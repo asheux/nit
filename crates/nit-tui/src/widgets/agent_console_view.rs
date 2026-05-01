@@ -622,7 +622,12 @@ pub fn render_pane(
         .split(area);
 
     let agent = Some(pane.agent_id.as_str());
-    let mission = pane.mission_id.as_deref();
+    // Render-side mission falls back to the synthetic chat id so the
+    // pane filter sees a non-None mission for fresh panes — closes the
+    // (agent_id.is_none() && mission_id.is_none()) leak in the matcher
+    // for default-chat user prompts in another pane.
+    let synthetic = (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str());
+    let mission = pane.mission_id.as_deref().or(synthetic);
     let codex_ctx_pct = agent.and_then(|id| resolve_context_pct(state, id, mission));
     let codex_ctx_used = agent.and_then(|id| resolve_context_used(state, id, mission));
     let codex_ctx_max = agent.and_then(|agent_id| {
@@ -641,7 +646,9 @@ pub fn render_pane(
     let label_style = Style::default()
         .fg(theme.border)
         .add_modifier(Modifier::DIM);
-    let mission_style = if mission.is_some() {
+    // BOLD mission style only when a real swarm mission is attached;
+    // the synthetic chat id should not light up the agent= label.
+    let mission_style = if pane.mission_id.is_some() {
         Style::default()
             .fg(theme.title_focused)
             .add_modifier(Modifier::BOLD)
@@ -669,9 +676,10 @@ pub fn render_pane(
     let thread_width = layout.thread_area.width.max(1) as usize;
     let thread_height = layout.thread_area.height.max(1) as usize;
 
-    let thread_rows = build_pane_thread_rows_with_breathers(
+    let thread_rows = build_pane_thread_rows_with_breathers_for_pane(
         state,
         swarm,
+        Some(pane.pane_id),
         agent,
         mission,
         thread_width,
@@ -893,7 +901,32 @@ pub fn build_pane_thread_rows(
     width: usize,
     suppress_artifacts: bool,
 ) -> Vec<ThreadRow> {
-    let ordered = visible_messages_grouped(state, mission, agent);
+    build_pane_thread_rows_for_pane(
+        state,
+        swarm,
+        None,
+        agent,
+        mission,
+        width,
+        suppress_artifacts,
+    )
+}
+
+/// Pane-aware variant of [`build_pane_thread_rows`] used by multipane.
+/// `pane_idx = Some(n)` enables defense-in-depth filtering on the
+/// `Broadcast` channel and on agent_id ownership so messages destined
+/// for another pane never render here, even if some upstream code path
+/// forgets to scope them.
+pub fn build_pane_thread_rows_for_pane(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    pane_idx: Option<usize>,
+    agent: Option<&str>,
+    mission: Option<&str>,
+    width: usize,
+    suppress_artifacts: bool,
+) -> Vec<ThreadRow> {
+    let ordered = visible_messages_grouped_for_pane(state, pane_idx, mission, agent);
     let mut rows = Vec::new();
     for (_, msg) in ordered {
         rows.extend(format_message_rows(state, swarm, msg, width));
@@ -929,7 +962,31 @@ pub fn build_pane_thread_rows_with_breathers(
     width: usize,
     suppress_artifacts: bool,
 ) -> Vec<ThreadRow> {
-    let ordered = visible_messages_grouped(state, mission, agent);
+    build_pane_thread_rows_with_breathers_for_pane(
+        state,
+        swarm,
+        None,
+        agent,
+        mission,
+        width,
+        suppress_artifacts,
+    )
+}
+
+/// Pane-aware variant of [`build_pane_thread_rows_with_breathers`].
+/// `pane_idx = Some(n)` activates the defense-in-depth filter so any
+/// `Broadcast` (or stray Agent reply) from another pane is dropped at
+/// the renderer.
+pub fn build_pane_thread_rows_with_breathers_for_pane(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    pane_idx: Option<usize>,
+    agent: Option<&str>,
+    mission: Option<&str>,
+    width: usize,
+    suppress_artifacts: bool,
+) -> Vec<ThreadRow> {
+    let ordered = visible_messages_grouped_for_pane(state, pane_idx, mission, agent);
     let pulse_on = pulse_on(state);
 
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
@@ -2367,6 +2424,15 @@ fn visible_messages_grouped<'a>(
     mission: Option<&str>,
     agent: Option<&str>,
 ) -> Vec<(usize, &'a AgentMessage)> {
+    visible_messages_grouped_for_pane(state, None, mission, agent)
+}
+
+fn visible_messages_grouped_for_pane<'a>(
+    state: &'a AppState,
+    pane_idx: Option<usize>,
+    mission: Option<&str>,
+    agent: Option<&str>,
+) -> Vec<(usize, &'a AgentMessage)> {
     let shadow_lanes: std::collections::HashSet<&str> = state
         .agents
         .agents
@@ -2374,6 +2440,7 @@ fn visible_messages_grouped<'a>(
         .filter(|lane| lane.shadow)
         .map(|lane| lane.id.as_str())
         .collect();
+    let multipane_active = state.multipane.is_some();
     let visible: Vec<(usize, &AgentMessage)> = state
         .agents
         .messages
@@ -2385,7 +2452,8 @@ fn visible_messages_grouped<'a>(
                     return false;
                 }
             }
-            message_matches_context(msg, mission, agent)
+            message_matches_context(msg, mission, agent, multipane_active)
+                && message_matches_pane(msg, pane_idx)
         })
         .collect();
 
@@ -2427,10 +2495,22 @@ fn visible_messages_grouped<'a>(
     result
 }
 
-fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Option<&str>) -> bool {
+fn message_matches_context(
+    msg: &AgentMessage,
+    mission: Option<&str>,
+    agent: Option<&str>,
+    multipane_active: bool,
+) -> bool {
+    // In multipane mode the Broadcast channel does NOT bypass the mission
+    // / agent filter — every multipane message carries either a real
+    // swarm mission_id or the synthetic `mp-pane-NN-chat` so pane scope
+    // is fully encoded. The unconditional Broadcast escape is preserved
+    // for single-pane parity (where mission_id may be missing on swarm
+    // broadcasts that should still surface in the chat thread).
+    let broadcast_bypasses = !multipane_active;
     if let Some(mission_id) = mission {
         return msg.mission_id.as_deref() == Some(mission_id)
-            || matches!(msg.channel, nit_core::AgentChannel::Broadcast);
+            || (broadcast_bypasses && matches!(msg.channel, nit_core::AgentChannel::Broadcast));
     }
     if let Some(agent_id) = agent {
         return msg.agent_id.as_deref() == Some(agent_id)
@@ -2439,7 +2519,24 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
                 .as_deref()
                 .is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
             || (msg.agent_id.is_none() && msg.mission_id.is_none())
-            || matches!(msg.channel, nit_core::AgentChannel::Broadcast);
+            || (broadcast_bypasses && matches!(msg.channel, nit_core::AgentChannel::Broadcast));
+    }
+    true
+}
+
+/// Defense-in-depth pane scope: drop messages whose author / sender
+/// resolves to a different pane. Keeps the renderer correct even if a
+/// dispatch-side caller forgets to pane-scope (e.g. an `@all` fallback,
+/// a stray genome-retry diagnostic, or a future feature). When
+/// `pane_idx` is `None` (single-pane), every message passes.
+fn message_matches_pane(msg: &AgentMessage, pane_idx: Option<usize>) -> bool {
+    let Some(pane) = pane_idx else {
+        return true;
+    };
+    if let Some(id) = msg.agent_id.as_deref() {
+        if let Some((_, owner)) = crate::multipane::agent_id::parse_pane_agent_id(id) {
+            return owner == pane;
+        }
     }
     true
 }

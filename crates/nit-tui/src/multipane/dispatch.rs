@@ -112,7 +112,13 @@ pub(crate) fn with_pane_aliased<R>(
     } else {
         pane.selected_agent_id.clone()
     };
-    state.agents.selected_mission = pane.mission_id.clone();
+    // Real swarm overlay wins; the synthetic chat id is the fallback so
+    // every default-chat AgentMessage produced inside `body` carries a
+    // pane-unique mission_id and the render filter can isolate it.
+    state.agents.selected_mission = pane
+        .mission_id
+        .clone()
+        .or_else(|| (!pane.chat_mission_id.is_empty()).then(|| pane.chat_mission_id.clone()));
     // Sentinel disables the global `selected_context_mission()` fallback so other panes' missions don't bleed in.
     let saved_mission_selected = std::mem::replace(&mut state.agents.mission_selected, usize::MAX);
     state.agents.swarm_default_template = pane.swarm_template.clone();
@@ -120,21 +126,7 @@ pub(crate) fn with_pane_aliased<R>(
 
     let result = body(state);
 
-    if let Some(mp) = state.multipane.as_mut() {
-        if let Some(pane) = mp.panes.get_mut(pane_idx) {
-            pane.chat_input = std::mem::take(&mut state.agents.chat_input);
-            pane.chat_input_cursor = state.agents.chat_input_cursor;
-            pane.chat_input_selection_anchor = state.agents.chat_input_selection_anchor;
-            pane.chat_input_scroll = state.agents.chat_input_scroll;
-            pane.chat_prompt_history = std::mem::take(&mut state.agents.chat_prompt_history);
-            pane.chat_prompt_history_pos = state.agents.chat_prompt_history_pos;
-            pane.chat_prompt_history_draft = state.agents.chat_prompt_history_draft.take();
-            // submit_chat_input_and_dispatch may have set selected_mission
-            // (e.g. for a fresh @swarm); mirror it back so subsequent
-            // aborts target the right mission.
-            pane.mission_id = state.agents.selected_mission.clone();
-        }
-    }
+    mirror_back_pane(state, pane_idx);
 
     state.agents.chat_input = saved_chat_input;
     state.agents.chat_input_cursor = saved_chat_input_cursor;
@@ -150,6 +142,36 @@ pub(crate) fn with_pane_aliased<R>(
     state.agents.swarm_default_mission = saved_swarm_mission;
 
     result
+}
+
+/// Snap aliased state back onto the pane after `body` returns. The
+/// mirror-back guard is load-bearing: a real swarm `mission_id` set by
+/// `@swarm` flows through to `pane.mission_id` so subsequent aborts
+/// target it, but the synthetic chat id (set by the alias source above)
+/// must NEVER be written back — that would conflate "real swarm
+/// overlay" with "default-chat fallback" and silently break the
+/// swarm-followup re-activation path.
+fn mirror_back_pane(state: &mut AppState, pane_idx: usize) {
+    let new_selected = state.agents.selected_mission.clone();
+    let Some(pane) = state
+        .multipane
+        .as_mut()
+        .and_then(|mp| mp.panes.get_mut(pane_idx))
+    else {
+        return;
+    };
+    pane.chat_input = std::mem::take(&mut state.agents.chat_input);
+    pane.chat_input_cursor = state.agents.chat_input_cursor;
+    pane.chat_input_selection_anchor = state.agents.chat_input_selection_anchor;
+    pane.chat_input_scroll = state.agents.chat_input_scroll;
+    pane.chat_prompt_history = std::mem::take(&mut state.agents.chat_prompt_history);
+    pane.chat_prompt_history_pos = state.agents.chat_prompt_history_pos;
+    pane.chat_prompt_history_draft = state.agents.chat_prompt_history_draft.take();
+    let synthetic_match = !pane.chat_mission_id.is_empty()
+        && new_selected.as_deref() == Some(pane.chat_mission_id.as_str());
+    if !synthetic_match {
+        pane.mission_id = new_selected;
+    }
 }
 
 /// Bridge the focused pane's effort map to the global runner-side

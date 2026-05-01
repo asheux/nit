@@ -136,6 +136,10 @@ pub fn merge_prior(target: &mut MultipaneState, prior: MultipaneState) -> bool {
         // exists; otherwise we drop back to roster mode. The caller is
         // expected to validate against the roster before re-rendering.
         slot.selected_agent_id = prior.selected_agent_id;
+        // chat_mission_id is a pure function of pane_id; recompute so
+        // schema drift in the format never leaves a stale value loaded
+        // from disk.
+        slot.chat_mission_id = super::agent_id::pane_chat_mission_id(slot.pane_id);
     }
     true
 }

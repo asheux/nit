@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use nit_core::{AppState, MultipaneState, PaneSession};
 
-use super::agent_id::pane_agent_id;
+use super::agent_id::{pane_agent_id, pane_chat_mission_id};
 use super::grid::compute_grid_shape;
 use crate::swarm::{copy_claude_runtime_metadata, copy_codex_runtime_metadata};
 
@@ -73,6 +73,7 @@ pub fn install_filtered(
                 selected_agent_id: Some(agent_id),
                 swarm_template: seed_template.clone(),
                 swarm_mission: seed_mission.clone(),
+                chat_mission_id: pane_chat_mission_id(k),
                 ..PaneSession::default()
             });
         }
@@ -90,6 +91,7 @@ pub fn install_filtered(
                 cwd: cwd.clone(),
                 swarm_template: seed_template.clone(),
                 swarm_mission: seed_mission.clone(),
+                chat_mission_id: pane_chat_mission_id(k),
                 ..PaneSession::default()
             });
         }

@@ -230,3 +230,488 @@ fn at_swarm_prefix_is_recognised_by_canonical_parser() {
     assert!(parse_abort_command("@abort all").is_some());
     assert!(parse_abort_command("hello world").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Multipane independence regression suite (BLOCKER coverage)
+// ---------------------------------------------------------------------------
+
+use crate::app::broadcast_target_agents;
+use crate::widgets::agent_console_view::build_pane_thread_rows_with_breathers_for_pane;
+use nit_core::{AgentChannel, AgentMessage};
+use std::collections::HashSet;
+
+fn test_swarm_with_active_missions(missions: &[(&str, &str)]) -> SwarmRuntime {
+    // Build a runtime where each mission has one running task assigned
+    // to its agent — enough to make `is_active_mission` return true and
+    // `abort_mission` produce the agent_id.
+    let mut runtime = SwarmRuntime::default();
+    for (mid, agent_id) in missions {
+        let one = crate::swarm::test_runtime_with_running_tasks(mid, &[(agent_id, "exec")]);
+        crate::swarm::merge_single_mission_runtime(&mut runtime, one);
+    }
+    runtime
+}
+
+fn build_state_with_chat_missions(n: usize) -> AppState {
+    let pairs: Vec<(usize, &str)> = (0..n)
+        .map(|i| (i, ["/p0", "/p1", "/p2", "/p3"][i.min(3)]))
+        .collect();
+    let mut state = build_state(&pairs);
+    if let Some(mp) = state.multipane.as_mut() {
+        for (i, pane) in mp.panes.iter_mut().enumerate() {
+            pane.chat_mission_id = format!("mp-pane-{i:02}-chat");
+            pane.has_run_mission = true;
+        }
+    }
+    state
+}
+
+#[test]
+fn default_chat_in_pane0_not_visible_in_pane1() {
+    // BUG 1: a plain `hello` in pane 0 must not appear in pane 1's
+    // thread. Synthetic chat mission scopes the AgentMessage so the
+    // pane-aware render filter excludes it from pane 1.
+    let mut state = build_state_with_chat_missions(2);
+    let mut vitals = VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+
+    state
+        .multipane
+        .as_mut()
+        .unwrap()
+        .panes
+        .iter_mut()
+        .for_each(|p| p.chat_input.clear());
+    state.multipane.as_mut().unwrap().panes[0].chat_input = "hello".into();
+
+    with_pane_aliased(&mut state, 0, |state| {
+        let _ = crate::app::submit_chat_input_and_dispatch(
+            state,
+            &mut vitals,
+            None,
+            None,
+            &mut swarm,
+            &mut shadow,
+        );
+    });
+
+    let pushed = state.agents.messages.last().expect("pushed message");
+    assert_eq!(
+        pushed.mission_id.as_deref(),
+        Some("mp-pane-00-chat"),
+        "default-chat from pane 0 must carry pane 0's synthetic mission id"
+    );
+    assert_eq!(pushed.text, "hello");
+
+    // Pane 1's render filter must exclude the message.
+    let pane1 = state.multipane.as_ref().unwrap().panes[1].clone();
+    let rows = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(1),
+        Some(pane1.agent_id.as_str()),
+        Some(pane1.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+    for row in &rows {
+        assert!(
+            !row.text.contains("hello"),
+            "pane 1 must not see pane 0's `hello`: row={:?}",
+            row.text
+        );
+    }
+}
+
+#[test]
+fn at_all_only_targets_agents_in_originating_pane() {
+    // BUG 2 (dispatch side): broadcast_target_agents must restrict to
+    // the focused pane's lanes when the synthetic mission has no entry
+    // in state.agents.missions.
+    let mut state = build_state_with_chat_missions(2);
+    state.agents.agents.push(nit_core::AgentLane {
+        id: "claude-haiku-4-5#mp-pane-01".into(),
+        role: "claude-haiku-4-5#mp-pane-01".into(),
+        lane: "Claude".into(),
+        kind: nit_core::AgentLaneKind::Claude,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.rebuild_agents_index();
+    state.multipane.as_mut().unwrap().focused = 0;
+
+    let targets: HashSet<String> = with_pane_aliased(&mut state, 0, |state| {
+        broadcast_target_agents(state, Some("mp-pane-00-chat"))
+            .into_iter()
+            .collect()
+    });
+    assert!(
+        targets.contains("claude-haiku-4-5#mp-pane-00"),
+        "pane 0 lane must be in the broadcast set"
+    );
+    assert!(
+        !targets.contains("claude-haiku-4-5#mp-pane-01"),
+        "pane 1 lane must NOT receive a broadcast issued from pane 0"
+    );
+}
+
+#[test]
+fn at_all_in_pane_0_replies_only_render_in_pane_0() {
+    // BUG 2 (render side / defense-in-depth): even if a Broadcast
+    // message somehow leaks across panes, the pane_id-aware filter
+    // drops messages whose author belongs to another pane.
+    let mut state = build_state_with_chat_missions(2);
+    state.agents.messages.push(AgentMessage {
+        at: "t+0".into(),
+        channel: AgentChannel::Agent,
+        agent_id: Some("claude-haiku-4-5#mp-pane-01".into()),
+        mission_id: Some("mp-pane-00-chat".into()),
+        text: "stray reply from pane 1's lane".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+
+    let pane0 = state.multipane.as_ref().unwrap().panes[0].clone();
+    let rows = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(0),
+        Some(pane0.agent_id.as_str()),
+        Some(pane0.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+    for row in &rows {
+        assert!(
+            !row.text.contains("stray reply from pane 1's lane"),
+            "pane 0 must drop messages authored by pane 1's lane"
+        );
+    }
+}
+
+#[test]
+fn chat_slash_abort_kills_focused_pane_only() {
+    // BUG 3: /abort issued from pane 0 must not touch pane 1's mission.
+    let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
+
+    let pane_a = "claude-haiku-4-5#mp-pane-00".to_string();
+    let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
+    state.agents.missions.push(MissionRecord {
+        id: "mission-a".into(),
+        title: "pane 0 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_a.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    state.agents.missions.push(MissionRecord {
+        id: "mission-b".into(),
+        title: "pane 1 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_b.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    {
+        let mp = state.multipane.as_mut().unwrap();
+        mp.focused = 0;
+        mp.panes[0].mission_id = Some("mission-a".into());
+        mp.panes[1].mission_id = Some("mission-b".into());
+        for pane in &mut mp.panes {
+            pane.chat_mission_id = format!("mp-pane-{:02}-chat", pane.pane_id);
+        }
+    }
+    let mut swarm =
+        test_swarm_with_active_missions(&[("mission-a", &pane_a), ("mission-b", &pane_b)]);
+
+    let _ = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(state, None, None, &mut swarm, AbortScope::Current)
+    });
+
+    assert!(!swarm.is_active_mission("mission-a"));
+    assert!(
+        swarm.is_active_mission("mission-b"),
+        "pane 1's mission must NOT be aborted by /abort issued in pane 0"
+    );
+}
+
+#[test]
+fn abort_when_focused_pane_has_no_mission_does_not_kill_others_mission() {
+    // BUG 3 leak vector: a synthetic-only pane firing /abort must not
+    // resolve through the global active_mission_ids fallback into
+    // another pane's mission.
+    let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
+
+    let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
+    state.agents.missions.push(MissionRecord {
+        id: "mission-b".into(),
+        title: "pane 1 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_b.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    {
+        let mp = state.multipane.as_mut().unwrap();
+        mp.focused = 0;
+        mp.panes[0].mission_id = None;
+        mp.panes[0].chat_mission_id = "mp-pane-00-chat".into();
+        mp.panes[1].mission_id = Some("mission-b".into());
+        mp.panes[1].chat_mission_id = "mp-pane-01-chat".into();
+    }
+    let mut swarm = test_swarm_with_active_missions(&[("mission-b", &pane_b)]);
+
+    let _ = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(state, None, None, &mut swarm, AbortScope::Current)
+    });
+
+    assert!(
+        swarm.is_active_mission("mission-b"),
+        "/abort in synthetic-only pane 0 must NOT cancel pane 1's swarm"
+    );
+}
+
+#[test]
+fn chat_slash_abort_all_in_pane_only_kills_pane_missions() {
+    // BUG 5 (decision): /abort all in multipane is scoped to the focused
+    // pane's missions, never global.
+    let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
+
+    let pane_a = "claude-haiku-4-5#mp-pane-00".to_string();
+    let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
+    state.agents.missions.push(MissionRecord {
+        id: "mission-a".into(),
+        title: "pane 0 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_a.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    state.agents.missions.push(MissionRecord {
+        id: "mission-b".into(),
+        title: "pane 1 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_b.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    state.multipane.as_mut().unwrap().focused = 0;
+    let mut swarm =
+        test_swarm_with_active_missions(&[("mission-a", &pane_a), ("mission-b", &pane_b)]);
+
+    let _ = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(state, None, None, &mut swarm, AbortScope::All)
+    });
+    assert!(!swarm.is_active_mission("mission-a"));
+    assert!(swarm.is_active_mission("mission-b"));
+}
+
+#[test]
+fn abort_agent_id_rejected_when_cross_pane() {
+    // BLOCKER: surgical /abort <agent-id> must reject ids belonging to
+    // a different pane, otherwise the operator has a backdoor to kill
+    // sibling-pane work.
+    let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
+    let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
+    state.agents.missions.push(MissionRecord {
+        id: "mission-b".into(),
+        title: "pane 1 mission".into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: vec![pane_b.clone()],
+        status: String::new(),
+        updated_at: String::new(),
+    });
+    state.multipane.as_mut().unwrap().focused = 0;
+    let mut swarm = test_swarm_with_active_missions(&[("mission-b", &pane_b)]);
+
+    let aborted = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(
+            state,
+            None,
+            None,
+            &mut swarm,
+            AbortScope::Agent(pane_b.clone()),
+        )
+    });
+    assert!(!aborted, "cross-pane abort must be a no-op");
+    assert!(
+        swarm.is_active_mission("mission-b"),
+        "pane 1's mission must remain active after a cross-pane /abort attempt"
+    );
+    assert!(
+        state
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("does not belong to the focused pane")),
+        "operator must see a system message explaining the rejection: status={:?}",
+        state.status
+    );
+}
+
+#[test]
+fn pane_owns_agent_classifies_swarm_clones() {
+    // BLOCKER #3: swarm clones nest a `#swarm-…` suffix after the pane
+    // index. Without parser tolerance, pane_owns_agent would drop them.
+    use crate::multipane::agent_id::pane_owns_agent;
+    assert!(pane_owns_agent(
+        "claude-haiku-4-5#mp-pane-00#swarm-mis-001-clone-01",
+        0
+    ));
+    assert!(!pane_owns_agent(
+        "claude-haiku-4-5#mp-pane-00#swarm-mis-001-clone-01",
+        1
+    ));
+}
+
+#[test]
+fn mirror_back_guard_does_not_clobber_real_mission_id_with_synthetic() {
+    // Highest-risk test: with_pane_aliased must NEVER write the synthetic
+    // chat id back into pane.mission_id. If it did, swarm-followup
+    // re-activation at chat_input.rs would silently break.
+    let mut state = build_state_with_chat_missions(2);
+    state.multipane.as_mut().unwrap().panes[0].mission_id = None;
+
+    // Body intentionally leaves selected_mission as the synthetic — that
+    // mirrors a default-chat dispatch in a fresh pane.
+    with_pane_aliased(&mut state, 0, |state| {
+        assert_eq!(
+            state.agents.selected_mission.as_deref(),
+            Some("mp-pane-00-chat")
+        );
+    });
+    assert!(
+        state.multipane.as_ref().unwrap().panes[0]
+            .mission_id
+            .is_none(),
+        "synthetic id must NOT be mirrored into pane.mission_id"
+    );
+}
+
+#[test]
+fn mirror_back_writes_real_mission_id_through_when_swarm_starts() {
+    // Counter-test: when the body sets a real swarm mission id (the
+    // `@swarm` path), with_pane_aliased mirrors it back so subsequent
+    // /abort routing targets the right mission.
+    let mut state = build_state_with_chat_missions(2);
+    state.multipane.as_mut().unwrap().panes[0].mission_id = None;
+
+    with_pane_aliased(&mut state, 0, |state| {
+        state.agents.selected_mission = Some("swarm-mis-real".into());
+    });
+    assert_eq!(
+        state.multipane.as_ref().unwrap().panes[0]
+            .mission_id
+            .as_deref(),
+        Some("swarm-mis-real"),
+        "real swarm mission must mirror back into pane.mission_id"
+    );
+}
+
+#[test]
+fn single_pane_broadcast_still_renders_when_multipane_is_none() {
+    // Regression guard: removing the unconditional Broadcast bypass must
+    // not regress single-pane swarm broadcasts. With multipane = None,
+    // a Broadcast carrying a different mission_id still surfaces in the
+    // current thread (the matcher's broadcast_bypasses branch).
+    let buffer = nit_core::Buffer::empty("scratch", None);
+    let notes = nit_core::Buffer::empty("notes", None);
+    let mut state = AppState::new(PathBuf::from("/workspace"), buffer, notes);
+    state.agents = AgentsState::default();
+    assert!(state.multipane.is_none());
+    // User-typed broadcast (no agent_id) carrying a different mission_id
+    // — the single-pane Broadcast bypass clause is what surfaces it.
+    state.agents.messages.push(AgentMessage {
+        at: "t+0".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: None,
+        mission_id: Some("some-other-mission".into()),
+        text: "user broadcast in single-pane".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+
+    let rows = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        None,
+        Some("claude-haiku-4-5"),
+        Some("active-mission"),
+        80,
+        false,
+    );
+    let surfaced = rows
+        .iter()
+        .any(|r| r.text.contains("user broadcast in single-pane"));
+    assert!(
+        surfaced,
+        "single-pane Broadcast bypass must still surface the message"
+    );
+}
+
+#[test]
+fn at_all_message_authored_by_pane0_does_not_appear_in_pane1() {
+    // Operator-reported BUG 2 reproducer: a Broadcast message authored
+    // in pane 0 (mission_id = mp-pane-00-chat) must not bleed into pane
+    // 1's render. With the multipane Broadcast-bypass gate disabled,
+    // strict mission_id matching keeps it out.
+    let mut state = build_state_with_chat_missions(2);
+    state.agents.messages.push(AgentMessage {
+        at: "t+0".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: None,
+        mission_id: Some("mp-pane-00-chat".into()),
+        text: "broadcast from pane 0".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+
+    let pane1 = state.multipane.as_ref().unwrap().panes[1].clone();
+    let rows = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(1),
+        Some(pane1.agent_id.as_str()),
+        Some(pane1.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+    for row in &rows {
+        assert!(
+            !row.text.contains("broadcast from pane 0"),
+            "pane 1 must not see pane 0's broadcast"
+        );
+    }
+}
+
+#[test]
+fn merge_prior_re_derives_chat_mission_id_from_pane_id() {
+    // The persistence layer recomputes chat_mission_id on load so a
+    // session file written before the field existed still loads with
+    // canonical ids — locking the field's "pure function of pane_id"
+    // invariant.
+    let mut prior = build_state(&[(0, "/p0"), (1, "/p1")]);
+    if let Some(mp) = prior.multipane.as_mut() {
+        for pane in &mut mp.panes {
+            pane.chat_mission_id = "stale".into();
+        }
+    }
+    let prior_mp = prior.multipane.unwrap();
+    let json = serde_json::to_string(&prior_mp).unwrap();
+    let mut current = build_state(&[(0, "/p0"), (1, "/p1")]);
+    let restored: nit_core::MultipaneState = serde_json::from_str(&json).unwrap();
+    assert!(merge_prior(current.multipane.as_mut().unwrap(), restored));
+    let mp = current.multipane.unwrap();
+    assert_eq!(mp.panes[0].chat_mission_id, "mp-pane-00-chat");
+    assert_eq!(mp.panes[1].chat_mission_id, "mp-pane-01-chat");
+}

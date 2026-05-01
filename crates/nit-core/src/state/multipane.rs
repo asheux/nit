@@ -35,6 +35,21 @@ pub struct PaneSession {
     pub chat_prompt_history_draft: Option<String>,
     pub dir_search: Option<DirSearchState>,
     pub mission_id: Option<String>,
+    /// Stable per-pane synthetic chat mission id (`mp-pane-NN-chat`).
+    /// Tags every default-chat AgentMessage emitted from this pane so
+    /// render filters can isolate the thread and `@all` / abort helpers
+    /// can scope to the originating pane. Distinct from `mission_id`
+    /// (real swarm overlay, transient). Recomputed from `pane_id` on
+    /// load — never persisted directly.
+    #[serde(default, skip_serializing)]
+    pub chat_mission_id: String,
+    /// Real swarm mission ids that have been bound to this pane during
+    /// the current session. Appended (deduped) when
+    /// `capture_pane_mission_ids` lifts a lane's `current_mission`. Used
+    /// by `/abort all` (multipane) to enumerate the missions owned by
+    /// the focused pane without scanning all of `state.agents.missions`.
+    #[serde(default)]
+    pub mission_ids: Vec<String>,
     /// Cursor row inside the per-pane roster while in roster mode. Survives
     /// focus changes (lives on the pane, not in any global state).
     #[serde(default)]
@@ -147,6 +162,8 @@ impl Default for PaneSession {
             chat_prompt_history_draft: None,
             dir_search: None,
             mission_id: None,
+            chat_mission_id: String::new(),
+            mission_ids: Vec::new(),
             roster_cursor: 0,
             roster_scroll: 0,
             roster_collapsed_agent_ids: HashSet::new(),

@@ -4,6 +4,16 @@ use super::{
     SwarmMissionKind, SwarmRun, SwarmRuntime, SwarmStage, SwarmTask, SwarmTaskState, SwarmTemplate,
 };
 
+/// Test helper: merge a single-mission fixture (built via
+/// `test_runtime_with_running_tasks`) into an accumulator runtime.
+/// Lets multipane tests build a runtime where multiple missions are
+/// simultaneously active without exposing the private `runs` field.
+pub(crate) fn merge_single_mission_runtime(accumulator: &mut SwarmRuntime, single: SwarmRuntime) {
+    for (k, v) in single.runs {
+        accumulator.runs.insert(k, v);
+    }
+}
+
 /// Test helper: build a `SwarmRuntime` fixture with one Running task per
 /// `(agent_id, role)` pair *and* one Dispatched (dashboard label "Queued")
 /// task per entry in `queued`. Used by the breather regression test that

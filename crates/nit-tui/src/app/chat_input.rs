@@ -554,62 +554,16 @@ pub(crate) fn handle_abort(
     swarm: &mut SwarmRuntime,
     scope: AbortScope,
 ) -> bool {
-    let agents_to_cancel: Vec<String> = match scope {
-        AbortScope::Current => {
-            // Resolve the abort target with a fallback: prefer the
-            // selected/context mission, but if it's already terminal
-            // (a common case — operator aborts once, starts a new
-            // swarm, then triggers abort again without re-selecting
-            // the mission tab), fall back to any still-running swarm
-            // mission. Otherwise `/abort` would keep replying "not
-            // active" and the live swarm would survive.
-            let selected = state
-                .agents
-                .selected_context_mission()
-                .map(|s| s.to_string())
-                .filter(|mid| swarm.is_active_mission(mid));
-            let target = selected.or_else(|| swarm.active_mission_ids().into_iter().next());
-            let Some(mission_id) = target else {
-                state.status = Some(
-                    "/abort: no active swarm mission. Use `/abort all` for runner-wide cancel."
-                        .into(),
-                );
-                return false;
-            };
-            let aborted = swarm.abort_mission(state, &mission_id);
-            if aborted.is_empty() {
-                // Should be unreachable now (we filtered to active), but
-                // keep the message for diagnostics if a mission terminates
-                // between the filter and the abort call.
-                state.status = Some(format!(
-                    "/abort: mission `{mission_id}` is not active (already complete or unknown)."
-                ));
-                return false;
-            }
-            aborted
-        }
-        AbortScope::All => {
-            let aborted = swarm.abort_all(state);
-            // Belt-and-braces: also send CancelAll to runners so any
-            // non-swarm chat turns or shadow agents in flight die too.
-            if let Some(c) = codex {
-                let _ = c.send(CodexCommand::CancelAll);
-            }
-            if let Some(c) = claude {
-                let _ = c.send(ClaudeCommand::CancelAll);
-            }
-            aborted
-        }
-        AbortScope::Agent(agent_id) => {
-            // Surgical: drain state-side queues for this one agent and
-            // forward CancelTurn to the runners. Doesn't touch swarm
-            // mission state — the rest of the mission keeps running.
-            drain_queued_turns_for_agent_pub(state, &agent_id);
-            vec![agent_id]
-        }
+    let multipane_focus = state.multipane.as_ref().map(|mp| mp.focused);
+    let agents_to_cancel = match scope {
+        AbortScope::Current => resolve_current_abort(state, swarm, multipane_focus),
+        AbortScope::All => resolve_all_abort(state, codex, claude, swarm, multipane_focus),
+        AbortScope::Agent(agent_id) => resolve_agent_abort(state, agent_id, multipane_focus),
     };
-
-    for agent_id in &agents_to_cancel {
+    let Some(targets) = agents_to_cancel else {
+        return false;
+    };
+    for agent_id in &targets {
         if let Some(c) = codex {
             let _ = c.send(CodexCommand::CancelTurn {
                 agent_id: agent_id.clone(),
@@ -621,7 +575,169 @@ pub(crate) fn handle_abort(
             });
         }
     }
-    !agents_to_cancel.is_empty()
+    !targets.is_empty()
+}
+
+/// Resolve `AbortScope::Current` to the list of agent ids whose runners
+/// still need a `CancelTurn`. Returns `None` (with a `state.status`
+/// message attached) when there's nothing to abort. In multipane the
+/// pane-aware caller routes synthetic-only state to `AbortScope::Agent`
+/// before this runs, so the global `active_mission_ids` fallback is
+/// disabled here to avoid cross-pane swarm kills.
+fn resolve_current_abort(
+    state: &mut AppState,
+    swarm: &mut SwarmRuntime,
+    multipane_focus: Option<usize>,
+) -> Option<Vec<String>> {
+    let selected = state
+        .agents
+        .selected_context_mission()
+        .map(|s| s.to_string())
+        .filter(|mid| swarm.is_active_mission(mid));
+    let target = if multipane_focus.is_some() {
+        selected
+    } else {
+        selected.or_else(|| swarm.active_mission_ids().into_iter().next())
+    };
+    let Some(mission_id) = target else {
+        state.status = Some(
+            "/abort: no active swarm mission. Use `/abort all` for runner-wide cancel.".into(),
+        );
+        return None;
+    };
+    let aborted = swarm.abort_mission(state, &mission_id);
+    if aborted.is_empty() {
+        state.status = Some(format!(
+            "/abort: mission `{mission_id}` is not active (already complete or unknown)."
+        ));
+        return None;
+    }
+    Some(aborted)
+}
+
+/// Resolve `AbortScope::All`. Single-pane is global (`swarm.abort_all` +
+/// `CancelAll`). Multipane scopes to the focused pane's missions and
+/// emits per-agent `CancelTurn` instead of `CancelAll` so sibling-pane
+/// work survives.
+fn resolve_all_abort(
+    state: &mut AppState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    swarm: &mut SwarmRuntime,
+    multipane_focus: Option<usize>,
+) -> Option<Vec<String>> {
+    if let Some(focus) = multipane_focus {
+        return Some(abort_all_for_pane(state, swarm, focus));
+    }
+    let aborted = swarm.abort_all(state);
+    if let Some(c) = codex {
+        let _ = c.send(CodexCommand::CancelAll);
+    }
+    if let Some(c) = claude {
+        let _ = c.send(ClaudeCommand::CancelAll);
+    }
+    Some(aborted)
+}
+
+/// Resolve `AbortScope::Agent(<id>)`. Single-pane: surgical, always
+/// honoured. Multipane: rejected (with a `state.status` message) when
+/// the targeted id does not belong to the focused pane, so the operator
+/// can't kill sibling-pane work via the surgical path.
+fn resolve_agent_abort(
+    state: &mut AppState,
+    agent_id: String,
+    multipane_focus: Option<usize>,
+) -> Option<Vec<String>> {
+    if let Some(focus) = multipane_focus {
+        let owns_via_id = crate::multipane::agent_id::pane_owns_agent(&agent_id, focus);
+        let owns_via_lane = state
+            .multipane
+            .as_ref()
+            .and_then(|mp| mp.panes.get(focus))
+            .is_some_and(|p| p.agent_id == agent_id);
+        if !owns_via_id && !owns_via_lane {
+            state.status = Some(format!(
+                "/abort {agent_id}: agent does not belong to the focused pane."
+            ));
+            return None;
+        }
+    }
+    drain_queued_turns_for_agent_pub(state, &agent_id);
+    Some(vec![agent_id])
+}
+
+/// Pane-scoped `/abort all`. Aborts every active swarm mission owned
+/// by `pane_idx`, then surgically drains any pane-owned lane with an
+/// in-flight non-swarm turn. Returns the union of agent ids whose
+/// runners still need a `CancelTurn`.
+fn abort_all_for_pane(
+    state: &mut AppState,
+    swarm: &mut SwarmRuntime,
+    pane_idx: usize,
+) -> Vec<String> {
+    use crate::multipane::agent_id::pane_owns_agent;
+
+    let pane_missions = collect_pane_missions(state, swarm, pane_idx);
+    let mut aborted: Vec<String> = Vec::new();
+    for mid in &pane_missions {
+        for agent in swarm.abort_mission(state, mid) {
+            if !aborted.contains(&agent) {
+                aborted.push(agent);
+            }
+        }
+    }
+    let pane_lanes: Vec<String> = state
+        .agents
+        .agents
+        .iter()
+        .filter(|lane| pane_owns_agent(&lane.id, pane_idx))
+        .map(|lane| lane.id.clone())
+        .collect();
+    for lane_id in pane_lanes {
+        if aborted.contains(&lane_id) || !lane_has_in_flight_turn(state, &lane_id) {
+            continue;
+        }
+        drain_queued_turns_for_agent_pub(state, &lane_id);
+        aborted.push(lane_id);
+    }
+    if aborted.is_empty() {
+        state.status = Some("/abort all: no active work for this pane.".into());
+    }
+    aborted
+}
+
+fn collect_pane_missions(state: &AppState, swarm: &SwarmRuntime, pane_idx: usize) -> Vec<String> {
+    use crate::multipane::agent_id::pane_owns_agent;
+    swarm
+        .active_mission_ids()
+        .into_iter()
+        .filter(|mid| {
+            state
+                .agents
+                .missions
+                .iter()
+                .find(|m| &m.id == mid)
+                .is_some_and(|m| {
+                    m.assigned_agents
+                        .iter()
+                        .any(|aid| pane_owns_agent(aid, pane_idx))
+                })
+        })
+        .collect()
+}
+
+fn lane_has_in_flight_turn(state: &AppState, lane_id: &str) -> bool {
+    state.agents.active_turns.contains_key(lane_id)
+        || state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|t| t.agent_id == lane_id)
+        || state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .any(|t| t.agent_id == lane_id)
 }
 
 // Submit the chat input, dispatch to agents, and return whether a prompt was sent.
@@ -1229,12 +1345,22 @@ pub(crate) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
         }
     }
 
+    // In multipane mode the fallback must NOT cross pane boundaries:
+    // restrict to lanes whose id encodes the focused pane index. Without
+    // this filter, `@all` from pane 0 fans out to every pane's lanes.
+    let focused_pane = state.multipane.as_ref().map(|mp| mp.focused);
     state
         .agents
         .agents
         .iter()
         .filter(|agent| {
-            (agent.is_codex() || agent.is_claude()) && !is_chat_clone_agent_id(&agent.id)
+            if !(agent.is_codex() || agent.is_claude()) || is_chat_clone_agent_id(&agent.id) {
+                return false;
+            }
+            match focused_pane {
+                Some(idx) => crate::multipane::agent_id::pane_owns_agent(&agent.id, idx),
+                None => true,
+            }
         })
         .map(|agent| agent.id.clone())
         .collect()

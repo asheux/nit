@@ -310,21 +310,49 @@ fn popup_rect_for(screen: Rect, desired: (u16, u16)) -> Rect {
 
 /// Each `dispatch_pane_prompt` allocates a mission inside the standard
 /// dispatch path; capture the resulting mission_id back into the pane so
-/// subsequent abort routing targets the right mission.
+/// subsequent abort routing targets the right mission. Also appends each
+/// real swarm mission id seen here into `pane.mission_ids` (deduped) so
+/// `/abort all` in multipane can enumerate this pane's missions.
 fn capture_pane_mission_ids(state: &mut AppState) {
+    // Snapshot real-mission ids so we can read them back inside the
+    // mutable pane loop below without holding two borrows on state.
+    let real_mission_ids: std::collections::HashSet<String> =
+        state.agents.missions.iter().map(|m| m.id.clone()).collect();
+    let lane_missions: std::collections::HashMap<String, Option<String>> = state
+        .agents
+        .agents
+        .iter()
+        .map(|l| (l.id.clone(), l.current_mission.clone()))
+        .collect();
     let Some(mp) = state.multipane.as_mut() else {
         return;
     };
     for pane in &mut mp.panes {
-        if pane.mission_id.is_some() {
+        // Only short-circuit when the pane already has a *real* swarm
+        // mission overlaid; the synthetic chat id (or a stale id no
+        // longer in `state.agents.missions`) must not block capture.
+        let already_real = pane
+            .mission_id
+            .as_deref()
+            .is_some_and(|m| real_mission_ids.contains(m));
+        if already_real {
+            if let Some(mid) = pane.mission_id.clone() {
+                if !pane.mission_ids.iter().any(|m| m == &mid) {
+                    pane.mission_ids.push(mid);
+                }
+            }
             continue;
         }
         let lookup_id = Some(pane.agent_id.as_str())
             .filter(|s| !s.is_empty())
             .or(pane.selected_agent_id.as_deref());
         let Some(lookup_id) = lookup_id else { continue };
-        if let Some(lane) = state.agents.agents_get(lookup_id) {
-            pane.mission_id = lane.current_mission.clone();
+        let candidate = lane_missions.get(lookup_id).cloned().unwrap_or(None);
+        if let Some(mid) = candidate {
+            pane.mission_id = Some(mid.clone());
+            if !pane.mission_ids.iter().any(|m| m == &mid) {
+                pane.mission_ids.push(mid);
+            }
         }
     }
 }
@@ -1307,11 +1335,14 @@ fn focused_pane_chat_thread_max_scroll(
     } else {
         Some(pane.agent_id.as_str())
     };
-    let rows = agent_console_view::build_pane_thread_rows_with_breathers(
+    let rows = agent_console_view::build_pane_thread_rows_with_breathers_for_pane(
         state,
         Some(swarm),
+        Some(pane.pane_id),
         agent_id,
-        pane.mission_id.as_deref(),
+        pane.mission_id.as_deref().or_else(|| {
+            (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str())
+        }),
         thread_area.width.max(1) as usize,
         !pane.has_run_mission,
     );
@@ -1506,6 +1537,7 @@ fn dispatch_commit(state: &mut AppState, pane_idx: usize, row: roster_view::Pane
 
 fn revert_focused_pane_to_roster(state: &mut AppState) {
     if let Some(pane) = focused_pane_mut(state) {
+        let pane_idx = pane.pane_id;
         pane.selected_agent_id = None;
         pane.agent_id.clear();
         pane.chat_input.clear();
@@ -1513,6 +1545,11 @@ fn revert_focused_pane_to_roster(state: &mut AppState) {
         pane.chat_input_selection_anchor = None;
         pane.chat_input_scroll = 0;
         pane.mission_id = None;
+        pane.mission_ids.clear();
+        // Re-derive the synthetic chat id so subsequent default-chat
+        // dispatches (after re-committing an agent) still tag with a
+        // stable per-pane id.
+        pane.chat_mission_id = super::agent_id::pane_chat_mission_id(pane_idx);
         // Clear staleness from the cursor-driven latches and the dir
         // search overlay so a re-entered roster does not flash stale
         // state.
@@ -1904,6 +1941,11 @@ fn invoke_pane_artifact_popup(
 ) -> bool {
     let saved_agent = state.agents.selected_agent.clone();
     let saved_mission = state.agents.selected_mission.clone();
+    // Stamp the mission_selected sentinel for parity with with_pane_aliased
+    // — without this, selected_context_mission()'s missions[mission_selected]
+    // fallback can return another pane's mission and the artifact popup
+    // resolver walks the wrong thread.
+    let saved_mission_selected = state.agents.mission_selected;
     let pane_agent_id = if pane.agent_id.is_empty() {
         pane.selected_agent_id.clone()
     } else {
@@ -1911,11 +1953,13 @@ fn invoke_pane_artifact_popup(
     };
     state.agents.selected_agent = pane_agent_id;
     state.agents.selected_mission = pane.mission_id.clone();
+    state.agents.mission_selected = usize::MAX;
     let opened =
         maybe_open_artifact_popup_from_console_line(state, Some(swarm), text_width, line_idx);
     if !opened {
         state.agents.selected_agent = saved_agent;
         state.agents.selected_mission = saved_mission;
+        state.agents.mission_selected = saved_mission_selected;
     }
     opened
 }
@@ -2162,11 +2206,14 @@ fn try_copy_focused_pane_selection(
         return false;
     };
     let width = thread_area.width.max(1) as usize;
-    let rows = agent_console_view::build_pane_thread_rows(
+    let rows = agent_console_view::build_pane_thread_rows_for_pane(
         state,
         None,
+        Some(pane.pane_id),
         Some(pane.agent_id.as_str()),
-        pane.mission_id.as_deref(),
+        pane.mission_id.as_deref().or_else(|| {
+            (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str())
+        }),
         width,
         !pane.has_run_mission,
     );
@@ -2255,33 +2302,80 @@ fn push_pane_system_message(state: &mut AppState, text: String) {
 ///
 /// The pane's `mission_id` is aliased into `state.agents.selected_mission`
 /// so `AbortScope::Current` resolves to the right mission. When a pane has
-/// no committed selection, the pane-system-message fallback kicks in
-/// instead of calling through to `handle_abort`.
+/// no real swarm mission (only the synthetic chat id), routes to a
+/// surgical per-agent `CancelTurn` instead so the swarm-wide fallback in
+/// `handle_abort` cannot reach into another pane's mission.
 fn abort_focused_pane(
     state: &mut AppState,
     codex: &CodexRunner,
     claude: &ClaudeRunner,
     swarm: &mut SwarmRuntime,
 ) {
-    if focused_pane_agent_id(state).is_none() {
+    let Some(focused_agent) = focused_pane_agent_id(state) else {
         push_pane_system_message(state, "no agent selected — nothing to abort".into());
         return;
-    }
-    with_focused_pane_aliased(state, |state| {
-        // Without this guard, `handle_abort`'s fallback would kill another pane's swarm.
-        let has_own_mission = state.agents.selected_mission.is_some()
-            || state
+    };
+    // Inspect mission scope BEFORE entering with_focused_pane_aliased
+    // because synthetic-id-only state must route to AbortScope::Agent
+    // (per-agent CancelTurn), never AbortScope::Current.
+    let pane = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .cloned();
+    let Some(pane) = pane else {
+        return;
+    };
+    let real_mission = pane
+        .mission_id
+        .as_deref()
+        .filter(|m| !super::agent_id::is_pane_chat_mission_id(m))
+        .map(|s| s.to_string())
+        .or_else(|| {
+            state
                 .agents
-                .selected_agent
-                .as_deref()
-                .and_then(|aid| state.agents.agents_get(aid))
-                .and_then(|lane| lane.current_mission.as_deref())
-                .is_some();
-        if !has_own_mission {
+                .agents_get(&focused_agent)
+                .and_then(|lane| lane.current_mission.clone())
+        });
+    if let Some(mid) = real_mission {
+        if !swarm.is_active_mission(&mid) {
             push_pane_system_message(state, "no active mission for this pane".into());
             return;
         }
-        handle_abort(state, Some(codex), Some(claude), swarm, AbortScope::Current);
+        with_focused_pane_aliased(state, |state| {
+            // The alias places `mid` (or the lane's current_mission)
+            // into selected_mission so AbortScope::Current resolves to
+            // exactly this pane's swarm — no cross-pane fallback.
+            handle_abort(state, Some(codex), Some(claude), swarm, AbortScope::Current);
+        });
+        return;
+    }
+    // No real swarm mission. If a turn is in flight on this pane's
+    // agent, surgically cancel it via AbortScope::Agent. Otherwise post
+    // a "nothing to abort" system message in this pane only.
+    let has_in_flight = state.agents.active_turns.contains_key(&focused_agent)
+        || state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|t| t.agent_id == focused_agent)
+        || state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .any(|t| t.agent_id == focused_agent);
+    if !has_in_flight {
+        push_pane_system_message(state, "no active mission for this pane".into());
+        return;
+    }
+    with_focused_pane_aliased(state, |state| {
+        handle_abort(
+            state,
+            Some(codex),
+            Some(claude),
+            swarm,
+            AbortScope::Agent(focused_agent.clone()),
+        );
     });
 }
 
