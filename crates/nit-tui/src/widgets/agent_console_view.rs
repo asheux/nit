@@ -1,7 +1,7 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, PaneSession,
-    UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
+    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, PaneSelection,
+    PaneSession, UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -37,23 +37,35 @@ const CHAT_INPUT_SCROLL_AUTO: usize = usize::MAX;
 const AGENT_BADGE_MAX_CHARS: usize = 24;
 const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 
+/// Computed layout for the console UI within a pane: thread area, input box,
+/// context hints, and cursor tracking.
 struct ConsoleLayout {
+    /// Rect for the scrollable agent message/thread display area.
     thread_area: Rect,
     /// 1-row strip above the input box for a context-aware hint
     /// (italicised, dimmed). Empty rect when the pane is too short to
     /// afford it — the layout swallows the hint rather than crowd out
     /// the thread area.
     hint_chunk: Rect,
+    /// Rect for the input container (with border).
     input_chunk: Rect,
+    /// Rect for the input text area (inside the container).
     input_area: Rect,
+    /// Whether the input box is drawn with a border.
     input_boxed: bool,
+    /// All input lines (may be scrolled).
     input_lines_all: Vec<String>,
+    /// Cursor line index across all input lines.
     cursor_line_all: usize,
+    /// Cursor column index within the line.
     cursor_col_all: usize,
+    /// Maximum displayable input lines (height of input_area).
     input_inner_height: usize,
+    /// Starting line index for the visible window (for scroll).
     input_window_start: usize,
 }
 
+/// Resolve the AgentLaneKind (Codex, Claude, etc.) for a given agent ID.
 fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
     state
         .agents
@@ -63,6 +75,7 @@ fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
         .map(|lane| lane.kind)
 }
 
+/// Resolve the context usage percentage (0–100) for an agent, optionally scoped to a mission.
 fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
     let pct = match lane_kind_for(state, agent_id)? {
         AgentLaneKind::Codex => match mission {
@@ -689,8 +702,22 @@ pub fn render_pane(
     let total_rows = thread_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
     let scroll = pane.chat_thread_scroll.min(max_scroll);
-    let visible_rows = thread_rows.iter().skip(scroll).take(thread_height);
-    let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
+    let visible_row_refs: Vec<&ThreadRow> = thread_rows
+        .iter()
+        .skip(scroll)
+        .take(thread_height)
+        .collect();
+    let visible_styled: Vec<Line<'static>> = thread_lines(visible_row_refs.iter().copied(), theme);
+    let visible = match pane.selection.as_ref() {
+        Some(sel) => paint_pane_thread_selection(
+            visible_styled,
+            &visible_row_refs,
+            sel,
+            scroll,
+            theme.selection_bg,
+        ),
+        None => visible_styled,
+    };
     frame.render_widget(
         Paragraph::new(visible).style(Style::default().bg(theme.background)),
         layout.thread_area,
@@ -707,13 +734,61 @@ pub fn render_pane(
         );
     }
 
-    let input_visible: Vec<Line<'static>> = layout
+    let input_visible_text: Vec<String> = layout
         .input_lines_all
         .iter()
         .skip(layout.input_window_start)
         .take(layout.input_inner_height)
         .cloned()
-        .map(Line::from)
+        .collect();
+    let input_len_chars = pane.chat_input.chars().count();
+    let input_cursor = pane.chat_input_cursor.min(input_len_chars);
+    let input_selection_range = pane
+        .chat_input_selection_anchor
+        .map(|anchor| anchor.min(input_len_chars))
+        .and_then(|anchor| {
+            if anchor == input_cursor {
+                None
+            } else {
+                Some((anchor.min(input_cursor), anchor.max(input_cursor)))
+            }
+        });
+    let (in_sel_start_line, in_sel_start_col, in_sel_end_line, in_sel_end_col) =
+        input_selection_range
+            .map(|(start, end)| {
+                let wrap_width = layout.input_area.width.max(1) as usize;
+                let (s_line, s_col) =
+                    chat_input_display_pos_for_char_idx(&pane.chat_input, wrap_width, start);
+                let (e_line, e_col) =
+                    chat_input_display_pos_for_char_idx(&pane.chat_input, wrap_width, end);
+                (s_line, s_col, e_line, e_col)
+            })
+            .unwrap_or((0, 0, 0, 0));
+    let input_visible: Vec<Line<'static>> = input_visible_text
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            if input_selection_range.is_none() {
+                return Line::from(text);
+            }
+            let line_idx = layout.input_window_start.saturating_add(idx);
+            if line_idx < in_sel_start_line || line_idx > in_sel_end_line {
+                return Line::from(text);
+            }
+            let line_len = text.chars().count();
+            let (sel_start, sel_end) = if in_sel_start_line == in_sel_end_line {
+                (in_sel_start_col, in_sel_end_col)
+            } else if line_idx == in_sel_start_line {
+                (in_sel_start_col, line_len)
+            } else if line_idx == in_sel_end_line {
+                (0, in_sel_end_col)
+            } else {
+                (0, line_len)
+            };
+            let sel_start = sel_start.min(line_len);
+            let sel_end = sel_end.min(line_len);
+            highlight_plain_line(&text, sel_start, sel_end, theme.selection_bg)
+        })
         .collect();
     let input_max_row = layout.input_inner_height.saturating_sub(1);
     if layout.input_boxed {
@@ -1085,6 +1160,59 @@ pub fn thread_text_area(area: Rect, state: &AppState) -> Option<Rect> {
 pub fn pane_thread_text_area(area: Rect, pane: &PaneSession) -> Option<Rect> {
     compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)
         .map(|layout| layout.thread_area)
+}
+
+/// Multipane analog of [`chat_input_text_area`]. The returned rect is
+/// the inner edit region of the pane's chat input (border-stripped when
+/// the pane is wide/tall enough to show a boxed input).
+pub fn pane_chat_input_text_area(area: Rect, pane: &PaneSession) -> Option<Rect> {
+    compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)
+        .map(|layout| layout.input_area)
+}
+
+/// Multipane analog of [`map_chat_input_point_to_cursor`] — given a
+/// click `(column, row)` inside the pane's chrome-stripped area, return
+/// the character index into `pane.chat_input` the click corresponds to.
+pub fn map_pane_chat_input_point_to_cursor(
+    area: Rect,
+    pane: &PaneSession,
+    column: u16,
+    row: u16,
+    clamp: bool,
+) -> Option<usize> {
+    let layout = compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)?;
+    if !point_in_rect(column, row, layout.input_area) && !clamp {
+        return None;
+    }
+    let total_lines = layout.input_lines_all.len();
+    if total_lines == 0 {
+        return Some(0);
+    }
+    let rel_row = if clamp {
+        row.saturating_sub(layout.input_area.y)
+            .min(layout.input_area.height.saturating_sub(1))
+    } else {
+        row.saturating_sub(layout.input_area.y)
+    } as usize;
+    let line_idx = layout
+        .input_window_start
+        .saturating_add(rel_row)
+        .min(total_lines.saturating_sub(1));
+    let rel_col = if clamp {
+        column
+            .saturating_sub(layout.input_area.x)
+            .min(layout.input_area.width.saturating_sub(1))
+    } else {
+        column.saturating_sub(layout.input_area.x)
+    } as usize;
+    let max_col = UnicodeWidthStr::width(layout.input_lines_all[line_idx].as_str());
+    let visual_col = rel_col.min(max_col);
+    Some(chat_input_char_index_for_display_pos(
+        &pane.chat_input,
+        layout.input_area.width as usize,
+        line_idx,
+        visual_col,
+    ))
 }
 
 pub fn chat_input_text_area(area: Rect, state: &AppState) -> Option<Rect> {
@@ -1499,6 +1627,55 @@ pub(crate) fn chat_input_display_pos_for_char_idx(
         }
     }
     (line, char_col)
+}
+
+/// Paint the chat-thread selection highlight on visible rows.
+///
+/// Mirrors `multipane::selection::resolve_text`'s row/column normalization
+/// so the highlight cannot diverge from the text Cmd+C copies.
+fn paint_pane_thread_selection(
+    visible: Vec<Line<'static>>,
+    visible_row_refs: &[&ThreadRow],
+    sel: &PaneSelection,
+    scroll: usize,
+    selection_bg: Color,
+) -> Vec<Line<'static>> {
+    let (start_line, start_col, end_line, end_col) =
+        if (sel.anchor_line, sel.anchor_col) <= (sel.end_line, sel.end_col) {
+            (sel.anchor_line, sel.anchor_col, sel.end_line, sel.end_col)
+        } else {
+            (sel.end_line, sel.end_col, sel.anchor_line, sel.anchor_col)
+        };
+    visible
+        .into_iter()
+        .enumerate()
+        .map(|(visible_idx, styled_line)| {
+            let line_idx = scroll.saturating_add(visible_idx);
+            if line_idx < start_line || line_idx > end_line {
+                return styled_line;
+            }
+            let row = match visible_row_refs.get(visible_idx) {
+                Some(r) => *r,
+                None => return styled_line,
+            };
+            let line_len = row.text.chars().count();
+            let (sel_start, sel_end) = if start_line == end_line {
+                (start_col, end_col)
+            } else if line_idx == start_line {
+                (start_col, line_len)
+            } else if line_idx == end_line {
+                (0, end_col)
+            } else {
+                (0, line_len)
+            };
+            let sel_start = sel_start.min(line_len);
+            let sel_end = sel_end.min(line_len);
+            if sel_start >= sel_end {
+                return styled_line;
+            }
+            highlight_plain_line(&row.text, sel_start, sel_end, selection_bg)
+        })
+        .collect()
 }
 
 pub(crate) fn highlight_plain_line(

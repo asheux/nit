@@ -1,8 +1,8 @@
 use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
-    AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AppState, MissionPhase,
-    CONSOLE_SCROLL_BOTTOM,
+    AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus, AppState,
+    MissionPhase, CONSOLE_SCROLL_BOTTOM,
 };
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
@@ -37,6 +37,351 @@ pub(crate) struct ChatInputEditResult {
     pub(crate) handled: bool,
     pub(crate) changed: bool,
     pub(crate) follow_cursor: bool,
+}
+
+fn try_dispatch_swarm_command(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    swarm: &mut SwarmRuntime,
+    cmd: &mut SwarmCommand,
+    raw: &str,
+) -> bool {
+    let auto_switch_ops_dag = cmd
+        .template
+        .as_deref()
+        .is_some_and(|t| matches!(t, "bulk" | "bo"));
+    chat_history_remember(state, raw);
+    let planner = state
+        .agents
+        .selected_context_agent()
+        .and_then(|id| {
+            state
+                .agents
+                .agents
+                .iter()
+                .find(|lane| lane.id == id)
+                .is_some_and(|lane| lane.is_codex() || lane.is_claude())
+                .then_some(id.to_string())
+        })
+        .or_else(|| {
+            state
+                .agents
+                .agents
+                .iter()
+                .find(|lane| lane.is_codex() || lane.is_claude())
+                .map(|lane| lane.id.clone())
+        });
+
+    if let Some(planner) = planner {
+        let original_size = cmd.size;
+        let bulk_template = matches!(cmd.template.as_deref(), Some("bulk") | Some("bo"));
+        let bulk_capped_from: Option<usize> = if bulk_template {
+            let intended = swarm_intended_size(state, original_size);
+            if intended > BULK_PRACTICAL_MAX {
+                cmd.size = SwarmSize::Count(BULK_PRACTICAL_MAX);
+                Some(intended)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
+        let agent_count = agents.len();
+        let intended_count = swarm_intended_size(state, original_size);
+        if let Some((mission_id, dispatches)) = swarm.start(
+            state,
+            planner.clone(),
+            agents,
+            cmd.size,
+            cmd.template.clone(),
+            cmd.mission_kind,
+            cmd.prompt.clone(),
+        ) {
+            if auto_switch_ops_dag {
+                state.agents.dock_tab = nit_core::AgentOpsTab::Dag;
+            }
+            state.agents.chat_input = cmd.prompt.clone();
+            sync_cursor_to_input_end(state);
+            let _ = push_chat_message(state);
+            let warn_threshold = large_swarm_warn_threshold();
+            let ceiling = effective_max_swarm_size();
+            let fd_limit = current_fd_soft_limit();
+            let final_size = match cmd.size {
+                SwarmSize::Default => DEFAULT_SWARM_SIZE.min(ceiling).max(1),
+                SwarmSize::All => agent_count,
+                SwarmSize::Count(n) => n.clamp(1, ceiling),
+            };
+            let was_clamped = intended_count > final_size;
+            let fd_bound_clamp =
+                was_clamped && bulk_capped_from.is_none() && final_size == ceiling;
+            if let Some(intended_bulk) = bulk_capped_from {
+                push_system_alert_to_mission(
+                    state,
+                    &mission_id,
+                    format!(
+                        "Bulk template capped at {BULK_PRACTICAL_MAX} proposers \
+                         (requested {intended_bulk}, started {final_size}). The \
+                         judge's per-dep budget is 240KB total / N proposers; past \
+                         {BULK_PRACTICAL_MAX} each proposal is truncated below ~20KB \
+                         and contributes headers, not reasoning. Use `template=parallel` \
+                         for larger fan-outs where each agent owns its own write region."
+                    ),
+                );
+            } else if fd_bound_clamp {
+                push_system_alert_to_mission(
+                    state,
+                    &mission_id,
+                    format!(
+                        "Requested {intended_count} agents, started {final_size} \
+                         (effective ceiling {ceiling}; `ulimit -n` is {fd_limit}). \
+                         Bump `ulimit -n 4096` and restart nit for more headroom."
+                    ),
+                );
+            } else if was_clamped {
+                push_system_alert_to_mission(
+                    state,
+                    &mission_id,
+                    format!(
+                        "Requested {intended_count} agents, started {final_size} \
+                         (only {final_size} eligible agents in the roster)."
+                    ),
+                );
+            } else if final_size >= warn_threshold {
+                let msg = if ceiling < LARGE_SWARM_WARN_THRESHOLD {
+                    format!(
+                        "Large swarm ({final_size} agents). Process FD limit \
+                         is {fd_limit} (`ulimit -n`); effective swarm ceiling \
+                         ~{ceiling}. Run `ulimit -n 4096` and restart nit for \
+                         more headroom."
+                    )
+                } else {
+                    format!(
+                        "Large swarm ({final_size} agents). Each agent spawns a \
+                         Codex/Claude subprocess (~4 fds, ~50–200 MB each). \
+                         Verify the host has spare RAM/CPU before continuing."
+                    )
+                };
+                push_system_alert_to_mission(state, &mission_id, msg);
+            }
+            if final_size > LIGHT_PLANNER_SWARM_THRESHOLD && is_light_planner(&planner) {
+                push_system_alert_to_mission(
+                    state,
+                    &mission_id,
+                    format!(
+                        "Planner `{planner}` is a lightweight model — coherently \
+                         planning {final_size} task assignments may exceed its \
+                         reasoning depth. Consider re-running with a sonnet/opus-tier \
+                         planner for swarms past ~{LIGHT_PLANNER_SWARM_THRESHOLD} agents."
+                    ),
+                );
+            }
+            for dispatch in dispatches {
+                apply_swarm_task_role(state, &dispatch);
+                dispatch_agent_prompt(
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    dispatch.agent_id,
+                    Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
+            maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+            maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+            true
+        } else {
+            state.agents.chat_input = cmd.prompt.clone();
+            sync_cursor_to_input_end(state);
+            false
+        }
+    } else {
+        state.status = Some("@swarm requires at least one Codex or Claude agent".into());
+        state.agents.chat_input.clear();
+        state.agents.chat_input_cursor = 0;
+        true
+    }
+}
+
+fn try_dispatch_shadow_pipeline(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    shadow: &mut ShadowRuntime,
+    selected_agent: &Option<String>,
+    prompt: &str,
+    mission_id: &Option<String>,
+    prompt_msg_idx: usize,
+) -> bool {
+    if let Some(main_agent_id) = selected_agent.as_ref() {
+        let dispatchable = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| &lane.id == main_agent_id)
+            .is_some_and(|lane| lane.is_codex() || lane.is_claude());
+        if dispatchable && !shadow.has_run_for(main_agent_id) {
+            if let Some(dispatches) = shadow.start(
+                state,
+                main_agent_id.clone(),
+                prompt.to_string(),
+                mission_id.clone(),
+                Some(prompt_msg_idx),
+            ) {
+                for mut d in dispatches {
+                    super::augment_shadow_prompt_with_landscape(state, &mut d);
+                    dispatch_agent_prompt(
+                        state,
+                        vitals,
+                        codex,
+                        claude,
+                        d.agent_id,
+                        d.mission_id,
+                        d.prompt,
+                    );
+                }
+                maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn dispatch_to_selected_targets(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    targets: Vec<String>,
+    prompt: &str,
+    mission_id: &Option<String>,
+    prompt_msg_idx: usize,
+    force_new: bool,
+) {
+    for model in targets {
+        let base_model = crate::swarm::resolve_base_agent_id(&model).to_string();
+        let lane_kind = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == base_model)
+            .map(|lane| lane.kind);
+        let is_dispatchable = matches!(
+            lane_kind,
+            Some(nit_core::AgentLaneKind::Codex) | Some(nit_core::AgentLaneKind::Claude)
+        );
+        if !is_dispatchable {
+            continue;
+        }
+        let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
+        if force_new && is_agent_family_busy(state, &base_model) {
+            if let Some(clone_id) = create_chat_clone(state, &base_model) {
+                if is_claude {
+                    state
+                        .agents
+                        .claude_turn_prompt_idx
+                        .insert(clone_id.clone(), prompt_msg_idx);
+                    maybe_dispatch_claude_turn(
+                        state,
+                        vitals,
+                        claude,
+                        Some(clone_id),
+                        mission_id.clone(),
+                        prompt.to_string(),
+                        true,
+                    );
+                } else {
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(clone_id.clone(), prompt_msg_idx);
+                    maybe_dispatch_codex_turn(
+                        state,
+                        vitals,
+                        codex,
+                        Some(clone_id),
+                        mission_id.clone(),
+                        prompt.to_string(),
+                        true,
+                    );
+                }
+            } else if is_claude {
+                enqueue_claude_turn(
+                    state,
+                    vitals,
+                    Some(base_model),
+                    mission_id.clone(),
+                    prompt.to_string(),
+                    Some(prompt_msg_idx),
+                );
+            } else {
+                enqueue_codex_turn(
+                    state,
+                    vitals,
+                    Some(base_model),
+                    mission_id.clone(),
+                    prompt.to_string(),
+                    Some(prompt_msg_idx),
+                );
+            }
+        } else if is_agent_busy(state, &base_model) {
+            if is_claude {
+                enqueue_claude_turn(
+                    state,
+                    vitals,
+                    Some(base_model),
+                    mission_id.clone(),
+                    prompt.to_string(),
+                    Some(prompt_msg_idx),
+                );
+            } else {
+                enqueue_codex_turn(
+                    state,
+                    vitals,
+                    Some(base_model),
+                    mission_id.clone(),
+                    prompt.to_string(),
+                    Some(prompt_msg_idx),
+                );
+            }
+        } else if is_claude {
+            state
+                .agents
+                .claude_turn_prompt_idx
+                .insert(base_model.clone(), prompt_msg_idx);
+            maybe_dispatch_claude_turn(
+                state,
+                vitals,
+                claude,
+                Some(base_model),
+                mission_id.clone(),
+                prompt.to_string(),
+                true,
+            );
+        } else {
+            state
+                .agents
+                .codex_turn_prompt_idx
+                .insert(base_model.clone(), prompt_msg_idx);
+            maybe_dispatch_codex_turn(
+                state,
+                vitals,
+                codex,
+                Some(base_model),
+                mission_id.clone(),
+                prompt.to_string(),
+                true,
+            );
+        }
+    }
+    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+    maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
 }
 
 fn reset_chat_input_and_history_nav(state: &mut AppState) {
@@ -744,18 +1089,20 @@ fn collect_pane_missions(state: &AppState, swarm: &SwarmRuntime, pane_idx: usize
         .collect()
 }
 
-fn lane_has_in_flight_turn(state: &AppState, lane_id: &str) -> bool {
-    state.agents.active_turns.contains_key(lane_id)
-        || state
-            .agents
+pub(crate) fn lane_has_in_flight_turn(state: &AppState, lane_id: &str) -> bool {
+    let agents = &state.agents;
+    agents.active_turns.contains_key(lane_id)
+        || agents
             .queued_codex_turns
             .iter()
             .any(|t| t.agent_id == lane_id)
-        || state
-            .agents
+        || agents
             .queued_claude_turns
             .iter()
             .any(|t| t.agent_id == lane_id)
+        || agents
+            .agents_get(lane_id)
+            .is_some_and(|lane| matches!(lane.status, AgentStatus::Running))
 }
 
 // Submit the chat input, dispatch to agents, and return whether a prompt was sent.
@@ -808,190 +1155,7 @@ pub(crate) fn submit_chat_input_and_dispatch(
             .or_else(|| detect_implicit_swarm_command(state, &raw))
     };
     if let Some(cmd) = cmd.as_mut() {
-        let auto_switch_ops_dag = cmd
-            .template
-            .as_deref()
-            .is_some_and(|t| matches!(t, "bulk" | "bo"));
-        chat_history_remember(state, &raw);
-        let planner = state
-            .agents
-            .selected_context_agent()
-            .and_then(|id| {
-                state
-                    .agents
-                    .agents
-                    .iter()
-                    .find(|lane| lane.id == id)
-                    .is_some_and(|lane| lane.is_codex() || lane.is_claude())
-                    .then_some(id.to_string())
-            })
-            .or_else(|| {
-                state
-                    .agents
-                    .agents
-                    .iter()
-                    .find(|lane| lane.is_codex() || lane.is_claude())
-                    .map(|lane| lane.id.clone())
-            });
-
-        if let Some(planner) = planner {
-            // Capture the operator's *original* size request before any
-            // template-specific clamping, so the advisory below can report
-            // "Requested 50, started 12" verbatim.
-            let original_size = cmd.size;
-            // Bulk template caps proposer count: past ~BULK_PRACTICAL_MAX
-            // the per-dep budget for the judge collapses (240k / N chars
-            // per dep), so additional proposers contribute headers, not
-            // reasoning. Hard-cap here before select_swarm_agents so the
-            // downstream pipeline never sees the original oversized request.
-            let bulk_template = matches!(cmd.template.as_deref(), Some("bulk") | Some("bo"));
-            let bulk_capped_from: Option<usize> = if bulk_template {
-                let intended = swarm_intended_size(state, original_size);
-                if intended > BULK_PRACTICAL_MAX {
-                    cmd.size = SwarmSize::Count(BULK_PRACTICAL_MAX);
-                    Some(intended)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
-            let agent_count = agents.len();
-            // Intended count uses the original request so messages reflect
-            // what the operator typed, not the post-clamp value.
-            let intended_count = swarm_intended_size(state, original_size);
-            if let Some((mission_id, dispatches)) = swarm.start(
-                state,
-                planner.clone(),
-                agents,
-                cmd.size,
-                cmd.template.clone(),
-                cmd.mission_kind,
-                cmd.prompt.clone(),
-            ) {
-                if auto_switch_ops_dag {
-                    state.agents.dock_tab = nit_core::AgentOpsTab::Dag;
-                }
-                state.agents.chat_input = cmd.prompt.clone();
-                sync_cursor_to_input_end(state);
-                let _ = push_chat_message(state);
-                let warn_threshold = large_swarm_warn_threshold();
-                let ceiling = effective_max_swarm_size();
-                let fd_limit = current_fd_soft_limit();
-                // `agent_count` is the pre-clone pool size returned by
-                // `select_swarm_agents`. The actual swarm size emerges
-                // after `ensure_size_clones` runs inside `swarm.start`,
-                // padding the roster up to the requested target (capped
-                // at the FD ceiling). For `All` no cloning happens, so
-                // the final size matches the pool. Compute the final
-                // size deterministically here so the clamp message
-                // reflects what the operator will actually see.
-                let final_size = match cmd.size {
-                    SwarmSize::Default => DEFAULT_SWARM_SIZE.min(ceiling).max(1),
-                    SwarmSize::All => agent_count,
-                    SwarmSize::Count(n) => n.clamp(1, ceiling),
-                };
-                // Advisory ordering: bulk-template cap > FD-bound clamp >
-                // pool-bound clamp > generic large-swarm warning. Only one
-                // fires; whichever explains the surprise the operator most
-                // needs to see.
-                let was_clamped = intended_count > final_size;
-                let fd_bound_clamp =
-                    was_clamped && bulk_capped_from.is_none() && final_size == ceiling;
-                if let Some(intended_bulk) = bulk_capped_from {
-                    push_system_alert_to_mission(
-                        state,
-                        &mission_id,
-                        format!(
-                            "Bulk template capped at {BULK_PRACTICAL_MAX} proposers \
-                             (requested {intended_bulk}, started {final_size}). The \
-                             judge's per-dep budget is 240KB total / N proposers; past \
-                             {BULK_PRACTICAL_MAX} each proposal is truncated below ~20KB \
-                             and contributes headers, not reasoning. Use `template=parallel` \
-                             for larger fan-outs where each agent owns its own write region."
-                        ),
-                    );
-                } else if fd_bound_clamp {
-                    push_system_alert_to_mission(
-                        state,
-                        &mission_id,
-                        format!(
-                            "Requested {intended_count} agents, started {final_size} \
-                             (effective ceiling {ceiling}; `ulimit -n` is {fd_limit}). \
-                             Bump `ulimit -n 4096` and restart nit for more headroom."
-                        ),
-                    );
-                } else if was_clamped {
-                    push_system_alert_to_mission(
-                        state,
-                        &mission_id,
-                        format!(
-                            "Requested {intended_count} agents, started {final_size} \
-                             (only {final_size} eligible agents in the roster)."
-                        ),
-                    );
-                } else if final_size >= warn_threshold {
-                    let msg = if ceiling < LARGE_SWARM_WARN_THRESHOLD {
-                        format!(
-                            "Large swarm ({final_size} agents). Process FD limit \
-                             is {fd_limit} (`ulimit -n`); effective swarm ceiling \
-                             ~{ceiling}. Run `ulimit -n 4096` and restart nit for \
-                             more headroom."
-                        )
-                    } else {
-                        format!(
-                            "Large swarm ({final_size} agents). Each agent spawns a \
-                             Codex/Claude subprocess (~4 fds, ~50–200 MB each). \
-                             Verify the host has spare RAM/CPU before continuing."
-                        )
-                    };
-                    push_system_alert_to_mission(state, &mission_id, msg);
-                }
-                // Independent advisory: nit's planner produces the entire
-                // task DAG in one pass (no hierarchical planning). Past
-                // ~20 task assignments, lightweight models (haiku / mini
-                // / nano / flash) start producing repetitive or shallow
-                // role assignments. Surface this as a separate message so
-                // operators can swap the planner before paying for a run
-                // that won't be coherent.
-                if final_size > LIGHT_PLANNER_SWARM_THRESHOLD && is_light_planner(&planner) {
-                    push_system_alert_to_mission(
-                        state,
-                        &mission_id,
-                        format!(
-                            "Planner `{planner}` is a lightweight model — coherently \
-                             planning {final_size} task assignments may exceed its \
-                             reasoning depth. Consider re-running with a sonnet/opus-tier \
-                             planner for swarms past ~{LIGHT_PLANNER_SWARM_THRESHOLD} agents."
-                        ),
-                    );
-                }
-                for dispatch in dispatches {
-                    apply_swarm_task_role(state, &dispatch);
-                    dispatch_agent_prompt(
-                        state,
-                        vitals,
-                        codex,
-                        claude,
-                        dispatch.agent_id,
-                        Some(dispatch.mission_id),
-                        dispatch.prompt,
-                    );
-                }
-                maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-                maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
-                swarm_handled = true;
-            } else {
-                state.agents.chat_input = cmd.prompt.clone();
-                sync_cursor_to_input_end(state);
-            }
-        } else {
-            state.status = Some("@swarm requires at least one Codex or Claude agent".into());
-            state.agents.chat_input.clear();
-            state.agents.chat_input_cursor = 0;
-            swarm_handled = true;
-        }
+        swarm_handled = try_dispatch_swarm_command(state, vitals, codex, claude, swarm, cmd, &raw);
     }
 
     if !swarm_handled {
@@ -1096,172 +1260,37 @@ pub(crate) fn submit_chat_input_and_dispatch(
                 && matches!(channel, AgentChannel::Agent);
             let shadow_requested =
                 shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&prompt));
-            let mut shadow_handled = false;
-            if shadow_requested {
-                if let Some(main_agent_id) = selected_agent.as_ref() {
-                    let dispatchable = state
-                        .agents
-                        .agents
-                        .iter()
-                        .find(|lane| &lane.id == main_agent_id)
-                        .is_some_and(|lane| lane.is_codex() || lane.is_claude());
-                    if dispatchable && !shadow.has_run_for(main_agent_id) {
-                        if let Some(dispatches) = shadow.start(
-                            state,
-                            main_agent_id.clone(),
-                            prompt.clone(),
-                            mission_id.clone(),
-                            Some(prompt_msg_idx),
-                        ) {
-                            // Proposers dispatch immediately — the workspace-
-                            // scan runtime keeps `state.genome_reports`
-                            // populated so the augmented landscape is ready
-                            // without per-dispatch prescan.
-                            for mut d in dispatches {
-                                super::augment_shadow_prompt_with_landscape(state, &mut d);
-                                dispatch_agent_prompt(
-                                    state,
-                                    vitals,
-                                    codex,
-                                    claude,
-                                    d.agent_id,
-                                    d.mission_id,
-                                    d.prompt,
-                                );
-                            }
-                            maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-                            maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
-                            shadow_handled = true;
-                        }
-                    }
-                }
-            }
+            let shadow_handled = shadow_requested
+                && try_dispatch_shadow_pipeline(
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    shadow,
+                    &selected_agent,
+                    &prompt,
+                    &mission_id,
+                    prompt_msg_idx,
+                );
 
             let targets = if is_swarm_mission || shadow_handled {
-                Vec::new() // already dispatched above
+                Vec::new()
             } else if matches!(channel, AgentChannel::Broadcast) {
                 broadcast_target_agents(state, mission_id.as_deref())
             } else {
                 selected_agent.clone().into_iter().collect::<Vec<_>>()
             };
-            for model in targets {
-                let base_model = crate::swarm::resolve_base_agent_id(&model).to_string();
-                let lane_kind = state
-                    .agents
-                    .agents
-                    .iter()
-                    .find(|lane| lane.id == base_model)
-                    .map(|lane| lane.kind);
-                let is_dispatchable = matches!(
-                    lane_kind,
-                    Some(nit_core::AgentLaneKind::Codex) | Some(nit_core::AgentLaneKind::Claude)
-                );
-                if !is_dispatchable {
-                    continue;
-                }
-                let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
-                if force_new && is_agent_family_busy(state, &base_model) {
-                    if let Some(clone_id) = create_chat_clone(state, &base_model) {
-                        if is_claude {
-                            state
-                                .agents
-                                .claude_turn_prompt_idx
-                                .insert(clone_id.clone(), prompt_msg_idx);
-                            maybe_dispatch_claude_turn(
-                                state,
-                                vitals,
-                                claude,
-                                Some(clone_id),
-                                mission_id.clone(),
-                                prompt.clone(),
-                                true,
-                            );
-                        } else {
-                            state
-                                .agents
-                                .codex_turn_prompt_idx
-                                .insert(clone_id.clone(), prompt_msg_idx);
-                            maybe_dispatch_codex_turn(
-                                state,
-                                vitals,
-                                codex,
-                                Some(clone_id),
-                                mission_id.clone(),
-                                prompt.clone(),
-                                true,
-                            );
-                        }
-                    } else if is_claude {
-                        enqueue_claude_turn(
-                            state,
-                            vitals,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            Some(prompt_msg_idx),
-                        );
-                    } else {
-                        enqueue_codex_turn(
-                            state,
-                            vitals,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            Some(prompt_msg_idx),
-                        );
-                    }
-                } else if is_agent_busy(state, &base_model) {
-                    if is_claude {
-                        enqueue_claude_turn(
-                            state,
-                            vitals,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            Some(prompt_msg_idx),
-                        );
-                    } else {
-                        enqueue_codex_turn(
-                            state,
-                            vitals,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            Some(prompt_msg_idx),
-                        );
-                    }
-                } else if is_claude {
-                    state
-                        .agents
-                        .claude_turn_prompt_idx
-                        .insert(base_model.clone(), prompt_msg_idx);
-                    maybe_dispatch_claude_turn(
-                        state,
-                        vitals,
-                        claude,
-                        Some(base_model),
-                        mission_id.clone(),
-                        prompt.clone(),
-                        true,
-                    );
-                } else {
-                    state
-                        .agents
-                        .codex_turn_prompt_idx
-                        .insert(base_model.clone(), prompt_msg_idx);
-                    maybe_dispatch_codex_turn(
-                        state,
-                        vitals,
-                        codex,
-                        Some(base_model),
-                        mission_id.clone(),
-                        prompt.clone(),
-                        true,
-                    );
-                }
-            }
-            maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-            maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+            dispatch_to_selected_targets(
+                state,
+                vitals,
+                codex,
+                claude,
+                targets,
+                &prompt,
+                &mission_id,
+                prompt_msg_idx,
+                force_new,
+            );
         } else {
             return false;
         }

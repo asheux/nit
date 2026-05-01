@@ -15,6 +15,7 @@ use nit_core::{AppKind, AppState, LabId, Mode, PaneId, SubstrateState};
 use nit_tui::claude_runner::ClaudeRunnerConfig;
 use nit_tui::codex_runner::{CodexRunnerConfig, CodexRuntimeMode};
 use nit_tui::multipane;
+use nit_tui::swarm::effective_max_swarm_size;
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 
@@ -234,6 +235,30 @@ fn run_multipane(
 
     multipane::setup::install_filtered(&mut state, args.backend.as_deref(), pane_count, cwd)
         .map_err(|err| anyhow::anyhow!(err))?;
+
+    // Scale runner concurrency by pane count, clamped to the FD ceiling
+    // that already protects swarm fan-out. Without this, the runner
+    // thread's `while active.len() < max_parallel` gate (default 2)
+    // serializes panes despite per-agent state-side queueing being
+    // correct.
+    let parallel = pane_count
+        .max(codex_config.max_parallel_turns)
+        .min(effective_max_swarm_size());
+    if parallel < pane_count {
+        eprintln!(
+            "nit multipane: clamped runner concurrency to {parallel} \
+             (host FD ceiling), below requested {pane_count} panes — \
+             raise with `ulimit -n 4096` and restart to lift it."
+        );
+    }
+    let codex_config = CodexRunnerConfig {
+        max_parallel_turns: parallel,
+        ..codex_config
+    };
+    let claude_config = ClaudeRunnerConfig {
+        max_parallel_turns: parallel,
+        ..claude_config
+    };
 
     run(
         state,

@@ -133,9 +133,17 @@ use graph_exec::{
 pub(crate) use graph_exec::{per_dep_budget, task_uses_full_output_budget};
 use json::{extract_json_code_block, extract_json_code_blocks};
 pub(crate) use limits::{
-    current_fd_soft_limit, effective_max_swarm_size, is_light_planner, large_swarm_warn_threshold,
-    BULK_PRACTICAL_MAX, LIGHT_PLANNER_SWARM_THRESHOLD,
+    current_fd_soft_limit, is_light_planner, large_swarm_warn_threshold, BULK_PRACTICAL_MAX,
+    LIGHT_PLANNER_SWARM_THRESHOLD,
 };
+
+/// Public wrapper exposing the FD-clamped swarm-size ceiling to the
+/// `nit` binary so multipane runner concurrency can be scaled by pane
+/// count without lifting visibility on the underlying `pub(crate)`
+/// helpers in `limits`.
+pub fn effective_max_swarm_size() -> usize {
+    limits::effective_max_swarm_size()
+}
 use plan_parser::{
     apply_role_dependency_ordering, assign_clone_roles_for_parallel_coverage,
     classify_swarm_mission_kind, deduplicate_inherited_role_hints, direct_role_hint_for_agent,

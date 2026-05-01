@@ -29,8 +29,8 @@ use super::setup::materialise_pane_lane;
 use crate::app::popup_keys::maybe_open_artifact_popup_from_console_line;
 use crate::app::{
     chat_history_next, chat_history_prev, clear_chat_esc_state, handle_abort,
-    handle_chat_input_editing_key, is_global_quit_key, parse_abort_command, record_chat_esc_press,
-    submit_chat_input_and_dispatch, AbortScope,
+    handle_chat_input_editing_key, is_global_quit_key, lane_has_in_flight_turn,
+    parse_abort_command, record_chat_esc_press, submit_chat_input_and_dispatch, AbortScope,
 };
 use crate::claude_runner::{ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
@@ -91,10 +91,9 @@ pub fn run_loop(
     loop {
         // Drain any already-buffered input BEFORE the agent-bus drain so
         // wheel / PgUp / Ctrl+Q events don't get queued behind a 100+ event
-        // swarm burst. Non-blocking — only consumes events that are
-        // already pending. The bottom-of-loop `event::poll(TICK_RATE)`
-        // remains the idle-wait pump. drain_input_burst caps each pass at
-        // 32 events so a runaway producer can't starve the bus drain.
+        // swarm burst. Non-blocking drain of pending events (capped at 32 per
+        // pass) so a runaway producer can't starve the bus. The bottom-of-loop
+        // `event::poll(TICK_RATE)` remains the idle-wait pump.
         if event::poll(Duration::from_millis(0))? {
             let area = terminal_size(terminal)?;
             let should_quit = drain_input_burst(
@@ -1185,21 +1184,30 @@ fn handle_chat_key(
             // Best-effort macOS Cmd+C: only fires on terminals that
             // forward SUPER (Kitty / WezTerm / iTerm with CSI-u).
             // Default Terminal.app does not deliver this.
-            try_copy_focused_pane_selection(state, clipboard, area);
+            // If a chat-thread selection was consumed, we're done; otherwise
+            // fall through to the canonical input editor so input-box
+            // selections still copy.
+            if !try_copy_focused_pane_selection(state, clipboard, area) {
+                with_focused_pane_aliased(state, |state| {
+                    let _ = handle_chat_input_editing_key(&key, state, clipboard);
+                });
+            }
             false
         }
         KeyCode::Char('c') if is_ctrl => {
             if try_copy_focused_pane_selection(state, clipboard, area) {
                 return false;
             }
-            let empty = focused_chat_input_is_empty(state);
-            if empty {
+            // Empty input: Ctrl+C is the abort sentinel for the focused
+            // pane. Non-empty input: defer to the canonical handler, which
+            // copies an active input selection or clears the input — same
+            // behavior as single-pane.
+            if focused_chat_input_is_empty(state) {
                 abort_focused_pane(state, codex, claude, swarm);
-            } else if let Some(pane) = focused_pane_mut(state) {
-                pane.chat_input.clear();
-                pane.chat_input_cursor = 0;
-                pane.chat_input_selection_anchor = None;
-                pane.chat_input_scroll = 0;
+            } else {
+                with_focused_pane_aliased(state, |state| {
+                    let _ = handle_chat_input_editing_key(&key, state, clipboard);
+                });
             }
             false
         }
@@ -1214,13 +1222,13 @@ fn handle_chat_key(
             submit_focused_pane_input(state, vitals, codex, claude, swarm, shadow);
             false
         }
-        KeyCode::Up => {
+        KeyCode::Up if !modifiers.contains(KeyModifiers::SHIFT) => {
             with_focused_pane_aliased(state, |state| {
                 let _ = chat_history_prev(state);
             });
             false
         }
-        KeyCode::Down => {
+        KeyCode::Down if !modifiers.contains(KeyModifiers::SHIFT) => {
             with_focused_pane_aliased(state, |state| {
                 let _ = chat_history_next(state);
             });
@@ -1650,6 +1658,13 @@ fn handle_mouse(
 thread_local! {
     static POPUP_BODY_ANCHOR: std::cell::Cell<Option<(usize, usize)>>
         = const { std::cell::Cell::new(None) };
+    /// Per-gesture sentinel: which pane currently owns an in-progress
+    /// chat-input-box drag. Mirrors single-pane's
+    /// `MouseSelectTarget::ChatInput` flag — when Some, drag events
+    /// extend the input-box selection on that pane rather than the
+    /// chat-thread selection.
+    static INPUT_BOX_DRAG_PANE: std::cell::Cell<Option<usize>>
+        = const { std::cell::Cell::new(None) };
 }
 
 fn record_popup_anchor(line: usize, col: usize) {
@@ -1772,6 +1787,30 @@ fn handle_mouse_left_down(
         }
         return;
     }
+    // Input-box click: position cursor + seed input selection anchor.
+    // Mirrors single-pane behaviour at `app/mouse.rs:1127-1148`. Tested
+    // BEFORE the chat-thread hit-test so an input-box click never spills
+    // into the thread-selection branch.
+    if let Some((pane_idx, cursor_char_idx)) = resolve_pane_input_box_hit(state, area, x, y) {
+        if let Some(mp) = state.multipane.as_mut() {
+            mp.focused = pane_idx;
+        }
+        with_pane_aliased(state, pane_idx, |state| {
+            let total_chars = state.agents.chat_input.chars().count();
+            let new_cursor = cursor_char_idx.min(total_chars);
+            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if state.agents.chat_input_selection_anchor.is_none() {
+                    state.agents.chat_input_selection_anchor =
+                        Some(state.agents.chat_input_cursor.min(total_chars));
+                }
+            } else {
+                state.agents.chat_input_selection_anchor = Some(new_cursor);
+            }
+            state.agents.chat_input_cursor = new_cursor;
+        });
+        INPUT_BOX_DRAG_PANE.with(|cell| cell.set(Some(pane_idx)));
+        return;
+    }
     // Drag-to-select takes precedence over artifact-popup open: seed
     // the selection anchor on Down, defer popup-open to Up so a single
     // click without drag still opens the popup. Selection lives on the
@@ -1789,6 +1828,32 @@ fn handle_mouse_left_down(
         return;
     };
     apply_roster_click(state, target);
+}
+
+/// Resolve a screen `(x, y)` to `(pane_idx, char_index_into_chat_input)`
+/// when the click lands inside any pane's chat input box. Mirrors
+/// `resolve_chat_thread_hit` but for the input rect produced by
+/// `compute_pane_layout`.
+fn resolve_pane_input_box_hit(
+    state: &AppState,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<(usize, usize)> {
+    let mp = state.multipane.as_ref()?;
+    let pane_idx = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y)?;
+    let pane = mp.panes.get(pane_idx)?;
+    if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
+        return None;
+    }
+    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+    let inner = pane_inner_after_chrome(pane_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let cursor_char_idx =
+        agent_console_view::map_pane_chat_input_point_to_cursor(inner, pane, x, y, false)?;
+    Some((pane_idx, cursor_char_idx))
 }
 
 fn handle_mouse_left_drag(
@@ -1825,6 +1890,50 @@ fn handle_mouse_left_drag(
         return;
     }
 
+    // Input-box drag: extend the chat-input selection. The thread_local
+    // sentinel (not the chat-thread hit-test) keeps the drag targeted at
+    // the input box even when the cursor moves outside its rect; clamping
+    // is enabled so the selection expands to the row/col edge.
+    if let Some(pane_idx) = INPUT_BOX_DRAG_PANE.with(|cell| cell.get()) {
+        let pane = match state
+            .multipane
+            .as_ref()
+            .and_then(|mp| mp.panes.get(pane_idx))
+        {
+            Some(pane) => pane.clone(),
+            None => {
+                INPUT_BOX_DRAG_PANE.with(|cell| cell.set(None));
+                return;
+            }
+        };
+        let mp_grid = state
+            .multipane
+            .as_ref()
+            .map(|mp| (mp.grid_cols, mp.grid_rows));
+        let Some((grid_cols, grid_rows)) = mp_grid else {
+            return;
+        };
+        let pane_rect = grid::pane_rect(area, grid_cols, grid_rows, pane_idx);
+        let inner = pane_inner_after_chrome(pane_rect);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        if let Some(cursor_char_idx) =
+            agent_console_view::map_pane_chat_input_point_to_cursor(inner, &pane, x, y, true)
+        {
+            with_pane_aliased(state, pane_idx, |state| {
+                let total_chars = state.agents.chat_input.chars().count();
+                let new_cursor = cursor_char_idx.min(total_chars);
+                if state.agents.chat_input_selection_anchor.is_none() {
+                    state.agents.chat_input_selection_anchor =
+                        Some(state.agents.chat_input_cursor.min(total_chars));
+                }
+                state.agents.chat_input_cursor = new_cursor;
+            });
+        }
+        return;
+    }
+
     let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) else {
         return;
     };
@@ -1845,6 +1954,16 @@ fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, 
     // the popup doesn't leak the anchor across gestures.
     if state.agents.artifacts_popup_open {
         clear_popup_anchor();
+        return;
+    }
+    // Input-box drag terminator: drop the per-gesture sentinel so the
+    // next mouse-down starts a fresh selection. The pane's
+    // chat_input_selection_anchor stays set if the drag covered any
+    // characters — Cmd+C / Ctrl+C on the canonical handler picks it up.
+    if INPUT_BOX_DRAG_PANE
+        .with(|cell| cell.replace(None))
+        .is_some()
+    {
         return;
     }
     let Some((pane_idx, _, _)) = resolve_chat_thread_hit(state, area, x, y) else {
@@ -2399,18 +2518,7 @@ fn abort_focused_pane(
     // Stale mission id, or never had a real swarm overlay. Surgically
     // cancel the focused pane's lane via AbortScope::Agent if a turn is
     // live; otherwise post a "nothing to abort" system message.
-    let has_in_flight = state.agents.active_turns.contains_key(&focused_agent)
-        || state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|t| t.agent_id == focused_agent)
-        || state
-            .agents
-            .queued_claude_turns
-            .iter()
-            .any(|t| t.agent_id == focused_agent);
-    if !has_in_flight {
+    if !lane_has_in_flight_turn(state, &focused_agent) {
         push_pane_system_message(state, "no active mission for this pane".into());
         return;
     }
