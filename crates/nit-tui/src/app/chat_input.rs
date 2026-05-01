@@ -594,12 +594,30 @@ fn resolve_current_abort(
         .selected_context_mission()
         .map(|s| s.to_string())
         .filter(|mid| swarm.is_active_mission(mid));
-    let target = if multipane_focus.is_some() {
+    // Multipane synthetic-only state — single-agent dispatch with only a
+    // mp-pane-NN-chat id. Surgically cancel the focused pane's lane via
+    // AbortScope::Agent, the same path Ctrl+C / Esc-Esc / Mission-tab `x`
+    // use through `abort_focused_pane`. Without this fallthrough, /abort
+    // posts "no active swarm mission" while a turn is genuinely in
+    // flight, leaving the operator stuck.
+    let mission_target = if selected.is_some() {
         selected
+    } else if multipane_focus.is_some() {
+        let agent = state
+            .agents
+            .selected_context_agent()
+            .map(str::to_string)
+            .filter(|candidate| lane_has_in_flight_turn(state, candidate.as_str()));
+        let Some(agent) = agent else {
+            state.status = Some("/abort: no active mission for this pane.".into());
+            return None;
+        };
+        drain_queued_turns_for_agent_pub(state, &agent);
+        return Some(vec![agent]);
     } else {
-        selected.or_else(|| swarm.active_mission_ids().into_iter().next())
+        swarm.active_mission_ids().into_iter().next()
     };
-    let Some(mission_id) = target else {
+    let Some(mission_id) = mission_target else {
         state.status = Some(
             "/abort: no active swarm mission. Use `/abort all` for runner-wide cancel.".into(),
         );

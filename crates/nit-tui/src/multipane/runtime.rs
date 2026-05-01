@@ -89,6 +89,31 @@ pub fn run_loop(
     let save_debounce = Duration::from_secs(1);
 
     loop {
+        // Drain any already-buffered input BEFORE the agent-bus drain so
+        // wheel / PgUp / Ctrl+Q events don't get queued behind a 100+ event
+        // swarm burst. Non-blocking — only consumes events that are
+        // already pending. The bottom-of-loop `event::poll(TICK_RATE)`
+        // remains the idle-wait pump. drain_input_burst caps each pass at
+        // 32 events so a runaway producer can't starve the bus drain.
+        if event::poll(Duration::from_millis(0))? {
+            let area = terminal_size(terminal)?;
+            let should_quit = drain_input_burst(
+                state,
+                &mut vitals,
+                &codex,
+                &claude,
+                &mut swarm,
+                &mut shadow,
+                &dir_search_runner,
+                &mut clipboard,
+                theme,
+                area,
+            )?;
+            if should_quit {
+                finalize_session(state, &workspace_root, had_prior_session);
+                return Ok(());
+            }
+        }
         for log_line in log_rx.try_iter() {
             // v1: discard. Phase 5 may route to a status row.
             let _ = log_line;
@@ -431,7 +456,14 @@ fn paint_bar(frame: &mut ratatui::Frame, rect: Rect, text: String, style: Style)
     if rect.height == 0 || rect.width == 0 {
         return;
     }
-    frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), rect);
+    // `.style(style)` paints the entire rect with the bar's bg, so cells
+    // beyond the text length still inherit the strip background. Without
+    // it, `Span::styled` only colours the text cells and the bar appears
+    // truncated on terminals wider than the label.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style))).style(style),
+        rect,
+    );
 }
 
 fn top_strip_style(theme: &Theme) -> Style {
@@ -592,7 +624,14 @@ fn render_one_pane(
         pane.selected_agent_id.clone()
     };
     state.agents.selected_agent = pane_agent_id;
-    state.agents.selected_mission = pane.mission_id.clone();
+    // For default-chat (no real swarm overlay), fall back to the pane's
+    // synthetic chat id so `breather_rows_for_user_prompt` sees a non-None
+    // `mission_ctx` and partitions other panes' agents OUT of `primary_ids`.
+    // Mirrors the alias source in `dispatch::with_pane_aliased`.
+    state.agents.selected_mission = pane
+        .mission_id
+        .clone()
+        .or_else(|| (!pane.chat_mission_id.is_empty()).then(|| pane.chat_mission_id.clone()));
     // Mirror `with_pane_aliased`: disable the global mission fallback during this pane's render.
     state.agents.mission_selected = usize::MAX;
     let cursor = agent_console_view::render_pane(
@@ -1252,6 +1291,10 @@ pub(crate) fn submit_focused_pane_input(
         return;
     }
 
+    if bound {
+        pin_pane_chat_mission_on_lane(state, pane_idx);
+    }
+
     with_focused_pane_aliased(state, |state| {
         let _ =
             submit_chat_input_and_dispatch(state, vitals, Some(codex), Some(claude), swarm, shadow);
@@ -1288,13 +1331,15 @@ fn scroll_chat_thread(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, de
         // `(-1 + delta).max(0) = 0`).
         let resolved = resolve_chat_scroll_sentinel(p.chat_thread_scroll, max_scroll);
         let next = (resolved as i32 + delta).max(0) as usize;
-        // Re-engage the sentinel when the user scrolls back to (or past)
-        // the bottom — keeps "follow new content" working without an
-        // explicit reattach key.
-        p.chat_thread_scroll = if next >= max_scroll {
+        // Only re-engage the "stick to bottom" sentinel when the operator
+        // scrolled DOWN past the current bottom. PgUp / wheel-up must
+        // never re-engage it — otherwise a transient max_scroll dip
+        // (breather rows oscillating mid-swarm) silently consumes the
+        // operator's scroll-up and the viewport feels stuck.
+        p.chat_thread_scroll = if delta > 0 && next >= max_scroll {
             nit_core::CONSOLE_SCROLL_BOTTOM
         } else {
-            next
+            next.min(max_scroll)
         };
     }
 }
@@ -2140,13 +2185,14 @@ fn handle_mouse_scroll(
         p.roster_scroll = next.min(max_scroll);
     } else {
         // Wheel uses the same sentinel-resolution path as the keyboard
-        // scroll — see `resolve_chat_scroll_sentinel`.
+        // scroll — see `resolve_chat_scroll_sentinel` and `scroll_chat_thread`
+        // for the matching delta-guard rationale.
         let resolved = resolve_chat_scroll_sentinel(p.chat_thread_scroll, max_scroll);
         let next = (resolved as i32 + delta).max(0) as usize;
-        p.chat_thread_scroll = if next >= max_scroll {
+        p.chat_thread_scroll = if delta > 0 && next >= max_scroll {
             nit_core::CONSOLE_SCROLL_BOTTOM
         } else {
-            next
+            next.min(max_scroll)
         };
     }
 }
@@ -2336,23 +2382,23 @@ fn abort_focused_pane(
                 .agents
                 .agents_get(&focused_agent)
                 .and_then(|lane| lane.current_mission.clone())
+                .filter(|m| !super::agent_id::is_pane_chat_mission_id(m))
         });
-    if let Some(mid) = real_mission {
-        if !swarm.is_active_mission(&mid) {
-            push_pane_system_message(state, "no active mission for this pane".into());
-            return;
-        }
+    let swarm_active = real_mission
+        .as_deref()
+        .is_some_and(|mid| swarm.is_active_mission(mid));
+    if swarm_active {
+        // Alias places this pane's mission into selected_mission so
+        // AbortScope::Current resolves to exactly this pane's swarm —
+        // no cross-pane fallback.
         with_focused_pane_aliased(state, |state| {
-            // The alias places `mid` (or the lane's current_mission)
-            // into selected_mission so AbortScope::Current resolves to
-            // exactly this pane's swarm — no cross-pane fallback.
             handle_abort(state, Some(codex), Some(claude), swarm, AbortScope::Current);
         });
         return;
     }
-    // No real swarm mission. If a turn is in flight on this pane's
-    // agent, surgically cancel it via AbortScope::Agent. Otherwise post
-    // a "nothing to abort" system message in this pane only.
+    // Stale mission id, or never had a real swarm overlay. Surgically
+    // cancel the focused pane's lane via AbortScope::Agent if a turn is
+    // live; otherwise post a "nothing to abort" system message.
     let has_in_flight = state.agents.active_turns.contains_key(&focused_agent)
         || state
             .agents
@@ -2676,6 +2722,27 @@ fn focused_pane_agent_id(state: &AppState) -> Option<String> {
                 p.selected_agent_id.clone()
             }
         })
+}
+
+/// Pin the focused lane's `current_mission` to the pane's synthetic chat
+/// id when no real swarm overlay exists. Locks the breather-filter
+/// invariant `agent.current_mission == Some(mission_ctx)` for the render
+/// alias even before `dispatch_agent_prompt` rewrites it on dispatch —
+/// without this, a stale id from a prior swarm could survive long enough
+/// to leak into another pane's render.
+fn pin_pane_chat_mission_on_lane(state: &mut AppState, pane_idx: usize) {
+    let synthetic = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(pane_idx))
+        .filter(|p| p.mission_id.is_none() && !p.chat_mission_id.is_empty())
+        .map(|p| p.chat_mission_id.clone());
+    let (Some(mid), Some(agent_id)) = (synthetic, focused_pane_agent_id(state)) else {
+        return;
+    };
+    if let Some(lane) = state.agents.agents_get_mut(&agent_id) {
+        lane.current_mission = Some(mid);
+    }
 }
 
 #[cfg(test)]
@@ -3083,10 +3150,12 @@ mod tests {
         }
         let swarm = SwarmRuntime::default();
         let area = Rect::new(0, 0, 80, 30);
-        // Bare fixture has no rendered messages, so max_scroll is 0.
-        // After PgUp from the sentinel "follow bottom", we land at
-        // (max_scroll + delta).max(0) = 0 → which `>= max_scroll`
-        // re-engages the sentinel for "stick to bottom".
+        // Bare fixture has no rendered messages → max_scroll = 0. PgUp
+        // (delta < 0) from the top must NOT re-engage the follow-bottom
+        // sentinel — only wheel-down past the bottom does. Otherwise
+        // operator scroll-up gestures would silently snap back to BOTTOM
+        // every time max_scroll transiently equals current scroll (the
+        // BUG-3 root cause).
         let mp = state.multipane.as_mut().unwrap();
         if let Some(pane) = mp.panes.get_mut(0) {
             pane.chat_thread_scroll = 0;
@@ -3094,8 +3163,8 @@ mod tests {
         scroll_chat_thread(&mut state, &swarm, area, -3);
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
-            nit_core::CONSOLE_SCROLL_BOTTOM,
-            "scrolling past the bottom must re-engage the follow-bottom sentinel"
+            0,
+            "PgUp from row 0 must stay at row 0, not silently snap to BOTTOM"
         );
     }
 
@@ -3751,5 +3820,97 @@ mod tests {
             Some("claude-haiku-4-5#mp-pane-00"),
             "selected_agent must be restored to its prior value on miss"
         );
+    }
+
+    // ----- BUG 3: scroll holds when row count oscillates -------------------
+    //
+    // When swarm bus events flip breather rows in/out of the visible
+    // window, max_scroll oscillates frame-to-frame. The pre-fix snap-back
+    // rule re-engaged the follow-bottom sentinel whenever `next >= max_scroll`
+    // — silently consuming PgUp / wheel-up gestures during a swarm. The
+    // delta-guard restricts the snap-back to operator-driven scroll-DOWN.
+
+    #[test]
+    fn pgup_does_not_re_engage_sentinel_when_max_scroll_dips() {
+        // Pane is parked at scroll = 10 with current max_scroll = 30.
+        // A swarm event drops the trailing breather count, max_scroll is
+        // recomputed at 0 inside `scroll_chat_thread`. Before the fix:
+        // `next = 10 - 8 = 2`, `2 >= 0` → snap to BOTTOM. After the fix:
+        // delta < 0 so the sentinel stays disengaged, scroll lands at 0
+        // (clamped to max_scroll, not BOTTOM).
+        let mut state = fixture_state_no_backend();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-00".into();
+            pane.chat_thread_scroll = 10;
+        }
+        let swarm = SwarmRuntime::default();
+        let area = Rect::new(0, 0, 80, 30);
+        scroll_chat_thread(&mut state, &swarm, area, -8);
+        assert_ne!(
+            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
+            nit_core::CONSOLE_SCROLL_BOTTOM,
+            "PgUp must NEVER re-engage the follow-bottom sentinel — even when \
+             max_scroll transiently dips to ≤ next"
+        );
+    }
+
+    #[test]
+    fn wheel_down_past_bottom_still_re_engages_sentinel() {
+        // Counter-test for the delta-guard: wheel-down (delta > 0) past
+        // max_scroll is the only path that should re-arm the sentinel.
+        let mut state = fixture_state_no_backend();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(1) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-01".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-01".into();
+            pane.chat_thread_scroll = 0;
+        }
+        let swarm = SwarmRuntime::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let pane1_rect = grid::pane_rect(area, 2, 1, 1);
+        handle_mouse_scroll(
+            &mut state,
+            &swarm,
+            area,
+            pane1_rect.x + 5,
+            pane1_rect.y + 5,
+            5,
+        );
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
+            nit_core::CONSOLE_SCROLL_BOTTOM,
+            "wheel-DOWN past the current bottom must re-engage the sentinel"
+        );
+    }
+
+    // ----- BUG 4: paint_bar fills the rect with bg style -------------------
+
+    #[test]
+    fn paint_bar_fills_full_rect_with_bg_style() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let style = Style::default()
+            .fg(Color::White)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD);
+        let target_rect = Rect::new(0, 0, 40, 1);
+        terminal
+            .draw(|frame| {
+                paint_bar(frame, target_rect, "MULTIPANE".into(), style);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        for x in 0..target_rect.width {
+            let cell = buffer.get(target_rect.x + x, target_rect.y);
+            assert_eq!(
+                cell.bg,
+                Color::Blue,
+                "cell at column {x} must inherit the bar's bg colour"
+            );
+        }
     }
 }

@@ -715,3 +715,176 @@ fn merge_prior_re_derives_chat_mission_id_from_pane_id() {
     assert_eq!(mp.panes[0].chat_mission_id, "mp-pane-00-chat");
     assert_eq!(mp.panes[1].chat_mission_id, "mp-pane-01-chat");
 }
+
+// ---------------------------------------------------------------------------
+// BUG 1 / BUG 2 regression tests (multipane bug-batch integrate-01)
+// ---------------------------------------------------------------------------
+
+use nit_core::AgentConsoleRowKind;
+
+#[test]
+fn breather_rows_in_pane_k_only_contain_pane_k_agents() {
+    // BUG 1: when single-agent dispatch is in flight on multiple panes,
+    // each pane's render must show ONLY its own pane lane in the breather
+    // table. Pre-fix, the trailing breather block in
+    // `breather_rows_for_user_prompt` walked every active lane in
+    // `state.agents.agents` because `mission_ctx` was None at render
+    // time, leaking pane J's agents into pane K's breather.
+    let mut state = build_state_with_chat_missions(2);
+
+    // Materialise pane 1's lane (pane 0 is materialised by build_state).
+    let _ = materialise_pane_lane(&mut state, 1, "claude-haiku-4-5");
+
+    let pane0_id = "claude-haiku-4-5#mp-pane-00".to_string();
+    let pane1_id = "claude-haiku-4-5#mp-pane-01".to_string();
+
+    // Both lanes are running, each tied to its pane's synthetic chat id.
+    if let Some(lane) = state.agents.agents_get_mut(&pane0_id) {
+        lane.current_mission = Some("mp-pane-00-chat".into());
+        lane.status = nit_core::AgentStatus::Running;
+    }
+    if let Some(lane) = state.agents.agents_get_mut(&pane1_id) {
+        lane.current_mission = Some("mp-pane-01-chat".into());
+        lane.status = nit_core::AgentStatus::Running;
+    }
+    state.agents.active_turns.insert(
+        pane0_id.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: std::time::Instant::now(),
+            last_heartbeat_at: std::time::Instant::now(),
+            last_output_at: std::time::Instant::now(),
+            stage: Some("running".into()),
+        },
+    );
+    state.agents.active_turns.insert(
+        pane1_id.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: std::time::Instant::now(),
+            last_heartbeat_at: std::time::Instant::now(),
+            last_output_at: std::time::Instant::now(),
+            stage: Some("running".into()),
+        },
+    );
+
+    // Render path aliases selected_mission to the pane's synthetic id —
+    // mirror that here so breather_rows_for_user_prompt's filter sees
+    // the same context the renderer would set.
+    state.agents.selected_mission = Some("mp-pane-00-chat".into());
+    state.agents.selected_agent = Some(pane0_id.clone());
+    state.agents.mission_selected = usize::MAX;
+
+    let pane0 = state.multipane.as_ref().unwrap().panes[0].clone();
+    let rows = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(0),
+        Some(pane0.agent_id.as_str()),
+        Some(pane0.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+
+    // No row in pane 0's render may carry pane 1's agent text. The
+    // breather table builder embeds the agent role into the row, so a
+    // contains-check on the role is the cleanest signal.
+    for row in &rows {
+        if matches!(
+            row.kind,
+            AgentConsoleRowKind::StatusRow | AgentConsoleRowKind::StatusSubRow
+        ) {
+            assert!(
+                !row.text.contains("mp-pane-01"),
+                "pane 0 breather row leaked pane 1's lane: {:?}",
+                row.text
+            );
+        }
+    }
+}
+
+#[test]
+fn abort_via_typed_slash_in_pane_routes_to_agent_scope() {
+    // BUG 2 (typed /abort path): a single-agent pane with a turn in
+    // flight (active_turns populated) but no real swarm mission must
+    // surgically cancel the agent instead of bailing with "no active
+    // swarm mission". `resolve_current_abort` now falls through to a
+    // per-agent CancelTurn for multipane panes whose synthetic mission
+    // doesn't appear in `swarm.active_mission_ids`.
+    let mut state = build_state_with_chat_missions(2);
+    let agent = "claude-haiku-4-5#mp-pane-00".to_string();
+
+    state.agents.active_turns.insert(
+        agent.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: std::time::Instant::now(),
+            last_heartbeat_at: std::time::Instant::now(),
+            last_output_at: std::time::Instant::now(),
+            stage: Some("running".into()),
+        },
+    );
+    if let Some(lane) = state.agents.agents_get_mut(&agent) {
+        lane.current_mission = Some("mp-pane-00-chat".into());
+        lane.status = nit_core::AgentStatus::Running;
+    }
+
+    let mut swarm = SwarmRuntime::default();
+    let aborted = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(state, None, None, &mut swarm, AbortScope::Current)
+    });
+    assert!(
+        aborted,
+        "/abort with a non-swarm in-flight turn must cancel the focused agent"
+    );
+    let status = state.status.as_deref().unwrap_or("");
+    assert!(
+        !status.contains("no active swarm mission"),
+        "operator must NOT see the swarm-mode error when an agent turn is live: status={status:?}"
+    );
+}
+
+#[test]
+fn abort_focused_pane_with_non_swarm_in_flight_uses_agent_scope() {
+    // BUG 2 (Ctrl+C / Esc-Esc / Mission-tab `x` path): the focused-pane
+    // abort must fall through to an agent-scope CancelTurn when
+    // `lane.current_mission` is a stale non-swarm id. Pre-fix, a stale
+    // mission id caused the early "no active mission for this pane"
+    // return even though `active_turns` carried a live turn.
+    let mut state = build_state_with_chat_missions(2);
+    let agent = "claude-haiku-4-5#mp-pane-00".to_string();
+
+    if let Some(lane) = state.agents.agents_get_mut(&agent) {
+        lane.current_mission = Some("ad-hoc-001".into());
+        lane.status = nit_core::AgentStatus::Running;
+    }
+    state.agents.active_turns.insert(
+        agent.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: std::time::Instant::now(),
+            last_heartbeat_at: std::time::Instant::now(),
+            last_output_at: std::time::Instant::now(),
+            stage: Some("running".into()),
+        },
+    );
+    if let Some(mp) = state.multipane.as_mut() {
+        mp.panes[0].mission_id = None;
+    }
+
+    // Drive the same routing path that abort_focused_pane uses: a
+    // non-swarm mission id falls through to AbortScope::Agent. The
+    // existing `chat_slash_abort_kills_focused_pane_only` test already
+    // covers the typed /abort path; this exercises the Agent-scope
+    // resolver directly.
+    let mut swarm = SwarmRuntime::default();
+    let aborted = with_pane_aliased(&mut state, 0, |state| {
+        handle_abort(
+            state,
+            None,
+            None,
+            &mut swarm,
+            AbortScope::Agent(agent.clone()),
+        )
+    });
+    assert!(
+        aborted,
+        "AbortScope::Agent for the focused pane's lane must succeed"
+    );
+}

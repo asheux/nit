@@ -64,6 +64,12 @@ pub(crate) fn enumerate_scope_files_with_deadline(
     prompt: &str,
     deadline: Duration,
 ) -> Vec<String> {
+    // A zero deadline means "skip the walk". `recv_timeout(Duration::ZERO)`
+    // races with the worker on fast machines (the walker can deliver a
+    // result before the timeout fires), so short-circuit before spawning.
+    if deadline.is_zero() {
+        return Vec::new();
+    }
     let workspace_root = workspace_root.to_path_buf();
     let prompt = prompt.to_string();
     let (tx, rx) = mpsc::channel();
@@ -460,12 +466,16 @@ mod tests {
         }
         let root = fresh_root("git_changed");
 
-        assert!(run_git(&["init", "-q", "-b", "main"], &root).status.success());
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
         // Seed the repo with a committed .rs file inside `crates/`.
         fs::create_dir_all(root.join("crates/foo/src")).unwrap();
         fs::write(root.join("crates/foo/src/lib.rs"), "// initial\n").unwrap();
         assert!(run_git(&["add", "-A"], &root).status.success());
-        assert!(run_git(&["commit", "-q", "-m", "seed"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
         // Now modify it — `git diff --name-only HEAD` should report it.
         fs::write(root.join("crates/foo/src/lib.rs"), "// changed\n").unwrap();
 
@@ -486,7 +496,9 @@ mod tests {
             return;
         }
         let root = fresh_root("git_filters");
-        assert!(run_git(&["init", "-q", "-b", "main"], &root).status.success());
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
         // Track files in target/ and .cache/ so they show up in the
         // diff. The fallback must filter them out the same way the
         // directory walk does.
@@ -501,7 +513,9 @@ mod tests {
         // Force git to track even the normally-ignored paths.
         fs::write(root.join(".gitignore"), "").unwrap();
         assert!(run_git(&["add", "-A"], &root).status.success());
-        assert!(run_git(&["commit", "-q", "-m", "seed"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
         // Touch all four files so they show in the diff.
         fs::write(root.join("crates/foo/target/keep.rs"), "y").unwrap();
         fs::write(root.join("crates/foo/.cache/keep.rs"), "y").unwrap();
