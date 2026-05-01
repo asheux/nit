@@ -15,7 +15,7 @@ nit is a terminal-first editor composed of eight crates:
 
 ## Data Flow
 
-```
+```data-flow
 crossterm events -> keymap -> Action -> nit-core::apply_action(state, action)
                                |                     |
                                +---- effect (save, reseed, etc.)

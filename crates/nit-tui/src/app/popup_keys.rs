@@ -765,8 +765,26 @@ pub fn maybe_open_artifact_popup_from_console_line(
     text_width: usize,
     line_idx: usize,
 ) -> bool {
-    let Some(message_idx) = agent_console_view::artifact_message_index_for_line_with_swarm(
-        state, swarm, text_width, line_idx,
+    maybe_open_artifact_popup_from_console_line_for_pane(
+        state, swarm, None, text_width, line_idx,
+    )
+}
+
+/// Pane-aware variant of [`maybe_open_artifact_popup_from_console_line`].
+/// Multipane callers must pass `Some(pane_idx)` so the artifact-line
+/// resolver walks the same pane-scoped message list the renderer used —
+/// otherwise the row cursor drifts whenever an inline breather (e.g.
+/// active shadow run) shifts subsequent rows and the click silently
+/// misses.
+pub fn maybe_open_artifact_popup_from_console_line_for_pane(
+    state: &mut AppState,
+    swarm: Option<&SwarmRuntime>,
+    pane_idx: Option<usize>,
+    text_width: usize,
+    line_idx: usize,
+) -> bool {
+    let Some(message_idx) = agent_console_view::artifact_message_index_for_line_with_pane(
+        state, swarm, pane_idx, text_width, line_idx,
     ) else {
         return false;
     };

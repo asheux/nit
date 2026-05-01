@@ -54,6 +54,112 @@ fn should_auto_enable_shadows_is_quiet_for_short_questions() {
     assert!(!should_auto_enable_shadows("why is the test flaky?"));
 }
 
+// Regression: an augmented prompt (file checklist appended by
+// `augment_with_module_file_checklist` once the git-diff scope
+// fallback finds any changed files) easily exceeds 500 chars even
+// for casual prompts. The dispatcher must run the auto-enable
+// heuristic on the *raw* operator prompt, not the augmented one —
+// otherwise a "hi there" gets four shadow lanes spun up the moment
+// the workspace has uncommitted edits.
+#[test]
+fn should_auto_enable_shadows_is_quiet_for_short_prompt_even_with_augment() {
+    let raw = "hi there";
+    // Simulate the FILE CHECKLIST block grafted on by
+    // `augment_with_module_file_checklist` — the actual block is
+    // ~1.5 KB; this stub is conservatively 800 chars.
+    let augment_block = "## FILE CHECKLIST (non-negotiable)\n".to_string()
+        + &"- crates/nit-tui/src/widgets/agent_console_view.rs\n".repeat(20);
+    let augmented = format!("{raw}\n\n{augment_block}");
+    assert!(augmented.len() > 500);
+    // Heuristic must be quiet for the raw prompt …
+    assert!(!should_auto_enable_shadows(raw));
+    // … and the dispatcher uses *raw*, not augmented, so this is
+    // what auto-shadow sees in production. (We assert the augmented
+    // form would have triggered to lock the regression in: if a
+    // future refactor accidentally swaps back to passing
+    // `&augmented`, the runtime behaviour reverts and this test
+    // catches it.)
+    assert!(should_auto_enable_shadows(&augmented));
+}
+
+// Regression: while a shadow run is mid-pipeline, a follow-up prompt
+// must queue (not race ahead and dispatch on top of half-finished
+// context). The dispatcher uses `is_agent_busy` for the queue gate;
+// before this fix the main lane looked idle (its own `active_turns`
+// entry was empty — only the propose-a / judge / review lanes were
+// busy) and the second prompt dispatched immediately.
+#[test]
+fn is_agent_busy_detects_shadow_run_on_main_agent() {
+    let main_id = "claude-opus-4-7";
+    let mut state = make_state_with_main_agent(main_id);
+    // Spin up a propose-a shadow lane and pretend it's mid-turn — the
+    // exact role doesn't matter, only that the lane id starts with
+    // `<main>#shadow-` and there's an active_turn entry for it.
+    let shadow_id = shadow_lane_id(main_id, "01", "propose-a");
+    state.agents.agents.push(AgentLane {
+        id: shadow_id.clone(),
+        role: "shadow".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: true,
+    });
+    state
+        .agents
+        .active_turns
+        .insert(shadow_id, active_turn_state());
+
+    // Direct lane: idle. With the pre-fix `is_agent_busy` this was the
+    // only signal checked — false → second prompt would dispatch.
+    assert!(matches!(
+        state.agents.agents_get(main_id).map(|l| l.status),
+        Some(AgentStatus::Idle)
+    ));
+    // Post-fix: shadow lane is enough to count main as busy.
+    assert!(crate::swarm::is_agent_busy(&state, main_id));
+}
+
+#[test]
+fn is_agent_busy_ignores_shadow_lanes_for_unrelated_agent() {
+    // Shadow on agent A must not make agent B look busy.
+    let mut state = make_state_with_main_agent("agent-a");
+    let shadow_id = shadow_lane_id("agent-a", "01", "judge");
+    state.agents.agents.push(AgentLane {
+        id: shadow_id.clone(),
+        role: "shadow".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: true,
+    });
+    state
+        .agents
+        .active_turns
+        .insert(shadow_id, active_turn_state());
+    state.agents.agents.push(AgentLane {
+        id: "agent-b".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    assert!(crate::swarm::is_agent_busy(&state, "agent-a"));
+    assert!(!crate::swarm::is_agent_busy(&state, "agent-b"));
+}
+
 #[test]
 fn shadow_lane_id_roundtrip() {
     let id = shadow_lane_id("codex", "01", "propose-a");

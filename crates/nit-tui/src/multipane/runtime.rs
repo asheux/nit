@@ -26,7 +26,6 @@ use super::persistence;
 use super::roster_view;
 use super::selection;
 use super::setup::materialise_pane_lane;
-use crate::app::popup_keys::maybe_open_artifact_popup_from_console_line;
 use crate::app::{
     chat_history_next, chat_history_prev, clear_chat_esc_state, handle_abort,
     handle_chat_input_editing_key, is_global_quit_key, lane_has_in_flight_turn,
@@ -43,11 +42,6 @@ use crate::widgets::artifacts_popup;
 
 const TICK_RATE: Duration = Duration::from_millis(50);
 
-/// Multipane main loop. Spawns its own `CodexRunner` + `ClaudeRunner` +
-/// `VitalsState`; does NOT spawn `SyntaxRuntime`, file watcher, genome
-/// worker, workspace scan, petri/seed/games preview, or mcp_backchannel.
-/// `log_rx` is drained-and-discarded in v1 (Phase 5 polish: route to a
-/// status row).
 pub fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -248,10 +242,6 @@ pub fn run_loop(
     }
 }
 
-/// Process up to 32 pending crossterm events, dispatching each one to
-/// `handle_key` or `handle_mouse`. Returns `Ok(true)` when a key
-/// handler signalled quit. Drains so a wheel burst that fires 5–20
-/// events lands in one redraw batch.
 #[allow(clippy::too_many_arguments)]
 fn drain_input_burst(
     state: &mut AppState,
@@ -284,11 +274,8 @@ fn drain_input_burst(
     Ok(false)
 }
 
-/// Final save / drop on Ctrl+Q. A "fresh" session (no pane has run a
-/// mission) discards the on-disk file entirely if no prior file existed
-/// — relaunching `nit multipane` then gets a clean start. Sessions with
-/// any committed work always persist so the operator can pick up where
-/// they left off.
+// Discard the session file if nothing was run yet and no prior file existed;
+// otherwise persist so the operator can resume.
 fn finalize_session(state: &AppState, workspace_root: &Path, had_prior: bool) {
     let Some(mp) = state.multipane.as_ref() else {
         return;
@@ -332,14 +319,8 @@ fn popup_rect_for(screen: Rect, desired: (u16, u16)) -> Rect {
         .split(vertical)[1]
 }
 
-/// Each `dispatch_pane_prompt` allocates a mission inside the standard
-/// dispatch path; capture the resulting mission_id back into the pane so
-/// subsequent abort routing targets the right mission. Also appends each
-/// real swarm mission id seen here into `pane.mission_ids` (deduped) so
-/// `/abort all` in multipane can enumerate this pane's missions.
 fn capture_pane_mission_ids(state: &mut AppState) {
-    // Snapshot real-mission ids so we can read them back inside the
-    // mutable pane loop below without holding two borrows on state.
+    // pre-collect to avoid two simultaneous borrows on state inside the loop
     let real_mission_ids: std::collections::HashSet<String> =
         state.agents.missions.iter().map(|m| m.id.clone()).collect();
     let lane_missions: std::collections::HashMap<String, Option<String>> = state
@@ -698,19 +679,31 @@ fn compute_dropdown_rows(inner_height: u16, results_len: usize) -> u16 {
     clamped.min(results_len.max(1) as u16)
 }
 
+fn compute_dir_search_layout(inner: Rect, pane: &nit_core::PaneSession) -> Option<(u16, Rect, Rect)> {
+    let ds = pane.dir_search.as_ref()?;
+    if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
+        return None;
+    }
+    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
+    let bar_rect = Rect::new(inner.x, inner.y, inner.width, DIR_SEARCH_INPUT_ROWS);
+    let drop_rect = Rect::new(
+        inner.x,
+        inner.y + DIR_SEARCH_INPUT_ROWS,
+        inner.width,
+        visible_rows,
+    );
+    Some((visible_rows, bar_rect, drop_rect))
+}
+
 /// Body rect for a pane's content area, taking into account whether the
 /// dir-search overlay is open. Mirrors `render_pane_dir_search_overlay`'s
 /// return value exactly so click hit-tests resolve to the same rows the
 /// renderer painted. Single source of truth — both call sites must use
 /// it or roster clicks misroute when the dropdown is open.
 fn dir_search_body_rect(inner: Rect, pane: &nit_core::PaneSession) -> Rect {
-    let Some(ds) = pane.dir_search.as_ref() else {
+    let Some((visible_rows, _, _)) = compute_dir_search_layout(inner, pane) else {
         return inner;
     };
-    if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
-        return inner;
-    }
-    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
     let total = DIR_SEARCH_INPUT_ROWS + visible_rows;
     Rect::new(
         inner.x,
@@ -726,20 +719,10 @@ fn render_pane_dir_search_overlay(
     pane: &nit_core::PaneSession,
     theme: &Theme,
 ) -> Rect {
-    let Some(ds) = pane.dir_search.as_ref() else {
+    let Some((visible_rows, bar_rect, drop_rect)) = compute_dir_search_layout(inner, pane) else {
         return inner;
     };
-    if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
-        return inner;
-    }
-    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
-    let bar_rect = Rect::new(inner.x, inner.y, inner.width, DIR_SEARCH_INPUT_ROWS);
-    let drop_rect = Rect::new(
-        inner.x,
-        inner.y + DIR_SEARCH_INPUT_ROWS,
-        inner.width,
-        visible_rows,
-    );
+    let ds = pane.dir_search.as_ref().unwrap();
     let bar_text = format!(
         " search: {}{} ",
         ds.query,
@@ -1004,7 +987,7 @@ fn handle_key(
     }
 
     if focused_pane_dir_search_active(state) {
-        return handle_dir_search_key(state, dir_runner, key, codex, claude, swarm);
+        return handle_dir_search_key(state, dir_runner, key, codex, claude, swarm, shadow);
     }
 
     if focused_pane_in_roster_mode(state) {
@@ -1203,7 +1186,7 @@ fn handle_chat_key(
             // copies an active input selection or clears the input — same
             // behavior as single-pane.
             if focused_chat_input_is_empty(state) {
-                abort_focused_pane(state, codex, claude, swarm);
+                abort_focused_pane(state, codex, claude, swarm, shadow);
             } else {
                 with_focused_pane_aliased(state, |state| {
                     let _ = handle_chat_input_editing_key(&key, state, clipboard);
@@ -1213,7 +1196,7 @@ fn handle_chat_key(
         }
         KeyCode::Esc => {
             if record_chat_esc_press() {
-                abort_focused_pane(state, codex, claude, swarm);
+                abort_focused_pane(state, codex, claude, swarm, shadow);
                 clear_chat_esc_state();
             }
             false
@@ -1816,7 +1799,17 @@ fn handle_mouse_left_down(
     // click without drag still opens the popup. Selection lives on the
     // pane that owns the click — never the focused pane — so dragging
     // inside an unfocused pane creates a per-pane selection.
-    if let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) {
+    //
+    // The *swarm-aware* resolver is critical here: when the pane's
+    // `chat_thread_scroll == CONSOLE_SCROLL_BOTTOM` (the "follow
+    // bottom" sentinel — true for any pane that hasn't been scrolled
+    // by hand), the no-swarm variant treats it as `0` and the
+    // selection lands on the wrong row. Passing the swarm runtime
+    // resolves the sentinel to the actual `max_scroll` so the row
+    // index lines up with what the renderer painted.
+    if let Some((pane_idx, line_idx, col_idx)) =
+        resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
+    {
         let Some(pane) = pane_at_mut(state, pane_idx) else {
             return;
         };
@@ -1832,8 +1825,8 @@ fn handle_mouse_left_down(
 
 /// Resolve a screen `(x, y)` to `(pane_idx, char_index_into_chat_input)`
 /// when the click lands inside any pane's chat input box. Mirrors
-/// `resolve_chat_thread_hit` but for the input rect produced by
-/// `compute_pane_layout`.
+/// `resolve_chat_thread_hit_with_swarm` but for the input rect produced
+/// by `compute_pane_layout`.
 fn resolve_pane_input_box_hit(
     state: &AppState,
     area: Rect,
@@ -1934,7 +1927,14 @@ fn handle_mouse_left_drag(
         return;
     }
 
-    let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) else {
+    // Same sentinel concern as the Down handler: a drag whose start
+    // point landed on a sentinel-scrolled pane needs the swarm-aware
+    // resolver, otherwise `chat_thread_scroll` is treated as 0 and the
+    // selection extends to a row that has nothing to do with what's
+    // visually under the cursor.
+    let Some((pane_idx, line_idx, col_idx)) =
+        resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
+    else {
         return;
     };
     let owns_anchor = pane_at(state, pane_idx)
@@ -1966,7 +1966,9 @@ fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, 
     {
         return;
     }
-    let Some((pane_idx, _, _)) = resolve_chat_thread_hit(state, area, x, y) else {
+    let Some((pane_idx, _, _)) =
+        resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
+    else {
         return;
     };
     let collapsed = pane_at(state, pane_idx)
@@ -1992,19 +1994,15 @@ fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, 
 /// inside that pane's chat thread. `logical_line` already includes
 /// `chat_thread_scroll`, so it's directly usable as a row index into
 /// `build_pane_thread_rows`. Returns `None` if the click lands outside
-/// the pane's chat thread area, or the pane is in roster mode.
-fn resolve_chat_thread_hit(
-    state: &AppState,
-    area: Rect,
-    x: u16,
-    y: u16,
-) -> Option<(usize, usize, usize)> {
-    resolve_chat_thread_hit_with_swarm(state, None, area, x, y)
-}
-
-/// Same as `resolve_chat_thread_hit` but takes an optional `SwarmRuntime`
-/// so the chat-thread row count (and therefore `max_scroll`) can be
-/// computed correctly. Required for sentinel-resolution: when
+/// the pane's chat thread area, or the pane is in roster mode. The
+/// `swarm` argument is required when `chat_thread_scroll` may hold the
+/// `CONSOLE_SCROLL_BOTTOM` sentinel (true for any pane that hasn't been
+/// scrolled by hand) — without it, sentinel resolution falls back to 0
+/// and the resolved line is wrong by `max_scroll` rows. Pass `None`
+/// only when the caller is certain the sentinel never applies (tests
+/// that pre-set scroll to a numeric value).
+///
+/// Sentinel-resolution: when
 /// `pane.chat_thread_scroll == CONSOLE_SCROLL_BOTTOM`, we must
 /// translate it to `max_scroll` BEFORE adding `local_y` — otherwise
 /// the logical row ends up at `usize::MAX` and the artifact-popup
@@ -2075,7 +2073,14 @@ fn try_open_chat_pane_artifact(
     let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, &pane) else {
         return false;
     };
-    invoke_pane_artifact_popup(state, swarm, &pane, thread_area.width as usize, line_idx)
+    invoke_pane_artifact_popup(
+        state,
+        swarm,
+        pane_idx,
+        &pane,
+        thread_area.width as usize,
+        line_idx,
+    )
 }
 
 /// Chat thread paint rect — a thin layer above [`pane_body_rect`]
@@ -2099,6 +2104,7 @@ fn pane_thread_area_for_pane(
 fn invoke_pane_artifact_popup(
     state: &mut AppState,
     swarm: &SwarmRuntime,
+    pane_idx: usize,
     pane: &nit_core::PaneSession,
     text_width: usize,
     line_idx: usize,
@@ -2118,8 +2124,17 @@ fn invoke_pane_artifact_popup(
     state.agents.selected_agent = pane_agent_id;
     state.agents.selected_mission = pane.mission_id.clone();
     state.agents.mission_selected = usize::MAX;
-    let opened =
-        maybe_open_artifact_popup_from_console_line(state, Some(swarm), text_width, line_idx);
+    // Pane-aware variant: the resolver must walk the same pane-scoped
+    // message list the renderer used (`message_matches_pane`),
+    // otherwise an inline breather (e.g. active shadow run) shifts the
+    // row cursor and clicking `(see ARTIFACTS)` misses entirely.
+    let opened = crate::app::popup_keys::maybe_open_artifact_popup_from_console_line_for_pane(
+        state,
+        Some(swarm),
+        Some(pane_idx),
+        text_width,
+        line_idx,
+    );
     if !opened {
         state.agents.selected_agent = saved_agent;
         state.agents.selected_mission = saved_mission;
@@ -2475,6 +2490,7 @@ fn abort_focused_pane(
     codex: &CodexRunner,
     claude: &ClaudeRunner,
     swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
 ) {
     let Some(focused_agent) = focused_pane_agent_id(state) else {
         push_pane_system_message(state, "no agent selected — nothing to abort".into());
@@ -2513,6 +2529,38 @@ fn abort_focused_pane(
         with_focused_pane_aliased(state, |state| {
             handle_abort(state, Some(codex), Some(claude), swarm, AbortScope::Current);
         });
+        return;
+    }
+    // Single-agent shadow mode: a `@shadow` prompt (or auto-shadow on
+    // a heavy single-agent prompt) spins up hidden propose-a /
+    // propose-b / judge / review lanes. While they run, the *base*
+    // lane is idle, so the lane-in-flight check below is false even
+    // though the operator clearly sees activity in the breather.
+    // Detect the shadow run first and tear it down before falling
+    // through, otherwise `/abort` posts "no active mission for this
+    // pane" while propose / judge keep burning tokens.
+    if shadow.has_run_for(&focused_agent) {
+        let shadow_lanes = shadow.abort_run(state, &focused_agent);
+        // CancelTurn for each shadow lane — `cleanup_shadow_lanes`
+        // (called inside `abort_run`) only purges in-process
+        // bookkeeping; the runner subprocesses are still alive and
+        // would otherwise keep streaming until they hit their idle
+        // reaper.
+        for lane_id in &shadow_lanes {
+            let _ = codex.send(crate::codex_runner::CodexCommand::CancelTurn {
+                agent_id: lane_id.clone(),
+            });
+            let _ = claude.send(crate::claude_runner::ClaudeCommand::CancelTurn {
+                agent_id: lane_id.clone(),
+            });
+        }
+        // Drain any queued main-agent turn the shadow pipeline was
+        // about to dispatch once review finished.
+        crate::swarm::drain_queued_turns_for_agent_pub(state, &focused_agent);
+        push_pane_system_message(
+            state,
+            format!("aborted shadow run ({} lanes)", shadow_lanes.len()),
+        );
         return;
     }
     // Stale mission id, or never had a real swarm overlay. Surgically
@@ -2599,10 +2647,11 @@ fn handle_dir_search_key(
     codex: &CodexRunner,
     claude: &ClaudeRunner,
     swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
 ) -> bool {
     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Esc => handle_dir_search_esc(state, codex, claude, swarm),
+        KeyCode::Esc => handle_dir_search_esc(state, codex, claude, swarm, shadow),
         KeyCode::Enter => commit_dir_search(state),
         KeyCode::Up => with_focused_dir_search(state, move_selected_up),
         KeyCode::Down => with_focused_dir_search(state, move_selected_down),
@@ -2730,6 +2779,7 @@ fn handle_dir_search_esc(
     codex: &CodexRunner,
     claude: &ClaudeRunner,
     swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
 ) {
     // Esc closes the overlay and feeds the shared esc-press latch so a
     // second Esc within the abort window aborts the focused pane
@@ -2742,7 +2792,7 @@ fn handle_dir_search_esc(
     if focused_pane_in_roster_mode(state) {
         push_pane_system_message(state, "no agent selected — nothing to abort".into());
     } else {
-        abort_focused_pane(state, codex, claude, swarm);
+        abort_focused_pane(state, codex, claude, swarm, shadow);
     }
     clear_chat_esc_state();
 }

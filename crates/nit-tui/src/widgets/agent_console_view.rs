@@ -42,10 +42,7 @@ const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 struct ConsoleLayout {
     /// Rect for the scrollable agent message/thread display area.
     thread_area: Rect,
-    /// 1-row strip above the input box for a context-aware hint
-    /// (italicised, dimmed). Empty rect when the pane is too short to
-    /// afford it — the layout swallows the hint rather than crowd out
-    /// the thread area.
+    /// Empty rect when the pane is too short; hint is dropped rather than crowding the thread area.
     hint_chunk: Rect,
     /// Rect for the input container (with border).
     input_chunk: Rect,
@@ -65,7 +62,6 @@ struct ConsoleLayout {
     input_window_start: usize,
 }
 
-/// Resolve the AgentLaneKind (Codex, Claude, etc.) for a given agent ID.
 fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
     state
         .agents
@@ -75,38 +71,49 @@ fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
         .map(|lane| lane.kind)
 }
 
-/// Resolve the context usage percentage (0–100) for an agent, optionally scoped to a mission.
-fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
-    let pct = match lane_kind_for(state, agent_id)? {
+fn resolve_agent_metric<T>(
+    state: &AppState,
+    agent_id: &str,
+    mission: Option<&str>,
+    codex_mission_map: &std::collections::HashMap<String, std::collections::HashMap<String, T>>,
+    codex_agent_map: &std::collections::HashMap<String, T>,
+    claude_mission_map: &std::collections::HashMap<String, std::collections::HashMap<String, T>>,
+    claude_agent_map: &std::collections::HashMap<String, T>,
+) -> Option<T>
+where
+    T: Copy,
+{
+    match lane_kind_for(state, agent_id)? {
         AgentLaneKind::Codex => match mission {
-            Some(m) => state
-                .agents
-                .codex_mission_context_remaining_pct
+            Some(m) => codex_mission_map
                 .get(m)
                 .and_then(|map| map.get(agent_id))
                 .copied(),
-            None => state
-                .agents
-                .codex_context_remaining_pct
-                .get(agent_id)
-                .copied(),
+            None => codex_agent_map.get(agent_id).copied(),
         },
         AgentLaneKind::Claude => match mission {
-            Some(m) => state
-                .agents
-                .claude_mission_context_remaining_pct
+            Some(m) => claude_mission_map
                 .get(m)
                 .and_then(|map| map.get(agent_id))
                 .copied(),
-            None => state
-                .agents
-                .claude_context_remaining_pct
-                .get(agent_id)
-                .copied(),
+            None => claude_agent_map.get(agent_id).copied(),
         },
-        _ => return None,
-    };
-    Some(pct.unwrap_or(100).into())
+        _ => None,
+    }
+}
+
+fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
+    resolve_agent_metric(
+        state,
+        agent_id,
+        mission,
+        &state.agents.codex_mission_context_remaining_pct,
+        &state.agents.codex_context_remaining_pct,
+        &state.agents.claude_mission_context_remaining_pct,
+        &state.agents.claude_context_remaining_pct,
+    )
+    .or(Some(100))
+    .map(u32::from)
 }
 
 fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) -> String {
@@ -122,27 +129,15 @@ fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) ->
 }
 
 fn resolve_context_used(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
-    match lane_kind_for(state, agent_id)? {
-        AgentLaneKind::Codex => match mission {
-            Some(m) => state
-                .agents
-                .codex_mission_used_tokens
-                .get(m)
-                .and_then(|map| map.get(agent_id))
-                .copied(),
-            None => state.agents.codex_used_tokens.get(agent_id).copied(),
-        },
-        AgentLaneKind::Claude => match mission {
-            Some(m) => state
-                .agents
-                .claude_mission_used_tokens
-                .get(m)
-                .and_then(|map| map.get(agent_id))
-                .copied(),
-            None => state.agents.claude_used_tokens.get(agent_id).copied(),
-        },
-        _ => None,
-    }
+    resolve_agent_metric(
+        state,
+        agent_id,
+        mission,
+        &state.agents.codex_mission_used_tokens,
+        &state.agents.codex_used_tokens,
+        &state.agents.claude_mission_used_tokens,
+        &state.agents.claude_used_tokens,
+    )
 }
 
 pub fn render(
@@ -813,19 +808,26 @@ pub fn render_pane(
                 })
                 .add_modifier(Modifier::BOLD),
         ));
-        let badge_style = Style::default()
-            .fg(theme.background)
-            .bg(theme.seed.accent)
-            .add_modifier(Modifier::BOLD);
+        // Match the single-pane chat-box badge colors so the operator
+        // gets the same visual cue regardless of which UI surface
+        // they're using. Single-pane uses `border_focused` for the
+        // template badge and `hl.operator` for the mission badge —
+        // see the matching block ~300 lines up in `compute_console_layout`.
         title_spans.push(Span::raw("  "));
         title_spans.push(Span::styled(
             format!(" t={} ", pane.swarm_template),
-            badge_style,
+            Style::default()
+                .fg(theme.background)
+                .bg(theme.border_focused)
+                .add_modifier(Modifier::BOLD),
         ));
         title_spans.push(Span::raw(" "));
         title_spans.push(Span::styled(
             format!(" m={} ", pane.swarm_mission),
-            badge_style,
+            Style::default()
+                .fg(theme.background)
+                .bg(theme.hl.operator)
+                .add_modifier(Modifier::BOLD),
         ));
         if queued_count > 0 {
             title_spans.push(Span::raw("  "));
@@ -1306,16 +1308,36 @@ pub fn artifact_message_index_for_line_with_swarm(
     width: usize,
     line_idx: usize,
 ) -> Option<usize> {
+    artifact_message_index_for_line_with_pane(state, swarm, None, width, line_idx)
+}
+
+/// Pane-aware variant of [`artifact_message_index_for_line_with_swarm`].
+/// In multipane mode the renderer drops messages whose author belongs to
+/// a different pane (`message_matches_pane`) — without the same filter
+/// here, the resolver iterates extra messages and `row_cursor` drifts
+/// off by the count of those extras. Symptom: clicking the
+/// `(see ARTIFACTS)` link does nothing once an inline breather (e.g.
+/// active shadow run) shifts subsequent rows. Pass `Some(pane_idx)` to
+/// keep the resolver and renderer in lockstep; `None` is the legacy
+/// single-pane behaviour.
+pub fn artifact_message_index_for_line_with_pane(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    pane_idx: Option<usize>,
+    width: usize,
+    line_idx: usize,
+) -> Option<usize> {
     let width = width.max(1);
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
 
-    // Must iterate messages in the same grouped order as thread_rows() so that
-    // `line_idx` (which comes from the rendered output) lines up with our row count.
-    let ordered = visible_messages_grouped(state, mission, agent);
+    // Must iterate messages in the same grouped order as the renderer so
+    // that `line_idx` (which comes from the rendered output) lines up
+    // with our row count.
+    let ordered = visible_messages_grouped_for_pane(state, pane_idx, mission, agent);
 
-    // Also account for inline breather rows that thread_rows() inserts after
-    // each user prompt.
+    // Also account for inline breather rows that the renderer inserts
+    // after each user prompt.
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
         std::collections::HashMap::new();
     for (agent_id, &prompt_idx) in state
@@ -2610,13 +2632,6 @@ fn visible_messages_grouped_for_pane<'a>(
     mission: Option<&str>,
     agent: Option<&str>,
 ) -> Vec<(usize, &'a AgentMessage)> {
-    let shadow_lanes: std::collections::HashSet<&str> = state
-        .agents
-        .agents
-        .iter()
-        .filter(|lane| lane.shadow)
-        .map(|lane| lane.id.as_str())
-        .collect();
     let multipane_active = state.multipane.is_some();
     let visible: Vec<(usize, &AgentMessage)> = state
         .agents
@@ -2624,8 +2639,18 @@ fn visible_messages_grouped_for_pane<'a>(
         .iter()
         .enumerate()
         .filter(|(_, msg)| {
+            // Shadow agent messages stay hidden from the chat thread —
+            // they're support work for the main agent, not user-facing
+            // turns. Match by id pattern (`#shadow-`) instead of looking
+            // up the lane in `state.agents.agents`: after a shadow run
+            // ends (normal completion or `/abort`), `cleanup_shadow_lanes`
+            // drops the lane bookkeeping but the messages it pushed are
+            // still in `state.agents.messages`. A lane-existence check
+            // would let those propose-a/propose-b/judge/review rows leak
+            // into the chat (visible as `[claude-...] done (see ARTIFACTS)`
+            // ghosts).
             if let Some(id) = msg.agent_id.as_deref() {
-                if shadow_lanes.contains(id) {
+                if crate::shadow::parse_shadow_lane_id(id).is_some() {
                     return false;
                 }
             }

@@ -24,7 +24,6 @@ use crate::swarm::{
     copy_claude_runtime_metadata, copy_codex_runtime_metadata, insert_swarm_clone_lane,
 };
 
-/// The four hidden roles the shadow pipeline always spawns.
 pub const SHADOW_ROLES: &[&str] = &["propose-a", "propose-b", "judge", "review"];
 
 /// How shadows are requested for a given prompt.
@@ -45,10 +44,8 @@ pub struct ShadowCommand {
     pub prompt: String,
 }
 
-/// Recognise an explicit `@shadow <prompt>` prefix.
-///
-/// Accepts leading whitespace and requires the prefix be followed by whitespace
-/// (so `@shadows` or `@shadowing` is not matched by accident).
+/// Requires the prefix be followed by whitespace so `@shadows` or
+/// `@shadowing` is not matched by accident.
 pub fn parse_shadow_command(raw: &str) -> Option<ShadowCommand> {
     let trimmed = raw.trim_start();
     let rest = trimmed.strip_prefix("@shadow")?;
@@ -85,7 +82,7 @@ pub fn should_auto_enable_shadows(prompt: &str) -> bool {
     KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
-/// A single dispatch the runtime wants the caller to perform.
+/// A dispatch for one shadow agent (proposer, judge, reviewer, or main).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowDispatch {
     pub agent_id: String,
@@ -333,6 +330,23 @@ impl ShadowRuntime {
             .iter()
             .find(|(_, run)| run.lanes.values().any(|id| id == agent_id))
             .map(|(main_id, _)| main_id.clone())
+    }
+
+    /// Operator-driven cancellation of an in-flight shadow run for
+    /// `main_agent_id`. Removes the run from the runtime (so any
+    /// stragglers reaching `handle_turn_failed` become no-ops and don't
+    /// re-dispatch the main prompt) and tears down the shadow lanes via
+    /// `cleanup_shadow_lanes`. Returns the lane ids the run had spun
+    /// up so the caller can route a `CancelTurn` to each one's runner —
+    /// `cleanup_shadow_lanes` only purges the in-process bookkeeping;
+    /// it cannot reach the live `codex`/`claude` child processes.
+    pub fn abort_run(&mut self, state: &mut AppState, main_agent_id: &str) -> Vec<String> {
+        let Some(run) = self.runs.remove(main_agent_id) else {
+            return Vec::new();
+        };
+        let lane_ids: Vec<String> = run.lanes.values().cloned().collect();
+        cleanup_shadow_lanes(state, &lane_ids);
+        lane_ids
     }
 }
 

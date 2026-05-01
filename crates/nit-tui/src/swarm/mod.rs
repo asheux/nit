@@ -18,8 +18,8 @@ pub struct SwarmSessionConfig {
     pub planner_agent_id: String,
 }
 
-/// Re-create swarm clones for a follow-up dispatch within an existing mission.
-/// Returns the full list of agent IDs (planner + clones) ready for dispatch.
+/// Re-apply the original swarm's template, size, and planner for follow-up dispatches,
+/// returning the full list of agent IDs (planner + clones) ready for dispatch.
 pub fn ensure_swarm_agents_for_followup(
     state: &mut AppState,
     mission_id: &str,
@@ -137,10 +137,7 @@ pub(crate) use limits::{
     LIGHT_PLANNER_SWARM_THRESHOLD,
 };
 
-/// Public wrapper exposing the FD-clamped swarm-size ceiling to the
-/// `nit` binary so multipane runner concurrency can be scaled by pane
-/// count without lifting visibility on the underlying `pub(crate)`
-/// helpers in `limits`.
+// pub for the `nit` binary to scale multipane concurrency without exposing `limits` internals.
 pub fn effective_max_swarm_size() -> usize {
     limits::effective_max_swarm_size()
 }

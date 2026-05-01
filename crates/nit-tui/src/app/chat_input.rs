@@ -39,6 +39,7 @@ pub(crate) struct ChatInputEditResult {
     pub(crate) follow_cursor: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_dispatch_swarm_command(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -206,6 +207,7 @@ fn try_dispatch_swarm_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_dispatch_shadow_pipeline(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -253,6 +255,7 @@ fn try_dispatch_shadow_pipeline(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_to_selected_targets(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -282,35 +285,18 @@ fn dispatch_to_selected_targets(
         let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
         if force_new && is_agent_family_busy(state, &base_model) {
             if let Some(clone_id) = create_chat_clone(state, &base_model) {
-                if is_claude {
-                    state
-                        .agents
-                        .claude_turn_prompt_idx
-                        .insert(clone_id.clone(), prompt_msg_idx);
-                    maybe_dispatch_claude_turn(
-                        state,
-                        vitals,
-                        claude,
-                        Some(clone_id),
-                        mission_id.clone(),
-                        prompt.to_string(),
-                        true,
-                    );
-                } else {
-                    state
-                        .agents
-                        .codex_turn_prompt_idx
-                        .insert(clone_id.clone(), prompt_msg_idx);
-                    maybe_dispatch_codex_turn(
-                        state,
-                        vitals,
-                        codex,
-                        Some(clone_id),
-                        mission_id.clone(),
-                        prompt.to_string(),
-                        true,
-                    );
-                }
+                dispatch_agent_turn_for_model_kind(
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    &clone_id,
+                    mission_id,
+                    prompt.to_string(),
+                    prompt_msg_idx,
+                    true,
+                    is_claude,
+                );
             } else if is_claude {
                 enqueue_claude_turn(
                     state,
@@ -350,33 +336,18 @@ fn dispatch_to_selected_targets(
                     Some(prompt_msg_idx),
                 );
             }
-        } else if is_claude {
-            state
-                .agents
-                .claude_turn_prompt_idx
-                .insert(base_model.clone(), prompt_msg_idx);
-            maybe_dispatch_claude_turn(
-                state,
-                vitals,
-                claude,
-                Some(base_model),
-                mission_id.clone(),
-                prompt.to_string(),
-                true,
-            );
         } else {
-            state
-                .agents
-                .codex_turn_prompt_idx
-                .insert(base_model.clone(), prompt_msg_idx);
-            maybe_dispatch_codex_turn(
+            dispatch_agent_turn_for_model_kind(
                 state,
                 vitals,
                 codex,
-                Some(base_model),
-                mission_id.clone(),
+                claude,
+                &base_model,
+                mission_id,
                 prompt.to_string(),
-                true,
+                prompt_msg_idx,
+                false,
+                is_claude,
             );
         }
     }
@@ -389,6 +360,80 @@ fn reset_chat_input_and_history_nav(state: &mut AppState) {
     state.agents.chat_input_cursor = 0;
     state.agents.chat_input_selection_anchor = None;
     super::chat_history_reset_nav(state);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_agent_turn_for_model_kind(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    agent_id: &str,
+    mission_id: &Option<String>,
+    prompt: String,
+    prompt_msg_idx: usize,
+    force_new: bool,
+    is_claude: bool,
+) {
+    if force_new {
+        if is_claude {
+            state
+                .agents
+                .claude_turn_prompt_idx
+                .insert(agent_id.to_string(), prompt_msg_idx);
+            maybe_dispatch_claude_turn(
+                state,
+                vitals,
+                claude,
+                Some(agent_id.to_string()),
+                mission_id.clone(),
+                prompt,
+                true,
+            );
+        } else {
+            state
+                .agents
+                .codex_turn_prompt_idx
+                .insert(agent_id.to_string(), prompt_msg_idx);
+            maybe_dispatch_codex_turn(
+                state,
+                vitals,
+                codex,
+                Some(agent_id.to_string()),
+                mission_id.clone(),
+                prompt,
+                true,
+            );
+        }
+    } else if is_claude {
+        state
+            .agents
+            .claude_turn_prompt_idx
+            .insert(agent_id.to_string(), prompt_msg_idx);
+        maybe_dispatch_claude_turn(
+            state,
+            vitals,
+            claude,
+            Some(agent_id.to_string()),
+            mission_id.clone(),
+            prompt,
+            true,
+        );
+    } else {
+        state
+            .agents
+            .codex_turn_prompt_idx
+            .insert(agent_id.to_string(), prompt_msg_idx);
+        maybe_dispatch_codex_turn(
+            state,
+            vitals,
+            codex,
+            Some(agent_id.to_string()),
+            mission_id.clone(),
+            prompt,
+            true,
+        );
+    }
 }
 
 fn sync_cursor_to_input_end(state: &mut AppState) {
@@ -405,9 +450,25 @@ fn update_chat_selection_anchor(state: &mut AppState, selecting: bool, cursor: u
     }
 }
 
-// Handles text manipulation keys (characters, backspace, delete, cursor movement,
-// selection, clipboard). Does NOT handle Enter-submit, Esc, or Up/Down — those are
-// context-specific and left to the caller.
+fn apply_cursor_movement(
+    state: &mut AppState,
+    clipboard: &mut Option<arboard::Clipboard>,
+    new_cursor: usize,
+    selecting: bool,
+) -> (bool, bool) {
+    let cursor = state.agents.chat_input_cursor;
+    let (changed, follow_cursor) = if new_cursor != cursor {
+        state.agents.chat_input_cursor = new_cursor;
+        (true, true)
+    } else {
+        (false, false)
+    };
+    if selecting {
+        copy_chat_input_selection(state, clipboard);
+    }
+    (changed, follow_cursor)
+}
+
 pub(crate) fn handle_chat_input_editing_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -687,14 +748,9 @@ pub(crate) fn handle_chat_input_editing_key(
             } else {
                 cursor.saturating_sub(1)
             };
-            if new_cursor != cursor {
-                state.agents.chat_input_cursor = new_cursor;
-                changed = true;
-                follow_cursor = true;
-            }
-            if selecting {
-                copy_chat_input_selection(state, clipboard);
-            }
+            let (c, f) = apply_cursor_movement(state, clipboard, new_cursor, selecting);
+            changed = changed || c;
+            follow_cursor = follow_cursor || f;
         }
         KeyEvent {
             code: KeyCode::Right,
@@ -711,14 +767,9 @@ pub(crate) fn handle_chat_input_editing_key(
             } else {
                 cursor.saturating_add(1).min(max)
             };
-            if new_cursor != cursor {
-                state.agents.chat_input_cursor = new_cursor;
-                changed = true;
-                follow_cursor = true;
-            }
-            if selecting {
-                copy_chat_input_selection(state, clipboard);
-            }
+            let (c, f) = apply_cursor_movement(state, clipboard, new_cursor, selecting);
+            changed = changed || c;
+            follow_cursor = follow_cursor || f;
         }
         KeyEvent {
             code: KeyCode::Home,
@@ -737,14 +788,9 @@ pub(crate) fn handle_chat_input_editing_key(
             } else {
                 line_start
             };
-            if new_cursor != cursor {
-                state.agents.chat_input_cursor = new_cursor;
-                changed = true;
-                follow_cursor = true;
-            }
-            if selecting {
-                copy_chat_input_selection(state, clipboard);
-            }
+            let (c, f) = apply_cursor_movement(state, clipboard, new_cursor, selecting);
+            changed = changed || c;
+            follow_cursor = follow_cursor || f;
         }
         KeyEvent {
             code: KeyCode::End,
@@ -763,14 +809,9 @@ pub(crate) fn handle_chat_input_editing_key(
             } else {
                 line_end
             };
-            if new_cursor != cursor {
-                state.agents.chat_input_cursor = new_cursor;
-                changed = true;
-                follow_cursor = true;
-            }
-            if selecting {
-                copy_chat_input_selection(state, clipboard);
-            }
+            let (c, f) = apply_cursor_movement(state, clipboard, new_cursor, selecting);
+            changed = changed || c;
+            follow_cursor = follow_cursor || f;
         }
         KeyEvent {
             code: KeyCode::Tab,
@@ -862,10 +903,10 @@ pub(crate) enum AbortScope {
     Agent(String),
 }
 
-/// Parser for the abort command. Accepts `/abort`, `@abort` (the latter
-/// for symmetry with the `@swarm` family even though `@` usually
-/// dispatches new work). Forms: bare → Current, `all` → All, anything
-/// else → Agent(literal). Trailing whitespace tolerated.
+/// Parses `/abort` and `@abort` prefixes. Forms: bare → `Current`,
+/// `all` → `All`, `<agent-id>` → `Agent`. Rejects substring matches
+/// like `/abortif` so prompts that happen to start with those letters
+/// aren't hijacked.
 pub(crate) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
     let trimmed = raw.trim_start();
     let after = trimmed
@@ -886,12 +927,10 @@ pub(crate) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
     Some(AbortScope::Agent(arg.to_string()))
 }
 
-/// Single entry point for every abort trigger (`/abort`, `@abort`,
-/// Ctrl+C, Esc-Esc, Mission-tab `x`). Resolves the scope into a list of
-/// agent ids whose runners need a `CancelTurn`, sends the runner-side
-/// commands, and posts a system alert. Returns `true` when something was
-/// aborted, `false` when the request was a no-op (e.g. `/abort` with no
-/// active mission).
+/// Routes every abort trigger (chat `/abort`, `@abort`, Ctrl+C with
+/// empty input, Esc-Esc, mission `x`) to the same path: resolve scope
+/// to a list of agent ids, send `CancelTurn` to each runner, and post
+/// a system alert. Returns true when at least one agent was cancelled.
 pub(crate) fn handle_abort(
     state: &mut AppState,
     codex: Option<&CodexRunner>,
@@ -1105,8 +1144,51 @@ pub(crate) fn lane_has_in_flight_turn(state: &AppState, lane_id: &str) -> bool {
             .is_some_and(|lane| matches!(lane.status, AgentStatus::Running))
 }
 
-// Submit the chat input, dispatch to agents, and return whether a prompt was sent.
-// Shared between the main Agent Chat Enter handler and the Artifacts popup input.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_swarm_followup(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    swarm: &mut SwarmRuntime,
+    mission_id: &Option<String>,
+    prompt: &str,
+    prompt_msg_idx: usize,
+) -> bool {
+    let swarm_config = mission_id
+        .as_deref()
+        .and_then(|mid| swarm.session_config(mid));
+    let Some(config) = swarm_config else {
+        return false;
+    };
+    let mid = mission_id.as_deref().unwrap();
+    crate::swarm::ensure_swarm_agents_for_followup(state, mid, &config);
+    swarm.reactivate_for_followup(state, mid);
+    if let Some(mission) = state.agents.missions.iter_mut().find(|m| m.id == mid) {
+        mission.status = "PLAN".into();
+        mission.phase = MissionPhase::Plan;
+    }
+    let planner = config.planner_agent_id.clone();
+    let plan_prompt = swarm
+        .build_followup_planner_prompt(state, mid, prompt)
+        .unwrap_or_else(|| prompt.to_string());
+    let planner_is_claude = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id == planner)
+        .is_some_and(|lane| lane.is_claude());
+    if planner_is_claude {
+        state.agents.claude_turn_prompt_idx.insert(planner.clone(), prompt_msg_idx);
+    } else {
+        state.agents.codex_turn_prompt_idx.insert(planner.clone(), prompt_msg_idx);
+    }
+    dispatch_agent_prompt(state, vitals, codex, claude, planner, mission_id.clone(), plan_prompt);
+    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+    maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+    true
+}
+
 pub(crate) fn submit_chat_input_and_dispatch(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -1189,77 +1271,35 @@ pub(crate) fn submit_chat_input_and_dispatch(
             .selected_context_agent()
             .map(ToString::to_string);
         let sent = push_chat_message(state);
-        if let Some((channel, prompt)) = sent {
-            let prompt = augment_with_module_file_checklist(state, prompt);
+        if let Some((channel, raw_prompt)) = sent {
+            // Keep the operator's original prompt around for heuristics
+            // that should fire on user intent, not on machine-appended
+            // boilerplate. `augment_with_module_file_checklist` can add
+            // a 1-2 KB FILE CHECKLIST block when the workspace has any
+            // git-changed files (the scope fallback in
+            // `enumerate_scope_files`), which would otherwise push a
+            // casual "hi there" past the 500-char auto-shadow threshold.
+            let prompt = augment_with_module_file_checklist(state, raw_prompt.clone());
             // Index of the user prompt message just pushed — used to link agent
             // responses back to the correct prompt in the chat view.
             let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
             chat_history_remember(state, &raw);
             // For swarm missions, re-activate the run and dispatch only to
             // the planner so the swarm pipeline assigns roles to clones.
-            let swarm_config = mission_id
-                .as_deref()
-                .and_then(|mid| swarm.session_config(mid));
-            let is_swarm_mission = swarm_config.is_some();
-            if is_swarm_mission {
-                let config = swarm_config.as_ref().unwrap();
-                let mid = mission_id.as_deref().unwrap();
-                // Ensure clones exist in the roster.
-                crate::swarm::ensure_swarm_agents_for_followup(state, mid, config);
-                // Re-activate the completed run so handle_event_outcome
-                // processes the planner's response as a new swarm plan.
-                swarm.reactivate_for_followup(state, mid);
-                // Update mission status.
-                if let Some(mission) = state.agents.missions.iter_mut().find(|m| m.id == mid) {
-                    mission.status = "PLAN".into();
-                    mission.phase = MissionPhase::Plan;
-                }
-                // Wrap the user's prompt with planning instructions so the
-                // planner generates a proper plan with role assignments.
-                let planner = config.planner_agent_id.clone();
-                let plan_prompt = swarm
-                    .build_followup_planner_prompt(state, mid, &prompt)
-                    .unwrap_or_else(|| prompt.clone());
-                // Store prompt idx in the appropriate backend map.
-                let planner_is_claude = state
-                    .agents
-                    .agents
-                    .iter()
-                    .find(|lane| lane.id == planner)
-                    .is_some_and(|lane| lane.is_claude());
-                if planner_is_claude {
-                    state
-                        .agents
-                        .claude_turn_prompt_idx
-                        .insert(planner.clone(), prompt_msg_idx);
-                } else {
-                    state
-                        .agents
-                        .codex_turn_prompt_idx
-                        .insert(planner.clone(), prompt_msg_idx);
-                }
-                dispatch_agent_prompt(
-                    state,
-                    vitals,
-                    codex,
-                    claude,
-                    planner,
-                    mission_id.clone(),
-                    plan_prompt,
-                );
-                maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-                maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
-            }
+            let is_swarm_mission = dispatch_swarm_followup(
+                state, vitals, codex, claude, swarm, &mission_id, &prompt, prompt_msg_idx,
+            );
             // Shadow pipeline: enabled explicitly (@shadow) or auto for heavy
             // single-agent prompts. Skipped for swarm followups, broadcasts,
             // @new clone dispatches, @queue prompts, and when no single agent
-            // is selected.
+            // is selected. The auto-enable heuristic runs on the *raw*
+            // prompt — see `raw_prompt` above for why.
             let shadow_eligible = !is_swarm_mission
                 && !force_new
                 && !legacy_queue
                 && matches!(channel, AgentChannel::Agent);
             let shadow_requested =
-                shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&prompt));
+                shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&raw_prompt));
             let shadow_handled = shadow_requested
                 && try_dispatch_shadow_pipeline(
                     state,
@@ -1536,10 +1576,6 @@ fn detect_swarm_template_from_prompt(raw: &str) -> Option<String> {
     None
 }
 
-fn roster_default_swarm_mission_kind(state: &AppState) -> Option<SwarmMissionKind> {
-    parse_swarm_mission_kind(Some(state.agents.swarm_default_mission.as_str()))
-}
-
 fn effective_swarm_mission_kind(
     state: &AppState,
     raw: &str,
@@ -1547,7 +1583,7 @@ fn effective_swarm_mission_kind(
 ) -> Option<SwarmMissionKind> {
     current
         .or_else(|| explicit_swarm_mission_kind_from_prompt(raw))
-        .or_else(|| roster_default_swarm_mission_kind(state))
+        .or_else(|| parse_swarm_mission_kind(Some(state.agents.swarm_default_mission.as_str())))
         .or_else(|| detect_swarm_mission_kind_from_prompt(raw))
 }
 

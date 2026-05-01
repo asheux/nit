@@ -94,8 +94,6 @@ fn build_runner_configs(cli: &Cli) -> (CodexRuntimeMode, CodexRunnerConfig, Clau
         sandbox: cli.codex_sandbox.map(|s| s.as_str().to_string()),
         approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
         max_parallel_turns: max_turns,
-        // mcp_backchannel_socket is filled in by nit-tui's app::run once the
-        // back-channel listener has bound its UDS path.
         mcp_backchannel_socket: None,
     };
     let claude = ClaudeRunnerConfig {
@@ -113,12 +111,7 @@ fn resolve_app_target(
     match command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
         Some(Command::Games { path, .. }) => (AppKind::Games, path),
-        Some(Command::Multipane(_)) => {
-            // Unreachable: the Multipane arm short-circuits in `main` before
-            // resolve_app_target is called. Kept exhaustive for future
-            // refactors that pipe everything through this resolver.
-            (LabId::from(lab), fallback_path)
-        }
+        Some(Command::Multipane(_)) => (LabId::from(lab), fallback_path), // unreachable: short-circuits in main
         None => (LabId::from(lab), fallback_path),
     }
 }

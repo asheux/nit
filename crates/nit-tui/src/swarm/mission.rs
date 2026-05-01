@@ -235,7 +235,7 @@ pub fn swarm_intended_size(state: &AppState, size: SwarmSize) -> usize {
 }
 
 pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
-    state.agents.active_turns.contains_key(agent_id)
+    let direct = state.agents.active_turns.contains_key(agent_id)
         || state
             .agents
             .queued_codex_turns
@@ -243,10 +243,33 @@ pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
             .any(|turn| turn.agent_id == agent_id)
         || state
             .agents
+            .queued_claude_turns
+            .iter()
+            .any(|turn| turn.agent_id == agent_id)
+        || state
+            .agents
             .agents
             .iter()
             .find(|lane| lane.id.as_str() == agent_id)
-            .is_some_and(|lane| matches!(lane.status, AgentStatus::Running))
+            .is_some_and(|lane| matches!(lane.status, AgentStatus::Running));
+    if direct {
+        return true;
+    }
+    // Shadow pipeline: while propose-a / propose-b / judge / review run
+    // for `agent_id`, the main lane itself is idle, but the operator's
+    // previous prompt is still in flight — a new prompt must queue, not
+    // race ahead of review and dispatch on top of half-finished context.
+    // Detect this by id pattern (`agent_id#shadow-...`) so we don't need
+    // to plumb the ShadowRuntime through every busy-check site.
+    let shadow_prefix = format!("{agent_id}#shadow-");
+    state
+        .agents
+        .active_turns
+        .keys()
+        .any(|id| id.starts_with(&shadow_prefix))
+        || state.agents.agents.iter().any(|lane| {
+            lane.id.starts_with(&shadow_prefix) && matches!(lane.status, AgentStatus::Running)
+        })
 }
 
 /// Resolve any clone agent ID back to its base (non-clone) agent ID.

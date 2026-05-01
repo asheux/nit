@@ -13,18 +13,36 @@ the rest of the standard nit UI are unavailable in this mode — only
 chat dispatch.
 
 ```
-$ nit multipane --backend claude-haiku-4-5 --panes 8
-
-┌── pane 0 ─────┬── pane 1 ─────┬── pane 2 ─────┬── pane 3 ─────┐
-│ cwd: nit/     │ cwd: ../web/  │ cwd: ../infra │ cwd: ~/scripts│
-│               │               │               │               │
-│  agent chat   │  agent chat   │  agent chat   │  agent chat   │
-│  (focused)    │               │               │               │
-│               │               │               │               │
-│ > ___         │ > ___         │ > ___         │ > ___         │
-├── pane 4 ─────┼── pane 5 ─────┼── pane 6 ─────┼── pane 7 ─────┤
-│ ...           │ ...           │ ...           │ ...           │
-└───────────────┴───────────────┴───────────────┴───────────────┘
+MULTIPANE  pane 1/9  cwd=nit
+┌── pane 0 · roster · nit ─────┬── pane 1 · roster · nit ─────┬── pane 2 · roster · nit ─────┐
+│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
+│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
+│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
+│                              │                              │                              │
+│  → ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
+│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
+│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
+│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
+├── pane 3 · roster · nit ─────┼── pane 4 · roster · nit ─────┼── pane 5 · roster · nit ─────┤
+│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
+│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
+│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
+│                              │                              │                              │
+│    ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
+│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
+│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
+│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
+├── pane 6 · roster · nit ─────┼── pane 7 · roster · nit ─────┼── pane 8 · roster · nit ─────┤
+│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
+│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
+│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
+│                              │                              │                              │
+│    ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
+│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
+│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
+│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
+└──────────────────────────────┴──────────────────────────────┴──────────────────────────────┘
+MULTIPANE · Tab cycle · Ctrl+Q quit · F1 help
 ```
 
 Use case: drive N concurrent agent sessions across different projects
