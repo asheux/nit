@@ -44,14 +44,17 @@ use crate::{
 };
 use arboard::Clipboard;
 use crossterm::{
-    cursor::{SetCursorStyle, Show},
+    cursor::{MoveTo, SetCursorStyle, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
         MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ctrlc::Error as CtrlcError;
 use nit_core::{
@@ -106,6 +109,14 @@ impl TerminalState {
             let _ = disable_raw_mode();
         }
         if self.alternate_screen {
+            // Some terminal emulators (notably macOS Terminal.app) don't
+            // restore the saved main screen on `LeaveAlternateScreen` —
+            // they dump the alt-screen contents to scrollback instead,
+            // leaving the entire TUI grid visible above the shell prompt
+            // after exit. Clear the alt screen and park the cursor at
+            // (0,0) first so even on those terminals the operator gets a
+            // clean handoff back to the shell.
+            let _ = execute!(stdout, MoveTo(0, 0), TerminalClear(ClearType::All));
             let _ = execute!(stdout, LeaveAlternateScreen);
         }
         self.active = false;

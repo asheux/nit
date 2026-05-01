@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -48,6 +49,12 @@ pub(super) fn sanitize_for_filename(input: &str) -> String {
 /// an empty `Vec` immediately so the UI never freezes. The walker thread
 /// keeps draining and exits on its own; its result is discarded since the
 /// channel receiver has already been dropped.
+///
+/// When the prompt contains no usable path tokens (no token with `/`), the
+/// walk falls back to `git diff --name-only` against the merge-base with
+/// `main` (or `master`) so the verifier can still scope to the operator's
+/// in-progress edits instead of running `--workspace --all-features`.
+/// Returns empty if the workspace isn't a git repo or git is missing.
 pub(crate) fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
     enumerate_scope_files_with_deadline(workspace_root, prompt, scope_walk_timeout())
 }
@@ -96,7 +103,11 @@ fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<St
         }
     }
     if dirs.is_empty() {
-        return Vec::new();
+        // Prompt had no usable path tokens. Fall back to whatever the
+        // operator has actually changed in the working tree so the
+        // verifier still runs scoped commands (`-p <pkg>`) instead of
+        // collapsing to `--workspace --all-features`.
+        return git_changed_scope_files(workspace_root);
     }
 
     let mut files = Vec::new();
@@ -110,6 +121,96 @@ fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<St
     files.dedup();
     files.truncate(SCOPE_WALK_MAX_FILES);
     files
+}
+
+/// Last-resort scope source: ask git which files have changed in the
+/// current branch (committed + staged + unstaged), starting from the
+/// merge-base with `main`/`master`. Returns paths relative to
+/// `workspace_root`, filtered to the same source-file extensions the
+/// directory walk uses, and capped at `SCOPE_WALK_MAX_FILES`.
+///
+/// Returns `Vec::new()` on any failure: not a git repo, git missing,
+/// no merge-base, command nonzero exit, garbled output. Callers treat
+/// an empty result the same as "no scope" — verifier falls back to
+/// unscoped (`--workspace`) commands.
+fn git_changed_scope_files(workspace_root: &Path) -> Vec<String> {
+    // Pick the diff base. Prefer `main`, fall back to `master`. If
+    // neither exists, fall back to plain `HEAD` so we still catch
+    // uncommitted edits.
+    let base = git_diff_base(workspace_root).unwrap_or_else(|| "HEAD".to_string());
+
+    let output = Command::new("git")
+        .args(["diff", "--name-only", &base])
+        .current_dir(workspace_root)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut files: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            // Match the directory walk's accepted extensions.
+            std::path::Path::new(line)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext,
+                        "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp"
+                    )
+                })
+        })
+        .filter(|line| {
+            // Skip files in directories the walk skips, so the two
+            // sources stay consistent.
+            !line.split('/').any(|component| {
+                component.starts_with('.') || SCOPE_WALK_SKIP_DIRS.contains(&component)
+            })
+        })
+        .filter(|line| {
+            // Final sanity check: file must currently exist on disk
+            // (a deletion would be in the diff but produce no
+            // verifier-relevant scope).
+            workspace_root.join(line).exists()
+        })
+        .map(String::from)
+        .collect();
+    files.sort();
+    files.dedup();
+    files.truncate(SCOPE_WALK_MAX_FILES);
+    files
+}
+
+/// Try to find a diff base by asking git for the merge-base of
+/// `HEAD` against `main`, then `master`. Returns `None` if neither
+/// branch exists or git fails. Caller treats `None` as "no committed
+/// branch base" and falls back to `HEAD` (uncommitted only).
+fn git_diff_base(workspace_root: &Path) -> Option<String> {
+    for branch in ["main", "master"] {
+        let output = Command::new("git")
+            .args(["merge-base", "HEAD", branch])
+            .current_dir(workspace_root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        if !sha.is_empty() {
+            return Some(sha);
+        }
+    }
+    None
 }
 
 fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>, depth: usize) {
@@ -336,5 +437,94 @@ mod tests {
             Some(value) => std::env::set_var(VAR, value),
             None => std::env::remove_var(VAR),
         }
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(cwd);
+        // Make sure committer/author env doesn't leak from the host.
+        cmd.env("GIT_AUTHOR_NAME", "scope-test")
+            .env("GIT_AUTHOR_EMAIL", "scope@test")
+            .env("GIT_COMMITTER_NAME", "scope-test")
+            .env("GIT_COMMITTER_EMAIL", "scope@test");
+        cmd.output().expect("git command")
+    }
+
+    #[test]
+    fn git_fallback_includes_uncommitted_changes_when_prompt_has_no_paths() {
+        // Skip cleanly when git is missing on the build host (CI sandbox,
+        // minimal images, etc.) so the test doesn't false-fail.
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_changed");
+
+        assert!(run_git(&["init", "-q", "-b", "main"], &root).status.success());
+        // Seed the repo with a committed .rs file inside `crates/`.
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/src/lib.rs"), "// initial\n").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root).status.success());
+        // Now modify it — `git diff --name-only HEAD` should report it.
+        fs::write(root.join("crates/foo/src/lib.rs"), "// changed\n").unwrap();
+
+        // Prompt deliberately has no path tokens (no `/`), so the
+        // directory walk returns empty and the git fallback kicks in.
+        let scope = enumerate_scope_files(&root, "fix the bug");
+        assert!(
+            scope.iter().any(|p| p.ends_with("crates/foo/src/lib.rs")),
+            "expected git fallback to include the modified .rs file, got {scope:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_skips_target_and_dot_dirs() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_filters");
+        assert!(run_git(&["init", "-q", "-b", "main"], &root).status.success());
+        // Track files in target/ and .cache/ so they show up in the
+        // diff. The fallback must filter them out the same way the
+        // directory walk does.
+        fs::create_dir_all(root.join("crates/foo/target")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/.cache")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/target/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
+        // README is wrong-extension; must not slip through.
+        fs::write(root.join("README.md"), "x").unwrap();
+        // Force git to track even the normally-ignored paths.
+        fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root).status.success());
+        // Touch all four files so they show in the diff.
+        fs::write(root.join("crates/foo/target/keep.rs"), "y").unwrap();
+        fs::write(root.join("crates/foo/.cache/keep.rs"), "y").unwrap();
+        fs::write(root.join("crates/foo/src/keep.rs"), "y").unwrap();
+        fs::write(root.join("README.md"), "y").unwrap();
+
+        let scope = enumerate_scope_files(&root, "general cleanup");
+        assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
+        for path in &scope {
+            assert!(!path.contains("target/"), "leaked target/: {path}");
+            assert!(!path.contains(".cache"), "leaked .cache: {path}");
+            assert!(!path.ends_with(".md"), "wrong-ext slipped: {path}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_returns_empty_when_not_a_git_repo() {
+        // Plain temp dir, no `git init`. The fallback must fail
+        // gracefully and not panic / hang / leak the host's repo.
+        let root = fresh_root("not_a_repo");
+        let scope = enumerate_scope_files(&root, "do something");
+        assert!(scope.is_empty(), "expected empty scope, got {scope:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 }
