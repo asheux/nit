@@ -2438,7 +2438,7 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
                 .agent_id
                 .as_deref()
                 .is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
-            || msg.agent_id.is_none()
+            || (msg.agent_id.is_none() && msg.mission_id.is_none())
             || matches!(msg.channel, nit_core::AgentChannel::Broadcast);
     }
     true

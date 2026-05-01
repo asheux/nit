@@ -113,6 +113,8 @@ pub(crate) fn with_pane_aliased<R>(
         pane.selected_agent_id.clone()
     };
     state.agents.selected_mission = pane.mission_id.clone();
+    // Sentinel disables the global `selected_context_mission()` fallback so other panes' missions don't bleed in.
+    let saved_mission_selected = std::mem::replace(&mut state.agents.mission_selected, usize::MAX);
     state.agents.swarm_default_template = pane.swarm_template.clone();
     state.agents.swarm_default_mission = pane.swarm_mission.clone();
 
@@ -143,6 +145,7 @@ pub(crate) fn with_pane_aliased<R>(
     state.agents.chat_prompt_history_draft = saved_history_draft;
     state.agents.selected_agent = saved_selected_agent;
     state.agents.selected_mission = saved_selected_mission;
+    state.agents.mission_selected = saved_mission_selected;
     state.agents.swarm_default_template = saved_swarm_template;
     state.agents.swarm_default_mission = saved_swarm_mission;
 

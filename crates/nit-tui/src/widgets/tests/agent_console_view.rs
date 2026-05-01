@@ -1341,14 +1341,7 @@ fn pane_breather_does_not_leak_active_turn_from_other_pane() {
     state.agents.selected_agent = Some(pane_b.into());
     state.agents.selected_mission = None;
 
-    let rows = build_pane_thread_rows_with_breathers(
-        &state,
-        None,
-        Some(pane_b),
-        None,
-        120,
-        false,
-    );
+    let rows = build_pane_thread_rows_with_breathers(&state, None, Some(pane_b), None, 120, false);
     let flat = rows
         .iter()
         .map(|r| r.text.as_str())

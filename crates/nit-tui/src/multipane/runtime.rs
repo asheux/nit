@@ -557,6 +557,7 @@ fn render_one_pane(
     // bleed.
     let saved_agent = state.agents.selected_agent.clone();
     let saved_mission = state.agents.selected_mission.clone();
+    let saved_mission_selected = state.agents.mission_selected;
     let pane_agent_id = if !pane.agent_id.is_empty() {
         Some(pane.agent_id.clone())
     } else {
@@ -564,6 +565,8 @@ fn render_one_pane(
     };
     state.agents.selected_agent = pane_agent_id;
     state.agents.selected_mission = pane.mission_id.clone();
+    // Mirror `with_pane_aliased`: disable the global mission fallback during this pane's render.
+    state.agents.mission_selected = usize::MAX;
     let cursor = agent_console_view::render_pane(
         frame,
         body_rect,
@@ -575,6 +578,7 @@ fn render_one_pane(
     );
     state.agents.selected_agent = saved_agent;
     state.agents.selected_mission = saved_mission;
+    state.agents.mission_selected = saved_mission_selected;
     cursor
 }
 
@@ -2264,6 +2268,19 @@ fn abort_focused_pane(
         return;
     }
     with_focused_pane_aliased(state, |state| {
+        // Without this guard, `handle_abort`'s fallback would kill another pane's swarm.
+        let has_own_mission = state.agents.selected_mission.is_some()
+            || state
+                .agents
+                .selected_agent
+                .as_deref()
+                .and_then(|aid| state.agents.agents_get(aid))
+                .and_then(|lane| lane.current_mission.as_deref())
+                .is_some();
+        if !has_own_mission {
+            push_pane_system_message(state, "no active mission for this pane".into());
+            return;
+        }
         handle_abort(state, Some(codex), Some(claude), swarm, AbortScope::Current);
     });
 }

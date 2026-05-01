@@ -907,13 +907,12 @@ impl AgentBusEvent {
 }
 
 fn upsert_agent(state: &mut AppState, agent: AgentLane) {
-    let existing_idx = state.agents.agents_index.get(&agent.id).copied().or_else(|| {
-        state
-            .agents
-            .agents
-            .iter()
-            .position(|a| a.id == agent.id)
-    });
+    let existing_idx = state
+        .agents
+        .agents_index
+        .get(&agent.id)
+        .copied()
+        .or_else(|| state.agents.agents.iter().position(|a| a.id == agent.id));
     let Some(idx) = existing_idx else {
         let new_idx = state.agents.agents.len();
         let id = agent.id.clone();
