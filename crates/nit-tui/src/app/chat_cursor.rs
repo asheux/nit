@@ -72,7 +72,7 @@ use ratatui::{
 
 use super::*;
 
-pub(super) fn insert_chat_input_text(state: &mut AppState, text: &str) -> bool {
+pub(crate) fn insert_chat_input_text(state: &mut AppState, text: &str) -> bool {
     let normalized = normalize_chat_input_text(text);
     if normalized.is_empty() {
         return false;
@@ -152,7 +152,7 @@ pub(super) fn delete_chat_input_selection(state: &mut AppState) -> bool {
     true
 }
 
-pub(super) fn copy_chat_input_selection(
+pub(crate) fn copy_chat_input_selection(
     state: &mut AppState,
     clipboard: &mut Option<Clipboard>,
 ) -> bool {

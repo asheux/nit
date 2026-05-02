@@ -22,6 +22,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `nit-games` | Game theory tournament engine |
 | `nit-gol` | Game of Life simulation |
 | `nit-metal` | Metal GPU acceleration (macOS) |
+| `nit-mcp` | MCP stdio JSON-RPC server (`nit-mcp-server` binary) — bridges spawned `codex` back into substrate tools (signals/claims/assumptions); spawned by `codex_runner` |
 | `nit-syntax` | Syntax highlighting |
 | `nit-utils` | Shared filesystem/hashing/path utilities |
 

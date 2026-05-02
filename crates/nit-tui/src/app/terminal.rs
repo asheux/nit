@@ -109,15 +109,21 @@ impl TerminalState {
             let _ = disable_raw_mode();
         }
         if self.alternate_screen {
-            // Some terminal emulators (notably macOS Terminal.app) don't
-            // restore the saved main screen on `LeaveAlternateScreen` —
-            // they dump the alt-screen contents to scrollback instead,
-            // leaving the entire TUI grid visible above the shell prompt
-            // after exit. Clear the alt screen and park the cursor at
-            // (0,0) first so even on those terminals the operator gets a
-            // clean handoff back to the shell.
+            // macOS Terminal.app does not restore the saved main screen on
+            // `LeaveAlternateScreen` — it dumps the alt-screen render
+            // history into scrollback, leaving the entire TUI grid visible
+            // above the shell prompt after exit. Clearing the visible area
+            // (`ClearType::All` → `\x1b[2J`) before leaving zeroes the
+            // current frame, but the per-frame draw history is what gets
+            // appended; on a long-running session that's the entire UI
+            // worth of redraws. After `LeaveAlternateScreen` we issue
+            // `ClearType::Purge` (`\x1b[3J`) to wipe scrollback so the
+            // dumped history doesn't survive the handoff. Other terminals
+            // (iTerm2, Kitty, WezTerm) restore main correctly and ignore
+            // both clears, so this is safe to always emit.
             let _ = execute!(stdout, MoveTo(0, 0), TerminalClear(ClearType::All));
             let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = execute!(stdout, TerminalClear(ClearType::Purge), MoveTo(0, 0));
         }
         self.active = false;
     }

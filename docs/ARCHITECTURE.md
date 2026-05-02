@@ -2,11 +2,12 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of eight crates:
+nit is a terminal-first editor composed of nine crates:
 
 - `nit-core`: state, actions, text buffers, config, agent bus, and IO (no terminal dependencies).
 - `nit-games`: game theory tournament engine and strategy implementations (FSM, CA, one-sided TM).
 - `nit-gol`: Conway’s Game of Life engine, rule evaluation, and snapshot encoding.
+- `nit-mcp`: MCP stdio JSON-RPC server (`nit-mcp-server` binary) exposing substrate tools (`emit_signal`, `assert_claim`, `assert_assumption`) to the spawned `codex` process via the back-channel.
 - `nit-metal`: Metal GPU acceleration for macOS (optional compute offload for games engine).
 - `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
 - `nit-tui`: rendering, layout, event loop, key mapping, agent runners (Codex + Claude), swarm orchestration, using ratatui + crossterm.

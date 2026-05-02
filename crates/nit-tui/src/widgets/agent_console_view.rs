@@ -883,7 +883,11 @@ pub fn render_pane(
         layout.input_area,
     );
 
-    if focused {
+    // Same blink gating as `render` (single-pane). `cursor_visible`
+    // toggles every ~6 frames via the global frame counter, so the
+    // pane caret pulses in lockstep with the editor caret instead of
+    // sitting solid the whole time.
+    if focused && cursor_visible(state) {
         let cursor_visible_in_window = layout.cursor_line_all >= layout.input_window_start
             && layout.cursor_line_all
                 < layout
@@ -4439,7 +4443,7 @@ fn pulse_on(state: &AppState) -> bool {
     (state.metrics.frame_count / 6).is_multiple_of(2)
 }
 
-fn cursor_visible(state: &AppState) -> bool {
+pub(crate) fn cursor_visible(state: &AppState) -> bool {
     pulse_on(state)
 }
 

@@ -116,8 +116,7 @@ fn try_dispatch_swarm_command(
                 SwarmSize::Count(n) => n.clamp(1, ceiling),
             };
             let was_clamped = intended_count > final_size;
-            let fd_bound_clamp =
-                was_clamped && bulk_capped_from.is_none() && final_size == ceiling;
+            let fd_bound_clamp = was_clamped && bulk_capped_from.is_none() && final_size == ceiling;
             if let Some(intended_bulk) = bulk_capped_from {
                 push_system_alert_to_mission(
                     state,
@@ -1179,11 +1178,25 @@ fn dispatch_swarm_followup(
         .find(|lane| lane.id == planner)
         .is_some_and(|lane| lane.is_claude());
     if planner_is_claude {
-        state.agents.claude_turn_prompt_idx.insert(planner.clone(), prompt_msg_idx);
+        state
+            .agents
+            .claude_turn_prompt_idx
+            .insert(planner.clone(), prompt_msg_idx);
     } else {
-        state.agents.codex_turn_prompt_idx.insert(planner.clone(), prompt_msg_idx);
+        state
+            .agents
+            .codex_turn_prompt_idx
+            .insert(planner.clone(), prompt_msg_idx);
     }
-    dispatch_agent_prompt(state, vitals, codex, claude, planner, mission_id.clone(), plan_prompt);
+    dispatch_agent_prompt(
+        state,
+        vitals,
+        codex,
+        claude,
+        planner,
+        mission_id.clone(),
+        plan_prompt,
+    );
     maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
     maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
     true
@@ -1287,7 +1300,14 @@ pub(crate) fn submit_chat_input_and_dispatch(
             // For swarm missions, re-activate the run and dispatch only to
             // the planner so the swarm pipeline assigns roles to clones.
             let is_swarm_mission = dispatch_swarm_followup(
-                state, vitals, codex, claude, swarm, &mission_id, &prompt, prompt_msg_idx,
+                state,
+                vitals,
+                codex,
+                claude,
+                swarm,
+                &mission_id,
+                &prompt,
+                prompt_msg_idx,
             );
             // Shadow pipeline: enabled explicitly (@shadow) or auto for heavy
             // single-agent prompts. Skipped for swarm followups, broadcasts,

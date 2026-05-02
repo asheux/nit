@@ -765,9 +765,7 @@ pub fn maybe_open_artifact_popup_from_console_line(
     text_width: usize,
     line_idx: usize,
 ) -> bool {
-    maybe_open_artifact_popup_from_console_line_for_pane(
-        state, swarm, None, text_width, line_idx,
-    )
+    maybe_open_artifact_popup_from_console_line_for_pane(state, swarm, None, text_width, line_idx)
 }
 
 /// Pane-aware variant of [`maybe_open_artifact_popup_from_console_line`].

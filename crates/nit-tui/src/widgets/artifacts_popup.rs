@@ -592,10 +592,16 @@ pub fn render(
         input_area,
     );
 
-    // Cursor position.
+    // Cursor position. Gate on `cursor_visible` so the popup caret
+    // blinks at the same cadence as the chat-pane caret instead of
+    // sitting solid (which the operator perceived as a frozen UI).
     let cursor_in_window = cursor_line_all >= input_window_start
         && cursor_line_all < input_window_start.saturating_add(input_inner_height);
-    if cursor_in_window && input_area.width > 0 && input_area.height > 0 {
+    if cursor_in_window
+        && input_area.width > 0
+        && input_area.height > 0
+        && agent_console_view::cursor_visible(state)
+    {
         let cursor_line_visible = cursor_line_all.saturating_sub(input_window_start);
         let max_col = input_area.width.saturating_sub(1) as usize;
         let col = cursor_col_all.min(max_col) as u16;

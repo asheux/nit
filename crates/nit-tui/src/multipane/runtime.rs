@@ -200,6 +200,17 @@ pub fn run_loop(
                 frame.set_cursor(c.x, c.y);
             }
         })?;
+        // Match the single-pane chat-input caret shape so the operator
+        // sees the same thin steady bar across both modes; without this,
+        // multipane inherits whatever the terminal's default is (usually
+        // a wide block) and the caret looks fat / inconsistent. The bar
+        // is "steady" — the visible blink comes from gating
+        // `frame.set_cursor` on `cursor_visible(state)` (a frame-counter
+        // pulse), exactly like single-pane.
+        let _ = crossterm::execute!(
+            terminal.backend_mut(),
+            crossterm::cursor::SetCursorStyle::SteadyBar
+        );
 
         if !event::poll(TICK_RATE)? {
             continue;
@@ -257,13 +268,22 @@ fn drain_input_burst(
 ) -> io::Result<bool> {
     for _ in 0..32 {
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            // Accept both Press and Repeat so held keys (Backspace,
+            // Delete, arrow nav, character repeats) auto-fire — single
+            // pane already does this in `app/runner.rs` and the UX
+            // mismatch was breaking long edits in multipane.
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if handle_key(
                     state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard, area,
                 ) {
                     return Ok(true);
                 }
             }
+            // Bracketed paste arrives as a single text blob (not a
+            // sequence of Char key events), so without this branch
+            // Cmd-V / right-click-paste / iTerm paste in multipane is
+            // silently dropped.
+            Event::Paste(text) => handle_paste(state, &text),
             Event::Mouse(mouse) => handle_mouse(state, swarm, theme, clipboard, area, mouse),
             _ => {}
         }
@@ -272,6 +292,26 @@ fn drain_input_burst(
         }
     }
     Ok(false)
+}
+
+/// Routes a bracketed-paste blob to whichever input is currently
+/// receiving keystrokes: the artifacts popup chat input when it's
+/// open, otherwise the focused pane's chat input. Mirrors single-pane
+/// `handle_paste_event` for the two surfaces multipane exposes — the
+/// editor / fuzzy-search / command-line paths from single-pane don't
+/// apply because multipane has no editor focus.
+fn handle_paste(state: &mut AppState, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if state.agents.artifacts_popup_open {
+        let _ = crate::app::insert_popup_chat_text(state, text);
+        return;
+    }
+    let pane_idx = focused_pane_idx(state);
+    with_pane_aliased(state, pane_idx, |state| {
+        let _ = crate::app::insert_chat_input_text(state, text);
+    });
 }
 
 // Discard the session file if nothing was run yet and no prior file existed;
@@ -679,7 +719,10 @@ fn compute_dropdown_rows(inner_height: u16, results_len: usize) -> u16 {
     clamped.min(results_len.max(1) as u16)
 }
 
-fn compute_dir_search_layout(inner: Rect, pane: &nit_core::PaneSession) -> Option<(u16, Rect, Rect)> {
+fn compute_dir_search_layout(
+    inner: Rect,
+    pane: &nit_core::PaneSession,
+) -> Option<(u16, Rect, Rect)> {
     let ds = pane.dir_search.as_ref()?;
     if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
         return None;
@@ -1790,6 +1833,11 @@ fn handle_mouse_left_down(
                 state.agents.chat_input_selection_anchor = Some(new_cursor);
             }
             state.agents.chat_input_cursor = new_cursor;
+            // Mirror single-pane (`app/mouse.rs:1153`): every selection
+            // mutation auto-copies, so a shift-click that grew the
+            // selection is immediately on the clipboard without the
+            // operator having to also press Cmd+C.
+            crate::app::copy_chat_input_selection(state, clipboard);
         });
         INPUT_BOX_DRAG_PANE.with(|cell| cell.set(Some(pane_idx)));
         return;
@@ -1922,6 +1970,10 @@ fn handle_mouse_left_drag(
                         Some(state.agents.chat_input_cursor.min(total_chars));
                 }
                 state.agents.chat_input_cursor = new_cursor;
+                // Match single-pane drag behaviour (`app/mouse.rs:1641`)
+                // — auto-copy on every drag tick so releasing the mouse
+                // leaves the selection already on the clipboard.
+                crate::app::copy_chat_input_selection(state, clipboard);
             });
         }
         return;
@@ -1966,8 +2018,7 @@ fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, 
     {
         return;
     }
-    let Some((pane_idx, _, _)) =
-        resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
+    let Some((pane_idx, _, _)) = resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
     else {
         return;
     };
