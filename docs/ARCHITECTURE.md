@@ -53,19 +53,34 @@ crossterm events -> keymap -> Action -> nit-core::apply_action(state, action)
 state -> render -> ratatui widgets -> terminal diff
 ```
 
-The app redraws only when state changes or the terminal resizes.
-
 ## State Model (nit-core)
 
-- Workspace root (PathBuf)
-- Buffers (main editor + scratchpad) stored in rope-backed `Buffer`
-- Mode (Insert/Normal/Visual)
-- Focused pane (Editor, Notes, JobOutput, Visualizer, GateMonitor, AgentOps, AgentConsole, FileTree, SearchPopup)
-- Logs ring buffer and job progress/paused flag
-- Visualizer state (seed, rule, mode, pause, wrap, generation, period, leaderboard)
-- App kind (GoL or Games) plus app-specific runtime state
-- Metrics: last render time, frame count, last action
-- Optional prompt (e.g., confirm quit)
+`AppState` is the single source of truth for the editor. It lives in memory
+and is mutated only through `apply_action`. The fields group as follows:
+
+- **Workspace** — workspace root, gitignore-derived exclusions, and the
+  file-tree picker state.
+- **Editor** — rope-backed buffers (main editor + scratchpad notes), mode
+  (Insert / Normal / Visual), yank register, vim-style search (`/`, `*`,
+  `#`), and the `:` command line.
+- **UI / focus** — focused pane (Editor, Agent Chat, Agent Ops,
+  Visualizer, Code Structural Quality), modal prompt, fuzzy-file
+  picker, help and logs scroll positions, status line, and overlay
+  state for the structural-quality view and substrate inspector.
+- **Lab** — app kind (GoL or Games), visualizer state (seed, rule, mode,
+  generation, period, leaderboard), the games tournament state, rule
+  catalog, rule / protocol pickers, and persisted rule selection.
+- **Agents** — `AgentsState` carrying lanes, missions, swarm / shadow
+  runtime state, Agent Ops tabs, and the chat console; plus multipane
+  mode state for parallel chat panes.
+- **Substrate** — the persistent stigmergic layer (signals, claims,
+  assumptions, mood) along with pending claim retries and pending
+  arbiter interventions.
+- **Genome** — cached reports per file, pre-turn baselines, per-turn and
+  per-mission modified-file sets, retry counters, in-flight evaluation
+  batches, and the last quality delta surfaced to agent retries.
+- **Runtime** — log ring buffer, job progress / paused flag, render
+  metrics, user settings, and tree-sitter syntax status.
 
 ## Text Encoding (Editor + Scratchpad)
 

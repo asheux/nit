@@ -342,6 +342,7 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
                 task,
                 None,
                 &run.scope_files,
+                run.spawn_cwd.as_path(),
             )
         } else {
             wrap_task_prompt(
@@ -350,6 +351,7 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
                 task,
                 Some(deps_payload.as_slice()),
                 &run.scope_files,
+                run.spawn_cwd.as_path(),
             )
         };
         let agent_id = task.agent_id.clone();

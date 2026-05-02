@@ -1,6 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, sync::mpsc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::mpsc,
+};
 
-use nit_core::{AppState, GenomeReport};
+use nit_core::GenomeReport;
 
 use super::{normalize_role_label, read_workspace_gate_default, COMPUTATIONAL_RESEARCH_ROLE};
 
@@ -217,6 +221,32 @@ impl Gate {
     }
 }
 
+/// Single structural gate for "should this prompt mention cargo / Rust crate
+/// scoping at all?". Checks for `Cargo.toml` directly at the spawn cwd — no
+/// walk-up — so a child project nested under an unrelated Rust workspace
+/// does not inherit Rust framing. Used by `wrap_task_prompt`'s test/review
+/// branch and `dashboard::derive_cargo_packages` to suppress cargo-specific
+/// text on non-Rust workspaces.
+pub(crate) fn is_cargo_workspace(cwd: &Path) -> bool {
+    cwd.join("Cargo.toml").is_file()
+}
+
+/// Best-effort discovery of the git repository root containing `cwd`. Walks
+/// ancestors looking for a `.git` entry (file for worktrees, dir for plain
+/// repos). Returns `None` when no `.git` is found before reaching the
+/// filesystem root. Used to bound `GateBundle::detect`'s ancestor walk so a
+/// stray ancestor manifest cannot leak gates into an unrelated child.
+fn git_repo_root(cwd: &Path) -> Option<PathBuf> {
+    let mut cursor = Some(cwd);
+    while let Some(path) = cursor {
+        if path.join(".git").exists() {
+            return Some(path.to_path_buf());
+        }
+        cursor = path.parent();
+    }
+    None
+}
+
 impl GateBundle {
     pub(super) fn from_label(value: &str) -> Option<Self> {
         let value = value.trim();
@@ -238,8 +268,12 @@ impl GateBundle {
         None
     }
 
-    pub(super) fn detect(state: &AppState) -> GateBundleSelection {
-        let config_default = read_workspace_gate_default(state.workspace_root.as_path());
+    /// Detect the auto-gate bundle for a spawn cwd. The walk is bounded at
+    /// `cwd` itself or the surrounding git root (whichever is shallower) so a
+    /// stray ancestor `Cargo.toml` cannot impose Rust gates on an unrelated
+    /// child project.
+    pub(super) fn detect(cwd: &Path) -> GateBundleSelection {
+        let config_default = read_workspace_gate_default(cwd);
         if let Ok(Some(default)) = config_default.as_ref() {
             if default.eq_ignore_ascii_case("none") {
                 return GateBundleSelection {
@@ -257,8 +291,9 @@ impl GateBundle {
             }
         }
 
+        let walk_root = git_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
         let mut detected = None;
-        let mut cursor = Some(state.workspace_root.as_path());
+        let mut cursor = Some(cwd);
         while let Some(path) = cursor {
             if path.join("Cargo.toml").exists() {
                 detected = Some((Self::Rust, "Cargo.toml"));
@@ -286,6 +321,9 @@ impl GateBundle {
             }
             if path.join("go.mod").exists() {
                 detected = Some((Self::Go, "go.mod"));
+                break;
+            }
+            if path == walk_root.as_path() {
                 break;
             }
             cursor = path.parent();
@@ -659,6 +697,12 @@ pub(super) struct SwarmRun {
     pub(super) root_prompt: String,
     pub(super) template: SwarmTemplate,
     pub(super) mission_kind: SwarmMissionKind,
+    /// Directory the spawned agents will execute in. In single-pane this is
+    /// `state.workspace_root`; in multipane it is the dispatching pane's cwd.
+    /// Prompt builders consult this (not `state.workspace_root`) for cargo /
+    /// language gating so a non-Rust pane never sees Rust framing even when
+    /// the harness was launched from a Rust repo.
+    pub(super) spawn_cwd: PathBuf,
     pub(super) planner_agent_id: String,
     pub(super) integrator_agent_id: Option<String>,
     pub(super) integrator_locked: bool,

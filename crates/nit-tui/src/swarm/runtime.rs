@@ -241,9 +241,12 @@ impl SwarmRuntime {
             }
         }
         // Phase 8: also inject cross-mission memory into follow-up prompts.
-        let memory_scope_files = enumerate_scope_files(state.workspace_root.as_path(), user_prompt);
+        // Reuse the mission's spawn cwd (set at run creation) so a multipane
+        // followup keeps its pane's workspace, not the harness's.
+        let spawn_cwd = run.spawn_cwd.as_path();
+        let memory_scope_files = enumerate_scope_files(spawn_cwd, user_prompt);
         let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index = nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_index = nit_core::mission_memory::load_or_build(spawn_cwd);
         let memory_exclude: Vec<&str> = vec![mission_id];
         let memory_hits = nit_core::mission_memory::retrieve_similar(
             &memory_index,
@@ -261,7 +264,7 @@ impl SwarmRuntime {
             run.integrator_agent_id.as_deref(),
             &role_hints,
             &priority_agent_ids,
-            state.workspace_root.as_path(),
+            spawn_cwd,
             &memory_hits,
         ))
     }
@@ -596,12 +599,20 @@ impl SwarmRuntime {
             }
         }
 
+        // Resolve the spawn cwd once per mission. In single-pane this is
+        // `state.workspace_root`; in multipane it's the dispatching pane's
+        // cwd (per `app::dispatch::resolve_dispatch_cwd`). Every prompt
+        // builder, scope walk, gate detector and mission-memory load below
+        // is keyed off this — never `state.workspace_root` directly — so
+        // the pane that's working in a non-Rust workspace doesn't inherit
+        // paths or gates from the harness's repo.
+        let spawn_cwd = crate::app::resolve_dispatch_cwd(state, &planner_agent_id);
+
         // Phase 8: cross-mission structural memory — retrieve top-K
         // precedents to inject into the planner prompt.
-        let memory_scope_files =
-            enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
+        let memory_scope_files = enumerate_scope_files(spawn_cwd.as_path(), &root_prompt);
         let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index = nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_index = nit_core::mission_memory::load_or_build(spawn_cwd.as_path());
         let memory_exclude: Vec<&str> = vec![mission_id.as_str()];
         let memory_hits = nit_core::mission_memory::retrieve_similar(
             &memory_index,
@@ -620,20 +631,20 @@ impl SwarmRuntime {
             integrator_agent_id.as_deref(),
             &role_hints,
             &priority_agent_ids,
-            state.workspace_root.as_path(),
+            spawn_cwd.as_path(),
             &memory_hits,
         );
 
-        let scope_files = enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
+        let scope_files = enumerate_scope_files(spawn_cwd.as_path(), &root_prompt);
 
         // Load project-specific custom gates first; if defined, they fully
         // override the auto-detected language bundle.
-        let custom_gates_result = read_workspace_custom_gates(state.workspace_root.as_path());
+        let custom_gates_result = read_workspace_custom_gates(spawn_cwd.as_path());
         let gate_custom = match custom_gates_result.as_ref() {
             Ok(gates) => gates.clone(),
             Err(_) => None,
         };
-        let gate_selection = GateBundle::detect(state);
+        let gate_selection = GateBundle::detect(spawn_cwd.as_path());
         let gate_bundle = gate_selection.bundle.clone();
         let gate_selection_source = match (custom_gates_result.as_ref(), gate_custom.as_ref()) {
             (Err(err), _) => format!("config-error:{err}|{}", gate_selection.source),
@@ -692,6 +703,7 @@ impl SwarmRuntime {
                 root_prompt,
                 template: template_kind,
                 mission_kind,
+                spawn_cwd,
                 planner_agent_id: planner_agent_id.clone(),
                 integrator_agent_id: integrator_agent_id.clone(),
                 integrator_locked,

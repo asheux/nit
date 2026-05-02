@@ -157,6 +157,7 @@ use scope::sanitize_for_filename;
 #[cfg(test)]
 use signals::collect_unresolved_deps;
 use signals::{emit_parallel_deps_auto_repair_signals, emit_unresolved_dep_signals};
+pub(crate) use types::is_cargo_workspace;
 pub(crate) use types::{
     explicit_swarm_mission_kind_from_prompt, parse_swarm_mission_kind, SwarmArtifactFocus,
     SwarmEventOutcome,
@@ -199,3 +200,7 @@ pub(crate) use types::SwarmTemplate as SwarmTemplateForTests;
 #[cfg(test)]
 #[path = "../tests/swarm.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/prompts_leak_test.rs"]
+mod prompts_leak_test;

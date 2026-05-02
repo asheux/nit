@@ -98,6 +98,7 @@ pub(crate) fn test_runtime_with_running_tasks_and_template(
         root_prompt: String::new(),
         template,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: agent_ids
             .first()
             .cloned()

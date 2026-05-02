@@ -3,14 +3,14 @@ use nit_core::{AppState, MissionPhase};
 use super::mission::{update_mission_phase, update_mission_status};
 use super::{
     derive_cargo_packages, extract_json_code_block, extract_json_code_blocks,
-    push_system_message_to_mission, run_effective_gates, tasks_terminal_count, GateReport,
-    GateReportGate, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState,
+    push_system_message_to_mission, run_effective_gates, tasks_terminal_count, GateBundle,
+    GateReport, GateReportGate, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState,
     NO_REVERT_CLAUSE,
 };
 
 pub(super) fn build_verify_prompt(run: &SwarmRun) -> String {
     let effective = run_effective_gates(run);
-    let cargo_packages = derive_cargo_packages(&run.scope_files);
+    let cargo_packages = derive_cargo_packages(&run.scope_files, run.spawn_cwd.as_path());
     let bundle_label = run
         .gate_custom
         .as_ref()
@@ -34,16 +34,22 @@ pub(super) fn build_verify_prompt(run: &SwarmRun) -> String {
     out.push_str(run.root_prompt.trim());
     out.push_str("\n\nGate bundle:\n");
     out.push_str(&format!("Bundle: {bundle_label}\n"));
-    if !cargo_packages.is_empty() {
+    // Cargo-specific scope wording is only meaningful for the Rust bundle —
+    // Node / Python / Go (or no bundle) lean on the rendered gate commands
+    // below for their scope signal, so emitting "did not map to cargo
+    // packages" against them would just leak Rust framing into unrelated
+    // workspaces. Combined-condition branches keep the nesting flat.
+    let is_rust = matches!(run.gate_bundle, Some(GateBundle::Rust));
+    if is_rust && !cargo_packages.is_empty() {
         out.push_str(&format!(
             "Scope: cargo packages {} (derived from scope_files — only these packages were touched; do not widen to --workspace)\n",
             cargo_packages.join(", ")
         ));
-    } else if !run.scope_files.is_empty() {
+    } else if is_rust && !run.scope_files.is_empty() {
         out.push_str(
             "Scope: scope_files did not map to cargo packages — running full-workspace commands.\n",
         );
-    } else {
+    } else if is_rust {
         out.push_str("Scope: (no scope_files declared — running full-workspace commands)\n");
     }
     for gate in effective.iter() {

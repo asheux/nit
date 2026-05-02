@@ -1292,7 +1292,11 @@ pub(crate) fn submit_chat_input_and_dispatch(
             // git-changed files (the scope fallback in
             // `enumerate_scope_files`), which would otherwise push a
             // casual "hi there" past the 500-char auto-shadow threshold.
-            let prompt = augment_with_module_file_checklist(state, raw_prompt.clone());
+            let prompt = augment_with_module_file_checklist(
+                state,
+                selected_agent.as_deref(),
+                raw_prompt.clone(),
+            );
             // Index of the user prompt message just pushed — used to link agent
             // responses back to the correct prompt in the chat view.
             let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
@@ -1362,8 +1366,19 @@ pub(crate) fn submit_chat_input_and_dispatch(
 // When the prompt names a module or directory, append a non-negotiable per-file
 // checklist so a single-agent refactor covers every file rather than
 // cherry-picking. Returns the prompt unchanged when no scope is detected.
-fn augment_with_module_file_checklist(state: &AppState, prompt: String) -> String {
-    let scope = crate::swarm::enumerate_scope_files(state.workspace_root.as_path(), &prompt);
+//
+// Walks the spawn cwd of the target agent (multipane resolves per-pane via
+// `resolve_dispatch_cwd`), so a dotbox pane never picks up nit's own paths
+// when nit's repo happens to be the harness workspace_root.
+fn augment_with_module_file_checklist(
+    state: &AppState,
+    target_agent: Option<&str>,
+    prompt: String,
+) -> String {
+    let cwd = target_agent
+        .map(|id| crate::app::resolve_dispatch_cwd(state, id))
+        .unwrap_or_else(|| state.workspace_root.clone());
+    let scope = crate::swarm::enumerate_scope_files(cwd.as_path(), &prompt);
     if scope.is_empty() {
         return prompt;
     }
@@ -1374,9 +1389,6 @@ fn augment_with_module_file_checklist(state: &AppState, prompt: String) -> Strin
         "Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n",
     );
     out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
-    out.push_str(
-        "Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n",
-    );
     out.push_str(
         "COMMENTS: Trim doc comments that restate the type/function name, \
          echo visible type signatures, or describe obvious behavior (e.g. \

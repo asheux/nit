@@ -32,11 +32,11 @@ pub(crate) const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
 /// byte-for-byte identical, so the role contracts reference this constant
 /// instead of inlining the text.
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
-    "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands \
-     (`cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
+    "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands of any \
+     toolchain — `cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
      `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, \
      `npm test --workspaces`, `just test`, `just ci`, full lint/type-check \
-     sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for \
+     sweeps, etc. — are ONLY allowed when the OPERATOR explicitly asked for \
      them in the request above (phrases like \"run full CI\", \"verify the \
      whole workspace\", \"run all tests\", \"make sure nothing else broke\"). \
      If the operator did not, you MUST NOT run a workspace-wide command — \
@@ -49,7 +49,7 @@ pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
      `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: combine targeted \
      flags (`cargo test -p crate1 -p crate2`) or run one targeted command \
      per module. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: \
-     running `cargo test -p nit-gol` (passes) AND THEN running \
+     running `cargo test -p <affected-crate>` (passes) AND THEN running \
      `cargo test --all` to \"verify the full results\" — exactly the \
      duplication the rule forbids. The post-execution gate verifier handles \
      workspace-wide gates as the next swarm stage.";
@@ -58,17 +58,19 @@ pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
 /// Referenced by the integrate role contract and the genome-retry prompt
 /// so both say the same thing word-for-word.
 pub(crate) const NO_PADDING_CLAUSE: &str =
-    "CODE SHAPE: Do NOT add inline test modules (`#[cfg(test)] mod tests \
-     { ... }`) inside source files — tests live in a dedicated tests \
-     directory or test file. If you encounter an existing inline test \
-     module during a refactor, move it to the appropriate test file. Do \
-     NOT pad small files (lib.rs, mod.rs, re-export files) with \
-     unnecessary code to boost genome scores — trivially small files are \
-     auto-passed. Do NOT over-engineer trivial logic to hit a metric. \
-     COMMENTS: trim doc comments that restate type/function names, echo \
-     visible type signatures, or describe obvious behavior. Keep comments \
-     that explain WHY, document non-obvious constraints, safety \
-     invariants, or algorithmic choices.";
+    "CODE SHAPE: Do NOT add inline test modules (e.g. Rust `#[cfg(test)] \
+     mod tests { ... }`, Python `if __name__ == '__main__'` test blocks, \
+     Go `_test.go` stubs co-located in source files) inside production \
+     source files — tests live in a dedicated tests directory or test \
+     file. If you encounter an existing inline test module during a \
+     refactor, move it to the appropriate test file. Do NOT pad small \
+     files (re-export / barrel files such as `lib.rs`, `mod.rs`, \
+     `index.ts`, `__init__.py`) with unnecessary code to boost genome \
+     scores — trivially small files are auto-passed. Do NOT over-engineer \
+     trivial logic to hit a metric. COMMENTS: trim doc comments that \
+     restate type/function names, echo visible type signatures, or \
+     describe obvious behavior. Keep comments that explain WHY, document \
+     non-obvious constraints, safety invariants, or algorithmic choices.";
 
 /// Non-revert rule for any retry prompt (gate retry, per-agent genome
 /// retry). Reverting your own BROKEN code is fine — that's how you fix

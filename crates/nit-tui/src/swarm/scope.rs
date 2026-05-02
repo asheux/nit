@@ -25,6 +25,59 @@ const SCOPE_WALK_DEFAULT_TIMEOUT_MS: u64 = 200;
 /// would balloon the walk for no useful planner signal.
 const SCOPE_WALK_SKIP_DIRS: &[&str] = &["target", "node_modules"];
 
+/// Source-file extensions accepted by the scope walk. Covers the major
+/// compiled / typed languages plus common scripting and config-as-code
+/// surfaces (shell, lua, ruby, conf, md) so dotfiles / sysadmin / scripts-
+/// only workspaces produce a non-empty `scope_files` list. Without these,
+/// a swarm dispatched in a `dotbox`-style repo gets an empty checklist and
+/// the FILE CHECKLIST template renders as an empty section.
+fn is_source_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "rs" | "toml"
+            | "ts"
+            | "js"
+            | "tsx"
+            | "jsx"
+            | "py"
+            | "go"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "lua"
+            | "rb"
+            | "conf"
+            | "md"
+    )
+}
+
+/// Recognise dotfiles and config-style files that have no separate
+/// extension (`.zshrc`, `.bashrc`, `.tmux.conf`, `Makefile`, etc.). Required
+/// because `Path::extension()` returns `None` for `.zshrc` (the whole basename
+/// is treated as the file name with no separate extension), so the leading-
+/// dot pattern is the only reliable way to surface them.
+fn is_source_filename(name: &str) -> bool {
+    matches!(
+        name,
+        ".zshrc"
+            | ".zshenv"
+            | ".zprofile"
+            | ".bashrc"
+            | ".bash_profile"
+            | ".profile"
+            | ".tmux.conf"
+            | ".vimrc"
+            | ".gvimrc"
+            | "Makefile"
+            | "Dockerfile"
+    )
+}
+
 pub(super) fn sanitize_for_filename(input: &str) -> String {
     input
         .chars()
@@ -166,21 +219,30 @@ fn git_changed_scope_files(workspace_root: &Path) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .filter(|line| {
             // Match the directory walk's accepted extensions.
-            std::path::Path::new(line)
+            let path = std::path::Path::new(line);
+            let ext_match = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|ext| {
-                    matches!(
-                        ext,
-                        "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp"
-                    )
-                })
+                .is_some_and(is_source_extension);
+            let filename_match = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_source_filename);
+            ext_match || filename_match
         })
         .filter(|line| {
             // Skip files in directories the walk skips, so the two
-            // sources stay consistent.
-            !line.split('/').any(|component| {
-                component.starts_with('.') || SCOPE_WALK_SKIP_DIRS.contains(&component)
+            // sources stay consistent. Allow leaf files starting with `.`
+            // (dotfiles like .zshrc) — only intermediate dot-DIRS are
+            // skipped.
+            let parts: Vec<&str> = line.split('/').collect();
+            let dir_components = if parts.len() > 1 {
+                &parts[..parts.len() - 1]
+            } else {
+                &[][..]
+            };
+            !dir_components.iter().any(|component| {
+                component.starts_with('.') || SCOPE_WALK_SKIP_DIRS.contains(component)
             })
         })
         .filter(|line| {
@@ -252,14 +314,15 @@ fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>
             }
             collect_source_files(&path, workspace_root, out, depth + 1);
         } else if meta.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(
-                    ext,
-                    "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp"
-                ) {
-                    if let Ok(rel) = path.strip_prefix(workspace_root) {
-                        out.push(rel.display().to_string());
-                    }
+            let name = path.file_name().and_then(|n| n.to_str());
+            let ext_match = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(is_source_extension);
+            let filename_match = name.is_some_and(is_source_filename);
+            if ext_match || filename_match {
+                if let Ok(rel) = path.strip_prefix(workspace_root) {
+                    out.push(rel.display().to_string());
                 }
             }
         }
@@ -508,8 +571,9 @@ mod tests {
         fs::write(root.join("crates/foo/target/keep.rs"), "x").unwrap();
         fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
         fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
-        // README is wrong-extension; must not slip through.
-        fs::write(root.join("README.md"), "x").unwrap();
+        // notes.txt is wrong-extension (txt is intentionally not in the
+        // source allowlist); must not slip through.
+        fs::write(root.join("notes.txt"), "x").unwrap();
         // Force git to track even the normally-ignored paths.
         fs::write(root.join(".gitignore"), "").unwrap();
         assert!(run_git(&["add", "-A"], &root).status.success());
@@ -520,15 +584,51 @@ mod tests {
         fs::write(root.join("crates/foo/target/keep.rs"), "y").unwrap();
         fs::write(root.join("crates/foo/.cache/keep.rs"), "y").unwrap();
         fs::write(root.join("crates/foo/src/keep.rs"), "y").unwrap();
-        fs::write(root.join("README.md"), "y").unwrap();
+        fs::write(root.join("notes.txt"), "y").unwrap();
 
         let scope = enumerate_scope_files(&root, "general cleanup");
         assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
         for path in &scope {
             assert!(!path.contains("target/"), "leaked target/: {path}");
             assert!(!path.contains(".cache"), "leaked .cache: {path}");
-            assert!(!path.ends_with(".md"), "wrong-ext slipped: {path}");
+            assert!(!path.ends_with(".txt"), "wrong-ext slipped: {path}");
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_includes_dotfile_changes() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_dotfiles");
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
+        // Seed dotfile-style files. The walker now treats .zshrc / .sh /
+        // .tmux.conf as source so dotfiles repos can produce a non-empty
+        // scope_files list at the planner.
+        fs::write(root.join(".zshrc"), "alias ll='ls -la'\n").unwrap();
+        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env bash\n").unwrap();
+        fs::write(root.join(".tmux.conf"), "set -g mouse on\n").unwrap();
+        fs::write(root.join("README.md"), "# dotfiles\n").unwrap();
+        fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
+        // Modify each tracked file so it appears in the diff.
+        fs::write(root.join(".zshrc"), "alias l='ls'\n").unwrap();
+        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env zsh\n").unwrap();
+        fs::write(root.join(".tmux.conf"), "set -g mouse off\n").unwrap();
+        fs::write(root.join("README.md"), "# dotfiles updated\n").unwrap();
+
+        let scope = enumerate_scope_files(&root, "general cleanup");
+        assert!(scope.iter().any(|p| p.ends_with(".zshrc")));
+        assert!(scope.iter().any(|p| p.ends_with("tmux-gpu.sh")));
+        assert!(scope.iter().any(|p| p.ends_with(".tmux.conf")));
+        assert!(scope.iter().any(|p| p.ends_with("README.md")));
         let _ = fs::remove_dir_all(&root);
     }
 

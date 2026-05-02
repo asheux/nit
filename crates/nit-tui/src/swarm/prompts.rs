@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use super::{
-    dashboard_gate_rows, enumerate_scope_files, normalize_role_label, run_gates_label,
-    task_artifacts_summary_for_prompt, truncate_chars, SwarmMissionKind, SwarmRun, SwarmTask,
-    SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, NO_PADDING_CLAUSE,
+    dashboard_gate_rows, enumerate_scope_files, is_cargo_workspace, normalize_role_label,
+    run_gates_label, task_artifacts_summary_for_prompt, truncate_chars, SwarmMissionKind, SwarmRun,
+    SwarmTask, SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, NO_PADDING_CLAUSE,
     SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
 };
 
@@ -337,15 +337,28 @@ pub(super) fn build_planner_prompt(
                 out.push_str(&format!("    * {}\n", truncate_chars(s, 180)));
             }
             if !m.files_touched.is_empty() {
-                let preview: Vec<&String> = m.files_touched.iter().take(5).collect();
-                out.push_str(&format!(
-                    "    files: {}\n",
-                    preview
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+                // Filter out paths that no longer exist in the current spawn
+                // workspace. Without this, a polluted `.nit/swarm` index (e.g.
+                // mission memory carried over from a prior, different
+                // workspace) bleeds nit-internal paths into the planner —
+                // which then echoes them into integrate task_prompts. The
+                // self-reinforcing leak loop the operator hit on dotbox.
+                let preview: Vec<&String> = m
+                    .files_touched
+                    .iter()
+                    .filter(|p| workspace_root.join(p).exists())
+                    .take(5)
+                    .collect();
+                if !preview.is_empty() {
+                    out.push_str(&format!(
+                        "    files: {}\n",
+                        preview
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
             }
         }
     }
@@ -484,6 +497,7 @@ pub(super) fn wrap_task_prompt(
     task: &SwarmTask,
     deps: Option<&[(String, String)]>,
     scope_files: &[String],
+    spawn_cwd: &Path,
 ) -> String {
     let mut out = String::new();
     // Continuation preamble: when a task has been re-dispatched because its
@@ -629,7 +643,13 @@ pub(super) fn wrap_task_prompt(
             let role = task.role.as_deref().and_then(normalize_role_label);
             let is_test = role.as_deref() == Some("test");
             let is_review = role.as_deref() == Some("review");
-            if is_test || is_review {
+            // Only emit the cargo-specific REQUIRED COMMANDS block on actual
+            // cargo workspaces. A workspace can contain a `crates/` directory
+            // without being a Cargo workspace (vendored deps, monorepos with
+            // non-Rust subdirs, dotfiles repos that happen to share a token);
+            // injecting `cargo test -p <name>` into a non-Rust agent's prompt
+            // is the leak the operator reported on dotbox.
+            if (is_test || is_review) && is_cargo_workspace(spawn_cwd) {
                 let crates = crate_names_from_paths(scope_files);
                 if !crates.is_empty() {
                     out.push_str("\n## SCOPE — crates touched by this mission\n");

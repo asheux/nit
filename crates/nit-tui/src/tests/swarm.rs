@@ -1060,6 +1060,7 @@ fn dag_scheduler_dispatches_after_deps() {
         root_prompt: "root".into(),
         template: SwarmTemplate::Lab,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("a1".into()),
         integrator_locked: false,
@@ -1188,6 +1189,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         root_prompt: "root".into(),
         template: SwarmTemplate::Lab,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("a1".into()),
         integrator_locked: false,
@@ -1291,6 +1293,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
         root_prompt: "root".into(),
         template: SwarmTemplate::Parallel,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("a1".into()),
         integrator_locked: false,
@@ -1383,7 +1386,14 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
 #[test]
 fn task_prompt_includes_role_contract_guidance() {
     let task = make_task("judge", "a1", Some("judge"), vec!["propose-01"]);
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::General, &task, None, &[]);
+    let prompt = wrap_task_prompt(
+        "root",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+    );
 
     assert!(prompt.contains("ROLE CONTRACT:"));
     assert!(prompt.contains("Act strictly as the assigned role"));
@@ -1393,7 +1403,14 @@ fn task_prompt_includes_role_contract_guidance() {
 #[test]
 fn research_role_contract_mentions_external_sources() {
     let task = make_task("research", "a1", Some("research"), Vec::new());
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::Research, &task, None, &[]);
+    let prompt = wrap_task_prompt(
+        "root",
+        SwarmMissionKind::Research,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+    );
 
     assert!(prompt.contains("papers, docs, web resources"));
     assert!(prompt.contains("best strategy candidates"));
@@ -1418,6 +1435,7 @@ fn computational_research_role_contract_mentions_modeling_and_simulation() {
         &task,
         None,
         &[],
+        std::path::Path::new("."),
     );
 
     assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
@@ -2012,6 +2030,7 @@ fn deadlock_detection_skips_pending_tasks() {
         root_prompt: "root".into(),
         template: SwarmTemplate::Lab,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("a1".into()),
         integrator_locked: false,
@@ -2305,6 +2324,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         root_prompt: "root".into(),
         template: SwarmTemplate::Lab,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("a1".into()),
         integrator_locked: false,
@@ -2551,6 +2571,15 @@ fn chat_clones_excluded_from_select_swarm_agents() {
     assert!(agents.contains(&"b".to_string()));
 }
 
+fn cargo_workspace_fixture(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("nit-derive-cargo-{}-{}", name, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+    dir
+}
+
 #[test]
 fn derive_cargo_packages_collects_unique_crate_names() {
     let files = vec![
@@ -2559,8 +2588,10 @@ fn derive_cargo_packages_collects_unique_crate_names() {
         "crates/nit-core/src/state.rs".to_string(),
         "crates/nit-tui/src/swarm.rs".to_string(), // duplicate
     ];
-    let pkgs = derive_cargo_packages(&files);
+    let cwd = cargo_workspace_fixture("collects_unique");
+    let pkgs = derive_cargo_packages(&files, cwd.as_path());
     assert_eq!(pkgs, vec!["nit-tui".to_string(), "nit-core".to_string()]);
+    let _ = std::fs::remove_dir_all(&cwd);
 }
 
 #[test]
@@ -2572,12 +2603,29 @@ fn derive_cargo_packages_returns_empty_when_any_file_is_outside_crates_dir() {
         "crates/nit-tui/src/swarm.rs".to_string(),
         "Cargo.toml".to_string(),
     ];
-    assert!(derive_cargo_packages(&files).is_empty());
+    let cwd = cargo_workspace_fixture("mixed_scope");
+    assert!(derive_cargo_packages(&files, cwd.as_path()).is_empty());
+    let _ = std::fs::remove_dir_all(&cwd);
 }
 
 #[test]
 fn derive_cargo_packages_empty_scope_returns_empty() {
-    assert!(derive_cargo_packages(&[]).is_empty());
+    let cwd = cargo_workspace_fixture("empty_scope");
+    assert!(derive_cargo_packages(&[], cwd.as_path()).is_empty());
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn derive_cargo_packages_returns_empty_when_workspace_lacks_cargo_toml() {
+    // Even a perfectly cargo-shaped scope returns empty when the spawn cwd
+    // is not a Cargo workspace — the gate prevents Rust framing leaking
+    // into non-Rust workspaces.
+    let dir = std::env::temp_dir().join(format!("nit-derive-cargo-shell-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let files = vec!["crates/nit-tui/src/swarm.rs".to_string()];
+    assert!(derive_cargo_packages(&files, dir.as_path()).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -3593,6 +3641,7 @@ fn make_verifying_run_with_fail_report() -> SwarmRun {
         root_prompt: "root".into(),
         template: SwarmTemplate::Lab,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: Some("integ".into()),
         integrator_locked: false,
@@ -3754,6 +3803,7 @@ fn make_run_with_tasks(template: SwarmTemplate, tasks: Vec<SwarmTask>) -> SwarmR
         root_prompt: "root".into(),
         template,
         mission_kind: SwarmMissionKind::General,
+        spawn_cwd: std::path::PathBuf::from("."),
         planner_agent_id: "planner".into(),
         integrator_agent_id: None,
         integrator_locked: false,

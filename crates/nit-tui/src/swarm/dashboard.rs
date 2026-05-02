@@ -1,9 +1,12 @@
+use std::path::Path;
+
 use super::{
-    Gate, GateBundle, SwarmGateDashboardRow, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState,
+    is_cargo_workspace, Gate, GateBundle, SwarmGateDashboardRow, SwarmRun, SwarmStage, SwarmTask,
+    SwarmTaskState,
 };
 
-pub(super) fn derive_cargo_packages(scope_files: &[String]) -> Vec<String> {
-    if scope_files.is_empty() {
+pub(super) fn derive_cargo_packages(scope_files: &[String], spawn_cwd: &Path) -> Vec<String> {
+    if scope_files.is_empty() || !is_cargo_workspace(spawn_cwd) {
         return Vec::new();
     }
     let mut packages: Vec<String> = Vec::new();
@@ -75,7 +78,7 @@ pub(super) fn run_gates_label(run: &SwarmRun) -> Option<String> {
 /// already-rendered commands scoped to the run's cargo packages (when the
 /// scope can be derived cleanly) or as full-workspace commands otherwise.
 pub(super) fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
-    let cargo_packages = derive_cargo_packages(&run.scope_files);
+    let cargo_packages = derive_cargo_packages(&run.scope_files, run.spawn_cwd.as_path());
     let base_gates = if let Some(custom) = run.gate_custom.as_ref() {
         custom.clone()
     } else if let Some(bundle) = run.gate_bundle.as_ref() {
