@@ -406,7 +406,7 @@ const MIN_PANE_WIDTH: u16 = 20;
 const MIN_PANE_HEIGHT: u16 = 10;
 const BOTTOM_HINT: &str = "MULTIPANE  ·  Tab cycle  ·  Ctrl+Q quit  ·  F1 help";
 
-fn render_grid(
+pub(super) fn render_grid(
     frame: &mut ratatui::Frame,
     area: Rect,
     state: &mut AppState,
@@ -513,23 +513,14 @@ fn paint_top_strip(frame: &mut ratatui::Frame, rect: Rect, state: &AppState, the
     let Some(mp) = state.multipane.as_ref() else {
         return;
     };
-    let cwd = mp
-        .panes
-        .get(mp.focused)
-        .map(|p| pane_path_label(state, &p.cwd))
-        .unwrap_or_default();
-    let mut label = format!(
-        "MULTIPANE  pane {}/{}  cwd={cwd}",
-        mp.focused + 1,
-        mp.panes.len()
-    );
+    let mut label = format!("MULTIPANE  pane {}/{}", mp.focused + 1, mp.panes.len());
     if let Some(status) = state.status.as_deref() {
         if !status.is_empty() {
             label.push_str("  STATUS:");
             label.push_str(status);
         }
     }
-    paint_bar(frame, rect, label, top_strip_style(theme));
+    paint_bar(frame, rect, label, bottom_strip_style(theme));
 }
 
 fn render_help_overlay(frame: &mut ratatui::Frame, rect: Rect, theme: &Theme) {
@@ -884,7 +875,8 @@ fn paint_pane_chrome(
     } else {
         "chat"
     };
-    let title = format!(" pane {idx} · {mode_label} · {cwd_text} ");
+    let title_prefix = format!(" pane {idx} · {mode_label} · ");
+    let title_path = format!("{cwd_text} ");
     let border_color = if focused {
         theme.border_focused
     } else {
@@ -903,12 +895,20 @@ fn paint_pane_chrome(
             BorderType::Plain
         })
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::from(vec![
+            Span::styled(
+                title_prefix,
+                Style::default()
+                    .fg(title_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                title_path,
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]))
         .style(Style::default().bg(theme.background));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);

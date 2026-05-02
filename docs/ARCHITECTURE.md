@@ -2,17 +2,47 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of nine crates:
+nit is a terminal-first editor organized as **nine modules across six layers**.
+Each module owns a single concern; the layers describe how they fit together.
 
-- `nit-core`: state, actions, text buffers, config, agent bus, and IO (no terminal dependencies).
-- `nit-games`: game theory tournament engine and strategy implementations (FSM, CA, one-sided TM).
-- `nit-gol`: Conway’s Game of Life engine, rule evaluation, and snapshot encoding.
-- `nit-mcp`: MCP stdio JSON-RPC server (`nit-mcp-server` binary) exposing substrate tools (`emit_signal`, `assert_claim`, `assert_assumption`) to the spawned `codex` process via the back-channel.
-- `nit-metal`: Metal GPU acceleration for macOS (optional compute offload for games engine).
-- `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
-- `nit-tui`: rendering, layout, event loop, key mapping, agent runners (Codex + Claude), swarm orchestration, using ratatui + crossterm.
-- `nit-utils`: shared filesystem, hashing, and path utilities.
-- `nit`: binary entrypoint wiring CLI args, tracing, and running the TUI.
+### Foundation
+
+- **`nit-core`** — application state, actions, text buffers, config, agent bus,
+  and substrate primitives (signals, claims, assumptions, mood). Pure logic; no
+  terminal dependencies.
+- **`nit-utils`** — shared filesystem helpers, BLAKE3 hashing, and workspace
+  path utilities used across every other module.
+
+### Interface
+
+- **`nit-tui`** — rendering, layout, event loop, key mapping, agent runners
+  (Codex + Claude), and swarm orchestration. Built on ratatui + crossterm.
+  This is the visible layer.
+- **`nit-syntax`** — tree-sitter syntax highlighting engine and language
+  registry, with a fallback path for unsupported languages.
+
+### Lab engines
+
+- **`nit-gol`** — Conway's Game of Life engine: rule evaluation, grid
+  evolution, and snapshot encoding.
+- **`nit-games`** — game theory tournament engine and strategy implementations
+  (FSM Moore machines, cellular automata, one-sided Turing machines).
+
+### Agent integration
+
+- **`nit-mcp`** — MCP stdio JSON-RPC server (`nit-mcp-server` binary) that
+  exposes substrate tools (`emit_signal`, `assert_claim`, `assert_assumption`)
+  to the spawned `codex` process over a back-channel.
+
+### Acceleration
+
+- **`nit-metal`** — Apple Metal GPU compute shaders for macOS, an optional
+  offload path for the games engine. No-op stubs on other platforms so the
+  workspace builds unconditionally.
+
+### Entry point
+
+- **`nit`** — the CLI binary that wires arguments, tracing, and TUI bootstrap.
 
 ## Data Flow
 

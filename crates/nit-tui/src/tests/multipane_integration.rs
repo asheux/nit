@@ -957,3 +957,43 @@ fn dispatch_cwd_picks_up_pane_change_at_dequeue() {
         PathBuf::from("/pane0-after-dir-search"),
     );
 }
+
+// Regression guard for the operator op-3 cleanup: the abort-shortcut
+// hint must appear exactly once per pane (the top-of-pane hint at
+// `paint_hint_line`, chat branch). The duplicate render in
+// `agent_console_view::render_pane` was the source of the operator's
+// "shown both up and at the chatbox" complaint and was deleted.
+#[test]
+fn abort_hint_appears_exactly_once_per_pane() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let mut state = build_state(&[(0, "/pane0")]);
+    let swarm = SwarmRuntime::default();
+    let theme = crate::theme::Theme::default();
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let area = Rect::new(0, 0, 80, 24);
+    terminal
+        .draw(|frame| {
+            let _ = super::runtime::render_grid(frame, area, &mut state, &swarm, &theme);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer();
+    let mut content = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            content.push_str(buffer.get(x, y).symbol());
+        }
+        content.push('\n');
+    }
+
+    let count = content.matches("/abort").count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one /abort hint per pane, got {count} in:\n{content}",
+    );
+}

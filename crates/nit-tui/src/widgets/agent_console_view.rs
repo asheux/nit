@@ -718,17 +718,6 @@ pub fn render_pane(
         layout.thread_area,
     );
 
-    if layout.hint_chunk.height > 0 && layout.hint_chunk.width >= 4 {
-        let hint_text = "/abort  ·  Ctrl+C  ·  Esc Esc";
-        let hint_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::ITALIC | Modifier::DIM);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint_text, hint_style))),
-            layout.hint_chunk,
-        );
-    }
-
     let input_visible_text: Vec<String> = layout
         .input_lines_all
         .iter()
@@ -933,21 +922,19 @@ fn compute_pane_layout(
     } else {
         input_inner_height
     };
-    let want_hint = inner.height as usize >= input_height + 4;
-    let hint_height = if want_hint { 1u16 } else { 0u16 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(hint_height),
             Constraint::Length(input_height as u16),
         ])
         .split(inner);
+    let input_chunk = chunks[2];
     let input_area = if input_boxed {
-        Block::default().borders(Borders::ALL).inner(chunks[3])
+        Block::default().borders(Borders::ALL).inner(input_chunk)
     } else {
-        chunks[3]
+        input_chunk
     };
     let input_window_start = chat_input_window_start(
         CHAT_INPUT_SCROLL_AUTO,
@@ -955,10 +942,17 @@ fn compute_pane_layout(
         input_inner_height,
         cursor_line_all,
     );
+    let thread_area = chunks[1];
+    let hint_chunk = Rect::new(
+        thread_area.x,
+        thread_area.y + thread_area.height,
+        thread_area.width,
+        0,
+    );
     Some(ConsoleLayout {
-        thread_area: chunks[1],
-        hint_chunk: chunks[2],
-        input_chunk: chunks[3],
+        thread_area,
+        hint_chunk,
+        input_chunk,
         input_area,
         input_boxed,
         input_lines_all,
