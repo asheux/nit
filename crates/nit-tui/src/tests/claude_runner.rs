@@ -149,6 +149,49 @@ fn test_token_count_from_assistant_event() {
     assert_eq!(count.context_window, 0);
 }
 
+/// Pin the Lens-E spawn-site invariant: `prepare_claude_command` must
+/// bind `current_dir` to the per-pane cwd. Without it, `--add-dir`
+/// updates only the allow-list and the subprocess inherits nit's parent
+/// cwd — the silent regression the multipane fix exists to prevent.
+#[test]
+fn prepare_claude_command_binds_cwd_to_subprocess_working_directory() {
+    let config = ClaudeRunnerConfig::default();
+    let cwd = Path::new("/tmp/pane0-cwd");
+    let cmd = super::prepare_claude_command(
+        "claude-opus-4-6",
+        cwd,
+        true,
+        None,
+        Path::new("/tmp/out.txt"),
+        None,
+        false,
+        None,
+        &config,
+    );
+    assert_eq!(cmd.get_current_dir(), Some(cwd));
+}
+
+/// Resume turns must spawn with the SAME cwd as fresh turns. Pre-fix the
+/// resume branch dropped `-C`, which combined with the missing
+/// `current_dir` left resumed sessions anchored at the workspace root.
+#[test]
+fn prepare_claude_command_binds_cwd_for_resume_turns() {
+    let config = ClaudeRunnerConfig::default();
+    let cwd = Path::new("/tmp/pane3-after-dir-change");
+    let cmd = super::prepare_claude_command(
+        "claude-haiku-4-5",
+        cwd,
+        true,
+        None,
+        Path::new("/tmp/out.txt"),
+        Some("session-abc-123"),
+        false,
+        None,
+        &config,
+    );
+    assert_eq!(cmd.get_current_dir(), Some(cwd));
+}
+
 #[test]
 fn test_build_claude_args_basic() {
     let config = ClaudeRunnerConfig::default();

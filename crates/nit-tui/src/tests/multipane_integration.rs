@@ -888,3 +888,72 @@ fn abort_focused_pane_with_non_swarm_in_flight_uses_agent_scope() {
         "AbortScope::Agent for the focused pane's lane must succeed"
     );
 }
+
+// Lens-E parent-pane fallback: clone descendants of a pane lane carry
+// `<base>#mp-pane-NN<#…>` and exact-id match misses them. Without
+// `parse_pane_agent_id` walking the suffix chain, every @swarm / @new /
+// @shadow issued from a pane resolved to workspace_root.
+#[test]
+fn dispatch_cwd_parent_pane_fallback_for_clone_descendants() {
+    let state = build_state(&[(0, "/pane0"), (1, "/pane1")]);
+    let cases = [
+        (
+            "claude-haiku-4-5#mp-pane-00#swarm-mis-001-clone-03",
+            "/pane0",
+        ),
+        ("claude-haiku-4-5#mp-pane-00#shadow-001-propose-a", "/pane0"),
+        ("claude-haiku-4-5#mp-pane-00#chat-clone-01", "/pane0"),
+        (
+            "claude-haiku-4-5#mp-pane-01#swarm-mis-007-clone-02",
+            "/pane1",
+        ),
+    ];
+    for (id, expected) in cases {
+        assert_eq!(
+            crate::app::resolve_dispatch_cwd(&state, id),
+            PathBuf::from(expected),
+            "id {id}",
+        );
+    }
+}
+
+// Cross-pane independence: mutating pane 0's cwd must NOT mutate
+// pane 1's resolved cwd or any of pane 1's clone descendants.
+#[test]
+fn dispatch_cwd_isolates_panes_after_pane0_change() {
+    let mut state = build_state(&[(0, "/pane0"), (1, "/pane1")]);
+    state.multipane.as_mut().unwrap().panes[0].cwd = PathBuf::from("/pane0-new");
+    assert_eq!(
+        crate::app::resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
+        PathBuf::from("/pane0-new"),
+    );
+    assert_eq!(
+        crate::app::resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-01"),
+        PathBuf::from("/pane1"),
+    );
+    assert_eq!(
+        crate::app::resolve_dispatch_cwd(
+            &state,
+            "claude-haiku-4-5#mp-pane-01#swarm-mis-007-clone-02",
+        ),
+        PathBuf::from("/pane1"),
+    );
+}
+
+// Queued turns reach `resolve_dispatch_cwd` at dequeue. Mutating
+// pane.cwd between two resolver calls for the same agent_id models
+// the queue→dequeue gap; the second call must see the new value.
+#[test]
+fn dispatch_cwd_picks_up_pane_change_at_dequeue() {
+    let mut state = build_state(&[(0, "/pane0")]);
+    let queued_id = "claude-haiku-4-5#mp-pane-00";
+    assert_eq!(
+        crate::app::resolve_dispatch_cwd(&state, queued_id),
+        PathBuf::from("/pane0"),
+    );
+    state.multipane.as_mut().unwrap().panes[0].cwd = PathBuf::from("/pane0-after-dir-search");
+    assert_eq!(
+        crate::app::resolve_dispatch_cwd(&state, queued_id),
+        PathBuf::from("/pane0-after-dir-search"),
+    );
+}

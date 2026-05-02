@@ -21,3 +21,4 @@ vendor/
 !vendor/time/**
 .cargo-local/
 .claude/
+__pycache__/

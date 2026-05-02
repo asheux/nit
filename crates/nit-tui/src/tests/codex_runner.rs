@@ -27,6 +27,31 @@ fn custom_config() -> CodexRunnerConfig {
     }
 }
 
+/// Pin the Lens-E spawn-site invariant: every codex turn (fresh or
+/// resume) must spawn with `current_dir` bound to the per-pane cwd.
+/// `-C <cwd>` is dropped on resume, so this is the only consistent
+/// channel.
+#[test]
+fn prepare_codex_command_binds_current_dir_with_empty_args() {
+    let cwd = Path::new("/tmp/pane0-cwd");
+    let cmd = super::prepare_codex_command(cwd, Vec::new());
+    assert_eq!(cmd.get_current_dir(), Some(cwd));
+}
+
+#[test]
+fn prepare_codex_command_binds_current_dir_when_args_present() {
+    let cwd = Path::new("/tmp/pane2-after-dir-change");
+    let argv = vec![
+        "exec".into(),
+        "-C".into(),
+        cwd.to_string_lossy().into_owned(),
+        "--model".into(),
+        "gpt-5".into(),
+    ];
+    let cmd = super::prepare_codex_command(cwd, argv);
+    assert_eq!(cmd.get_current_dir(), Some(cwd));
+}
+
 #[test]
 fn extracts_thread_id_from_event_stream() {
     let jsonl = br#"{"type":"thread.started","thread_id":"019ca7c5-536f-7f81-82a7-7a38fa483cb2"}

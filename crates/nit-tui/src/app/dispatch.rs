@@ -10,20 +10,25 @@ use crate::swarm::{is_agent_busy, SwarmDispatch};
 use crate::vitals::VitalsState;
 
 /// Resolve the working directory for a runner dispatch keyed on
-/// `agent_id`. In multipane mode, returns the matching pane's `cwd`; in
-/// every other mode (and as fallback for unknown ids) returns
-/// `state.workspace_root`. The lookup runs at dispatch leaf time, not at
-/// enqueue time — so a queued multipane prompt picks up the pane's
-/// CURRENT cwd at dequeue, which is the semantics Phase 4 dir-search
-/// relies on.
+/// `agent_id`. In multipane mode, returns the matching pane's `cwd`
+/// (canonical lane id, lazily-selected lane id, or any suffixed clone
+/// descendant via `parse_pane_agent_id`); otherwise falls back to
+/// `state.workspace_root`. The lookup runs at dispatch leaf time, so
+/// queued prompts pick up the pane's CURRENT cwd at dequeue.
 pub(crate) fn resolve_dispatch_cwd(state: &AppState, agent_id: &str) -> PathBuf {
     state
         .multipane
         .as_ref()
         .and_then(|mp| {
-            mp.panes.iter().find(|p| {
-                p.agent_id == agent_id || p.selected_agent_id.as_deref() == Some(agent_id)
-            })
+            mp.panes
+                .iter()
+                .find(|p| {
+                    p.agent_id == agent_id || p.selected_agent_id.as_deref() == Some(agent_id)
+                })
+                .or_else(|| {
+                    crate::multipane::agent_id::parse_pane_agent_id(agent_id)
+                        .and_then(|(_, idx)| mp.panes.get(idx))
+                })
         })
         .map(|p| p.cwd.clone())
         .unwrap_or_else(|| state.workspace_root.clone())

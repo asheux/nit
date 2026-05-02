@@ -2854,7 +2854,32 @@ fn commit_dir_search(state: &mut AppState) {
     if let Some(pane) = focused_pane_mut(state) {
         pane.cwd = path.clone();
     }
+    invalidate_focused_pane_resume_sessions(state);
     push_pane_system_alert(state, format!("cwd → {}", path.display()));
+}
+
+/// Drop the focused pane's resume ids so a fresh session is created in
+/// the new cwd. Otherwise CLI session metadata re-anchors the spawn cwd
+/// to the original workspace silently.
+fn invalidate_focused_pane_resume_sessions(state: &mut AppState) {
+    let Some(agent_id) = focused_pane_agent_id(state) else {
+        return;
+    };
+    let mission_id = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .and_then(|p| p.mission_id.clone());
+    state.agents.codex_thread_ids.remove(&agent_id);
+    state.agents.claude_session_ids.remove(&agent_id);
+    if let Some(mid) = mission_id.as_deref() {
+        if let Some(threads) = state.agents.codex_mission_thread_ids.get_mut(mid) {
+            threads.remove(&agent_id);
+        }
+        if let Some(sessions) = state.agents.claude_mission_session_ids.get_mut(mid) {
+            sessions.remove(&agent_id);
+        }
+    }
 }
 
 fn take_dir_search_choice(state: &mut AppState) -> Option<PathBuf> {
@@ -3638,6 +3663,99 @@ mod tests {
         let pane = &state.multipane.as_ref().unwrap().panes[0];
         assert_eq!(pane.cwd, cwd_before);
         assert!(pane.dir_search.is_none());
+    }
+
+    // Lens-E Part C: switching cwd drops focused-pane resume ids so the
+    // next turn opens a fresh session in the new cwd. Without this,
+    // session metadata re-anchors to the original workspace.
+    #[test]
+    fn commit_dir_search_invalidates_resume_session_ids_for_focused_pane() {
+        let mut state = fixture_state_no_backend();
+        let lane = "claude-haiku-4-5#mp-pane-00";
+        let mission = "mission-XYZ";
+        if let Some(pane) = focused_pane_mut(&mut state) {
+            pane.agent_id = lane.into();
+            pane.mission_id = Some(mission.into());
+        }
+        state
+            .agents
+            .claude_session_ids
+            .insert(lane.into(), "A".into());
+        state
+            .agents
+            .codex_thread_ids
+            .insert(lane.into(), "B".into());
+        state
+            .agents
+            .claude_mission_session_ids
+            .entry(mission.into())
+            .or_default()
+            .insert(lane.into(), "C".into());
+        state
+            .agents
+            .codex_mission_thread_ids
+            .entry(mission.into())
+            .or_default()
+            .insert(lane.into(), "D".into());
+
+        let tmp = std::env::temp_dir().join(format!(
+            "nit-resume-inval-{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        open_dir_search_with_results(&mut state, vec![tmp.clone()]);
+        commit_dir_search(&mut state);
+
+        let agents = &state.agents;
+        assert!(!agents.claude_session_ids.contains_key(lane));
+        assert!(!agents.codex_thread_ids.contains_key(lane));
+        assert!(agents
+            .claude_mission_session_ids
+            .get(mission)
+            .is_none_or(|inner| !inner.contains_key(lane)));
+        assert!(agents
+            .codex_mission_thread_ids
+            .get(mission)
+            .is_none_or(|inner| !inner.contains_key(lane)));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Selecting a directory in pane 0 must not mutate pane 1's cwd or
+    // invalidate pane 1's resume sessions.
+    #[test]
+    fn commit_dir_search_in_pane0_does_not_affect_pane1() {
+        let mut state = fixture_state_no_backend();
+        let other = "claude-haiku-4-5#mp-pane-01";
+        if let Some(mp) = state.multipane.as_mut() {
+            mp.panes[0].agent_id = "claude-haiku-4-5#mp-pane-00".into();
+            mp.panes[1].agent_id = other.into();
+        }
+        state
+            .agents
+            .claude_session_ids
+            .insert(other.into(), "stay".into());
+        let pane1_cwd = state.multipane.as_ref().unwrap().panes[1].cwd.clone();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "nit-pane-iso-{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        open_dir_search_with_results(&mut state, vec![tmp.clone()]);
+        commit_dir_search(&mut state);
+
+        let mp = state.multipane.as_ref().unwrap();
+        assert_eq!(mp.panes[0].cwd, tmp);
+        assert_eq!(mp.panes[1].cwd, pane1_cwd);
+        assert_eq!(
+            state
+                .agents
+                .claude_session_ids
+                .get(other)
+                .map(String::as_str),
+            Some("stay"),
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

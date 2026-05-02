@@ -432,8 +432,7 @@ fn run_turn(
     let started_at = Instant::now();
     let out_file = std::env::temp_dir().join(format!("nit-claude-last-message-{seq}.txt"));
 
-    let mut cmd = Command::new("claude");
-    cmd.args(build_claude_args(
+    let mut cmd = prepare_claude_command(
         model.as_str(),
         cwd.as_path(),
         persist_session,
@@ -443,10 +442,10 @@ fn run_turn(
         read_only,
         max_turns,
         &config,
-    ))
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    );
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -958,6 +957,39 @@ pub fn claude_model_slug_for_agent_id(agent_id: &str) -> &str {
         Some((base, _)) if !base.trim().is_empty() => base,
         _ => agent_id,
     }
+}
+
+/// Build the `claude` subprocess `Command` with both the argv list AND the
+/// per-pane working directory bound. `--add-dir` only mutates Claude's
+/// allow-list — without `current_dir(cwd)` the child inherits nit's parent
+/// cwd, so multipane prompts always ran in the workspace root regardless of
+/// which directory the operator picked. This helper exists so the spawn-site
+/// invariant (`cmd.get_current_dir() == Some(cwd)`) is testable.
+#[allow(clippy::too_many_arguments)]
+fn prepare_claude_command(
+    agent_id: &str,
+    cwd: &Path,
+    persist_session: bool,
+    effort: Option<&str>,
+    out_file: &Path,
+    resume_session_id: Option<&str>,
+    read_only: bool,
+    max_turns: Option<u32>,
+    config: &ClaudeRunnerConfig,
+) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.current_dir(cwd).args(build_claude_args(
+        agent_id,
+        cwd,
+        persist_session,
+        effort,
+        out_file,
+        resume_session_id,
+        read_only,
+        max_turns,
+        config,
+    ));
+    cmd
 }
 
 #[allow(clippy::too_many_arguments)]

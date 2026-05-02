@@ -1613,8 +1613,7 @@ fn run_turn(
     let started_at = Instant::now();
     let out_file = std::env::temp_dir().join(format!("nit-codex-last-message-{seq}.txt"));
 
-    let mut cmd = Command::new("codex");
-    cmd.args(build_codex_exec_args(
+    let args = build_codex_exec_args(
         model.as_str(),
         cwd.as_path(),
         persist_session,
@@ -1623,11 +1622,12 @@ fn run_turn(
         resume_thread_id.as_deref(),
         read_only,
         &config,
-    ))
+    );
+    let mut cmd = prepare_codex_command(cwd.as_path(), args);
     // Read prompt from stdin so multi-line input works without shell escaping.
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1993,6 +1993,15 @@ fn build_codex_mcp_tool_call(
         );
     }
     ("codex", serde_json::Value::Object(args))
+}
+
+/// Spawn-site cwd binding for the codex subprocess. `-C <cwd>` is
+/// dropped on resume turns; `current_dir` is the only consistent cwd
+/// channel across fresh and resumed dispatches.
+fn prepare_codex_command(cwd: &Path, args: Vec<String>) -> Command {
+    let mut cmd = Command::new("codex");
+    cmd.current_dir(cwd).args(args);
+    cmd
 }
 
 #[allow(clippy::too_many_arguments)]
