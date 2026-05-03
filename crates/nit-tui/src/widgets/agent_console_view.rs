@@ -1048,6 +1048,39 @@ pub fn build_pane_thread_rows_with_breathers(
     )
 }
 
+/// True when `lane` belongs to the rendered pane's scope. Used by the
+/// `any_remaining` trigger to match the bottom-block content filter, so
+/// sibling-pane activity does not inflate this pane's breather. Single-
+/// pane callers (`pane_idx = None`) accept every lane.
+fn lane_in_pane_scope(
+    state: &AppState,
+    lane: &nit_core::AgentLane,
+    pane_idx: Option<usize>,
+    mission: Option<&str>,
+    agent: Option<&str>,
+) -> bool {
+    if pane_idx.is_none() {
+        return true;
+    }
+    if let Some(mid) = mission {
+        if lane.current_mission.as_deref() == Some(mid) {
+            return true;
+        }
+        let queued_codex = state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|t| t.agent_id == lane.id && t.mission_id.as_deref() == Some(mid));
+        let queued_claude = state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .any(|t| t.agent_id == lane.id && t.mission_id.as_deref() == Some(mid));
+        return queued_codex || queued_claude;
+    }
+    agent.is_none_or(|ag| lane.id == ag)
+}
+
 /// Pane-aware variant of [`build_pane_thread_rows_with_breathers`].
 /// `pane_idx = Some(n)` activates the defense-in-depth filter so any
 /// `Broadcast` (or stray Agent reply) from another pane is dropped at
@@ -1109,19 +1142,30 @@ pub fn build_pane_thread_rows_with_breathers_for_pane(
         }
     }
 
+    // Pane mode (`pane_idx = Some(_)`): the trigger must match the
+    // bottom-block content filter. Otherwise sibling-pane activity fires
+    // `any_remaining = true` here and `breather_rows_for_user_prompt`
+    // re-emits this pane's own lane that `inline_breather_rows` already
+    // showed — the doubled breather the operator hit when pane 4
+    // dispatched while pane 0 was active.
     let any_remaining = state.agents.agents.iter().any(|a| {
-        !inline_shown.contains(&a.id)
-            && (state.agents.active_turns.contains_key(&a.id)
-                || state
-                    .agents
-                    .queued_codex_turns
-                    .iter()
-                    .any(|t| t.agent_id == a.id)
-                || state
-                    .agents
-                    .queued_claude_turns
-                    .iter()
-                    .any(|t| t.agent_id == a.id))
+        if !lane_in_pane_scope(state, a, pane_idx, mission, agent) {
+            return false;
+        }
+        if inline_shown.contains(&a.id) {
+            return false;
+        }
+        state.agents.active_turns.contains_key(&a.id)
+            || state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == a.id)
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|t| t.agent_id == a.id)
     });
     let has_swarm_context =
         mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));

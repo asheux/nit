@@ -1285,20 +1285,7 @@ pub(crate) fn submit_chat_input_and_dispatch(
             .map(ToString::to_string);
         let sent = push_chat_message(state);
         if let Some((channel, raw_prompt)) = sent {
-            // Keep the operator's original prompt around for heuristics
-            // that should fire on user intent, not on machine-appended
-            // boilerplate. `augment_with_module_file_checklist` can add
-            // a 1-2 KB FILE CHECKLIST block when the workspace has any
-            // git-changed files (the scope fallback in
-            // `enumerate_scope_files`), which would otherwise push a
-            // casual "hi there" past the 500-char auto-shadow threshold.
-            let prompt = augment_with_module_file_checklist(
-                state,
-                selected_agent.as_deref(),
-                raw_prompt.clone(),
-            );
-            // Index of the user prompt message just pushed — used to link agent
-            // responses back to the correct prompt in the chat view.
+            let prompt = raw_prompt.clone();
             let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
             chat_history_remember(state, &raw);
             // For swarm missions, re-activate the run and dispatch only to
@@ -1361,48 +1348,6 @@ pub(crate) fn submit_chat_input_and_dispatch(
     }
     state.agents.chat_input_scroll = usize::MAX;
     true
-}
-
-// When the prompt names a module or directory, append a non-negotiable per-file
-// checklist so a single-agent refactor covers every file rather than
-// cherry-picking. Returns the prompt unchanged when no scope is detected.
-//
-// Walks the spawn cwd of the target agent (multipane resolves per-pane via
-// `resolve_dispatch_cwd`), so a dotbox pane never picks up nit's own paths
-// when nit's repo happens to be the harness workspace_root.
-fn augment_with_module_file_checklist(
-    state: &AppState,
-    target_agent: Option<&str>,
-    prompt: String,
-) -> String {
-    let cwd = target_agent
-        .map(|id| crate::app::resolve_dispatch_cwd(state, id))
-        .unwrap_or_else(|| state.workspace_root.clone());
-    let scope = crate::swarm::enumerate_scope_files(cwd.as_path(), &prompt);
-    if scope.is_empty() {
-        return prompt;
-    }
-    let mut out = prompt;
-    out.push_str("\n\n## FILE CHECKLIST (non-negotiable)\n");
-    out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
-    out.push_str(
-        "Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n",
-    );
-    out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
-    out.push_str(
-        "COMMENTS: Trim doc comments that restate the type/function name, \
-         echo visible type signatures, or describe obvious behavior (e.g. \
-         \"/// Returns the value\" on fn value()). Keep comments that explain \
-         WHY something is done, document non-obvious constraints, safety \
-         invariants, or algorithmic choices. A comment worth keeping tells \
-         the reader something the code alone cannot.\n",
-    );
-    out.push_str("Your task is NOT complete until every file has been modified.\n\n");
-    for (i, path) in scope.iter().enumerate() {
-        out.push_str(&format!("{}. {path}\n", i + 1));
-    }
-    out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
-    out
 }
 
 pub(crate) fn chat_history_remember(state: &mut AppState, raw: &str) {

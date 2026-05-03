@@ -1325,11 +1325,10 @@ pub(crate) fn submit_focused_pane_input(
         return;
     }
 
-    if bound {
-        pin_pane_chat_mission_on_lane(state, pane_idx);
-    }
-
     with_focused_pane_aliased(state, |state| {
+        if bound {
+            pin_pane_chat_mission_on_lane(state, pane_idx);
+        }
         let _ =
             submit_chat_input_and_dispatch(state, vitals, Some(codex), Some(claude), swarm, shadow);
     });

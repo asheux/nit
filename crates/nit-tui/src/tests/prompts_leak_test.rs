@@ -16,8 +16,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use nit_core::mission_memory::{IndexedMission, MissionHit};
+use nit_core::state::AgentTurnState;
+use nit_core::{AgentLane, AgentLaneKind, AgentStatus, AppState, Buffer};
 
 use super::*;
 
@@ -299,6 +302,143 @@ fn nit_on_nit_keeps_cargo_required_commands_block() {
         );
     }
 
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+// BUG 2 regression: chat dispatch must hand the operator's prompt to the
+// runner verbatim. Pre-fix, `augment_with_module_file_checklist` appended
+// "FILE CHECKLIST (non-negotiable) … task NOT complete until every file has
+// been modified" to any prompt that named a directory token (or any prompt
+// at all when the workspace had git-changed files). That block contradicted
+// read-only operator requests like "Read this project and report".
+#[test]
+fn chat_dispatch_does_not_augment_with_file_checklist() {
+    let cwd = cargo_workspace("chat_dispatch_no_augment");
+
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.selected_agent = Some("codex-test".into());
+    // Mark the agent as busy so the dispatcher routes through `enqueue`
+    // rather than `maybe_dispatch` — the latter requires a real runner.
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+
+    let raw = "Read the project at crates/foo and report what you find";
+    state.agents.chat_input = raw.into();
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    // A real (in-memory) CodexRunner keeps the post-dispatch queue
+    // walker from draining the orphaned queue. The agent stays busy
+    // (active_turns contains its id), so the dequeue defers and pushes
+    // the turn back, leaving it inspectable.
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    let _ = crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&codex),
+        None,
+        &mut swarm,
+        &mut shadow,
+    );
+
+    let queued: Vec<_> = state.agents.queued_codex_turns.iter().collect();
+    assert!(
+        !queued.is_empty(),
+        "expected the busy-agent prompt to land in the codex queue"
+    );
+    for turn in &queued {
+        assert!(
+            !turn.prompt.contains("FILE CHECKLIST (non-negotiable)"),
+            "queued prompt leaked FILE CHECKLIST:\n{}",
+            turn.prompt
+        );
+        assert!(
+            !turn.prompt.contains("Refactor module"),
+            "queued prompt leaked refactor-module mandate:\n{}",
+            turn.prompt
+        );
+        assert!(
+            !turn.prompt.contains("Your task is NOT complete until"),
+            "queued prompt leaked completion mandate:\n{}",
+            turn.prompt
+        );
+        assert_eq!(
+            turn.prompt, raw,
+            "queued prompt diverged from the operator's raw input"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+// Defensive parity: every non-integrate role's `wrap_task_prompt` output
+// must omit the writer FILE CHECKLIST. This matrix-checks role-gating in
+// `swarm/prompts.rs:603-630` so a future refactor that misroutes a writer
+// appendix to a read-only role fails CI immediately.
+#[test]
+fn wrap_task_prompt_omits_file_checklist_for_non_integrate_roles() {
+    let cwd = cargo_workspace("wrap_non_integrate");
+    let scope = vec!["crates/foo/src/lib.rs".to_string()];
+    let leak_phrases = [
+        "FILE CHECKLIST (non-negotiable)",
+        "MUST modify every listed file",
+        "Your task is NOT complete until",
+    ];
+    for role in [
+        "propose",
+        "research",
+        "computational-research",
+        "judge",
+        "review",
+        "test",
+        "genome-reviewer",
+    ] {
+        let task = read_only_task(role);
+        let prompt = wrap_task_prompt(
+            "tighten the foo crate",
+            SwarmMissionKind::General,
+            &task,
+            None,
+            &scope,
+            cwd.as_path(),
+        );
+        for phrase in leak_phrases {
+            assert!(
+                !prompt.contains(phrase),
+                "role={role} leaked `{phrase}` in wrap_task_prompt output:\n{prompt}"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(&cwd);
 }
 

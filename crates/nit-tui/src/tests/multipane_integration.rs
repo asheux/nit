@@ -799,6 +799,117 @@ fn breather_rows_in_pane_k_only_contain_pane_k_agents() {
             );
         }
     }
+
+    // Stricter: pane 0's own lane must appear AT MOST ONCE across the
+    // inline + bottom blocks. Pre-fix, the global `any_remaining`
+    // predicate fired on pane 1's activity and re-emitted pane 0's lane
+    // a second time via `breather_rows_for_user_prompt` (the doubled
+    // breather the operator hit). Count rows that mention pane 0's
+    // base id within a status row.
+    let pane0_count = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                AgentConsoleRowKind::StatusRow | AgentConsoleRowKind::StatusSubRow
+            ) && r.text.contains("mp-pane-00")
+        })
+        .count();
+    assert!(
+        pane0_count <= 1,
+        "pane 0's own lane rendered {pane0_count} times across status rows; expected at most 1"
+    );
+}
+
+#[test]
+fn pane_active_turns_do_not_leak_breather_block_into_sibling_pane() {
+    // BUG 1: the operator's screencap had pane 0 active and then
+    // dispatched in pane 4. The bug rendered double breathers in BOTH
+    // panes the moment pane 4 dispatched. Verify symmetric isolation:
+    // each pane's render contains exactly one row mentioning its own
+    // lane id and zero rows mentioning the sibling's.
+    let mut state = build_state_with_chat_missions(2);
+    let _ = materialise_pane_lane(&mut state, 1, "claude-haiku-4-5");
+
+    let pane0_id = "claude-haiku-4-5#mp-pane-00".to_string();
+    let pane1_id = "claude-haiku-4-5#mp-pane-01".to_string();
+
+    for (id, mid) in [
+        (&pane0_id, "mp-pane-00-chat"),
+        (&pane1_id, "mp-pane-01-chat"),
+    ] {
+        if let Some(lane) = state.agents.agents_get_mut(id) {
+            lane.current_mission = Some(mid.into());
+            lane.status = nit_core::AgentStatus::Running;
+        }
+        state.agents.active_turns.insert(
+            id.clone(),
+            nit_core::state::AgentTurnState {
+                started_at: std::time::Instant::now(),
+                last_heartbeat_at: std::time::Instant::now(),
+                last_output_at: std::time::Instant::now(),
+                stage: Some("running".into()),
+            },
+        );
+    }
+
+    state.agents.mission_selected = usize::MAX;
+
+    let pane0 = state.multipane.as_ref().unwrap().panes[0].clone();
+    let pane1 = state.multipane.as_ref().unwrap().panes[1].clone();
+
+    state.agents.selected_mission = Some("mp-pane-00-chat".into());
+    state.agents.selected_agent = Some(pane0_id.clone());
+    let rows0 = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(0),
+        Some(pane0.agent_id.as_str()),
+        Some(pane0.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+    state.agents.selected_mission = Some("mp-pane-01-chat".into());
+    state.agents.selected_agent = Some(pane1_id.clone());
+    let rows1 = build_pane_thread_rows_with_breathers_for_pane(
+        &state,
+        None,
+        Some(1),
+        Some(pane1.agent_id.as_str()),
+        Some(pane1.chat_mission_id.as_str()),
+        80,
+        false,
+    );
+
+    let count_lane_mentions = |rows: &[nit_core::AgentConsoleRow], needle: &str| -> usize {
+        rows.iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    AgentConsoleRowKind::StatusRow | AgentConsoleRowKind::StatusSubRow
+                ) && r.text.contains(needle)
+            })
+            .count()
+    };
+
+    assert_eq!(
+        count_lane_mentions(&rows0, "mp-pane-01"),
+        0,
+        "pane 0 leaked pane 1's lane"
+    );
+    assert!(
+        count_lane_mentions(&rows0, "mp-pane-00") <= 1,
+        "pane 0's own lane rendered more than once"
+    );
+    assert_eq!(
+        count_lane_mentions(&rows1, "mp-pane-00"),
+        0,
+        "pane 1 leaked pane 0's lane"
+    );
+    assert!(
+        count_lane_mentions(&rows1, "mp-pane-01") <= 1,
+        "pane 1's own lane rendered more than once"
+    );
 }
 
 #[test]

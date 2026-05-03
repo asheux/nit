@@ -82,6 +82,73 @@ fn should_auto_enable_shadows_is_quiet_for_short_prompt_even_with_augment() {
     assert!(should_auto_enable_shadows(&augmented));
 }
 
+// After the BUG 2 fix, single-agent dispatch no longer augments the operator
+// prompt with a FILE CHECKLIST block. Drive the full shadow DAG with a clean
+// operator prompt and assert no propose / judge / review / main dispatch
+// carries the writer-mandate phrasing — locks the contradiction the operator
+// hit ("Read this project and report" + "task NOT complete until every file
+// modified") out of the shadow path.
+#[test]
+fn shadow_pipeline_dispatches_omit_file_checklist_block() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    let starts = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "Read this project and report what you find".into(),
+            None,
+            Some(0),
+        )
+        .expect("start succeeds");
+
+    let a_id = shadow_lane_id("codex-main", "01", "propose-a");
+    let b_id = shadow_lane_id("codex-main", "01", "propose-b");
+    let j_id = shadow_lane_id("codex-main", "01", "judge");
+    let r_id = shadow_lane_id("codex-main", "01", "review");
+
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&a_id, "plan A"));
+    let judge_out = rt.handle_event_outcome(&mut state, &completed_event(&b_id, "plan B"));
+    let review_out = rt.handle_event_outcome(&mut state, &completed_event(&j_id, "ruling"));
+    let final_out = rt.handle_event_outcome(&mut state, &completed_event(&r_id, "review"));
+
+    let leak_phrases = [
+        "FILE CHECKLIST (non-negotiable)",
+        "Refactor module",
+        "Your task is NOT complete until",
+        "MUST modify every listed file",
+    ];
+    let mut all = Vec::new();
+    all.extend(starts.iter().map(|d| (&d.agent_id, &d.prompt)));
+    all.extend(
+        judge_out
+            .dispatches
+            .iter()
+            .map(|d| (&d.agent_id, &d.prompt)),
+    );
+    all.extend(
+        review_out
+            .dispatches
+            .iter()
+            .map(|d| (&d.agent_id, &d.prompt)),
+    );
+    all.extend(
+        final_out
+            .dispatches
+            .iter()
+            .map(|d| (&d.agent_id, &d.prompt)),
+    );
+
+    for (agent_id, prompt) in all {
+        for phrase in leak_phrases {
+            assert!(
+                !prompt.contains(phrase),
+                "shadow dispatch to {agent_id} leaked `{phrase}`:\n{prompt}"
+            );
+        }
+    }
+}
+
 // Regression: while a shadow run is mid-pipeline, a follow-up prompt
 // must queue (not race ahead and dispatch on top of half-finished
 // context). The dispatcher uses `is_agent_busy` for the queue gate;
