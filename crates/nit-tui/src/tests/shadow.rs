@@ -149,6 +149,71 @@ fn shadow_pipeline_dispatches_omit_file_checklist_block() {
     }
 }
 
+// Option (b) of the FILE CHECKLIST gate: when the operator's prompt
+// names a real on-disk directory and uses a writer verb, the main
+// agent's final dispatch (built in `finalize_main_dispatch` via
+// `build_final_prompt`) carries the writer mandate. The advisory
+// lanes (propose-a / propose-b / judge / review) MUST NOT inherit
+// it — they run under `shadow_readonly_clause`. This locks the
+// asymmetry in shadow option (b).
+#[test]
+fn shadow_main_lane_attaches_checklist_when_real_work() {
+    // Drive ShadowRuntime through the full DAG with a real-work prompt
+    // pointed at a path that exists under the test workspace root
+    // (`CARGO_MANIFEST_DIR` = the nit-tui crate, so `src/swarm` is a
+    // real on-disk directory).
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    let starts = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "Refactor src/swarm to split the planner".into(),
+            None,
+            Some(0),
+        )
+        .expect("start succeeds");
+
+    let a_id = shadow_lane_id("codex-main", "01", "propose-a");
+    let b_id = shadow_lane_id("codex-main", "01", "propose-b");
+    let j_id = shadow_lane_id("codex-main", "01", "judge");
+    let r_id = shadow_lane_id("codex-main", "01", "review");
+
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&a_id, "plan A"));
+    let judge_out = rt.handle_event_outcome(&mut state, &completed_event(&b_id, "plan B"));
+    let review_out = rt.handle_event_outcome(&mut state, &completed_event(&j_id, "ruling"));
+    let final_out = rt.handle_event_outcome(&mut state, &completed_event(&r_id, "review"));
+
+    // Advisory lanes must NEVER carry the writer mandate.
+    let advisory_dispatches: Vec<_> = starts
+        .iter()
+        .chain(judge_out.dispatches.iter())
+        .chain(review_out.dispatches.iter())
+        .collect();
+    for dispatch in advisory_dispatches {
+        assert!(
+            !dispatch.prompt.contains("FILE CHECKLIST (non-negotiable)"),
+            "shadow advisory dispatch to {} leaked writer mandate:\n{}",
+            dispatch.agent_id,
+            dispatch.prompt
+        );
+    }
+
+    // Main writer dispatch DOES carry the checklist.
+    let final_dispatch = final_out
+        .dispatches
+        .iter()
+        .find(|d| d.agent_id == "codex-main")
+        .expect("final dispatch to main agent");
+    assert!(
+        final_dispatch
+            .prompt
+            .contains("FILE CHECKLIST (non-negotiable)"),
+        "shadow main dispatch should carry FILE CHECKLIST for real-work prompt:\n{}",
+        final_dispatch.prompt,
+    );
+}
+
 // Regression: while a shadow run is mid-pipeline, a follow-up prompt
 // must queue (not race ahead and dispatch on top of half-finished
 // context). The dispatcher uses `is_agent_busy` for the queue gate;

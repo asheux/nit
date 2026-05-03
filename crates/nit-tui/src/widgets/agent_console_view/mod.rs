@@ -1,7 +1,7 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, PaneSelection,
-    PaneSession, UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
+    AgentLane, AgentLaneKind, AgentMessage, AppState, PaneId, PaneSelection, PaneSession,
+    UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -10,12 +10,20 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::swarm::{chat_clone_base_id, SwarmRuntime, SWARM_CLONE_INFIX};
 use crate::theme::Theme;
 use crate::widgets::{agent_ops_view, text_selection::apply_ui_selection};
+
+mod breather;
+mod rendering;
+
+pub use breather::{
+    build_pane_thread_rows_with_breathers, build_pane_thread_rows_with_breathers_for_pane,
+};
+pub use rendering::render_pane;
 
 pub struct ChatCursor {
     pub x: u16,
@@ -39,27 +47,27 @@ const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 
 /// Computed layout for the console UI within a pane: thread area, input box,
 /// context hints, and cursor tracking.
-struct ConsoleLayout {
+pub(super) struct ConsoleLayout {
     /// Rect for the scrollable agent message/thread display area.
-    thread_area: Rect,
+    pub(super) thread_area: Rect,
     /// Empty rect when the pane is too short; hint is dropped rather than crowding the thread area.
-    hint_chunk: Rect,
+    pub(super) hint_chunk: Rect,
     /// Rect for the input container (with border).
-    input_chunk: Rect,
+    pub(super) input_chunk: Rect,
     /// Rect for the input text area (inside the container).
-    input_area: Rect,
+    pub(super) input_area: Rect,
     /// Whether the input box is drawn with a border.
-    input_boxed: bool,
+    pub(super) input_boxed: bool,
     /// All input lines (may be scrolled).
-    input_lines_all: Vec<String>,
+    pub(super) input_lines_all: Vec<String>,
     /// Cursor line index across all input lines.
-    cursor_line_all: usize,
+    pub(super) cursor_line_all: usize,
     /// Cursor column index within the line.
-    cursor_col_all: usize,
+    pub(super) cursor_col_all: usize,
     /// Maximum displayable input lines (height of input_area).
-    input_inner_height: usize,
+    pub(super) input_inner_height: usize,
     /// Starting line index for the visible window (for scroll).
-    input_window_start: usize,
+    pub(super) input_window_start: usize,
 }
 
 fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
@@ -102,7 +110,11 @@ where
     }
 }
 
-fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
+pub(super) fn resolve_context_pct(
+    state: &AppState,
+    agent_id: &str,
+    mission: Option<&str>,
+) -> Option<u32> {
     resolve_agent_metric(
         state,
         agent_id,
@@ -116,7 +128,7 @@ fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) 
     .map(u32::from)
 }
 
-fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) -> String {
+pub(super) fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) -> String {
     let short = format_token_count_short;
     match (pct, used, max) {
         (Some(p), Some(u), Some(m)) => format!("{p}% {}/{}", short(u), short(m)),
@@ -128,7 +140,11 @@ fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) ->
     }
 }
 
-fn resolve_context_used(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
+pub(super) fn resolve_context_used(
+    state: &AppState,
+    agent_id: &str,
+    mission: Option<&str>,
+) -> Option<u32> {
     resolve_agent_metric(
         state,
         agent_id,
@@ -331,7 +347,7 @@ pub fn render(
                     break;
                 };
                 if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
-                    combined_rows.extend(inline_breather_rows(
+                    combined_rows.extend(breather::inline_breather_rows(
                         state,
                         agent_ids,
                         pulse_on,
@@ -346,7 +362,7 @@ pub fn render(
         // Drain any remaining slots past the end of cached rows.
         for &(_, prompt_msg_idx) in slot_iter {
             if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
-                combined_rows.extend(inline_breather_rows(
+                combined_rows.extend(breather::inline_breather_rows(
                     state,
                     agent_ids,
                     pulse_on,
@@ -378,7 +394,7 @@ pub fn render(
     let has_swarm_context =
         mission_ctx.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
-        combined_rows.extend(breather_rows_for_user_prompt(
+        combined_rows.extend(breather::breather_rows_for_user_prompt(
             state,
             Some(swarm),
             pulse_on,
@@ -599,306 +615,7 @@ pub fn render(
     None
 }
 
-/// Per-pane render entry point used by multipane mode. Renders chat
-/// thread + hint + chat input box for a single `PaneSession` inside
-/// `area`. Caller paints any outer chrome (border + cwd title) and passes
-/// the inner rect.
-///
-/// Sibling-not-wrapper relationship to `render`: see the deviation note in
-/// the multipane integration plan. This function bypasses the global
-/// `console_rows_cache` (the cache key is keyed off
-/// `selected_context_agent`, which is shared across panes); rebuilds
-/// thread rows directly from `state.agents.messages` filtered by
-/// `pane.agent_id`. Acceptable v1 cost: messages per pane are bounded.
-pub fn render_pane(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut AppState,
-    swarm: Option<&SwarmRuntime>,
-    theme: &Theme,
-    pane: &PaneSession,
-    focused: bool,
-) -> Option<ChatCursor> {
-    let layout = compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)?;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(layout.input_chunk.height),
-        ])
-        .split(area);
-
-    let agent = Some(pane.agent_id.as_str());
-    // Render-side mission falls back to the synthetic chat id so the
-    // pane filter sees a non-None mission for fresh panes — closes the
-    // (agent_id.is_none() && mission_id.is_none()) leak in the matcher
-    // for default-chat user prompts in another pane.
-    let synthetic = (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str());
-    let mission = pane.mission_id.as_deref().or(synthetic);
-    let codex_ctx_pct = agent.and_then(|id| resolve_context_pct(state, id, mission));
-    let codex_ctx_used = agent.and_then(|id| resolve_context_used(state, id, mission));
-    let codex_ctx_max = agent.and_then(|agent_id| {
-        state
-            .agents
-            .codex_effective_context_window_tokens
-            .get(agent_id)
-            .or_else(|| {
-                state
-                    .agents
-                    .claude_effective_context_window_tokens
-                    .get(agent_id)
-            })
-            .copied()
-    });
-    let label_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
-    // BOLD mission style only when a real swarm mission is attached;
-    // the synthetic chat id should not light up the agent= label.
-    let mission_style = if pane.mission_id.is_some() {
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        label_style
-    };
-    let ctx_text = format_context_text(codex_ctx_pct, codex_ctx_used, codex_ctx_max);
-    let ctx_any = codex_ctx_pct.is_some() || codex_ctx_used.is_some() || codex_ctx_max.is_some();
-    let ctx_style = if ctx_any {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        label_style
-    };
-    let context_line = Line::from(vec![
-        Span::styled("agent=", label_style),
-        Span::styled(pane.agent_id.clone(), mission_style),
-        Span::styled("     ", label_style),
-        Span::styled("ctx=", label_style),
-        Span::styled(ctx_text, ctx_style),
-    ]);
-    frame.render_widget(Paragraph::new(context_line), chunks[0]);
-
-    let thread_width = layout.thread_area.width.max(1) as usize;
-    let thread_height = layout.thread_area.height.max(1) as usize;
-
-    let thread_rows = build_pane_thread_rows_with_breathers_for_pane(
-        state,
-        swarm,
-        Some(pane.pane_id),
-        agent,
-        mission,
-        thread_width,
-        !pane.has_run_mission,
-    );
-
-    let total_rows = thread_rows.len();
-    let max_scroll = total_rows.saturating_sub(thread_height);
-    let scroll = pane.chat_thread_scroll.min(max_scroll);
-    let visible_row_refs: Vec<&ThreadRow> = thread_rows
-        .iter()
-        .skip(scroll)
-        .take(thread_height)
-        .collect();
-    let visible_styled: Vec<Line<'static>> = thread_lines(visible_row_refs.iter().copied(), theme);
-    let visible = match pane.selection.as_ref() {
-        Some(sel) => paint_pane_thread_selection(
-            visible_styled,
-            &visible_row_refs,
-            sel,
-            scroll,
-            theme.selection_bg,
-        ),
-        None => visible_styled,
-    };
-    frame.render_widget(
-        Paragraph::new(visible).style(Style::default().bg(theme.background)),
-        layout.thread_area,
-    );
-
-    let input_visible_text: Vec<String> = layout
-        .input_lines_all
-        .iter()
-        .skip(layout.input_window_start)
-        .take(layout.input_inner_height)
-        .cloned()
-        .collect();
-    let input_len_chars = pane.chat_input.chars().count();
-    let input_cursor = pane.chat_input_cursor.min(input_len_chars);
-    let input_selection_range = pane
-        .chat_input_selection_anchor
-        .map(|anchor| anchor.min(input_len_chars))
-        .and_then(|anchor| {
-            if anchor == input_cursor {
-                None
-            } else {
-                Some((anchor.min(input_cursor), anchor.max(input_cursor)))
-            }
-        });
-    let (in_sel_start_line, in_sel_start_col, in_sel_end_line, in_sel_end_col) =
-        input_selection_range
-            .map(|(start, end)| {
-                let wrap_width = layout.input_area.width.max(1) as usize;
-                let (s_line, s_col) =
-                    chat_input_display_pos_for_char_idx(&pane.chat_input, wrap_width, start);
-                let (e_line, e_col) =
-                    chat_input_display_pos_for_char_idx(&pane.chat_input, wrap_width, end);
-                (s_line, s_col, e_line, e_col)
-            })
-            .unwrap_or((0, 0, 0, 0));
-    let input_visible: Vec<Line<'static>> = input_visible_text
-        .into_iter()
-        .enumerate()
-        .map(|(idx, text)| {
-            if input_selection_range.is_none() {
-                return Line::from(text);
-            }
-            let line_idx = layout.input_window_start.saturating_add(idx);
-            if line_idx < in_sel_start_line || line_idx > in_sel_end_line {
-                return Line::from(text);
-            }
-            let line_len = text.chars().count();
-            let (sel_start, sel_end) = if in_sel_start_line == in_sel_end_line {
-                (in_sel_start_col, in_sel_end_col)
-            } else if line_idx == in_sel_start_line {
-                (in_sel_start_col, line_len)
-            } else if line_idx == in_sel_end_line {
-                (0, in_sel_end_col)
-            } else {
-                (0, line_len)
-            };
-            let sel_start = sel_start.min(line_len);
-            let sel_end = sel_end.min(line_len);
-            highlight_plain_line(&text, sel_start, sel_end, theme.selection_bg)
-        })
-        .collect();
-    let input_max_row = layout.input_inner_height.saturating_sub(1);
-    if layout.input_boxed {
-        let queued_count = state
-            .agents
-            .agents
-            .iter()
-            .find(|a| a.id == pane.agent_id)
-            .map(|agent_lane| {
-                let running = state.agents.active_turns.contains_key(&agent_lane.id);
-                agent_lane.queue_len.saturating_sub(usize::from(running))
-            })
-            .unwrap_or(0);
-        let mut title_spans = Vec::new();
-        title_spans.push(Span::styled(
-            "CHAT BOX".to_string(),
-            Style::default()
-                .fg(if focused {
-                    theme.border_focused
-                } else {
-                    theme.border
-                })
-                .add_modifier(Modifier::BOLD),
-        ));
-        // Match the single-pane chat-box badge colors so the operator
-        // gets the same visual cue regardless of which UI surface
-        // they're using. Single-pane uses `border_focused` for the
-        // template badge and `hl.operator` for the mission badge —
-        // see the matching block ~300 lines up in `compute_console_layout`.
-        title_spans.push(Span::raw("  "));
-        title_spans.push(Span::styled(
-            format!(" t={} ", pane.swarm_template),
-            Style::default()
-                .fg(theme.background)
-                .bg(theme.border_focused)
-                .add_modifier(Modifier::BOLD),
-        ));
-        title_spans.push(Span::raw(" "));
-        title_spans.push(Span::styled(
-            format!(" m={} ", pane.swarm_mission),
-            Style::default()
-                .fg(theme.background)
-                .bg(theme.hl.operator)
-                .add_modifier(Modifier::BOLD),
-        ));
-        if queued_count > 0 {
-            title_spans.push(Span::raw("  "));
-            let label = if queued_count > 1 {
-                format!(" Queued {queued_count} ")
-            } else {
-                " Queued ".to_string()
-            };
-            title_spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(theme.background)
-                    .bg(theme.seed.accent_2)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .title(Line::from(title_spans))
-            .border_style(if focused {
-                Style::default().fg(theme.border_focused)
-            } else {
-                Style::default().fg(theme.border)
-            })
-            .border_type(if focused {
-                BorderType::Rounded
-            } else {
-                BorderType::Plain
-            })
-            .style(Style::default().bg(theme.background));
-        frame.render_widget(input_block, layout.input_chunk);
-    }
-    let input_bg = if focused {
-        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
-        if bg == theme.selection_bg {
-            bg = theme.cursor_line_bg;
-        }
-        if bg == theme.selection_bg {
-            bg = theme.background;
-        }
-        bg
-    } else {
-        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 85);
-        if bg == theme.selection_bg {
-            bg = theme.background;
-        }
-        bg
-    };
-    frame.render_widget(
-        Paragraph::new(input_visible)
-            .style(Style::default().fg(theme.foreground).bg(input_bg))
-            .wrap(Wrap { trim: false }),
-        layout.input_area,
-    );
-
-    // Same blink gating as `render` (single-pane). `cursor_visible`
-    // toggles every ~6 frames via the global frame counter, so the
-    // pane caret pulses in lockstep with the editor caret instead of
-    // sitting solid the whole time.
-    if focused && cursor_visible(state) {
-        let cursor_visible_in_window = layout.cursor_line_all >= layout.input_window_start
-            && layout.cursor_line_all
-                < layout
-                    .input_window_start
-                    .saturating_add(layout.input_inner_height);
-        if cursor_visible_in_window {
-            let cursor_line_visible = layout
-                .cursor_line_all
-                .saturating_sub(layout.input_window_start);
-            let max_col = layout.input_area.width.saturating_sub(1) as usize;
-            let col = layout.cursor_col_all.min(max_col) as u16;
-            let row = cursor_line_visible.min(input_max_row) as u16;
-            return Some(ChatCursor {
-                x: layout.input_area.x + col,
-                y: layout.input_area.y + row,
-            });
-        }
-    }
-    None
-}
-
-fn compute_pane_layout(
+pub(super) fn compute_pane_layout(
     area: Rect,
     chat_input: &str,
     cursor_char_idx: usize,
@@ -1029,170 +746,6 @@ pub fn build_pane_thread_rows_for_pane(
 /// values before invoking. `inline_breather_rows` and
 /// `breather_rows_for_user_prompt` read those via `selected_context_*`,
 /// so the resulting rows only contain pending lanes for this pane.
-pub fn build_pane_thread_rows_with_breathers(
-    state: &AppState,
-    swarm: Option<&SwarmRuntime>,
-    agent: Option<&str>,
-    mission: Option<&str>,
-    width: usize,
-    suppress_artifacts: bool,
-) -> Vec<ThreadRow> {
-    build_pane_thread_rows_with_breathers_for_pane(
-        state,
-        swarm,
-        None,
-        agent,
-        mission,
-        width,
-        suppress_artifacts,
-    )
-}
-
-/// True when `lane` belongs to the rendered pane's scope. Used by the
-/// `any_remaining` trigger to match the bottom-block content filter, so
-/// sibling-pane activity does not inflate this pane's breather. Single-
-/// pane callers (`pane_idx = None`) accept every lane.
-fn lane_in_pane_scope(
-    state: &AppState,
-    lane: &nit_core::AgentLane,
-    pane_idx: Option<usize>,
-    mission: Option<&str>,
-    agent: Option<&str>,
-) -> bool {
-    if pane_idx.is_none() {
-        return true;
-    }
-    if let Some(mid) = mission {
-        if lane.current_mission.as_deref() == Some(mid) {
-            return true;
-        }
-        let queued_codex = state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|t| t.agent_id == lane.id && t.mission_id.as_deref() == Some(mid));
-        let queued_claude = state
-            .agents
-            .queued_claude_turns
-            .iter()
-            .any(|t| t.agent_id == lane.id && t.mission_id.as_deref() == Some(mid));
-        return queued_codex || queued_claude;
-    }
-    agent.is_none_or(|ag| lane.id == ag)
-}
-
-/// Pane-aware variant of [`build_pane_thread_rows_with_breathers`].
-/// `pane_idx = Some(n)` activates the defense-in-depth filter so any
-/// `Broadcast` (or stray Agent reply) from another pane is dropped at
-/// the renderer.
-pub fn build_pane_thread_rows_with_breathers_for_pane(
-    state: &AppState,
-    swarm: Option<&SwarmRuntime>,
-    pane_idx: Option<usize>,
-    agent: Option<&str>,
-    mission: Option<&str>,
-    width: usize,
-    suppress_artifacts: bool,
-) -> Vec<ThreadRow> {
-    let ordered = visible_messages_grouped_for_pane(state, pane_idx, mission, agent);
-    let pulse_on = pulse_on(state);
-
-    let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
-        std::collections::HashMap::new();
-    for (agent_id, &prompt_idx) in state
-        .agents
-        .codex_turn_prompt_idx
-        .iter()
-        .chain(state.agents.claude_turn_prompt_idx.iter())
-    {
-        let is_active = state.agents.active_turns.contains_key(agent_id)
-            || state
-                .agents
-                .queued_codex_turns
-                .iter()
-                .any(|t| t.agent_id == *agent_id)
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|t| t.agent_id == *agent_id);
-        if is_active {
-            pending_by_prompt
-                .entry(prompt_idx)
-                .or_default()
-                .push(agent_id.clone());
-        }
-    }
-
-    let mut inline_shown = std::collections::HashSet::<String>::new();
-    let mut combined: Vec<ThreadRow> = Vec::new();
-    for (msg_idx, msg) in ordered {
-        let msg_rows = format_message_rows(state, swarm, msg, width);
-        combined.extend(msg_rows);
-        let is_user_prompt = msg.agent_id.is_none();
-        if !is_user_prompt {
-            continue;
-        }
-        let Some(agent_ids) = pending_by_prompt.get(&msg_idx) else {
-            continue;
-        };
-        combined.extend(inline_breather_rows(state, agent_ids, pulse_on, width));
-        for id in agent_ids {
-            inline_shown.insert(id.clone());
-        }
-    }
-
-    // Pane mode (`pane_idx = Some(_)`): the trigger must match the
-    // bottom-block content filter. Otherwise sibling-pane activity fires
-    // `any_remaining = true` here and `breather_rows_for_user_prompt`
-    // re-emits this pane's own lane that `inline_breather_rows` already
-    // showed — the doubled breather the operator hit when pane 4
-    // dispatched while pane 0 was active.
-    let any_remaining = state.agents.agents.iter().any(|a| {
-        if !lane_in_pane_scope(state, a, pane_idx, mission, agent) {
-            return false;
-        }
-        if inline_shown.contains(&a.id) {
-            return false;
-        }
-        state.agents.active_turns.contains_key(&a.id)
-            || state
-                .agents
-                .queued_codex_turns
-                .iter()
-                .any(|t| t.agent_id == a.id)
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|t| t.agent_id == a.id)
-    });
-    let has_swarm_context =
-        mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
-    if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
-        // pane_isolate=true: drop secondary_ids so a running agent in
-        // pane A doesn't show up in pane B's breather. Each multipane
-        // pane is its own session — they must not see each other's
-        // active turns. The caller (multipane render) has already
-        // aliased state.agents.selected_agent / selected_mission to
-        // this pane's values, so primary_ids is exactly the agents
-        // belonging to this pane.
-        combined.extend(breather_rows_for_user_prompt(
-            state, swarm, pulse_on, width, true,
-        ));
-    }
-
-    if suppress_artifacts {
-        for row in &mut combined {
-            if matches!(row.kind, ThreadRowKind::ArtifactLink) {
-                row.text = row.text.replace(" (see ARTIFACTS)", "");
-                row.kind = ThreadRowKind::Agent;
-            }
-        }
-    }
-    combined
-}
-
 pub fn thread_text_area(area: Rect, state: &AppState) -> Option<Rect> {
     compute_console_layout(area, state).map(|layout| layout.thread_area)
 }
@@ -1424,7 +977,7 @@ pub fn artifact_message_index_for_line_with_pane(
         // would insert (they shift all subsequent line indices).
         if msg.agent_id.is_none() {
             if let Some(agent_ids) = pending_by_prompt.get(&msg_idx) {
-                let breather = inline_breather_rows(state, agent_ids, false, width);
+                let breather = breather::inline_breather_rows(state, agent_ids, false, width);
                 row_cursor = row_cursor.saturating_add(breather.len());
             }
         }
@@ -1697,7 +1250,7 @@ pub(crate) fn chat_input_display_pos_for_char_idx(
 ///
 /// Mirrors `multipane::selection::resolve_text`'s row/column normalization
 /// so the highlight cannot diverge from the text Cmd+C copies.
-fn paint_pane_thread_selection(
+pub(super) fn paint_pane_thread_selection(
     visible: Vec<Line<'static>>,
     visible_row_refs: &[&ThreadRow],
     sel: &PaneSelection,
@@ -1843,7 +1396,7 @@ fn next_tab_width(col: usize, width: usize) -> usize {
     to_stop.max(1).min(width)
 }
 
-fn thread_lines<'a>(
+pub(super) fn thread_lines<'a>(
     rows: impl IntoIterator<Item = &'a ThreadRow>,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -2575,7 +2128,12 @@ fn thread_rows(
         // After a user prompt, show inline breather for pending agents.
         if msg.agent_id.is_none() {
             if let Some(prompt_agents) = pending_by_prompt.get(&msg_idx) {
-                rows.extend(inline_breather_rows(state, prompt_agents, pulse_on, width));
+                rows.extend(breather::inline_breather_rows(
+                    state,
+                    prompt_agents,
+                    pulse_on,
+                    width,
+                ));
                 for id in prompt_agents {
                     inline_shown.insert(id.clone());
                 }
@@ -2609,7 +2167,7 @@ fn thread_rows(
     let has_swarm_context =
         mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || has_swarm_context {
-        rows.extend(breather_rows_for_user_prompt(
+        rows.extend(breather::breather_rows_for_user_prompt(
             state, swarm, pulse_on, width, false,
         ));
     }
@@ -2668,7 +2226,7 @@ fn visible_messages_grouped<'a>(
     visible_messages_grouped_for_pane(state, None, mission, agent)
 }
 
-fn visible_messages_grouped_for_pane<'a>(
+pub(super) fn visible_messages_grouped_for_pane<'a>(
     state: &'a AppState,
     pane_idx: Option<usize>,
     mission: Option<&str>,
@@ -2785,7 +2343,7 @@ fn message_matches_pane(msg: &AgentMessage, pane_idx: Option<usize>) -> bool {
     true
 }
 
-fn format_message_rows(
+pub(super) fn format_message_rows(
     state: &AppState,
     swarm: Option<&SwarmRuntime>,
     msg: &AgentMessage,
@@ -3032,7 +2590,7 @@ fn swarm_clone_mission_id(agent_id: &str) -> Option<&str> {
     }
 }
 
-fn agent_roster_label(agent: &AgentLane) -> String {
+pub(super) fn agent_roster_label(agent: &AgentLane) -> String {
     let id_full = agent.id.trim();
     if let Some(label) = swarm_clone_source_label(id_full) {
         return label;
@@ -3059,678 +2617,7 @@ fn agent_roster_label(agent: &AgentLane) -> String {
     format!("{role_full}/{id_full}")
 }
 
-fn inline_breather_rows(
-    state: &AppState,
-    agent_ids: &[String],
-    pulse_on: bool,
-    width: usize,
-) -> Vec<ThreadRow> {
-    let now = Instant::now();
-    let width = width.max(1);
-    let elap_w = 6usize;
-    let hb_w = 4usize;
-    let out_w = 4usize;
-    let times_and_spacing = elap_w + hb_w + out_w + 3;
-    let agent_w = width.saturating_sub(times_and_spacing + 1).max(1);
-
-    let seed_id = agent_ids.first().map(String::as_str);
-    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, true);
-
-    let mut rows = Vec::new();
-    rows.push(ThreadRow {
-        text: format!("{ecg} Working ..."),
-        kind: ThreadRowKind::Breather,
-    });
-    rows.push(ThreadRow {
-        text: pad_to_width(
-            &format!(
-                "{} {} {} {}",
-                fit_left("AGENT", agent_w),
-                fit_right("ELAP", elap_w),
-                fit_right("HB", hb_w),
-                fit_right("OUT", out_w),
-            ),
-            width,
-        ),
-        kind: ThreadRowKind::StatusHeader,
-    });
-    for id in agent_ids {
-        let agent = state.agents.agents_get(id.as_str());
-        let badge = agent
-            .map(agent_roster_label)
-            .unwrap_or_else(|| id.to_string());
-        let turn = state.agents.active_turns.get(id.as_str());
-        let stage_raw = if let Some(turn) = turn {
-            turn.stage.as_deref().unwrap_or("starting")
-        } else {
-            "queued"
-        };
-        let stage = agent
-            .map(|a| format_agent_stage_label(state, a, stage_raw))
-            .unwrap_or_else(|| stage_raw.to_string());
-        let suppress = stage_raw == "queued";
-        let (elapsed_s, hb_s, out_s) = if suppress {
-            ("--".into(), "--".into(), "--".into())
-        } else {
-            let elapsed = turn.and_then(|t| now.checked_duration_since(t.started_at));
-            let hb = turn
-                .and_then(|t| now.checked_duration_since(t.last_heartbeat_at))
-                .map(|d| d.as_secs());
-            let out = turn
-                .and_then(|t| now.checked_duration_since(t.last_output_at))
-                .map(|d| d.as_secs());
-            (
-                elapsed
-                    .map(format_duration_compact)
-                    .unwrap_or_else(|| "--".into()),
-                hb.map(|s| format!("{s}s")).unwrap_or_else(|| "--".into()),
-                out.map(|s| format!("{s}s")).unwrap_or_else(|| "--".into()),
-            )
-        };
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{} {} {} {}",
-                    fit_left(&badge, agent_w),
-                    fit_right(&elapsed_s, elap_w),
-                    fit_right(&hb_s, hb_w),
-                    fit_right(&out_s, out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusRow,
-        });
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{} {} {} {}",
-                    fit_left(&format!("\u{21b3} {stage}"), agent_w),
-                    fit_right("", elap_w),
-                    fit_right("", hb_w),
-                    fit_right("", out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusSubRow,
-        });
-    }
-    rows
-}
-
-/// Sort key for the breather agent table: smaller = higher priority. Used
-/// to promote actively-running agents to the front so the truncated table
-/// always shows the live work. Mirrors `agent_ops_view::roster_running_priority`
-/// but operates on agent ids since the breather works in id-space.
-fn breather_running_priority(state: &AppState, agent_id: &str) -> u8 {
-    if state.agents.active_turns.contains_key(agent_id) {
-        return 0;
-    }
-    let queued = state
-        .agents
-        .queued_codex_turns
-        .iter()
-        .any(|turn| turn.agent_id == agent_id)
-        || state
-            .agents
-            .queued_claude_turns
-            .iter()
-            .any(|turn| turn.agent_id == agent_id);
-    if queued {
-        return 1;
-    }
-    let agent = state.agents.agents_get(agent_id);
-    match agent.map(|a| a.status) {
-        Some(AgentStatus::Running) | Some(AgentStatus::Waiting) => 2,
-        Some(AgentStatus::Idle) => 3,
-        Some(AgentStatus::Error) | None => 4,
-    }
-}
-
-fn breather_rows_for_user_prompt(
-    state: &AppState,
-    swarm: Option<&SwarmRuntime>,
-    pulse_on: bool,
-    width: usize,
-    // When true, agents that don't match the current selected_agent /
-    // selected_mission context are dropped instead of being shown in
-    // the secondary ("other agents") block. Multipane sets this so a
-    // running agent in pane A doesn't bleed into pane B's breather; the
-    // single-pane chat-console intentionally keeps it false so the
-    // operator still sees background activity from agents they aren't
-    // currently looking at.
-    pane_isolate: bool,
-) -> Vec<ThreadRow> {
-    let mission_ctx = state.agents.selected_context_mission();
-    let agent_ctx = state.agents.selected_context_agent();
-    let mut primary_ids = Vec::new();
-    let mut secondary_ids = Vec::new();
-    for agent in state.agents.agents.iter() {
-        let has_active = state.agents.active_turns.contains_key(&agent.id);
-        let has_queued = state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|turn| turn.agent_id == agent.id)
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|turn| turn.agent_id == agent.id);
-        if !has_active && !has_queued {
-            continue;
-        }
-        let queued_in_mission = mission_ctx.is_some_and(|mission_id| {
-            state.agents.queued_codex_turns.iter().any(|turn| {
-                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
-            }) || state.agents.queued_claude_turns.iter().any(|turn| {
-                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
-            })
-        });
-        let in_context = if let Some(mission_id) = mission_ctx {
-            agent.current_mission.as_deref() == Some(mission_id) || queued_in_mission
-        } else if let Some(selected_agent) = agent_ctx {
-            agent.id == selected_agent || chat_clone_base_id(&agent.id) == Some(selected_agent)
-        } else {
-            true
-        };
-        if in_context {
-            primary_ids.push(agent.id.clone());
-        } else {
-            secondary_ids.push(agent.id.clone());
-        }
-    }
-
-    let width = width.max(1);
-    // Keep the roster table flush to the pane's left edge so it matches the right side alignment.
-    let indent_str = String::new();
-    let inner = width;
-
-    let now = Instant::now();
-    let mut swarm_assigned_ids: Vec<String> = Vec::new();
-    let mut swarm_mission_id: Option<&str> = None;
-    if let Some(mission_id) = mission_ctx {
-        if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
-            if mission.swarm {
-                swarm_mission_id = Some(mission_id);
-                for id in mission.assigned_agents.iter() {
-                    if swarm_assigned_ids.iter().any(|existing| existing == id) {
-                        continue;
-                    }
-                    swarm_assigned_ids.push(id.clone());
-                }
-            }
-        }
-    }
-
-    let mut ordered_ids = Vec::new();
-    ordered_ids.extend(swarm_assigned_ids.iter().cloned());
-    let secondary_iter: &mut dyn Iterator<Item = &String> = if pane_isolate {
-        &mut std::iter::empty()
-    } else {
-        &mut secondary_ids.iter()
-    };
-    for id in primary_ids.iter().chain(secondary_iter) {
-        if ordered_ids.iter().any(|existing: &String| existing == id) {
-            continue;
-        }
-        ordered_ids.push(id.clone());
-    }
-    if ordered_ids.is_empty() {
-        return Vec::new();
-    }
-
-    // Shadow agents are hidden from the roster but still count for
-    // activity/queue detection — otherwise the breather would show "Waiting"
-    // while a shadow (propose/judge/review) is actively working. Scope to
-    // the selected agent context so a shadow on agent A doesn't trigger
-    // agent B's breather.
-    let shadow_ids: Vec<&str> = state
-        .agents
-        .agents
-        .iter()
-        .filter(|lane| lane.shadow)
-        .filter(|lane| match agent_ctx {
-            Some(ctx) => crate::shadow::parse_shadow_lane_id(&lane.id)
-                .map(|(base, _, _)| base == ctx)
-                .unwrap_or(false),
-            None => true,
-        })
-        .map(|lane| lane.id.as_str())
-        .collect();
-
-    let any_active = ordered_ids
-        .iter()
-        .any(|id| state.agents.active_turns.contains_key(id.as_str()))
-        || shadow_ids
-            .iter()
-            .any(|id| state.agents.active_turns.contains_key(*id));
-    let any_queued = ordered_ids.iter().any(|id| {
-        state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|turn| turn.agent_id == id.as_str())
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|turn| turn.agent_id == id.as_str())
-    }) || shadow_ids.iter().any(|id| {
-        state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|turn| turn.agent_id == *id)
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|turn| turn.agent_id == *id)
-    });
-    // Source of truth (production): the swarm runtime moves a run into
-    // `completed_runs` once the planner's synthesis step lands. Per-agent
-    // message scans miss clones whose tasks were skipped or never
-    // dispatched, leaving the UI stuck at "Waiting ..." even though the
-    // swarm was done. Fall back to the message scan only when no swarm
-    // runtime is provided (test-only path).
-    let all_swarm_done = swarm_mission_id.is_some_and(|mid| match swarm {
-        Some(s) => s.mission_is_complete(mid),
-        None => {
-            !swarm_assigned_ids.is_empty()
-                && swarm_assigned_ids.iter().all(|id| {
-                    state.agents.messages.iter().any(|msg| {
-                        msg.mission_id.as_deref() == Some(mid)
-                            && msg.agent_id.as_deref() == Some(id.as_str())
-                    })
-                })
-        }
-    });
-    // Distinguish a normal completion ("Done") from an operator abort
-    // ("Aborted") so the breather doesn't lie about the run's outcome.
-    // `mission_is_complete` is true for both — abort moves the run into
-    // `completed_runs` too — so we need the dedicated accessor.
-    let swarm_was_aborted =
-        swarm_mission_id.is_some_and(|mid| swarm.is_some_and(|s| s.mission_was_aborted(mid)));
-    // Whether the swarm run has been moved to `completed_runs`. Used to
-    // relabel clones that never received a turn from "swarm_pending"
-    // (which implies "still working") to "swarm_skipped" (which is the
-    // truthful state for a clone the planner never dispatched).
-    let swarm_mission_complete =
-        swarm_mission_id.is_some_and(|mid| swarm.is_some_and(|s| s.mission_is_complete(mid)));
-    let working = any_active || any_queued;
-    let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
-    let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
-    let is_swarm = swarm_mission_id.is_some();
-    let shadow_stage = crate::shadow::shadow_stage_label_from_state(state, agent_ctx);
-    // Aborted takes priority over every other stage label. After
-    // `/abort`, runner CancelTurn commands take ~50 ms to kill the
-    // subprocesses and emit TurnFailed; during that window the
-    // active_turns / queued_*_turns vectors aren't fully drained, so
-    // `any_active || any_queued` would otherwise mask the abort and
-    // leave the breather on "Executing ...". Surface "Aborted" the
-    // moment `mission_was_aborted` flips, regardless of in-flight
-    // kill latency.
-    let base_label: std::borrow::Cow<'_, str> = if is_swarm && swarm_was_aborted {
-        "Aborted".into()
-    } else if !is_swarm && shadow_stage.is_some() {
-        // Shadow pipeline is running for a single agent — surface the stage
-        // explicitly so the user has real feedback while the hidden agents work.
-        format!("{} ...", shadow_stage.unwrap()).into()
-    } else if any_active || any_queued {
-        match swarm_phase {
-            Some("PLAN") => "Planning ...".into(),
-            Some("VERIFY") => "Verifying ...".into(),
-            Some("SYNTH") => "Synthesizing ...".into(),
-            Some("EXEC") => swarm_exec_label(state, &ordered_ids, swarm).into(),
-            // Catchall: even when the run isn't reachable via the selected
-            // mission (unknown stage, moved to `completed_runs`, etc.) we
-            // still want to surface role-specific labels by looking up each
-            // active clone's dashboard via its own mission_id.
-            _ if is_swarm && any_active => swarm_exec_label(state, &ordered_ids, swarm).into(),
-            _ if any_active => "Working ...".into(),
-            _ => "Queued ...".into(),
-        }
-    } else if is_swarm && swarm_hint.is_some() {
-        // Background genome work is running but no agent is active yet. Use
-        // the stage + hint instead of a generic "Waiting" so the user knows
-        // what's causing the delay.
-        match swarm_phase {
-            Some("VERIFY") => "Verifying ...".into(),
-            Some("SYNTH") => "Synthesizing ...".into(),
-            _ => "Waiting ...".into(),
-        }
-    } else if is_swarm && all_swarm_done {
-        "Done".into()
-    } else if is_swarm {
-        "Waiting ...".into()
-    } else {
-        "Working ...".into()
-    };
-    let label: std::borrow::Cow<'_, str> = match swarm_hint {
-        Some(hint) if base_label.ends_with("...") => {
-            let trimmed = base_label.trim_end_matches("...").trim_end();
-            format!("{trimmed} ({hint}) ...").into()
-        }
-        _ => base_label,
-    };
-
-    // Cap the breather agent table to a manageable height. With swarms of
-    // up to `MAX_SWARM_SIZE` clones, this view would otherwise dominate the
-    // chat pane (each agent occupies a status row + sub-row = 2 lines, so
-    // 30+ agents pushes everything else off-screen). Predicate computations
-    // above (`any_active`, `any_queued`, `label`) still see the full list —
-    // only the rendered table is truncated.
-    // `NIT_ROSTER_NO_TRUNCATE=1` opts out of the cap entirely.
-    const BREATHER_VISIBLE_AGENTS: usize = 6;
-    // Promote running agents to the front so the visible window always
-    // shows the live work, regardless of where they landed in the
-    // mission/primary/secondary ordering. Stable sort preserves the
-    // existing tiebreak (swarm-assigned, then in-context, then others).
-    ordered_ids.sort_by_key(|id| breather_running_priority(state, id.as_str()));
-    let cap = if super::agent_ops_view::roster_truncation_disabled() {
-        ordered_ids.len()
-    } else {
-        BREATHER_VISIBLE_AGENTS
-    };
-    let visible_count = ordered_ids.len().min(cap);
-    let hidden_agent_count = ordered_ids.len() - visible_count;
-    let visible_ids = &ordered_ids[..visible_count];
-
-    let seed_id = primary_ids
-        .first()
-        .or_else(|| secondary_ids.first())
-        .or_else(|| ordered_ids.first())
-        .map(String::as_str);
-    // Animate whenever the label isn't a terminal state ("Done" /
-    // "Aborted") — transitional states like "Waiting ..." between
-    // swarm stages should still breathe so the UI doesn't look frozen.
-    let animating = !matches!(label.as_ref(), "Done" | "Aborted");
-    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, animating);
-
-    let mut rows = Vec::new();
-    rows.push(ThreadRow {
-        text: format!("{ecg} {label}"),
-        kind: ThreadRowKind::Breather,
-    });
-
-    // Table layout: show the agent roster with a stable right-aligned timing column.
-    let elap_w = 6usize;
-    let hb_w = 4usize;
-    let out_w = 4usize;
-    let times_and_spacing = elap_w + hb_w + out_w + 3; // spaces between columns
-    let agent_w = inner.saturating_sub(times_and_spacing + 1).max(1);
-
-    if agent_w < 6 {
-        // Narrow fallback: keep it readable without a strict column layout.
-        for id in visible_ids.iter() {
-            let agent = state
-                .agents
-                .agents
-                .iter()
-                .find(|agent| agent.id == id.as_str());
-            let badge = agent
-                .map(agent_roster_label)
-                .unwrap_or_else(|| id.to_string());
-            let turn = state.agents.active_turns.get(id.as_str());
-            let queued_for_swarm = swarm_mission_id.is_some_and(|mid| {
-                state.agents.queued_codex_turns.iter().any(|turn| {
-                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
-                }) || state.agents.queued_claude_turns.iter().any(|turn| {
-                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
-                })
-            });
-            let queued_any = state
-                .agents
-                .queued_codex_turns
-                .iter()
-                .any(|turn| turn.agent_id == id.as_str())
-                || state
-                    .agents
-                    .queued_claude_turns
-                    .iter()
-                    .any(|turn| turn.agent_id == id.as_str());
-            let has_message = swarm_mission_id.is_some_and(|mid| {
-                state.agents.messages.iter().any(|msg| {
-                    msg.mission_id.as_deref() == Some(mid)
-                        && msg.agent_id.as_deref() == Some(id.as_str())
-                })
-            });
-            let stage_raw = if let Some(turn) = turn {
-                turn.stage.as_deref().unwrap_or("starting")
-            } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
-                "error"
-            } else if queued_for_swarm {
-                "swarm_queued"
-            } else if queued_any {
-                "queued"
-            } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
-                if has_message {
-                    "swarm_done"
-                } else if swarm_mission_complete {
-                    "swarm_skipped"
-                } else {
-                    "swarm_pending"
-                }
-            } else {
-                "pending"
-            };
-            let suppress_times = matches!(stage_raw, "queued" | "swarm_queued");
-            let stage = agent
-                .map(|agent| format_agent_stage_label(state, agent, stage_raw))
-                .unwrap_or_else(|| stage_raw.to_string());
-
-            let (elapsed_s, hb_s, out_s) = if suppress_times {
-                ("--".into(), "--".into(), "--".into())
-            } else {
-                let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
-                let hb_age = turn
-                    .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
-                    .map(|d| d.as_secs());
-                let out_age = turn
-                    .and_then(|turn| now.checked_duration_since(turn.last_output_at))
-                    .map(|d| d.as_secs());
-
-                let elapsed_s = elapsed
-                    .map(format_duration_compact)
-                    .unwrap_or_else(|| "--".into());
-                let hb_s = hb_age
-                    .map(|s| format!("{s}s"))
-                    .unwrap_or_else(|| "--".into());
-                let out_s = out_age
-                    .map(|s| format!("{s}s"))
-                    .unwrap_or_else(|| "--".into());
-
-                (elapsed_s, hb_s, out_s)
-            };
-
-            rows.push(ThreadRow {
-                text: pad_to_width(
-                    &format!("{indent_str}{badge} {elapsed_s} {hb_s} {out_s}"),
-                    width,
-                ),
-                kind: ThreadRowKind::StatusRow,
-            });
-            rows.push(ThreadRow {
-                text: pad_to_width(&format!("{indent_str}↳ {stage}"), width),
-                kind: ThreadRowKind::StatusSubRow,
-            });
-        }
-        if hidden_agent_count > 0 {
-            rows.push(ThreadRow {
-                text: pad_to_width(
-                    &format!("{indent_str}↳ (+{hidden_agent_count} more)"),
-                    width,
-                ),
-                kind: ThreadRowKind::StatusSubRow,
-            });
-        }
-        if let Some(mission_id) = swarm_mission_id {
-            append_swarm_meta_footer_rows(
-                &mut rows,
-                state,
-                mission_id,
-                &indent_str,
-                width,
-                inner,
-                working,
-            );
-        }
-        return rows;
-    }
-
-    rows.push(ThreadRow {
-        text: pad_to_width(
-            &format!(
-                "{indent_str}{} {} {} {}",
-                fit_left("AGENT", agent_w),
-                fit_right("ELAP", elap_w),
-                fit_right("HB", hb_w),
-                fit_right("OUT", out_w),
-            ),
-            width,
-        ),
-        kind: ThreadRowKind::StatusHeader,
-    });
-    for id in visible_ids.iter() {
-        let agent = state
-            .agents
-            .agents
-            .iter()
-            .find(|agent| agent.id == id.as_str());
-        let badge = agent
-            .map(agent_roster_label)
-            .unwrap_or_else(|| id.to_string());
-        let turn = state.agents.active_turns.get(id.as_str());
-        let queued_for_swarm =
-            swarm_mission_id.is_some_and(|mid| {
-                state.agents.queued_codex_turns.iter().any(|turn| {
-                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
-                }) || state.agents.queued_claude_turns.iter().any(|turn| {
-                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
-                })
-            });
-        let queued_any = state
-            .agents
-            .queued_codex_turns
-            .iter()
-            .any(|turn| turn.agent_id == id.as_str())
-            || state
-                .agents
-                .queued_claude_turns
-                .iter()
-                .any(|turn| turn.agent_id == id.as_str());
-        let has_message = swarm_mission_id.is_some_and(|mid| {
-            state.agents.messages.iter().any(|msg| {
-                msg.mission_id.as_deref() == Some(mid)
-                    && msg.agent_id.as_deref() == Some(id.as_str())
-            })
-        });
-        let stage_raw = if let Some(turn) = turn {
-            turn.stage.as_deref().unwrap_or("starting")
-        } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
-            "error"
-        } else if queued_for_swarm {
-            "swarm_queued"
-        } else if queued_any {
-            "queued"
-        } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
-            if has_message {
-                "swarm_done"
-            } else if swarm_mission_complete {
-                "swarm_skipped"
-            } else {
-                "swarm_pending"
-            }
-        } else {
-            "pending"
-        };
-        let suppress_times = matches!(stage_raw, "queued" | "swarm_queued");
-        let stage = agent
-            .map(|agent| format_agent_stage_label(state, agent, stage_raw))
-            .unwrap_or_else(|| stage_raw.to_string());
-
-        let (elapsed_s, hb_s, out_s) = if suppress_times {
-            ("--".into(), "--".into(), "--".into())
-        } else {
-            let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
-            let hb_age = turn
-                .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
-                .map(|d| d.as_secs());
-            let out_age = turn
-                .and_then(|turn| now.checked_duration_since(turn.last_output_at))
-                .map(|d| d.as_secs());
-
-            let elapsed_s = elapsed
-                .map(format_duration_compact)
-                .unwrap_or_else(|| "--".into());
-            let hb_s = hb_age
-                .map(|s| format!("{s}s"))
-                .unwrap_or_else(|| "--".into());
-            let out_s = out_age
-                .map(|s| format!("{s}s"))
-                .unwrap_or_else(|| "--".into());
-
-            (elapsed_s, hb_s, out_s)
-        };
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{indent_str}{} {} {} {}",
-                    fit_left(&badge, agent_w),
-                    fit_right(&elapsed_s, elap_w),
-                    fit_right(&hb_s, hb_w),
-                    fit_right(&out_s, out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusRow,
-        });
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{indent_str}{} {} {} {}",
-                    fit_left(&format!("↳ {stage}"), agent_w),
-                    fit_right("", elap_w),
-                    fit_right("", hb_w),
-                    fit_right("", out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusSubRow,
-        });
-    }
-    if hidden_agent_count > 0 {
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{indent_str}{} {} {} {}",
-                    fit_left(&format!("↳ (+{hidden_agent_count} more)"), agent_w),
-                    fit_right("", elap_w),
-                    fit_right("", hb_w),
-                    fit_right("", out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusRow,
-        });
-    }
-
-    if let Some(mission_id) = swarm_mission_id {
-        append_swarm_meta_footer_rows(
-            &mut rows,
-            state,
-            mission_id,
-            &indent_str,
-            width,
-            inner,
-            working,
-        );
-    }
-
-    rows
-}
-
-fn append_swarm_meta_footer_rows(
+pub(super) fn append_swarm_meta_footer_rows(
     rows: &mut Vec<ThreadRow>,
     state: &AppState,
     mission_id: &str,
@@ -3955,7 +2842,7 @@ fn short_gate_bundle_label(value: &str) -> &str {
         .unwrap_or_else(|| value.trim())
 }
 
-fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) -> String {
+pub(super) fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) -> String {
     if state.debug {
         return stage.to_string();
     }
@@ -4204,11 +3091,11 @@ fn truncate_label(input: &str, max_chars: usize) -> String {
     out
 }
 
-fn fit_left(text: &str, width: usize) -> String {
+pub(super) fn fit_left(text: &str, width: usize) -> String {
     fit_cell(text, width, false)
 }
 
-fn fit_right(text: &str, width: usize) -> String {
+pub(super) fn fit_right(text: &str, width: usize) -> String {
     fit_cell(text, width, true)
 }
 
@@ -4236,7 +3123,7 @@ fn fit_cell(text: &str, width: usize, right_align: bool) -> String {
     }
 }
 
-fn format_duration_compact(duration: Duration) -> String {
+pub(super) fn format_duration_compact(duration: Duration) -> String {
     let secs = duration.as_secs();
     let minutes = secs / 60;
     let seconds = secs % 60;
@@ -4313,7 +3200,7 @@ fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usiz
     out
 }
 
-fn pad_to_width(input: &str, width: usize) -> String {
+pub(super) fn pad_to_width(input: &str, width: usize) -> String {
     let width = width.max(1);
     let current = UnicodeWidthStr::width(input);
     if current >= width {
@@ -4337,7 +3224,7 @@ fn pad_to_width(input: &str, width: usize) -> String {
 }
 
 // EXEC-phase label reflects the active roles (Coding/Reviewing/Integrating); mixed/absent → "Executing ...".
-fn swarm_exec_label<'a>(
+pub(super) fn swarm_exec_label<'a>(
     state: &nit_core::AppState,
     ordered_ids: &[String],
     swarm: Option<&SwarmRuntime>,
@@ -4436,7 +3323,7 @@ fn swarm_exec_label<'a>(
     "Executing ..."
 }
 
-fn ecg_indicator(
+pub(super) fn ecg_indicator(
     frame_count: u64,
     agent_id: Option<&str>,
     pulse_on: bool,
@@ -4477,7 +3364,7 @@ fn agent_seed(agent_id: &str) -> u64 {
     hash
 }
 
-fn pulse_on(state: &AppState) -> bool {
+pub(super) fn pulse_on(state: &AppState) -> bool {
     (state.metrics.frame_count / 6).is_multiple_of(2)
 }
 
@@ -4569,5 +3456,5 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[path = "tests/agent_console_view.rs"]
+#[path = "../tests/agent_console_view.rs"]
 mod tests;

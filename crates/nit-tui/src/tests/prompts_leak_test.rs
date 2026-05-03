@@ -401,6 +401,249 @@ fn chat_dispatch_does_not_augment_with_file_checklist() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
+// Positive case: a prompt that names an on-disk directory AND uses a
+// writer verb AND is neither a question nor a read-intent ask must
+// receive the FILE CHECKLIST appendix at chat dispatch. Locks the
+// gated-restore path the operator asked for.
+#[test]
+fn chat_dispatch_attaches_checklist_for_real_work() {
+    let cwd = cargo_workspace("chat_dispatch_real_work");
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.selected_agent = Some("codex-test".into());
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+
+    // Use a writer verb (`update`) that is NOT one of the auto-shadow
+    // keywords (refactor / migrate / rewrite / implement / overhaul /
+    // restructure) so the prompt stays on the main dispatch path
+    // instead of being hijacked into the shadow pipeline.
+    let raw = "Update crates/foo to extract the iterator helper";
+    state.agents.chat_input = raw.into();
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    let _ = crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&codex),
+        None,
+        &mut swarm,
+        &mut shadow,
+    );
+
+    let queued: Vec<_> = state.agents.queued_codex_turns.iter().collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "expected the prompt to land in the codex queue"
+    );
+    let prompt = &queued[0].prompt;
+    assert!(
+        prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        "real-work prompt should carry the FILE CHECKLIST:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("crates/foo/src/lib.rs"),
+        "checklist should enumerate the resolved scope files:\n{prompt}"
+    );
+
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+// BUG 2 root-cause regression: the deleted helper's primary failure path
+// was `enumerate_scope_files`'s git-diff fallback firing for every prompt
+// in a dirty workspace. The new conjunctive gate requires an inline path
+// token, so a casual "hi there" can never reach the git fallback even when
+// the workspace has uncommitted edits. Reproduce the original failure
+// shape (git-init, commit, modify, then dispatch a casual prompt) to
+// guard the fallback path itself.
+#[test]
+fn chat_dispatch_does_not_augment_short_prompt_in_dirty_workspace() {
+    use std::process::Command;
+
+    let cwd = cargo_workspace("chat_dispatch_dirty_workspace");
+    // git init + initial commit + modify a tracked file so `git diff
+    // --name-only` against HEAD has output. Without these git calls the
+    // fallback returns empty and the test wouldn't reproduce BUG 2.
+    let run_git = |args: &[&str]| {
+        let _ = Command::new("git")
+            .args(args)
+            .current_dir(&cwd)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output();
+    };
+    run_git(&["init", "-q"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+    fs::write(cwd.join("crates/foo/src/lib.rs"), "// foo edit\n").unwrap();
+
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.selected_agent = Some("codex-test".into());
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+
+    let raw = "hi there";
+    state.agents.chat_input = raw.into();
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    let _ = crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&codex),
+        None,
+        &mut swarm,
+        &mut shadow,
+    );
+
+    let queued: Vec<_> = state.agents.queued_codex_turns.iter().collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "expected the prompt to land in the codex queue"
+    );
+    assert_eq!(
+        queued[0].prompt, raw,
+        "casual prompt in dirty git workspace must not be augmented",
+    );
+
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+// Read-intent / question prefix veto: even when the prompt contains a
+// writer verb later, a leading question word must suppress augmentation.
+#[test]
+fn chat_dispatch_does_not_augment_for_question_prefix() {
+    let cwd = cargo_workspace("chat_dispatch_question_prefix");
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.selected_agent = Some("codex-test".into());
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+
+    let raw = "what does the dispatcher do?";
+    state.agents.chat_input = raw.into();
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    let _ = crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&codex),
+        None,
+        &mut swarm,
+        &mut shadow,
+    );
+
+    let queued: Vec<_> = state.agents.queued_codex_turns.iter().collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "expected the prompt to land in the codex queue"
+    );
+    assert_eq!(
+        queued[0].prompt, raw,
+        "question-prefixed prompt must reach runner verbatim",
+    );
+
+    let _ = fs::remove_dir_all(&cwd);
+}
+
 // Defensive parity: every non-integrate role's `wrap_task_prompt` output
 // must omit the writer FILE CHECKLIST. This matrix-checks role-gating in
 // `swarm/prompts.rs:603-630` so a future refactor that misroutes a writer

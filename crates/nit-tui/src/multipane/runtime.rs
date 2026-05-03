@@ -29,7 +29,7 @@ use super::setup::materialise_pane_lane;
 use crate::app::{
     chat_history_next, chat_history_prev, clear_chat_esc_state, handle_abort,
     handle_chat_input_editing_key, is_global_quit_key, lane_has_in_flight_turn,
-    parse_abort_command, record_chat_esc_press, submit_chat_input_and_dispatch, AbortScope,
+    record_chat_esc_press, AbortScope,
 };
 use crate::claude_runner::{ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
@@ -359,7 +359,7 @@ fn popup_rect_for(screen: Rect, desired: (u16, u16)) -> Rect {
         .split(vertical)[1]
 }
 
-fn capture_pane_mission_ids(state: &mut AppState) {
+pub(super) fn capture_pane_mission_ids(state: &mut AppState) {
     // pre-collect to avoid two simultaneous borrows on state inside the loop
     let real_mission_ids: std::collections::HashSet<String> =
         state.agents.missions.iter().map(|m| m.id.clone()).collect();
@@ -1277,156 +1277,12 @@ fn handle_chat_key(
     }
 }
 
-/// Lens-B-aliased Enter handler. Snaps the focused pane's
-/// `chat_input` / `selected_agent` / `selected_mission` /
-/// `chat_prompt_history*` / `swarm_default_*` into `state.agents.*`,
-/// runs the canonical `submit_chat_input_and_dispatch` (which handles
-/// `/abort`, `@swarm`, `@shadow`, `@all`, `@new`, `@queue`, `@q`, queueing,
-/// broadcast, advisories, swarm-followup re-activation, shadow auto-enable,
-/// and `push_chat_message`), then mirrors the resulting state back onto
-/// the pane.
-pub(crate) fn submit_focused_pane_input(
-    state: &mut AppState,
-    vitals: &mut VitalsState,
-    codex: &CodexRunner,
-    claude: &ClaudeRunner,
-    swarm: &mut SwarmRuntime,
-    shadow: &mut ShadowRuntime,
-) {
-    let pane_idx = focused_pane_idx(state);
-    let Some(pane) = state
-        .multipane
-        .as_ref()
-        .and_then(|mp| mp.panes.get(pane_idx))
-    else {
-        return;
-    };
-    let chat_input = pane.chat_input.clone();
-    if chat_input.trim().is_empty() {
-        return;
-    }
-    let bound = !pane.agent_id.is_empty()
-        || pane
-            .selected_agent_id
-            .as_deref()
-            .is_some_and(|id| !id.is_empty());
-
-    super::dispatch::bridge_pane_effort_to_runner_focused(state, pane_idx);
-
-    // Roster mode: only `/abort` is meaningful — fall through to the
-    // alias path so the operator gets parity with chat aborts. Anything
-    // else clears the input and posts a "no agent selected" notice.
-    if !bound && parse_abort_command(&chat_input).is_none() {
-        clear_focused_pane_input(state);
-        push_pane_system_message(
-            state,
-            "no agent selected — press Ctrl+R to choose one".into(),
-        );
-        return;
-    }
-
-    with_focused_pane_aliased(state, |state| {
-        if bound {
-            pin_pane_chat_mission_on_lane(state, pane_idx);
-        }
-        let _ =
-            submit_chat_input_and_dispatch(state, vitals, Some(codex), Some(claude), swarm, shadow);
-    });
-    if let Some(pane) = focused_pane_mut(state) {
-        pane.has_run_mission = true;
-    }
-    capture_pane_mission_ids(state);
-}
-
-/// Wrapper around `with_pane_aliased` for the focused pane. Single
-/// call site for chat-input editing and history nav so we don't
-/// duplicate the focus lookup at every keystroke.
-fn with_focused_pane_aliased<R>(state: &mut AppState, body: impl FnOnce(&mut AppState) -> R) -> R {
-    let pane_idx = focused_pane_idx(state);
-    with_pane_aliased(state, pane_idx, body)
-}
-
-const CHAT_THREAD_PAGE_STEP: i32 = 8;
-
-fn scroll_chat_thread(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, delta: i32) {
-    let Some(mp) = state.multipane.as_ref() else {
-        return;
-    };
-    let focused_idx = mp.focused;
-    let Some(pane) = mp.panes.get(focused_idx).cloned() else {
-        return;
-    };
-    let max_scroll = focused_pane_chat_thread_max_scroll(state, swarm, &pane, area, focused_idx);
-    if let Some(p) = focused_pane_mut(state) {
-        // Resolve the "stick to bottom" sentinel before applying delta —
-        // otherwise PgUp from the bottom jumps to row 0 instead of one
-        // page above the bottom (sentinel `as i32` wraps to -1 and
-        // `(-1 + delta).max(0) = 0`).
-        let resolved = resolve_chat_scroll_sentinel(p.chat_thread_scroll, max_scroll);
-        let next = (resolved as i32 + delta).max(0) as usize;
-        // Only re-engage the "stick to bottom" sentinel when the operator
-        // scrolled DOWN past the current bottom. PgUp / wheel-up must
-        // never re-engage it — otherwise a transient max_scroll dip
-        // (breather rows oscillating mid-swarm) silently consumes the
-        // operator's scroll-up and the viewport feels stuck.
-        p.chat_thread_scroll = if delta > 0 && next >= max_scroll {
-            nit_core::CONSOLE_SCROLL_BOTTOM
-        } else {
-            next.min(max_scroll)
-        };
-    }
-}
-
-/// Translate the "follow bottom" sentinel into a concrete row offset
-/// for arithmetic. Other values pass through. Used by both the
-/// keyboard PgUp/PgDn path and the mouse wheel path so they stay in
-/// lockstep with each other and with the `min(max_scroll)` clamp the
-/// renderer applies.
-fn resolve_chat_scroll_sentinel(scroll: usize, max_scroll: usize) -> usize {
-    if scroll == nit_core::CONSOLE_SCROLL_BOTTOM {
-        max_scroll
-    } else {
-        scroll.min(max_scroll)
-    }
-}
-
-/// Maximum legal `chat_thread_scroll` for the given pane. Mirrors the
-/// renderer's clamp at `agent_console_view::render_pane` so wheel /
-/// PgUp / PgDn never pin the stored scroll beyond the rendered window
-/// — which would otherwise force the operator to "drain" stale scroll
-/// before any visible movement happens.
-fn focused_pane_chat_thread_max_scroll(
-    state: &AppState,
-    swarm: &SwarmRuntime,
-    pane: &nit_core::PaneSession,
-    area: Rect,
-    pane_idx: usize,
-) -> usize {
-    if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
-        return 0;
-    }
-    let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, pane) else {
-        return 0;
-    };
-    let agent_id = if pane.agent_id.is_empty() {
-        pane.selected_agent_id.as_deref()
-    } else {
-        Some(pane.agent_id.as_str())
-    };
-    let rows = agent_console_view::build_pane_thread_rows_with_breathers_for_pane(
-        state,
-        Some(swarm),
-        Some(pane.pane_id),
-        agent_id,
-        pane.mission_id.as_deref().or_else(|| {
-            (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str())
-        }),
-        thread_area.width.max(1) as usize,
-        !pane.has_run_mission,
-    );
-    rows.len()
-        .saturating_sub(thread_area.height.max(1) as usize)
-}
+pub(super) use super::dispatch_focused::submit_focused_pane_input;
+use super::dispatch_focused::with_focused_pane_aliased;
+use super::scroll::{
+    focused_pane_chat_thread_max_scroll, pane_thread_area_for_pane, resolve_chat_scroll_sentinel,
+    scroll_chat_thread, CHAT_THREAD_PAGE_STEP,
+};
 
 fn focused_pane_rows(state: &AppState) -> (Option<usize>, Vec<roster_view::PaneRosterRow>) {
     let backend_filter = state
@@ -2135,16 +1991,6 @@ fn try_open_chat_pane_artifact(
 
 /// Chat thread paint rect — a thin layer above [`pane_body_rect`]
 /// that adds the prompt-input split.
-fn pane_thread_area_for_pane(
-    state: &AppState,
-    area: Rect,
-    pane_idx: usize,
-    pane: &nit_core::PaneSession,
-) -> Option<Rect> {
-    let body = pane_body_rect(state, area, pane_idx, pane)?;
-    agent_console_view::pane_thread_text_area(body, pane)
-}
-
 /// Alias `selected_*` to `pane` for the popup-open call so the resolver
 /// (`artifact_message_index_for_line_with_swarm` via `selected_context_*`)
 /// walks this pane's mission/agent. On a successful open `popup_keys`
@@ -2236,7 +2082,7 @@ fn resolve_left_click_target(
 /// chrome stripped + dir-search overlay stripped. Roster panes paint
 /// rows directly into this rect; chat panes split it further into
 /// thread + input via [`pane_thread_area_for_pane`].
-fn pane_body_rect(
+pub(super) fn pane_body_rect(
     state: &AppState,
     area: Rect,
     pane_idx: usize,
@@ -2463,13 +2309,13 @@ fn try_copy_focused_pane_selection(
     true
 }
 
-fn focused_pane_mut(state: &mut AppState) -> Option<&mut nit_core::PaneSession> {
+pub(super) fn focused_pane_mut(state: &mut AppState) -> Option<&mut nit_core::PaneSession> {
     let mp = state.multipane.as_mut()?;
     let idx = mp.focused;
     mp.panes.get_mut(idx)
 }
 
-fn focused_pane_idx(state: &AppState) -> usize {
+pub(super) fn focused_pane_idx(state: &AppState) -> usize {
     state.multipane.as_ref().map(|mp| mp.focused).unwrap_or(0)
 }
 
@@ -2491,7 +2337,7 @@ fn focused_chat_input_is_empty(state: &AppState) -> bool {
         .unwrap_or(true)
 }
 
-fn clear_focused_pane_input(state: &mut AppState) {
+pub(super) fn clear_focused_pane_input(state: &mut AppState) {
     if let Some(pane) = focused_pane_mut(state) {
         pane.chat_input.clear();
         pane.chat_input_cursor = 0;
@@ -2500,7 +2346,7 @@ fn clear_focused_pane_input(state: &mut AppState) {
     }
 }
 
-fn push_pane_system_message(state: &mut AppState, text: String) {
+pub(super) fn push_pane_system_message(state: &mut AppState, text: String) {
     let pane = state
         .multipane
         .as_ref()
@@ -2943,7 +2789,7 @@ fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent) {
     ds.view_offset = 0;
 }
 
-fn focused_pane_agent_id(state: &AppState) -> Option<String> {
+pub(super) fn focused_pane_agent_id(state: &AppState) -> Option<String> {
     state
         .multipane
         .as_ref()
@@ -2957,30 +2803,10 @@ fn focused_pane_agent_id(state: &AppState) -> Option<String> {
         })
 }
 
-/// Pin the focused lane's `current_mission` to the pane's synthetic chat
-/// id when no real swarm overlay exists. Locks the breather-filter
-/// invariant `agent.current_mission == Some(mission_ctx)` for the render
-/// alias even before `dispatch_agent_prompt` rewrites it on dispatch —
-/// without this, a stale id from a prior swarm could survive long enough
-/// to leak into another pane's render.
-fn pin_pane_chat_mission_on_lane(state: &mut AppState, pane_idx: usize) {
-    let synthetic = state
-        .multipane
-        .as_ref()
-        .and_then(|mp| mp.panes.get(pane_idx))
-        .filter(|p| p.mission_id.is_none() && !p.chat_mission_id.is_empty())
-        .map(|p| p.chat_mission_id.clone());
-    let (Some(mid), Some(agent_id)) = (synthetic, focused_pane_agent_id(state)) else {
-        return;
-    };
-    if let Some(lane) = state.agents.agents_get_mut(&agent_id) {
-        lane.current_mission = Some(mid);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::parse_abort_command;
     use nit_core::{
         AgentLane, AgentLaneKind, AgentStatus, AgentsState, MissionRecord, MultipaneState,
         PaneSession,

@@ -1108,3 +1108,181 @@ fn abort_hint_appears_exactly_once_per_pane() {
         "expected exactly one /abort hint per pane, got {count} in:\n{content}",
     );
 }
+
+// INV-4: a FILE CHECKLIST generated for pane A's cwd must NEVER land on
+// pane B's queue. The augmenter runs inside `dispatch_to_selected_targets`
+// per-target with the target's resolved cwd, so each pane's queue
+// references files only under its own cwd. Locks the cross-pane bleed
+// the proposer flagged in the strip-restore audit.
+#[test]
+fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
+    use std::fs;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+    );
+    let cwd0 = std::env::temp_dir().join(format!("nit-pane-aug-cwd0-{unique}"));
+    let cwd1 = std::env::temp_dir().join(format!("nit-pane-aug-cwd1-{unique}"));
+    let _ = fs::remove_dir_all(&cwd0);
+    let _ = fs::remove_dir_all(&cwd1);
+    fs::create_dir_all(cwd0.join("crates/foo/src")).unwrap();
+    fs::create_dir_all(cwd1.join("crates/bar/src")).unwrap();
+    fs::write(cwd0.join("crates/foo/src/lib.rs"), "// foo\n").unwrap();
+    fs::write(cwd1.join("crates/bar/src/lib.rs"), "// bar\n").unwrap();
+
+    // Build a 2-pane state with each pane anchored to its own cwd.
+    let buffer = nit_core::Buffer::empty("scratch", None);
+    let notes = nit_core::Buffer::empty("notes", None);
+    let mut state = AppState::new(PathBuf::from("/workspace"), buffer, notes);
+    state.agents = AgentsState::default();
+    state.agents.agents.push(AgentLane {
+        id: "claude-haiku-4-5".into(),
+        role: "claude-haiku-4-5".into(),
+        lane: "Claude".into(),
+        kind: AgentLaneKind::Claude,
+        status: AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.multipane = Some(MultipaneState {
+        backend_agent_id: "claude-haiku-4-5".into(),
+        panes: vec![
+            PaneSession {
+                pane_id: 0,
+                cwd: cwd0.clone(),
+                ..PaneSession::default()
+            },
+            PaneSession {
+                pane_id: 1,
+                cwd: cwd1.clone(),
+                ..PaneSession::default()
+            },
+        ],
+        focused: 0,
+        grid_cols: 2,
+        grid_rows: 1,
+        backend_filter: Some("claude-haiku-4-5".into()),
+        help_open: false,
+    });
+    let _ = materialise_pane_lane(&mut state, 0, "claude-haiku-4-5");
+    let _ = materialise_pane_lane(&mut state, 1, "claude-haiku-4-5");
+
+    // Mark each pane lane busy so the dispatcher takes the enqueue path
+    // (no real runner needed). active_turns.insert keys on the lane id.
+    let now = std::time::Instant::now();
+    for idx in 0..2 {
+        let lane_id = format!("claude-haiku-4-5#mp-pane-{idx:02}");
+        state.agents.active_turns.insert(
+            lane_id.clone(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: None,
+            },
+        );
+        if let Some(lane) = state.agents.agents_get_mut(&lane_id) {
+            lane.status = AgentStatus::Running;
+        }
+    }
+
+    let mut vitals = VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    // A real ClaudeRunner keeps `maybe_dispatch_next_queued_claude_turn`
+    // from draining the queue as orphaned. The pane lanes are busy
+    // (active_turns populated), so dequeue defers and pushes the turn
+    // back, leaving the queue inspectable.
+    let claude = crate::claude_runner::ClaudeRunner::spawn(
+        crate::claude_runner::ClaudeRunnerConfig::default(),
+    );
+
+    // Pane 0 dispatch: real-work prompt naming crates/foo (only exists
+    // under cwd0). Use a writer verb (`update`) that is NOT one of the
+    // auto-shadow keywords so the prompt enqueues on the main lane
+    // instead of being hijacked into the shadow pipeline.
+    state.multipane.as_mut().unwrap().focused = 0;
+    state.multipane.as_mut().unwrap().panes[0].chat_input =
+        "Update crates/foo to extract the iterator helper".into();
+    with_pane_aliased(&mut state, 0, |s| {
+        let _ = crate::app::submit_chat_input_and_dispatch(
+            s,
+            &mut vitals,
+            None,
+            Some(&claude),
+            &mut swarm,
+            &mut shadow,
+        );
+    });
+
+    // Pane 1 dispatch: real-work prompt naming crates/bar (only exists
+    // under cwd1).
+    state.multipane.as_mut().unwrap().focused = 1;
+    state.multipane.as_mut().unwrap().panes[1].chat_input =
+        "Update crates/bar to consolidate the helper".into();
+    with_pane_aliased(&mut state, 1, |s| {
+        let _ = crate::app::submit_chat_input_and_dispatch(
+            s,
+            &mut vitals,
+            None,
+            Some(&claude),
+            &mut swarm,
+            &mut shadow,
+        );
+    });
+
+    let pane0_id = "claude-haiku-4-5#mp-pane-00";
+    let pane1_id = "claude-haiku-4-5#mp-pane-01";
+    let queued_for = |agent: &str| -> Vec<&nit_core::QueuedClaudeTurn> {
+        state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .filter(|t| t.agent_id == agent)
+            .collect()
+    };
+    let pane0_queue = queued_for(pane0_id);
+    let pane1_queue = queued_for(pane1_id);
+    assert_eq!(pane0_queue.len(), 1, "pane 0 should have one queued turn");
+    assert_eq!(pane1_queue.len(), 1, "pane 1 should have one queued turn");
+
+    let pane0_prompt = &pane0_queue[0].prompt;
+    let pane1_prompt = &pane1_queue[0].prompt;
+
+    assert!(
+        pane0_prompt.contains("FILE CHECKLIST"),
+        "pane 0 real-work prompt should be augmented:\n{pane0_prompt}"
+    );
+    assert!(
+        pane0_prompt.contains("crates/foo/src/lib.rs"),
+        "pane 0 checklist should reference its own cwd:\n{pane0_prompt}"
+    );
+    assert!(
+        !pane0_prompt.contains("crates/bar"),
+        "pane 0 must NOT see pane 1's files:\n{pane0_prompt}"
+    );
+
+    assert!(
+        pane1_prompt.contains("FILE CHECKLIST"),
+        "pane 1 real-work prompt should be augmented:\n{pane1_prompt}"
+    );
+    assert!(
+        pane1_prompt.contains("crates/bar/src/lib.rs"),
+        "pane 1 checklist should reference its own cwd:\n{pane1_prompt}"
+    );
+    assert!(
+        !pane1_prompt.contains("crates/foo"),
+        "pane 1 must NOT see pane 0's files:\n{pane1_prompt}"
+    );
+
+    let _ = fs::remove_dir_all(&cwd0);
+    let _ = fs::remove_dir_all(&cwd1);
+}

@@ -17,7 +17,9 @@ pub mod roster_view;
 pub mod selection;
 pub mod setup;
 
+mod dispatch_focused;
 mod runtime;
+mod scroll;
 
 pub use runtime::run_loop;
 

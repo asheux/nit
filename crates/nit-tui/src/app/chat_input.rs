@@ -282,6 +282,18 @@ fn dispatch_to_selected_targets(
             continue;
         }
         let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
+
+        // Augment per-target with the target's own resolved cwd. A
+        // checklist generated against pane A's cwd must never land in a
+        // queue entry destined for pane B — augmenting outside this loop
+        // (or against `selected_agent`) breaks that isolation.
+        let target_cwd = crate::app::resolve_dispatch_cwd(state, &base_model);
+        let target_prompt = if is_real_work(prompt, target_cwd.as_path()) {
+            augment_with_module_file_checklist(target_cwd.as_path(), prompt.to_string())
+        } else {
+            prompt.to_string()
+        };
+
         if force_new && is_agent_family_busy(state, &base_model) {
             if let Some(clone_id) = create_chat_clone(state, &base_model) {
                 dispatch_agent_turn_for_model_kind(
@@ -291,7 +303,7 @@ fn dispatch_to_selected_targets(
                     claude,
                     &clone_id,
                     mission_id,
-                    prompt.to_string(),
+                    target_prompt,
                     prompt_msg_idx,
                     true,
                     is_claude,
@@ -302,7 +314,7 @@ fn dispatch_to_selected_targets(
                     vitals,
                     Some(base_model),
                     mission_id.clone(),
-                    prompt.to_string(),
+                    target_prompt,
                     Some(prompt_msg_idx),
                 );
             } else {
@@ -311,7 +323,7 @@ fn dispatch_to_selected_targets(
                     vitals,
                     Some(base_model),
                     mission_id.clone(),
-                    prompt.to_string(),
+                    target_prompt,
                     Some(prompt_msg_idx),
                 );
             }
@@ -322,7 +334,7 @@ fn dispatch_to_selected_targets(
                     vitals,
                     Some(base_model),
                     mission_id.clone(),
-                    prompt.to_string(),
+                    target_prompt,
                     Some(prompt_msg_idx),
                 );
             } else {
@@ -331,7 +343,7 @@ fn dispatch_to_selected_targets(
                     vitals,
                     Some(base_model),
                     mission_id.clone(),
-                    prompt.to_string(),
+                    target_prompt,
                     Some(prompt_msg_idx),
                 );
             }
@@ -343,7 +355,7 @@ fn dispatch_to_selected_targets(
                 claude,
                 &base_model,
                 mission_id,
-                prompt.to_string(),
+                target_prompt,
                 prompt_msg_idx,
                 false,
                 is_claude,
@@ -1368,6 +1380,106 @@ pub(crate) fn chat_history_remember(state: &mut AppState, raw: &str) {
         let excess = state.agents.chat_prompt_history.len() - CHAT_PROMPT_HISTORY_MAX;
         state.agents.chat_prompt_history.drain(0..excess);
     }
+}
+
+const REAL_WORK_VERBS: &[&str] = &[
+    "refactor",
+    "rewrite",
+    "implement",
+    "migrate",
+    "restructure",
+    "overhaul",
+    "add",
+    "fix",
+    "update",
+    "extract",
+    "consolidate",
+    "split",
+    "delete",
+    "rename",
+    "move",
+];
+
+const QUESTION_WORDS: &[&str] = &[
+    "what", "why", "how", "when", "where", "who", "is", "does", "can",
+];
+
+const READ_INTENT_VERBS: &[&str] = &[
+    "read",
+    "look",
+    "show",
+    "find",
+    "list",
+    "tell",
+    "explain",
+    "describe",
+    "summarize",
+    "report",
+    "audit",
+];
+
+// Gate for the FILE CHECKLIST appendix on chat dispatch. Returns true ONLY
+// when the operator's prompt names a real on-disk directory (path token
+// resolving under `cwd`) AND uses a writer verb AND is neither a question
+// nor a read-intent ask. The strict conjunctive form keeps casual prompts
+// ("hi there", "what does this do?") and read-only asks ("read crates/foo
+// and report") from triggering the writer mandate, and — by requiring an
+// inline path token — bypasses the `enumerate_scope_files` git-diff
+// fallback that previously over-augmented every prompt in a dirty workspace.
+pub(crate) fn is_real_work(prompt: &str, cwd: &std::path::Path) -> bool {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() || trimmed.contains('?') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let first_word = lower.split_whitespace().next().unwrap_or("");
+    if QUESTION_WORDS.contains(&first_word) || READ_INTENT_VERBS.contains(&first_word) {
+        return false;
+    }
+    let has_verb = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| REAL_WORK_VERBS.contains(&word));
+    if !has_verb {
+        return false;
+    }
+    trimmed.split_whitespace().any(|raw_token| {
+        let path_token = raw_token.trim_matches(|ch: char| matches!(ch, ',' | '.' | '"' | '\''));
+        !path_token.is_empty() && path_token.contains('/') && cwd.join(path_token).is_dir()
+    })
+}
+
+// Append a per-file refactor checklist when the operator's prompt names a
+// directory the agent should sweep. The caller MUST gate this with
+// `is_real_work` so casual prompts don't get a writer mandate. The path-
+// token requirement in the gate makes `enumerate_scope_files`'s git-diff
+// fallback unreachable from chat dispatch — only the inline-token branch
+// fires here.
+pub(crate) fn augment_with_module_file_checklist(cwd: &std::path::Path, prompt: String) -> String {
+    let scope = crate::swarm::enumerate_scope_files(cwd, &prompt);
+    if scope.is_empty() {
+        return prompt;
+    }
+    let mut out = prompt;
+    out.push_str("\n\n## FILE CHECKLIST (non-negotiable)\n");
+    out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
+    out.push_str(
+        "Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n",
+    );
+    out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+    out.push_str(
+        "COMMENTS: Trim doc comments that restate the type/function name, \
+         echo visible type signatures, or describe obvious behavior (e.g. \
+         \"/// Returns the value\" on fn value()). Keep comments that explain \
+         WHY something is done, document non-obvious constraints, safety \
+         invariants, or algorithmic choices. A comment worth keeping tells \
+         the reader something the code alone cannot.\n",
+    );
+    out.push_str("Your task is NOT complete until every file has been modified.\n\n");
+    for (i, path) in scope.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
+    }
+    out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
+    out
 }
 
 pub(super) fn chat_input_byte_index(input: &str, char_idx: usize) -> usize {
