@@ -282,6 +282,7 @@ pub fn resolve_base_agent_id(agent_id: &str) -> &str {
     chat_clone_base_id(agent_id)
         .or_else(|| swarm_clone_base_id(agent_id))
         .or_else(|| crate::shadow::parse_shadow_lane_id(agent_id).map(|(base, _, _)| base))
+        .or_else(|| crate::intake::parse_intake_lane_id(agent_id).map(|(base, _)| base))
         .unwrap_or(agent_id)
 }
 

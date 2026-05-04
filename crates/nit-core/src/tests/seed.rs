@@ -222,8 +222,7 @@ fn is_prime(n: u64) -> bool {
         // Both should produce non-zero density (visible grids).
         assert!(
             clean_encoded.stats.density > 0.0,
-            "Encoder {:?}: clean code should have non-zero density",
-            encoder
+            "Encoder {encoder:?}: clean code should have non-zero density"
         );
 
         // The grids should differ — different inputs produce different patterns.
@@ -236,28 +235,26 @@ fn is_prime(n: u64) -> bool {
             .count();
         assert!(
             diff_count > 100,
-            "Encoder {:?}: clean and gibberish grids should differ substantially, but only {} cells differ",
-            encoder,
-            diff_count
+            "Encoder {encoder:?}: clean and gibberish grids should differ substantially, but only {diff_count} cells differ"
         );
     }
 }
 
+#[allow(dead_code)]
 fn grid_variance(grid: &SeedValueGrid) -> f64 {
     let values = grid.values();
     if values.is_empty() {
         return 0.0;
     }
     let mean = values.iter().map(|&v| v as f64).sum::<f64>() / values.len() as f64;
-    let var = values
+    values
         .iter()
         .map(|&v| {
             let d = v as f64 - mean;
             d * d
         })
         .sum::<f64>()
-        / values.len() as f64;
-    var
+        / values.len() as f64
 }
 
 #[test]
@@ -281,11 +278,7 @@ fn unsupported_language_fallback() {
         assert_eq!(encoded.grid.height(), 32);
         // Should not be all zeros.
         let has_nonzero = encoded.base_values.values().iter().any(|&v| v > 0);
-        assert!(
-            has_nonzero,
-            "Encoder {:?} produced all-zero grid",
-            encoder_id
-        );
+        assert!(has_nonzero, "Encoder {encoder_id:?} produced all-zero grid");
     }
 }
 

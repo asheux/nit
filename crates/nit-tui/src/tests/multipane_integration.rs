@@ -1139,6 +1139,13 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
     let buffer = nit_core::Buffer::empty("scratch", None);
     let notes = nit_core::Buffer::empty("notes", None);
     let mut state = AppState::new(PathBuf::from("/workspace"), buffer, notes);
+    // Intake-disabled path: the per-pane queue routing invariant this
+    // test pins is independent of intake routing — when intake is on
+    // the prompt lands on a synthetic intake lane instead of the pane
+    // lane queue, which would break the queue-len assertion below.
+    // Per-pane intake cwd plumbing has dedicated coverage in
+    // `tests/intake.rs::intake_uses_per_pane_cwd_in_multipane`.
+    state.settings.intake_enabled = false;
     state.agents = AgentsState::default();
     state.agents.agents.push(AgentLane {
         id: "claude-haiku-4-5".into(),
@@ -1257,30 +1264,28 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
     let pane0_prompt = &pane0_queue[0].prompt;
     let pane1_prompt = &pane1_queue[0].prompt;
 
-    assert!(
-        pane0_prompt.contains("FILE CHECKLIST"),
-        "pane 0 real-work prompt should be augmented:\n{pane0_prompt}"
+    // After the intake-agent migration, chat dispatch never augments
+    // the operator's prompt directly — that decision belongs to the
+    // intake agent (when `intake_enabled` is on). Pane isolation is
+    // still verified via the per-pane queue routing: pane 0's prompt
+    // lands on pane 0's lane, pane 1's on pane 1's. Per-pane intake
+    // cwd plumbing has dedicated coverage in `tests/intake.rs`.
+    assert_eq!(
+        pane0_prompt, "Update crates/foo to extract the iterator helper",
+        "pane 0 prompt verbatim with intake off:\n{pane0_prompt}"
     );
     assert!(
-        pane0_prompt.contains("crates/foo/src/lib.rs"),
-        "pane 0 checklist should reference its own cwd:\n{pane0_prompt}"
-    );
-    assert!(
-        !pane0_prompt.contains("crates/bar"),
-        "pane 0 must NOT see pane 1's files:\n{pane0_prompt}"
+        !pane0_prompt.contains("FILE CHECKLIST"),
+        "intake disabled → no checklist on pane 0:\n{pane0_prompt}"
     );
 
-    assert!(
-        pane1_prompt.contains("FILE CHECKLIST"),
-        "pane 1 real-work prompt should be augmented:\n{pane1_prompt}"
+    assert_eq!(
+        pane1_prompt, "Update crates/bar to consolidate the helper",
+        "pane 1 prompt verbatim with intake off:\n{pane1_prompt}"
     );
     assert!(
-        pane1_prompt.contains("crates/bar/src/lib.rs"),
-        "pane 1 checklist should reference its own cwd:\n{pane1_prompt}"
-    );
-    assert!(
-        !pane1_prompt.contains("crates/foo"),
-        "pane 1 must NOT see pane 0's files:\n{pane1_prompt}"
+        !pane1_prompt.contains("FILE CHECKLIST"),
+        "intake disabled → no checklist on pane 1:\n{pane1_prompt}"
     );
 
     let _ = fs::remove_dir_all(&cwd0);

@@ -7,6 +7,7 @@ use nit_core::{
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig};
+use crate::intake::{self, IntakeStartContext};
 use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRuntime};
 use crate::swarm::{
     create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
@@ -255,6 +256,66 @@ fn try_dispatch_shadow_pipeline(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn try_dispatch_intake(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    selected_agent: Option<&str>,
+    prompt: &str,
+    mission_id: &Option<String>,
+    prompt_msg_idx: usize,
+    channel: AgentChannel,
+    force_new: bool,
+) -> bool {
+    let Some(target_agent_id) = selected_agent else {
+        return false;
+    };
+    let target_cwd = crate::app::resolve_dispatch_cwd(state, target_agent_id);
+    let ctx = IntakeStartContext {
+        mission_id: mission_id.clone(),
+        prompt_msg_idx,
+        channel,
+        force_new,
+        target_agent_id: target_agent_id.to_string(),
+    };
+    let Some(dispatch) = intake::start(state, prompt, target_cwd.as_path(), &ctx) else {
+        return false;
+    };
+    let intake_agent_id = dispatch.agent_id.clone();
+    dispatch_agent_prompt(
+        state,
+        vitals,
+        codex,
+        claude,
+        dispatch.agent_id,
+        dispatch.mission_id,
+        dispatch.prompt,
+    );
+    // Set-after-enqueue: stash pending state ONLY after the dispatch
+    // landed in `active_turns`. A dead runner channel emits a Warn diag
+    // from `dispatch_agent_prompt`'s send-failure path and removes the
+    // optimistic active-turns entry; in that case we must NOT stash a
+    // `pending_intake` that would block every subsequent chat submit
+    // for 30s waiting on a `TurnCompleted` that will never arrive. The
+    // caller falls through to `dispatch_to_selected_targets` and the
+    // operator's prompt lands raw.
+    if !state.agents.active_turns.contains_key(&intake_agent_id) {
+        // Tear down the synthetic intake lane the dispatch path
+        // inserted — `pending_intake` is not yet set so
+        // `cancel_pending_intake` would no-op. Without this cleanup the
+        // lane lingers as a phantom row in the agent ops view until the
+        // next chat submit.
+        intake::cleanup_intake_lane_after_failed_dispatch(state, &intake_agent_id);
+        return false;
+    }
+    intake::stash_pending_intake(state, intake_agent_id, prompt, target_cwd.as_path(), &ctx);
+    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+    maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn dispatch_to_selected_targets(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -283,16 +344,11 @@ fn dispatch_to_selected_targets(
         }
         let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
 
-        // Augment per-target with the target's own resolved cwd. A
-        // checklist generated against pane A's cwd must never land in a
-        // queue entry destined for pane B — augmenting outside this loop
-        // (or against `selected_agent`) breaks that isolation.
-        let target_cwd = crate::app::resolve_dispatch_cwd(state, &base_model);
-        let target_prompt = if is_real_work(prompt, target_cwd.as_path()) {
-            augment_with_module_file_checklist(target_cwd.as_path(), prompt.to_string())
-        } else {
-            prompt.to_string()
-        };
+        // The intake agent (when `state.settings.intake_enabled`) owns
+        // the FILE CHECKLIST decision now; chat dispatch hands the
+        // operator's prompt to the runner verbatim. The legacy
+        // `is_real_work` heuristic was deleted along with this branch.
+        let target_prompt = prompt.to_string();
 
         if force_new && is_agent_family_busy(state, &base_model) {
             if let Some(clone_id) = create_chat_clone(state, &base_model) {
@@ -938,6 +994,38 @@ pub(crate) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
     Some(AbortScope::Agent(arg.to_string()))
 }
 
+/// True when the operator's input is just a meta-prefix command without
+/// a real prompt body (e.g. `@shadow`, `@swarm`, `@swarm 5 template=lab`).
+/// These slip past `parse_shadow_command` / `parse_swarm_command` (both
+/// return `None` when the body is empty) and would otherwise reach
+/// `push_chat_message` as a literal string and be sent to the agent —
+/// the operator never wanted to dispatch a single-word `@shadow`.
+///
+/// `@all` / `@new` / `@queue` / `@q` prefix-only inputs are NOT covered
+/// here because they're already neutralised downstream:
+/// - `@all` alone → `parse_chat_input_channel` strips the prefix to ""
+///   and `push_chat_message` rejects on empty body.
+/// - `@new` / `@queue` / `@q` alone → the dispatcher strips the prefix,
+///   leaving `chat_input` empty before `push_chat_message` runs.
+pub(crate) fn is_meta_prefix_only_command(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if matches!(trimmed, "@shadow" | "@swarm") {
+        return true;
+    }
+    // `@shadow <ws>...` and `@swarm <ws>...` with empty body.
+    if let Some(rest) = trimmed.strip_prefix("@shadow") {
+        if rest.starts_with(char::is_whitespace) && parse_shadow_command(trimmed).is_none() {
+            return true;
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("@swarm") {
+        if rest.starts_with(char::is_whitespace) && parse_swarm_command(trimmed).is_none() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Routes every abort trigger (chat `/abort`, `@abort`, Ctrl+C with
 /// empty input, Esc-Esc, mission `x`) to the same path: resolve scope
 /// to a list of agent ids, send `CancelTurn` to each runner, and post
@@ -950,14 +1038,24 @@ pub(crate) fn handle_abort(
     scope: AbortScope,
 ) -> bool {
     let multipane_focus = state.multipane.as_ref().map(|mp| mp.focused);
+    // Cancel any in-flight intake before resolving mission scopes — a
+    // stranded `pending_intake` would still drive the deferred dispatch
+    // even after the operator aborted.
+    let intake_lane = cancel_pending_intake_for_scope(state, &scope);
     let agents_to_cancel = match scope {
         AbortScope::Current => resolve_current_abort(state, swarm, multipane_focus),
         AbortScope::All => resolve_all_abort(state, codex, claude, swarm, multipane_focus),
         AbortScope::Agent(agent_id) => resolve_agent_abort(state, agent_id, multipane_focus),
     };
-    let Some(targets) = agents_to_cancel else {
+    let mut targets = agents_to_cancel.unwrap_or_default();
+    if let Some(lane) = intake_lane {
+        if !targets.iter().any(|id| id == &lane) {
+            targets.push(lane);
+        }
+    }
+    if targets.is_empty() {
         return false;
-    };
+    }
     for agent_id in &targets {
         if let Some(c) = codex {
             let _ = c.send(CodexCommand::CancelTurn {
@@ -970,7 +1068,21 @@ pub(crate) fn handle_abort(
             });
         }
     }
-    !targets.is_empty()
+    true
+}
+
+fn cancel_pending_intake_for_scope(state: &mut AppState, scope: &AbortScope) -> Option<String> {
+    let pending = state.agents.pending_intake.as_ref()?;
+    let lane_id = pending.intake_agent_id.clone();
+    let target_id = pending.target_agent_id.clone();
+    let should_cancel = match scope {
+        AbortScope::Current | AbortScope::All => true,
+        AbortScope::Agent(id) => id == &lane_id || id == &target_id,
+    };
+    if !should_cancel {
+        return None;
+    }
+    intake::cancel_pending_intake(state)
 }
 
 /// Resolve `AbortScope::Current` to the list of agent ids whose runners
@@ -1226,6 +1338,17 @@ pub(crate) fn submit_chat_input_and_dispatch(
     if raw.trim().is_empty() {
         return false;
     }
+    // Reject "@shadow" / "@swarm" with no body — the parsers return None
+    // for these (so no prefix-strip runs) and `push_chat_message` would
+    // otherwise hand the literal `@shadow` / `@swarm` string to the agent
+    // as a prompt. The `@all` / `@new` / `@queue` / `@q` prefix-only
+    // variants are already neutralised downstream (see push_chat_message
+    // and the force_new / legacy_queue branches below) — only these two
+    // currently leak.
+    if is_meta_prefix_only_command(&raw) {
+        reset_chat_input_and_history_nav(state);
+        return false;
+    }
     // `/abort` and `@abort` short-circuit before any other parsing —
     // they're never a prompt, never a swarm/shadow command, and the
     // operator wants the side-effect (kill in-flight work), not a
@@ -1336,7 +1459,33 @@ pub(crate) fn submit_chat_input_and_dispatch(
                     prompt_msg_idx,
                 );
 
-            let targets = if is_swarm_mission || shadow_handled {
+            // Intake gate: when enabled, an LLM-based classifier runs
+            // before the real dispatch and may append a FILE CHECKLIST.
+            // Skipped for swarm, shadow, broadcast, @new, @queue, and
+            // when no single agent is selected — same eligibility rules
+            // as the shadow pipeline. The deferred dispatch resumes via
+            // `event_drain::drain_intake_outcome` on the intake turn's
+            // `TurnCompleted` / `TurnFailed`.
+            let intake_handled = !is_swarm_mission
+                && !shadow_handled
+                && !force_new
+                && !legacy_queue
+                && matches!(channel, AgentChannel::Agent)
+                && selected_agent.is_some()
+                && try_dispatch_intake(
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    selected_agent.as_deref(),
+                    &prompt,
+                    &mission_id,
+                    prompt_msg_idx,
+                    channel,
+                    force_new,
+                );
+
+            let targets = if is_swarm_mission || shadow_handled || intake_handled {
                 Vec::new()
             } else if matches!(channel, AgentChannel::Broadcast) {
                 broadcast_target_agents(state, mission_id.as_deref())
@@ -1382,78 +1531,14 @@ pub(crate) fn chat_history_remember(state: &mut AppState, raw: &str) {
     }
 }
 
-const REAL_WORK_VERBS: &[&str] = &[
-    "refactor",
-    "rewrite",
-    "implement",
-    "migrate",
-    "restructure",
-    "overhaul",
-    "add",
-    "fix",
-    "update",
-    "extract",
-    "consolidate",
-    "split",
-    "delete",
-    "rename",
-    "move",
-];
-
-const QUESTION_WORDS: &[&str] = &[
-    "what", "why", "how", "when", "where", "who", "is", "does", "can",
-];
-
-const READ_INTENT_VERBS: &[&str] = &[
-    "read",
-    "look",
-    "show",
-    "find",
-    "list",
-    "tell",
-    "explain",
-    "describe",
-    "summarize",
-    "report",
-    "audit",
-];
-
-// Gate for the FILE CHECKLIST appendix on chat dispatch. Returns true ONLY
-// when the operator's prompt names a real on-disk directory (path token
-// resolving under `cwd`) AND uses a writer verb AND is neither a question
-// nor a read-intent ask. The strict conjunctive form keeps casual prompts
-// ("hi there", "what does this do?") and read-only asks ("read crates/foo
-// and report") from triggering the writer mandate, and — by requiring an
-// inline path token — bypasses the `enumerate_scope_files` git-diff
-// fallback that previously over-augmented every prompt in a dirty workspace.
-pub(crate) fn is_real_work(prompt: &str, cwd: &std::path::Path) -> bool {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() || trimmed.contains('?') {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    let first_word = lower.split_whitespace().next().unwrap_or("");
-    if QUESTION_WORDS.contains(&first_word) || READ_INTENT_VERBS.contains(&first_word) {
-        return false;
-    }
-    let has_verb = lower
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .any(|word| REAL_WORK_VERBS.contains(&word));
-    if !has_verb {
-        return false;
-    }
-    trimmed.split_whitespace().any(|raw_token| {
-        let path_token = raw_token.trim_matches(|ch: char| matches!(ch, ',' | '.' | '"' | '\''));
-        !path_token.is_empty() && path_token.contains('/') && cwd.join(path_token).is_dir()
-    })
-}
-
 // Append a per-file refactor checklist when the operator's prompt names a
-// directory the agent should sweep. The caller MUST gate this with
-// `is_real_work` so casual prompts don't get a writer mandate. The path-
-// token requirement in the gate makes `enumerate_scope_files`'s git-diff
-// fallback unreachable from chat dispatch — only the inline-token branch
-// fires here.
+// directory the agent should sweep. Chat-dispatch gating moved to the
+// intake agent (`crates/nit-tui/src/intake.rs`); the helper is retained
+// as a `pub(crate)` API for swarm prompt builders that may need to
+// stitch a checklist onto a downstream task without round-tripping
+// through the LLM. Returns the prompt unchanged when no scope files
+// resolve, so callers don't need a separate gate.
+#[allow(dead_code)]
 pub(crate) fn augment_with_module_file_checklist(cwd: &std::path::Path, prompt: String) -> String {
     let scope = crate::swarm::enumerate_scope_files(cwd, &prompt);
     if scope.is_empty() {

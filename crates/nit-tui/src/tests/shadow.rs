@@ -149,13 +149,13 @@ fn shadow_pipeline_dispatches_omit_file_checklist_block() {
     }
 }
 
-// Option (b) of the FILE CHECKLIST gate: when the operator's prompt
-// names a real on-disk directory and uses a writer verb, the main
-// agent's final dispatch (built in `finalize_main_dispatch` via
-// `build_final_prompt`) carries the writer mandate. The advisory
-// lanes (propose-a / propose-b / judge / review) MUST NOT inherit
-// it — they run under `shadow_readonly_clause`. This locks the
-// asymmetry in shadow option (b).
+// After the intake-agent migration, the shadow main writer no longer
+// carries an automatic FILE CHECKLIST. The judge's binding plan
+// already covers the file scope; a separate checklist would duplicate
+// the contract. The advisory lanes (propose-a / propose-b / judge /
+// review) still must NEVER carry the writer mandate — they run under
+// `shadow_readonly_clause`. This locks the asymmetry: only judge's
+// plan reaches the main writer; no auto-augmentation either side.
 #[test]
 fn shadow_main_lane_attaches_checklist_when_real_work() {
     // Drive ShadowRuntime through the full DAG with a real-work prompt
@@ -199,17 +199,25 @@ fn shadow_main_lane_attaches_checklist_when_real_work() {
         );
     }
 
-    // Main writer dispatch DOES carry the checklist.
+    // Main writer dispatch carries the judge's binding plan — but not
+    // a separate FILE CHECKLIST; intake owns prompt-level augmentation.
     let final_dispatch = final_out
         .dispatches
         .iter()
         .find(|d| d.agent_id == "codex-main")
         .expect("final dispatch to main agent");
     assert!(
-        final_dispatch
+        !final_dispatch
             .prompt
             .contains("FILE CHECKLIST (non-negotiable)"),
-        "shadow main dispatch should carry FILE CHECKLIST for real-work prompt:\n{}",
+        "shadow main dispatch must NOT carry FILE CHECKLIST after intake migration:\n{}",
+        final_dispatch.prompt,
+    );
+    assert!(
+        final_dispatch
+            .prompt
+            .contains("IMPLEMENTATION PLAN (BINDING"),
+        "shadow main dispatch should carry the judge's plan:\n{}",
         final_dispatch.prompt,
     );
 }

@@ -82,7 +82,7 @@ fn token_count_routes_to_codex_maps_for_codex_agent() {
         .codex_context_remaining_pct
         .contains_key("gpt-test"));
     // Claude maps should be empty.
-    assert!(state.agents.claude_used_tokens.get("gpt-test").is_none());
+    assert!(!state.agents.claude_used_tokens.contains_key("gpt-test"));
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn token_count_routes_to_claude_maps_for_claude_agent() {
         .claude_context_remaining_pct
         .contains_key("claude-opus"));
     // Codex maps should be empty.
-    assert!(state.agents.codex_used_tokens.get("claude-opus").is_none());
+    assert!(!state.agents.codex_used_tokens.contains_key("claude-opus"));
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn token_count_mission_scoped_for_claude() {
         .and_then(|m| m.get("claude-opus"))
         .is_some());
     // Global maps should be empty.
-    assert!(state.agents.claude_used_tokens.get("claude-opus").is_none());
+    assert!(!state.agents.claude_used_tokens.contains_key("claude-opus"));
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn turn_completed_stores_mission_scoped_thread_id() {
         Some("thread-mission"),
     );
     // Global map should be empty.
-    assert!(state.agents.codex_thread_ids.get("gpt-test").is_none());
+    assert!(!state.agents.codex_thread_ids.contains_key("gpt-test"));
 }
 
 #[test]
@@ -492,11 +492,10 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
     let response = state.agents.messages.last().unwrap();
     assert_eq!(response.prompt_msg_idx, Some(42));
     // The claude_turn_prompt_idx should be consumed (removed).
-    assert!(state
+    assert!(!state
         .agents
         .claude_turn_prompt_idx
-        .get("claude-opus")
-        .is_none());
+        .contains_key("claude-opus"));
 }
 
 #[test]

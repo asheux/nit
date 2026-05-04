@@ -7,13 +7,14 @@
 //!
 //! The ordering is load-bearing — see comments inline. `genome_worker`
 //! is `None` for multipane (no genome retries in v1).
-use nit_core::{AgentBusEvent, AppState};
+use nit_core::{AgentBusEvent, AgentChannel, AppState};
 
 use super::dispatch::{
     apply_claude_event, apply_swarm_task_role, augment_dispatch_prompt_with_landscape,
     claude_session_context_not_found, clear_claude_session_context_for_agent,
     clear_codex_thread_context_for_agent, codex_thread_context_not_found, dispatch_agent_prompt,
-    maybe_dispatch_next_queued_claude_turn, maybe_dispatch_next_queued_codex_turn,
+    enqueue_claude_turn, enqueue_codex_turn, maybe_dispatch_next_queued_claude_turn,
+    maybe_dispatch_next_queued_codex_turn,
 };
 use super::genome_retry::{
     dispatch_shadow_outcome, dispatch_turn_genome_evals, drain_pending_claim_retries,
@@ -24,8 +25,9 @@ use super::vitals_log::record_agent_bus_vitals;
 use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::CodexRunner;
 use crate::genome_worker::GenomeWorker;
+use crate::intake::{self, IntakeResume};
 use crate::shadow::ShadowRuntime;
-use crate::swarm::SwarmRuntime;
+use crate::swarm::{create_chat_clone, is_agent_busy, is_agent_family_busy, SwarmRuntime};
 use crate::vitals::VitalsState;
 use crate::widgets::agent_ops_view;
 
@@ -85,6 +87,7 @@ pub(crate) fn drain_codex_event(
         );
     }
 
+    drain_intake_outcome(state, vitals, codex, claude, &event);
     drain_shadow_outcome(state, vitals, codex, claude, shadow, &event);
 
     if finished {
@@ -144,6 +147,7 @@ pub(crate) fn drain_claude_event(
         );
     }
 
+    drain_intake_outcome(state, vitals, codex, claude, &event);
     drain_shadow_outcome(state, vitals, codex, claude, shadow, &event);
 
     if finished {
@@ -226,6 +230,120 @@ fn drain_shadow_outcome(
     let shadow_outcome = shadow.handle_event_outcome(state, event);
     for dispatch in shadow_outcome.dispatches {
         dispatch_shadow_outcome(state, vitals, codex, claude, dispatch);
+    }
+}
+
+/// On `TurnCompleted` / `TurnFailed` for an in-flight intake lane, parse
+/// the JSON decision (or fall back to passthrough) and replay the
+/// deferred operator dispatch with either the augmented or raw prompt.
+/// Bails when `pending_intake` is already cleared (operator-driven abort
+/// path) so we never re-fire a dispatch the operator just cancelled.
+fn drain_intake_outcome(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+    event: &AgentBusEvent,
+) {
+    let Some(resume) = intake::handle_event_outcome(state, event) else {
+        return;
+    };
+    resume_intake_dispatch(state, vitals, codex, claude, resume);
+}
+
+fn resume_intake_dispatch(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+    resume: IntakeResume,
+) {
+    if matches!(resume.channel, AgentChannel::Broadcast) {
+        // Defensive: intake gate is `AgentChannel::Agent` only, but the
+        // pending struct is permissive. A broadcast channel here means
+        // someone changed the gate without updating this resume — fall
+        // back to a single dispatch against `target_agent_id` rather
+        // than fanning out unexpectedly.
+    }
+    let base_id = crate::swarm::resolve_base_agent_id(&resume.target_agent_id).to_string();
+    let lane_kind = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id == base_id)
+        .map(|lane| lane.kind);
+    let is_claude = matches!(lane_kind, Some(nit_core::AgentLaneKind::Claude));
+    let is_codex = matches!(lane_kind, Some(nit_core::AgentLaneKind::Codex));
+    if !is_claude && !is_codex {
+        return;
+    }
+
+    if resume.force_new && is_agent_family_busy(state, &base_id) {
+        if let Some(clone_id) = create_chat_clone(state, &base_id) {
+            apply_resume_prompt_idx(state, &clone_id, resume.prompt_msg_idx, is_claude);
+            dispatch_agent_prompt(
+                state,
+                vitals,
+                Some(codex),
+                Some(claude),
+                clone_id,
+                resume.mission_id,
+                resume.prompt,
+            );
+            maybe_dispatch_next_queued_codex_turn(state, vitals, Some(codex));
+            maybe_dispatch_next_queued_claude_turn(state, vitals, Some(claude));
+            return;
+        }
+    }
+
+    if is_agent_busy(state, &base_id) {
+        if is_claude {
+            enqueue_claude_turn(
+                state,
+                vitals,
+                Some(base_id),
+                resume.mission_id,
+                resume.prompt,
+                Some(resume.prompt_msg_idx),
+            );
+        } else {
+            enqueue_codex_turn(
+                state,
+                vitals,
+                Some(base_id),
+                resume.mission_id,
+                resume.prompt,
+                Some(resume.prompt_msg_idx),
+            );
+        }
+        return;
+    }
+
+    apply_resume_prompt_idx(state, &base_id, resume.prompt_msg_idx, is_claude);
+    dispatch_agent_prompt(
+        state,
+        vitals,
+        Some(codex),
+        Some(claude),
+        base_id,
+        resume.mission_id,
+        resume.prompt,
+    );
+    maybe_dispatch_next_queued_codex_turn(state, vitals, Some(codex));
+    maybe_dispatch_next_queued_claude_turn(state, vitals, Some(claude));
+}
+
+fn apply_resume_prompt_idx(state: &mut AppState, agent_id: &str, idx: usize, is_claude: bool) {
+    if is_claude {
+        state
+            .agents
+            .claude_turn_prompt_idx
+            .insert(agent_id.to_string(), idx);
+    } else {
+        state
+            .agents
+            .codex_turn_prompt_idx
+            .insert(agent_id.to_string(), idx);
     }
 }
 

@@ -114,7 +114,7 @@ fn tick_runs_observers() {
 fn tick_is_noop_when_idle() {
     let mut state = test_state("metabolism-noop");
     let outcome = tick(&mut state);
-    assert!(outcome.is_noop(), "expected noop, got {:?}", outcome);
+    assert!(outcome.is_noop(), "expected noop, got {outcome:?}");
     assert!(!outcome.saved);
 }
 

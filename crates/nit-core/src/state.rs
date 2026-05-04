@@ -745,6 +745,23 @@ pub struct QueuedClaudeTurn {
     pub prompt_msg_idx: Option<usize>,
 }
 
+/// Operator chat-state stashed while an intake turn is in flight. The
+/// bus-event handler resumes the deferred dispatch using this snapshot
+/// once the intake decision lands (or on parse-fail / timeout / abort).
+/// Runtime-only: never serialized — `started_at` is an `Instant`.
+#[derive(Clone, Debug)]
+pub struct PendingIntake {
+    pub mission_id: Option<String>,
+    pub prompt_msg_idx: usize,
+    pub channel: AgentChannel,
+    pub force_new: bool,
+    pub raw_prompt: String,
+    pub target_cwd: PathBuf,
+    pub target_agent_id: String,
+    pub intake_agent_id: String,
+    pub started_at: std::time::Instant,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RosterTreeBranch {
     Size,
@@ -1086,6 +1103,19 @@ pub struct AgentsState {
     /// Gemini model discovery error (if any). Runtime-only.
     #[serde(skip)]
     pub gemini_models_error: Option<String>,
+    /// In-flight intake-agent decision deferred until `TurnCompleted` /
+    /// `TurnFailed` lands for the synthetic intake lane. Runtime-only.
+    #[serde(skip)]
+    pub pending_intake: Option<PendingIntake>,
+    /// Operator-overridable lane id used for intake turns. When `None`,
+    /// `intake::start` clones the dispatching agent's lane — but only
+    /// when that lane is claude-class, since the intake system prompt
+    /// and 30s timeout are calibrated for haiku-style classifiers.
+    /// Setting this to a claude lane id lets a future operator setup
+    /// run a cheap claude preprocessor in front of a non-claude writer.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub intake_agent_id: Option<String>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -1317,6 +1347,8 @@ impl AgentsState {
             queued_claude_turns: VecDeque::new(),
             gemini_models: Vec::new(),
             gemini_models_error: None,
+            pending_intake: None,
+            intake_agent_id: None,
         }
     }
 
@@ -1488,6 +1520,8 @@ impl Default for AgentsState {
             queued_claude_turns: VecDeque::new(),
             gemini_models: Vec::new(),
             gemini_models_error: None,
+            pending_intake: None,
+            intake_agent_id: None,
         }
     }
 }

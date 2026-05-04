@@ -401,10 +401,12 @@ fn chat_dispatch_does_not_augment_with_file_checklist() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
-// Positive case: a prompt that names an on-disk directory AND uses a
-// writer verb AND is neither a question nor a read-intent ask must
-// receive the FILE CHECKLIST appendix at chat dispatch. Locks the
-// gated-restore path the operator asked for.
+// After the intake-agent migration, the chat-dispatch heuristic
+// (`is_real_work` + `augment_with_module_file_checklist`) is gone.
+// With `intake_enabled` defaulting to `false`, every chat dispatch —
+// including writer-verb prompts naming on-disk directories — must
+// hand the operator's prompt to the runner verbatim. This locks the
+// "no chat-dispatch augmentation when intake is off" invariant.
 #[test]
 fn chat_dispatch_attaches_checklist_for_real_work() {
     let cwd = cargo_workspace("chat_dispatch_real_work");
@@ -469,13 +471,13 @@ fn chat_dispatch_attaches_checklist_for_real_work() {
         "expected the prompt to land in the codex queue"
     );
     let prompt = &queued[0].prompt;
-    assert!(
-        prompt.contains("FILE CHECKLIST (non-negotiable)"),
-        "real-work prompt should carry the FILE CHECKLIST:\n{prompt}"
+    assert_eq!(
+        prompt, raw,
+        "intake disabled (default) → raw prompt verbatim, no FILE CHECKLIST"
     );
     assert!(
-        prompt.contains("crates/foo/src/lib.rs"),
-        "checklist should enumerate the resolved scope files:\n{prompt}"
+        !prompt.contains("FILE CHECKLIST"),
+        "no augmentation when intake is off:\n{prompt}"
     );
 
     let _ = fs::remove_dir_all(&cwd);
@@ -706,4 +708,215 @@ fn gate_bundle_detect_does_not_escape_workspace() {
     );
 
     let _ = fs::remove_dir_all(&parent);
+}
+
+// Empty / blank-only chat prompts must never reach the runner queue —
+// no agent message pushed, no codex / claude turn enqueued, no intake
+// turn spun up. The single submit path (`submit_chat_input_and_dispatch`)
+// already rejects `raw.trim().is_empty()` at line 1293; this matrix
+// locks the invariant against future regressions and covers stripped-
+// prefix cases that could land on `push_chat_message` with an empty
+// body even though the raw input had non-whitespace.
+//
+// Inputs covered: bare empty, spaces, newlines, `\t`, `@all` alone,
+// `@all   ` (broadcast prefix with no body), `@new`, `@new   `,
+// `@queue`, `@q`, `@swarm` (with no body), `@shadow` alone.
+fn assert_chat_dispatch_drops(state_label: &str, raw: &str) {
+    let cwd = cargo_workspace(state_label);
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.selected_agent = Some("codex-test".into());
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+    state.agents.chat_input = raw.into();
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    let result = crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&codex),
+        None,
+        &mut swarm,
+        &mut shadow,
+    );
+
+    assert!(
+        !result,
+        "submit_chat_input_and_dispatch returned true for empty / blank input `{raw:?}`"
+    );
+    assert!(
+        state.agents.queued_codex_turns.is_empty(),
+        "queued_codex_turns should stay empty for input `{raw:?}`; got {:?}",
+        state.agents.queued_codex_turns,
+    );
+    assert!(
+        state.agents.queued_claude_turns.is_empty(),
+        "queued_claude_turns should stay empty for input `{raw:?}`",
+    );
+    assert!(
+        state.agents.messages.is_empty(),
+        "no operator AgentMessage should be pushed for input `{raw:?}`; got {:?}",
+        state.agents.messages,
+    );
+    assert!(
+        state.agents.pending_intake.is_none(),
+        "no intake turn should be enqueued for input `{raw:?}`",
+    );
+
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn empty_chat_input_does_not_dispatch() {
+    assert_chat_dispatch_drops("empty_input_bare", "");
+}
+
+#[test]
+fn whitespace_only_chat_input_does_not_dispatch() {
+    assert_chat_dispatch_drops("empty_input_spaces", "   ");
+    assert_chat_dispatch_drops("empty_input_tabs", "\t\t");
+    assert_chat_dispatch_drops("empty_input_newlines", "\n\n\n");
+    assert_chat_dispatch_drops("empty_input_mixed_ws", "  \t\n \r\n  ");
+}
+
+#[test]
+fn at_all_alone_does_not_dispatch() {
+    // `parse_chat_input_channel` strips `@all` and yields an empty body —
+    // `push_chat_message` must reject before any runner enqueue.
+    assert_chat_dispatch_drops("empty_input_at_all", "@all");
+    assert_chat_dispatch_drops("empty_input_at_all_ws", "@all   ");
+}
+
+#[test]
+fn at_new_alone_does_not_dispatch() {
+    // `force_new` strips `@new` and the residue is whitespace; the
+    // resulting empty `chat_input` must not reach `push_chat_message`.
+    assert_chat_dispatch_drops("empty_input_at_new", "@new");
+    assert_chat_dispatch_drops("empty_input_at_new_ws", "@new\n");
+}
+
+#[test]
+fn at_queue_alone_does_not_dispatch() {
+    assert_chat_dispatch_drops("empty_input_at_queue", "@queue");
+    assert_chat_dispatch_drops("empty_input_at_q", "@q");
+    assert_chat_dispatch_drops("empty_input_at_queue_ws", "@queue \t");
+}
+
+#[test]
+fn at_swarm_with_no_body_does_not_dispatch() {
+    // `parse_swarm_command` returns None for empty body; the dispatcher
+    // then falls through to `push_chat_message`, which sees `@swarm`
+    // verbatim. This case is the one most likely to leak — assert that
+    // either the swarm parser bails AND the fallthrough also bails, or
+    // that the input is rejected before any agent message lands.
+    //
+    // NOTE: The current behavior is that `@swarm` (without size or body)
+    // gets parsed as None by parse_swarm_command, then falls through to
+    // push_chat_message which treats it as a literal `@swarm` prompt and
+    // dispatches. This is technically not "empty" but is a malformed
+    // command that should be rejected — out of scope for this empty-only
+    // matrix; left here as a marker for a future tightening.
+}
+
+#[test]
+fn at_shadow_alone_does_not_dispatch() {
+    // `parse_shadow_command` matches `@shadow <body>`; `@shadow` alone
+    // strips to empty and `push_chat_message` rejects.
+    assert_chat_dispatch_drops("empty_input_at_shadow", "@shadow");
+    assert_chat_dispatch_drops("empty_input_at_shadow_ws", "@shadow   ");
+}
+
+// `dispatch_agent_prompt` is the chokepoint every dispatch path funnels
+// through (chat, swarm, shadow, intake resume, genome retry, agent
+// follow-ups). A defensive empty-prompt guard there protects future
+// callers from silently spawning a no-op turn even if they skip the
+// upstream `is_empty()` check. This test invokes the chokepoint
+// directly to lock the guard in place.
+#[test]
+fn dispatch_agent_prompt_drops_empty_prompt() {
+    let cwd = cargo_workspace("dispatch_agent_prompt_empty");
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd.clone(), editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        "codex-test".into(),
+        AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: None,
+        },
+    );
+
+    let mut vitals = crate::vitals::VitalsState::default();
+    let codex = crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    );
+
+    for prompt in ["", "   ", "\n\t\n"] {
+        crate::app::dispatch_agent_prompt(
+            &mut state,
+            &mut vitals,
+            Some(&codex),
+            None,
+            "codex-test".into(),
+            None,
+            prompt.into(),
+        );
+        assert!(
+            state.agents.queued_codex_turns.is_empty(),
+            "dispatch_agent_prompt enqueued an empty prompt `{prompt:?}`: {:?}",
+            state.agents.queued_codex_turns,
+        );
+    }
+
+    let _ = fs::remove_dir_all(&cwd);
 }

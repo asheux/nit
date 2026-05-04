@@ -127,6 +127,13 @@ pub(super) fn enqueue_codex_turn(
     prompt: String,
     prompt_msg_idx: Option<usize>,
 ) {
+    // Same defensive guard as `dispatch_agent_prompt` — direct enqueue
+    // callers (event_drain, swarm, intake resume) bypass the chokepoint
+    // helper, so block here too rather than seating a no-op turn in the
+    // queue and noisying the UI with a phantom "queued" state.
+    if prompt.trim().is_empty() {
+        return;
+    }
     let Some(model) = model else {
         return;
     };
@@ -243,6 +250,12 @@ pub(super) fn maybe_dispatch_codex_turn(
     prompt: String,
     count_new_turn: bool,
 ) {
+    // Defense in depth: never spawn a Codex turn for an empty prompt.
+    // Direct callers (artifacts popup, chat dispatch leaf) gate before
+    // here, but the cost of a duplicated check is one trim + one bool.
+    if prompt.trim().is_empty() {
+        return;
+    }
     let Some(codex) = codex else {
         return;
     };
@@ -407,7 +420,15 @@ pub(super) fn maybe_dispatch_codex_turn(
         })
         .unwrap_or_else(|| "medium".into());
 
-    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
+    // Intake lanes run a JSON-only classifier and must never write,
+    // exec, or edit files. Shadow lanes are advisory-only (see
+    // `shadow_readonly_clause`). Both contracts are wire-level and
+    // load-bearing — extending this predicate to a write-capable role
+    // requires a paired audit of the system prompt that gates the
+    // model's actual behavior. See `docs/INTAKE.md` for the read-only
+    // contract on intake lanes.
+    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some()
+        || crate::intake::parse_intake_lane_id(&model).is_some();
     let cwd = resolve_dispatch_cwd(state, &model);
     let ok = codex.send(CodexCommand::RunTurn {
         model: model.clone(),
@@ -505,6 +526,10 @@ pub(super) fn enqueue_claude_turn(
     prompt: String,
     prompt_msg_idx: Option<usize>,
 ) {
+    // Symmetric guard with `enqueue_codex_turn` — see comment there.
+    if prompt.trim().is_empty() {
+        return;
+    }
     let Some(model) = model else {
         return;
     };
@@ -642,6 +667,10 @@ pub(super) fn maybe_dispatch_claude_turn(
     prompt: String,
     count_new_turn: bool,
 ) {
+    // Symmetric guard with `maybe_dispatch_codex_turn` — see comment there.
+    if prompt.trim().is_empty() {
+        return;
+    }
     let Some(claude) = claude else {
         return;
     };
@@ -790,7 +819,11 @@ pub(super) fn maybe_dispatch_claude_turn(
         .or_else(|| state.agents.claude_default_effort.get(&model).cloned())
         .unwrap_or_else(|| "high".into());
 
-    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
+    // See the codex dispatcher above for the rationale: intake lanes
+    // are JSON-only classifiers, shadow lanes are advisory; neither
+    // role legitimately writes, edits, or runs shell commands.
+    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some()
+        || crate::intake::parse_intake_lane_id(&model).is_some();
     // Role-aware turn budget:
     // - Integrators run real verify loops (clippy → test → fmt → fix → re-check)
     //   on top of the write work and need the largest envelope.
@@ -1305,6 +1338,22 @@ pub(crate) fn dispatch_agent_prompt(
     mission_id: Option<String>,
     prompt: String,
 ) {
+    // Defensive: every dispatch path (chat, swarm, shadow, intake resume,
+    // genome retry, agent follow-ups) funnels through here, so a single
+    // empty-prompt guard at the chokepoint catches every future caller
+    // that forgets the upstream `is_empty()` check. Drop with an Info
+    // diag rather than panicking — a stray empty prompt should never
+    // hard-fail the loop, and the diag preserves enough breadcrumb to
+    // hunt down the source.
+    if prompt.trim().is_empty() {
+        state.agents.diag_events.push(AgentDiagnosticEvent {
+            severity: AgentAlertSeverity::Info,
+            source: "dispatch".into(),
+            message: format!("dropped empty prompt for agent={agent_id} mission={mission_id:?}"),
+            at: super::timestamp_label(state),
+        });
+        return;
+    }
     // NOTE: genome context is prepended inside maybe_dispatch_codex_turn /
     // maybe_dispatch_claude_turn (and their queue-dequeue paths) so that every
     // code path that actually sends a prompt gets it exactly once.  Do NOT add

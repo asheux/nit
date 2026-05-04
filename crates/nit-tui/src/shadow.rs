@@ -366,17 +366,13 @@ fn finalize_main_dispatch(run: &mut ShadowRun, state: &AppState) -> Vec<ShadowDi
     // metric data even when the shadows' digests don't cite numbers.
     let landscape = landscape_for_main(state);
     let prompt = build_final_prompt(run, landscape.as_deref());
-    // Option (b) of the chat-dispatch gate: only the main writer can
-    // earn a FILE CHECKLIST appendix. propose-a / propose-b / judge /
-    // review are advisory-only (`shadow_readonly_clause`) and must
-    // never carry a writer mandate, even when the operator's request
-    // would qualify at chat dispatch.
-    let main_cwd = crate::app::resolve_dispatch_cwd(state, &run.main_agent_id);
-    let prompt = if crate::app::is_real_work(&run.main_prompt, main_cwd.as_path()) {
-        crate::app::augment_with_module_file_checklist(main_cwd.as_path(), prompt)
-    } else {
-        prompt
-    };
+    // FILE CHECKLIST gating moved to the intake agent (see
+    // `crates/nit-tui/src/intake.rs`). The shadow pipeline's main writer
+    // already receives the judge's binding plan — including any file
+    // paths the judge identified — so a separate FILE CHECKLIST here
+    // would duplicate the contract. Operators who want the explicit
+    // checklist should run a non-shadow chat dispatch with
+    // `intake_enabled = true`.
     let agent_id = run.main_agent_id.clone();
     let mission_id = run.mission_id.clone();
     let prompt_msg_idx = run.prompt_msg_idx;

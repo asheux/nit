@@ -53,10 +53,12 @@ fn default_mood_is_consolidation() {
 
 #[test]
 fn mood_roundtrips_through_serde() {
-    let mut state = SubstrateState::default();
-    state.mood = Mood::Defensive;
-    state.mood_override_until_gen = 42;
-    state.mood_quiet_streak = 7;
+    let state = SubstrateState {
+        mood: Mood::Defensive,
+        mood_override_until_gen: 42,
+        mood_quiet_streak: 7,
+        ..SubstrateState::default()
+    };
 
     let json = serde_json::to_string(&state).unwrap();
     let restored: SubstrateState = serde_json::from_str(&json).unwrap();
