@@ -1,8 +1,16 @@
 use std::collections::HashMap;
 
 pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
-    let const_bindings: HashMap<String, String> =
-        js_source.lines().filter_map(parse_js_const_line).collect();
+    let const_bindings: HashMap<String, String> = js_source
+        .lines()
+        .filter_map(|line| {
+            let after_export = line.trim().strip_prefix("export const ")?;
+            let (binding_name, rhs) = after_export.split_once('=')?;
+            let cleaned_rhs = rhs.trim().trim_end_matches(';').trim();
+            let unquoted = strip_single_quotes(cleaned_rhs)?;
+            Some((binding_name.trim().to_string(), unquoted.to_string()))
+        })
+        .collect();
     let set_member_tokens = extract_valid_models_set_members(js_source);
 
     let mut resolved: Vec<String> = set_member_tokens
@@ -16,14 +24,6 @@ pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
     resolved.sort();
     resolved.dedup();
     resolved
-}
-
-fn parse_js_const_line(line: &str) -> Option<(String, String)> {
-    let after_export = line.trim().strip_prefix("export const ")?;
-    let (binding_name, rhs) = after_export.split_once('=')?;
-    let cleaned_rhs = rhs.trim().trim_end_matches(';').trim();
-    let unquoted = strip_single_quotes(cleaned_rhs)?;
-    Some((binding_name.trim().to_string(), unquoted.to_string()))
 }
 
 fn extract_valid_models_set_members(js_source: &str) -> Vec<&str> {

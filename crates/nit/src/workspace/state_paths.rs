@@ -6,9 +6,13 @@ use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 
 pub(crate) fn load_notes(workspace_root: &Path) -> Buffer {
-    let Some(notes_path) = hashed_state_path(workspace_root, "notes", "md") else {
+    let Some(base) = paths::state_dir().or_else(paths::data_dir) else {
         return Buffer::empty("notes", None);
     };
+    let dir = base.join("notes");
+    let _ = fs::create_dir_all(&dir);
+    let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
+    let notes_path = dir.join(format!("{hash:016x}.md"));
     let saved = notes_path
         .exists()
         .then(|| core_io::load_to_string(&notes_path).ok())
@@ -17,15 +21,6 @@ pub(crate) fn load_notes(workspace_root: &Path) -> Buffer {
         Some(content) => Buffer::from_str("notes", &content, Some(notes_path)),
         None => Buffer::empty("notes", Some(notes_path)),
     }
-}
-
-/// Build a hashed path under the nit state directory: `<state>/<subdir>/<hash>.<ext>`.
-fn hashed_state_path(workspace_root: &Path, subdir: &str, ext: &str) -> Option<PathBuf> {
-    let base = paths::state_dir().or_else(paths::data_dir)?;
-    let dir = base.join(subdir);
-    let _ = fs::create_dir_all(&dir);
-    let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
-    Some(dir.join(format!("{hash:016x}.{ext}")))
 }
 
 pub(crate) fn export_legacy_notes_snapshot(

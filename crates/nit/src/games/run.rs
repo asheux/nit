@@ -2,7 +2,7 @@
 //! write artifacts, and emit a summary.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use nit_games::events::EventWriter;
@@ -42,10 +42,55 @@ pub(super) fn run_games_headless(args: RunArgs) -> anyhow::Result<()> {
 
     let prep = prepare_batch_config(config, strategies, seed)?;
     let artifact_root = super::resolve_output_dir(&prep.resolved_path, out)?;
+    let layout = setup_run_layout(&prep, &artifact_root, verbose)?;
 
+    let engine = TournamentKernel::new(prep.normalized.clone());
+    let frozen_config = engine.config().clone();
+    let emit_events = prep.normalized.save_data && prep.normalized.event_log.enabled;
+    let emit_history = prep.normalized.save_data && prep.normalized.history.enabled;
+
+    let event_path = layout
+        .as_ref()
+        .filter(|_| emit_events)
+        .map(|disk| disk.events_path.clone());
+    let history_path = layout
+        .as_ref()
+        .filter(|_| emit_history)
+        .map(|disk| disk.history_path.clone());
+    let outcome = super::execute_tournament(&engine, event_path, history_path)?;
+
+    if let Some(disk) = layout.as_ref() {
+        super::write_run_artifacts(
+            &disk.config_path,
+            &prep.source_text,
+            &disk.definitions_path,
+            engine.definitions(),
+            &disk.results_path,
+            &outcome.results,
+        );
+    }
+
+    let report = build_headless_summary(
+        prep,
+        frozen_config,
+        layout.as_ref(),
+        engine.definitions(),
+        outcome,
+    );
+
+    persist_and_emit_summary(&report, layout.as_ref(), format, quiet, verbose)
+}
+
+// Allocate the on-disk run layout when save_data is enabled; create the run
+// directory before the tournament writes anything into it.
+fn setup_run_layout(
+    prep: &PreparedBatchConfig,
+    artifact_root: &Path,
+    verbose: bool,
+) -> anyhow::Result<Option<RunLayout>> {
     let layout = prep.normalized.save_data.then(|| {
         RunLayout::for_base(
-            &artifact_root,
+            artifact_root,
             &prep.batch_timestamp,
             prep.effective_seed,
             &prep.deterministic_run_id,
@@ -71,41 +116,7 @@ pub(super) fn run_games_headless(args: RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    let engine = TournamentKernel::new(prep.normalized.clone());
-    let frozen_config = engine.config().clone();
-    let emit_events = prep.normalized.save_data && prep.normalized.event_log.enabled;
-    let emit_history = prep.normalized.save_data && prep.normalized.history.enabled;
-
-    let outcome = super::execute_tournament(
-        &engine,
-        emit_events
-            .then(|| layout.as_ref().map(|disk| disk.events_path.clone()))
-            .flatten(),
-        emit_history
-            .then(|| layout.as_ref().map(|disk| disk.history_path.clone()))
-            .flatten(),
-    )?;
-
-    if let Some(disk) = layout.as_ref() {
-        super::write_run_artifacts(
-            &disk.config_path,
-            &prep.source_text,
-            &disk.definitions_path,
-            engine.definitions(),
-            &disk.results_path,
-            &outcome.results,
-        );
-    }
-
-    let report = build_headless_summary(
-        prep,
-        frozen_config,
-        layout.as_ref(),
-        engine.definitions(),
-        outcome,
-    );
-
-    persist_and_emit_summary(&report, layout.as_ref(), format, quiet, verbose)
+    Ok(layout)
 }
 
 fn prepare_batch_config(

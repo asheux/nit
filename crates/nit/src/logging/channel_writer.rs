@@ -34,22 +34,18 @@ pub(super) struct ChannelWriter {
 impl ChannelWriter {
     fn drain_lines(&mut self) {
         while let Some(newline_pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let trimmed_line = String::from_utf8_lossy(&self.buf[..=newline_pos])
+            let line = String::from_utf8_lossy(&self.buf[..=newline_pos])
                 .trim()
                 .to_string();
             self.buf.drain(..=newline_pos);
-            if trimmed_line.is_empty() {
+            if line.is_empty() {
                 continue;
             }
-            self.emit(&trimmed_line);
+            if let Some(mut handle) = self.file.as_ref().and_then(|f| f.lock().ok()) {
+                let _ = writeln!(handle, "{line}");
+            }
+            let _ = self.tx.send(line);
         }
-    }
-
-    fn emit(&self, log_line: &str) {
-        if let Some(mut handle) = self.file.as_ref().and_then(|f| f.lock().ok()) {
-            let _ = writeln!(handle, "{log_line}");
-        }
-        let _ = self.tx.send(log_line.to_string());
     }
 }
 
@@ -63,10 +59,13 @@ impl Write for ChannelWriter {
     fn flush(&mut self) -> io::Result<()> {
         self.drain_lines();
         let trailing = String::from_utf8_lossy(&self.buf).trim().to_string();
-        if !trailing.is_empty() {
-            self.emit(&trailing);
-        }
         self.buf.clear();
+        if !trailing.is_empty() {
+            if let Some(mut handle) = self.file.as_ref().and_then(|f| f.lock().ok()) {
+                let _ = writeln!(handle, "{trailing}");
+            }
+            let _ = self.tx.send(trailing);
+        }
         Ok(())
     }
 }

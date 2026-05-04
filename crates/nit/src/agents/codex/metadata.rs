@@ -96,18 +96,16 @@ fn pick_codex_reasoning_effort(model: &CodexModelEntry) -> Option<String> {
         return Some(default.to_string());
     }
 
-    let find = |target: &str| {
+    let pick = |target: &str| -> Option<&str> {
         supported
             .iter()
-            .find(|e| e.eq_ignore_ascii_case(target))
+            .find(|effort| effort.eq_ignore_ascii_case(target))
             .copied()
     };
 
-    let chosen = find(default)
-        .or_else(|| find("medium"))
-        .or_else(|| find("high"))
-        .or_else(|| find("low"))
+    let chosen = [default, "medium", "high", "low"]
+        .into_iter()
+        .find_map(pick)
         .unwrap_or(supported[0]);
-
     Some(chosen.to_string())
 }

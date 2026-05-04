@@ -1,5 +1,4 @@
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -15,10 +14,19 @@ pub(crate) fn init_tracing(
     log_sender: mpsc::Sender<String>,
     log_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let file: Option<SharedFile> = log_path
-        .as_ref()
-        .and_then(|p| open_log_file(p).ok().map(|f| Arc::new(Mutex::new(f))));
+    let file: Option<SharedFile> = log_path.as_ref().and_then(|path| {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|handle| Arc::new(Mutex::new(handle)))
+    });
 
+    // try_init tolerates a subscriber already installed in tests.
     tracing_subscriber::fmt()
         .with_writer(LogWriter {
             tx: log_sender,
@@ -27,7 +35,7 @@ pub(crate) fn init_tracing(
         .with_ansi(false)
         .with_env_filter("info,nit_syntax::tree_sitter_engine=error")
         .try_init()
-        .ok(); // tolerate a subscriber already installed in tests
+        .ok();
 
     if let Some(path) = log_path {
         tracing::info!("log file: {}", path.display());
@@ -44,19 +52,14 @@ pub(crate) fn install_panic_hook() {
 }
 
 pub(crate) fn log_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("NIT_LOG_PATH") {
-        return Some(PathBuf::from(path));
-    }
-    let base = paths::state_dir().or_else(paths::data_dir)?;
-    let logs_dir = base.join("logs");
-    let _ = fs::create_dir_all(&logs_dir);
-    let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
-    Some(logs_dir.join(format!("{hash:016x}.log")))
-}
-
-fn open_log_file(path: &Path) -> io::Result<fs::File> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::OpenOptions::new().create(true).append(true).open(path)
+    std::env::var("NIT_LOG_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            let base = paths::state_dir().or_else(paths::data_dir)?;
+            let logs_dir = base.join("logs");
+            let _ = fs::create_dir_all(&logs_dir);
+            let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
+            Some(logs_dir.join(format!("{hash:016x}.log")))
+        })
 }

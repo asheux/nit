@@ -1,5 +1,4 @@
 mod binary;
-mod effort;
 mod probe;
 
 pub(super) use probe::probe_claude_models;
@@ -7,7 +6,7 @@ pub(super) use probe::probe_claude_models;
 #[cfg(test)]
 pub(crate) use binary::{parse_claude_models_from_binary, select_current_claude_models};
 #[cfg(test)]
-pub(crate) use effort::parse_effort_choices_from_help;
+pub(crate) use probe::parse_effort_choices_from_help;
 
 use probe::{EXTENDED_CONTEXT_WINDOW, STANDARD_CONTEXT_WINDOW};
 
@@ -46,9 +45,10 @@ pub(super) fn load_only_claude_agents(cli_available: bool) -> nit_core::AgentsSt
 
 pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState) {
     let supported = probe::probe_claude_supported_efforts();
-    let default_effort = effort::pick_claude_default_effort(&supported);
+    let default_effort = probe::pick_claude_default_effort(&supported);
+    let model_ids: Vec<String> = roster.claude_models.clone();
 
-    for id in roster.claude_models.clone() {
+    for id in model_ids {
         let window = if id.contains("[1m]") || id.contains("1m") {
             EXTENDED_CONTEXT_WINDOW
         } else {
@@ -57,7 +57,6 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
         roster
             .claude_effective_context_window_tokens
             .insert(id.clone(), window);
-
         roster
             .claude_supported_efforts
             .insert(id.clone(), supported.clone());

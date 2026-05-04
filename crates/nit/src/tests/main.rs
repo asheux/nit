@@ -1,9 +1,13 @@
+use std::path::PathBuf;
+
+use clap::Parser;
+
 use crate::agents::{
     parse_claude_models_from_binary, parse_effort_choices_from_help,
     parse_gemini_models_from_source, select_current_claude_models, select_current_gemini_models,
     sync_backend_model_lanes,
 };
-use crate::cli::AgentsArg;
+use crate::cli::{AgentsArg, Cli, Command};
 
 fn test_lane(id: &str, role: &str, kind: nit_core::AgentLaneKind) -> nit_core::AgentLane {
     nit_core::AgentLane {
@@ -206,4 +210,101 @@ fn parses_claude_effort_choices_returns_none_when_flag_absent() {
 fn parses_claude_effort_choices_returns_none_when_parens_missing() {
     let help_output = "--effort <level>    Effort level for the current session";
     assert!(parse_effort_choices_from_help(help_output).is_none());
+}
+
+fn parse_multipane(argv: &[&str]) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(argv.iter().copied())
+}
+
+#[test]
+fn multipane_args_parses_with_backend() {
+    let cli = parse_multipane(&[
+        "nit",
+        "multipane",
+        "--backend",
+        "claude-haiku-4-5",
+        "--panes",
+        "4",
+        "--cwd",
+        "/tmp",
+    ])
+    .expect("parses");
+    match cli.command {
+        Some(Command::Multipane(args)) => {
+            assert_eq!(args.backend.as_deref(), Some("claude-haiku-4-5"));
+            assert_eq!(args.panes, 4);
+            assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
+        }
+        other => panic!("expected Multipane, got {other:?}"),
+    }
+}
+
+#[test]
+fn multipane_defaults_eight_panes_and_no_cwd() {
+    let cli = parse_multipane(&["nit", "multipane", "--backend", "gpt-5"]).expect("parses");
+    match cli.command {
+        Some(Command::Multipane(args)) => {
+            assert_eq!(args.panes, 8);
+            assert_eq!(args.cwd, None);
+        }
+        other => panic!("expected Multipane, got {other:?}"),
+    }
+}
+
+#[test]
+fn multipane_no_backend_now_accepted() {
+    let cli = parse_multipane(&["nit", "multipane"]).expect("parses without --backend");
+    match cli.command {
+        Some(Command::Multipane(args)) => {
+            assert!(args.backend.is_none());
+            assert_eq!(args.panes, 8);
+            assert_eq!(args.cwd, None);
+        }
+        other => panic!("expected Multipane, got {other:?}"),
+    }
+}
+
+#[test]
+fn multipane_with_backend_family() {
+    let cli = parse_multipane(&["nit", "multipane", "--backend", "claude"]).expect("parses");
+    match cli.command {
+        Some(Command::Multipane(args)) => {
+            assert_eq!(args.backend.as_deref(), Some("claude"));
+            assert_eq!(args.panes, 8);
+        }
+        other => panic!("expected Multipane, got {other:?}"),
+    }
+}
+
+#[test]
+fn multipane_panes_zero_rejected() {
+    let err = parse_multipane(&["nit", "multipane", "--backend", "x", "--panes", "0"])
+        .expect_err("--panes 0 must be rejected");
+    assert!(err.to_string().contains('0'));
+}
+
+#[test]
+fn multipane_panes_thirtythree_rejected() {
+    let err = parse_multipane(&["nit", "multipane", "--backend", "x", "--panes", "33"])
+        .expect_err("--panes 33 must be rejected");
+    assert!(err.to_string().contains("33"));
+}
+
+#[test]
+fn multipane_panes_at_bounds_accepted() {
+    for boundary in [1u8, 32u8] {
+        let cli = parse_multipane(&[
+            "nit",
+            "multipane",
+            "--backend",
+            "x",
+            "--panes",
+            &boundary.to_string(),
+        ])
+        .expect("parses at bound");
+        match cli.command {
+            Some(Command::Multipane(args)) => assert_eq!(args.panes, boundary),
+            _ => panic!("expected Multipane"),
+        }
+    }
 }

@@ -20,7 +20,7 @@ pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
             dot,
             "  {} [label=\"{}\"];",
             dot_id(&node.id),
-            escape_dot_str(&node.label)
+            node.label.replace('"', "\\\""),
         )
         .unwrap();
     }
@@ -35,7 +35,7 @@ pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
             "  {} -> {} [label=\"{}\"{color_attrs}];",
             dot_id(&edge.from),
             dot_id(&edge.to),
-            escape_dot_str(&edge.label),
+            edge.label.replace('"', "\\\""),
         )
         .unwrap();
     }
@@ -43,12 +43,8 @@ pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
     dot
 }
 
-fn escape_dot_str(s: &str) -> String {
-    s.replace('"', "\\\"")
-}
-
 fn dot_id(raw: &str) -> String {
-    format!("\"{}\"", escape_dot_str(raw))
+    format!("\"{}\"", raw.replace('"', "\\\""))
 }
 
 pub(crate) fn write_strategy_graph_json(

@@ -297,13 +297,9 @@ pub(super) fn ensure_deps_resolve(tasks: &mut [SwarmTask], template: SwarmTempla
     }
     let task_ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
     let propose_ids: Vec<String> = collect_role_ids(tasks, |role| {
-        matches!(
-            role,
-            "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE
-        )
+        matches!(role, "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE)
     });
-    let integrate_ids: Vec<String> =
-        collect_role_ids(tasks, |role| matches!(role, "integrate"));
+    let integrate_ids: Vec<String> = collect_role_ids(tasks, |role| matches!(role, "integrate"));
     let mut repairs = Vec::new();
 
     // Pass 1: writers with all-unresolved deps → redirect to proposers.

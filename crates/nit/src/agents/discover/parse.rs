@@ -71,6 +71,8 @@ fn extract_models_from_json(json_node: &serde_json::Value, collector: &mut Vec<S
 }
 
 fn first_identity_field(fields: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    // Order is intentional: each CLI prefers a different field name (codex: slug,
+    // claude: id, gemini: name) — pick the first non-empty match in priority order.
     ["id", "name", "model", "slug"]
         .iter()
         .find_map(|key| match fields.get(*key) {

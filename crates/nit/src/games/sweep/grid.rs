@@ -47,7 +47,6 @@ impl PayoffPreset {
         }
     }
 
-    /// Canonical (R, S, T, P) values for this preset.
     const fn payoff_values(self) -> (i32, i32, i32, i32) {
         match self {
             Self::PrisonersDilemma => (3, 0, 5, 1),
@@ -57,10 +56,8 @@ impl PayoffPreset {
     }
 }
 
-/// Build a symmetric 2x2 payoff matrix from the four canonical payoff values.
-///
-/// R = mutual cooperation reward, S = sucker's payoff,
-/// T = temptation to defect, P = mutual defection punishment.
+// R = mutual cooperation reward, S = sucker's payoff,
+// T = temptation to defect, P = mutual defection punishment.
 pub(super) fn payoff_from_rstp(
     reward: i32,
     sucker: i32,
@@ -73,7 +70,6 @@ pub(super) fn payoff_from_rstp(
     ])
 }
 
-/// Resolve CLI grid vectors against config defaults, applying payoff presets if specified.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_parameter_grids(
     fallback_config: &NormalizedConfig,
@@ -110,17 +106,14 @@ pub(super) fn resolve_parameter_grids(
     })
 }
 
-/// Resolve a parameter dimension: CLI overrides take precedence,
-/// falling back to the single value from the parsed config.
-fn grid_or_default<T>(explicit_values: Vec<T>, config_fallback: T) -> Vec<T> {
-    if explicit_values.is_empty() {
-        vec![config_fallback]
+fn grid_or_default<T>(explicit: Vec<T>, fallback: T) -> Vec<T> {
+    if explicit.is_empty() {
+        vec![fallback]
     } else {
-        explicit_values
+        explicit
     }
 }
 
-/// Build the full Cartesian product of parameter dimensions as a flat grid.
 pub(super) fn build_cartesian_grid(space: &ParameterGrids) -> Vec<GridCell> {
     let capacity = space.rounds.len()
         * space.noise.len()
@@ -141,7 +134,6 @@ pub(super) fn build_cartesian_grid(space: &ParameterGrids) -> Vec<GridCell> {
     grid
 }
 
-/// Expand the payoff-matrix dimensions and append GridCells for one execution triple.
 fn expand_payoff_combinations(
     output: &mut Vec<GridCell>,
     round_count: u32,

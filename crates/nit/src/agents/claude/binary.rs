@@ -40,7 +40,11 @@ pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
         let Some(model) = normalize_claude_model_token(&pair[0]) else {
             continue;
         };
-        if looks_like_claude_model_label(&pair[1]) {
+        let label = pair[1].trim();
+        let label_matches_display = !label.is_empty()
+            && !label.starts_with("claude-")
+            && CLAUDE_DISPLAY_MARKERS.iter().any(|m| label.contains(m));
+        if label_matches_display {
             models.push(model.to_string());
         }
     }
@@ -59,7 +63,15 @@ pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
         let Some((family, version)) = parse_claude_family_and_version(model) else {
             continue;
         };
-        update_latest_per_family(&mut best_per_family, family, version, model);
+        let dominated = best_per_family
+            .get(family)
+            .is_some_and(|(inc_ver, inc_name)| {
+                version < *inc_ver
+                    || (version == *inc_ver && !prefer_shorter_model_name(model, inc_name))
+            });
+        if !dominated {
+            best_per_family.insert(family, (version, model.clone()));
+        }
     }
 
     if best_per_family.is_empty() {
@@ -72,20 +84,6 @@ pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
         .collect();
     result.sort();
     result
-}
-
-fn update_latest_per_family(
-    map: &mut HashMap<&'static str, (Vec<u32>, String)>,
-    family: &'static str,
-    version: Vec<u32>,
-    model: &str,
-) {
-    let dominated = map.get(family).is_some_and(|(inc_ver, inc_name)| {
-        version < *inc_ver || (version == *inc_ver && !prefer_shorter_model_name(model, inc_name))
-    });
-    if !dominated {
-        map.insert(family, (version, model.to_owned()));
-    }
 }
 
 fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
@@ -127,13 +125,6 @@ fn is_probable_claude_model(raw: &str) -> bool {
     }
     RECOGNIZED_FAMILIES.iter().any(|tag| name.contains(tag))
         && !DISQUALIFYING_KEYWORDS.iter().any(|kw| name.contains(kw))
-}
-
-fn looks_like_claude_model_label(raw: &str) -> bool {
-    let s = raw.trim();
-    !s.is_empty()
-        && !s.starts_with("claude-")
-        && CLAUDE_DISPLAY_MARKERS.iter().any(|m| s.contains(m))
 }
 
 fn parse_claude_family_and_version(model: &str) -> Option<(&'static str, Vec<u32>)> {

@@ -176,7 +176,7 @@ fn assemble_combined_roster(codex_available: bool, claude_available: bool) -> Ag
 }
 
 fn incorporate_codex_cache(destination: &mut AgentsState) {
-    let codex_state = match codex::load_agents_from_codex_models_cache() {
+    let src = match codex::load_agents_from_codex_models_cache() {
         Ok(state) => state,
         Err(err) => {
             destination.alerts.push(AgentAlert {
@@ -189,16 +189,12 @@ fn incorporate_codex_cache(destination: &mut AgentsState) {
         }
     };
 
-    apply_codex_fields(destination, codex_state);
-}
-
-fn apply_codex_fields(dest: &mut AgentsState, src: AgentsState) {
-    dest.codex_default_reasoning_effort = src.codex_default_reasoning_effort;
-    dest.codex_supported_reasoning_efforts = src.codex_supported_reasoning_efforts;
-    dest.codex_selected_reasoning_effort = src.codex_selected_reasoning_effort;
-    dest.codex_effective_context_window_tokens = src.codex_effective_context_window_tokens;
-    dest.agents.extend(src.agents);
-    dest.mcp = src.mcp;
+    destination.codex_default_reasoning_effort = src.codex_default_reasoning_effort;
+    destination.codex_supported_reasoning_efforts = src.codex_supported_reasoning_efforts;
+    destination.codex_selected_reasoning_effort = src.codex_selected_reasoning_effort;
+    destination.codex_effective_context_window_tokens = src.codex_effective_context_window_tokens;
+    destination.agents.extend(src.agents);
+    destination.mcp = src.mcp;
 }
 
 fn prefer_shorter_model_name(challenger: &str, incumbent: &str) -> bool {

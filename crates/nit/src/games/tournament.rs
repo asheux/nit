@@ -20,109 +20,116 @@ pub(super) struct TournamentRun {
 }
 
 pub(super) fn execute_tournament(
-    tournament_engine: &TournamentKernel,
-    event_output_file: Option<PathBuf>,
-    history_output_file: Option<PathBuf>,
+    engine: &TournamentKernel,
+    event_path: Option<PathBuf>,
+    history_path: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
-    let engine_settings = tournament_engine.config();
-    let parallelism_mode = Parallelism::from_config(&engine_settings.engine.parallelism);
+    let cfg = engine.config();
+    let parallelism = Parallelism::from_config(&cfg.engine.parallelism);
 
-    if matches!(parallelism_mode, Parallelism::Off) {
-        run_sequential(
-            tournament_engine,
-            engine_settings,
-            event_output_file,
-            history_output_file,
-        )
+    if matches!(parallelism, Parallelism::Off) {
+        run_sequential(engine, cfg, event_path, history_path)
     } else {
-        run_parallel(
-            tournament_engine,
-            engine_settings,
-            parallelism_mode,
-            event_output_file,
-            history_output_file,
-        )
+        run_parallel(engine, cfg, parallelism, event_path, history_path)
     }
 }
 
 fn run_sequential(
-    tournament_engine: &TournamentKernel,
-    engine_settings: &NormalizedConfig,
+    engine: &TournamentKernel,
+    cfg: &NormalizedConfig,
     event_file: Option<PathBuf>,
     history_file: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
-    let mut event_recorder = event_file
-        .map(|path| EventWriter::new(path, engine_settings.event_log.include_rounds))
+    let mut events = event_file
+        .map(|p| EventWriter::new(p, cfg.event_log.include_rounds))
         .transpose()?;
+    let mut history = history_file.map(HistoryWriter::new).transpose()?;
 
-    let mut history_recorder = history_file.map(HistoryWriter::new).transpose()?;
+    let (results, runtime) = engine.run_with_runtime(KernelRunMode::Sequential {
+        event_writer: events.as_mut(),
+        history_writer: history.as_mut(),
+    });
 
-    let (tournament_outcomes, acceleration_metrics) =
-        tournament_engine.run_with_runtime(KernelRunMode::Sequential {
-            event_writer: event_recorder.as_mut(),
-            history_writer: history_recorder.as_mut(),
-        });
-
-    let finalized_event_path = finalize_writer(event_recorder, "event log")?;
-    let finalized_history_path = finalize_writer(history_recorder, "history log")?;
+    let event_log_path = match events {
+        Some(w) => Some(
+            w.finish()
+                .with_context(|| "failed to finalize event log")?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let history_log_path = match history {
+        Some(w) => Some(
+            w.finish()
+                .with_context(|| "failed to finalize history log")?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        None => None,
+    };
 
     Ok(TournamentRun {
-        results: tournament_outcomes,
-        runtime: acceleration_metrics,
-        event_log_path: finalized_event_path,
-        history_log_path: finalized_history_path,
+        results,
+        runtime,
+        event_log_path,
+        history_log_path,
     })
 }
 
 fn run_parallel(
-    tournament_engine: &TournamentKernel,
-    engine_settings: &NormalizedConfig,
-    thread_strategy: Parallelism,
+    engine: &TournamentKernel,
+    cfg: &NormalizedConfig,
+    parallelism: Parallelism,
     event_file: Option<PathBuf>,
     history_file: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
     let event_writer = event_file
-        .map(|path| EventWriter::new(path, engine_settings.event_log.include_rounds))
+        .map(|p| EventWriter::new(p, cfg.event_log.include_rounds))
         .transpose()?;
     let (event_sender, event_thread) = spawn_writer_thread(event_writer);
 
     let history_writer = history_file.map(HistoryWriter::new).transpose()?;
     let (history_sender, history_thread) = spawn_writer_thread(history_writer);
 
-    let (tournament_outcomes, acceleration_metrics) =
-        tournament_engine.run_with_runtime(KernelRunMode::Parallel {
-            parallelism: thread_strategy,
-            event_sender: event_sender.clone(),
-            include_rounds: engine_settings.event_log.include_rounds,
-            history_sender: history_sender.clone(),
-        });
+    let (results, runtime) = engine.run_with_runtime(KernelRunMode::Parallel {
+        parallelism,
+        event_sender: event_sender.clone(),
+        include_rounds: cfg.event_log.include_rounds,
+        history_sender: history_sender.clone(),
+    });
 
-    // Drop senders before joining so the writer threads can observe channel close.
+    // Drop senders before joining so the writer threads observe channel close.
     drop(event_sender);
     drop(history_sender);
 
-    let finalized_event_path = collect_worker_result(event_thread, "event log")?;
-    let finalized_history_path = collect_worker_result(history_thread, "history log")?;
+    let event_log_path = match event_thread {
+        Some(h) => Some(
+            h.join()
+                .map_err(|_| anyhow::anyhow!("event log worker panicked"))?
+                .with_context(|| "failed to finalize event log")?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let history_log_path = match history_thread {
+        Some(h) => Some(
+            h.join()
+                .map_err(|_| anyhow::anyhow!("history log worker panicked"))?
+                .with_context(|| "failed to finalize history log")?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        None => None,
+    };
 
     Ok(TournamentRun {
-        results: tournament_outcomes,
-        runtime: acceleration_metrics,
-        event_log_path: finalized_event_path,
-        history_log_path: finalized_history_path,
+        results,
+        runtime,
+        event_log_path,
+        history_log_path,
     })
-}
-
-fn finalize_writer<W: RecordSink>(
-    optional_writer: Option<W>,
-    writer_description: &str,
-) -> anyhow::Result<Option<String>> {
-    let Some(open_writer) = optional_writer else {
-        return Ok(None);
-    };
-    let completed_output_path = open_writer
-        .finish()
-        .with_context(|| format!("failed to finalize {writer_description}"))?;
-    Ok(Some(completed_output_path.to_string_lossy().to_string()))
 }
 
 type WriterHandle<T> = (
@@ -130,7 +137,6 @@ type WriterHandle<T> = (
     Option<thread::JoinHandle<std::io::Result<PathBuf>>>,
 );
 
-/// Spawn a background writer thread that drains a channel into the given sink.
 fn spawn_writer_thread<W: RecordSink>(writer: Option<W>) -> WriterHandle<W::Record> {
     let Some(sink) = writer else {
         return (None, None);
@@ -146,22 +152,8 @@ fn spawn_writer_thread<W: RecordSink>(writer: Option<W>) -> WriterHandle<W::Reco
     (Some(tx), Some(handle))
 }
 
-fn collect_worker_result(
-    thread_handle: Option<thread::JoinHandle<std::io::Result<PathBuf>>>,
-    writer_description: &str,
-) -> anyhow::Result<Option<String>> {
-    let Some(active_handle) = thread_handle else {
-        return Ok(None);
-    };
-    let completed_output_path = active_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("{writer_description} worker panicked"))?
-        .with_context(|| format!("failed to finalize {writer_description}"))?;
-    Ok(Some(completed_output_path.to_string_lossy().to_string()))
-}
-
-/// Unified interface for event and history writers, enabling generic
-/// background threading and sequential finalization.
+// Unified interface for event and history writers, enabling generic
+// background threading and sequential finalization.
 trait RecordSink: Send + 'static {
     type Record: Send + 'static;
     fn accept(&mut self, record: &Self::Record) -> std::io::Result<()>;

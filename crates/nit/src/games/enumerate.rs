@@ -54,7 +54,7 @@ fn resolve_enumeration_path(out: &Path, states: &str) -> anyhow::Result<PathBuf>
 
 fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {
     let trimmed = input.trim();
-    // Try `..=` before `..` to avoid partial match on the inclusive separator.
+    // `..=` must be tried first; `..` is a prefix of it.
     let bounds = trimmed
         .split_once("..=")
         .or_else(|| trimmed.split_once(".."));

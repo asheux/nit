@@ -48,15 +48,14 @@ pub(super) fn run_games_graph(args: GraphArgs) -> anyhow::Result<()> {
 
     let strategies = load_strategies_for_graph(config, run)?;
     let spec = resolve_strategy(&strategies, &id)?;
-    let intro = introspect_strategy(&spec);
-    let graph = build_strategy_graph(&intro);
+    let graph = build_strategy_graph(&introspect_strategy(&spec));
 
+    create_parent_dirs(&out)?;
     let extension = out
         .extension()
         .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    create_parent_dirs(&out)?;
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
 
     match extension.as_str() {
         "json" => write_strategy_graph_json(&out, &graph)?,

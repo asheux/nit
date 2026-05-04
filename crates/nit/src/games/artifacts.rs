@@ -5,43 +5,37 @@ use serde::Serialize;
 
 use nit_games::output::{StrategyDefinition, TournamentResults};
 
-/// Persist run artifacts (config snapshot, strategy definitions, tournament results) to disk.
-///
-/// Individual write failures are logged as warnings rather than propagated, so that
-/// partial artifact output is still available even when one file fails.
+// Per-artifact failures are logged and swallowed so a single bad write
+// does not erase the other artifacts produced by a tournament run.
 pub(super) fn write_run_artifacts(
-    toml_output_path: &Path,
-    raw_config_content: &str,
-    definitions_output_path: &Path,
-    compiled_strategy_list: &[StrategyDefinition],
-    results_output_path: &Path,
-    match_outcome_data: &TournamentResults,
+    config_path: &Path,
+    config_text: &str,
+    definitions_path: &Path,
+    definitions: &[StrategyDefinition],
+    results_path: &Path,
+    results: &TournamentResults,
 ) {
-    persist_artifact(toml_output_path, "config snapshot", |target| {
-        fs::write(target, raw_config_content)?;
+    persist_artifact(config_path, "config snapshot", |target| {
+        fs::write(target, config_text)?;
         Ok(())
     });
-    persist_artifact(definitions_output_path, "strategy definitions", |target| {
-        write_json_pretty(target, compiled_strategy_list)
+    persist_artifact(definitions_path, "strategy definitions", |target| {
+        write_json_pretty(target, definitions)
     });
-    persist_artifact(results_output_path, "tournament results", |target| {
-        write_json_pretty(target, match_outcome_data)
+    persist_artifact(results_path, "tournament results", |target| {
+        write_json_pretty(target, results)
     });
 }
 
 fn write_json_pretty<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
-    nit_utils::fs::write_atomic(path, |json_writer| {
-        serde_json::to_writer_pretty(json_writer, value).map_err(std::io::Error::other)
+    nit_utils::fs::write_atomic(path, |writer| {
+        serde_json::to_writer_pretty(writer, value).map_err(std::io::Error::other)
     })?;
     Ok(())
 }
 
-fn persist_artifact(
-    file_target: &Path,
-    description_tag: &str,
-    writer_operation: impl FnOnce(&Path) -> anyhow::Result<()>,
-) {
-    if let Err(io_failure) = writer_operation(file_target) {
-        eprintln!("Warning: failed to write {description_tag}: {io_failure}");
+fn persist_artifact(path: &Path, label: &str, write: impl FnOnce(&Path) -> anyhow::Result<()>) {
+    if let Err(err) = write(path) {
+        eprintln!("Warning: failed to write {label}: {err}");
     }
 }

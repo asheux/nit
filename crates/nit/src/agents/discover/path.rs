@@ -3,29 +3,20 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub(in crate::agents) fn find_executable_in_path(binary_name: &str) -> Option<PathBuf> {
-    for search_dir in executable_search_dirs() {
-        if search_dir.as_os_str().is_empty() {
-            continue;
-        }
-        #[cfg(windows)]
-        {
-            if let Some(found) = find_in_dir_windows(&search_dir, binary_name) {
-                return Some(found);
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let full_path = search_dir.join(binary_name);
-            if full_path.is_file() {
-                return Some(full_path);
-            }
-        }
-    }
-    None
+    executable_search_dirs()
+        .into_iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| find_in_dir(&dir, binary_name))
+}
+
+#[cfg(not(windows))]
+fn find_in_dir(search_dir: &Path, binary_name: &str) -> Option<PathBuf> {
+    let candidate = search_dir.join(binary_name);
+    candidate.is_file().then_some(candidate)
 }
 
 #[cfg(windows)]
-fn find_in_dir_windows(search_dir: &Path, binary_name: &str) -> Option<PathBuf> {
+fn find_in_dir(search_dir: &Path, binary_name: &str) -> Option<PathBuf> {
     let mut extensions = std::env::var_os("PATHEXT")
         .map(|raw_pathext| {
             raw_pathext

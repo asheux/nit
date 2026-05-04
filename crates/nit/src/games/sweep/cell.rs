@@ -61,24 +61,17 @@ pub(super) fn run_sweep_cell(
 ) -> anyhow::Result<SweepCellSummary> {
     let cell_cfg = prepare_cell_config(sweep_context, grid_point)?;
 
-    let noise_tag = format!("{:.4}", grid_point.noise).replace('.', "_");
-    let point_output_dir = sweep_context.cells_root.join(format!(
-        "{ordinal:04}__r{}__n{noise_tag}__rep{}__R{}__S{}__T{}__P{}",
-        grid_point.rounds,
-        grid_point.repetitions,
-        grid_point.payoff_r,
-        grid_point.payoff_s,
-        grid_point.payoff_t,
-        grid_point.payoff_p
-    ));
-    fs::create_dir_all(&point_output_dir)
-        .with_context(|| format!("failed to create {}", point_output_dir.display()))?;
+    let cell_dir = sweep_context
+        .cells_root
+        .join(cell_dir_name(grid_point, ordinal));
+    fs::create_dir_all(&cell_dir)
+        .with_context(|| format!("failed to create {}", cell_dir.display()))?;
 
-    let point_summary_file = point_output_dir.join("run_summary.json");
+    let summary_file = cell_dir.join("run_summary.json");
 
-    if point_summary_file.exists() && !sweep_context.force {
+    if summary_file.exists() && !sweep_context.force {
         if let Some(cached) = try_reuse_existing_cell(
-            &point_summary_file,
+            &summary_file,
             sweep_context,
             running_totals,
             ordinal,
@@ -88,43 +81,35 @@ pub(super) fn run_sweep_cell(
         }
     }
 
-    let point_config_file = point_output_dir.join("config.toml");
-    let point_definitions_file = point_output_dir.join("definitions.json");
-    let point_results_file = point_output_dir.join("results.json");
-    let point_events_file = point_output_dir.join("events.ndjson");
-    let point_history_file = point_output_dir.join("history.ndjson");
-    let point_analysis_dir = point_output_dir.join("analysis");
+    let config_file = cell_dir.join("config.toml");
+    let definitions_file = cell_dir.join("definitions.json");
+    let results_file = cell_dir.join("results.json");
+    let events_file = cell_dir.join("events.ndjson");
+    let history_file = cell_dir.join("history.ndjson");
+    let analysis_dir = cell_dir.join("analysis");
 
-    let tournament_engine = TournamentKernel::new(cell_cfg.normalized.clone());
-    let frozen_config = tournament_engine.config().clone();
-    let execution_output = super::execute_tournament(
-        &tournament_engine,
-        cell_cfg
-            .normalized
-            .event_log
-            .enabled
-            .then_some(point_events_file),
-        cell_cfg
-            .normalized
-            .history
-            .enabled
-            .then_some(point_history_file),
+    let engine = TournamentKernel::new(cell_cfg.normalized.clone());
+    let frozen_config = engine.config().clone();
+    let outcome = super::execute_tournament(
+        &engine,
+        cell_cfg.normalized.event_log.enabled.then_some(events_file),
+        cell_cfg.normalized.history.enabled.then_some(history_file),
     )?;
 
     super::write_run_artifacts(
-        &point_config_file,
+        &config_file,
         &cell_cfg.serialized,
-        &point_definitions_file,
-        tournament_engine.definitions(),
-        &point_results_file,
-        &execution_output.results,
+        &definitions_file,
+        engine.definitions(),
+        &results_file,
+        &outcome.results,
     );
 
-    // Collect top-k before moving results into the summary to avoid a clone.
-    let (winner_id, podium_entries) =
-        collect_sweep_results(&execution_output.results, sweep_context, running_totals);
+    // Collect top-k before moving outcome.results into the summary to avoid a clone.
+    let (winner_id, podium) =
+        collect_sweep_results(&outcome.results, sweep_context, running_totals);
 
-    let cell_run_summary = RunSummary {
+    let run_summary = RunSummary {
         schema_version: RUN_SUMMARY_SCHEMA_VERSION,
         timestamp: sweep_context.timestamp.to_owned(),
         run_id: cell_cfg.content_hash.clone(),
@@ -132,45 +117,38 @@ pub(super) fn run_sweep_cell(
         config_text: cell_cfg.serialized,
         config: frozen_config,
         paths: RunPaths {
-            summary: Some(point_summary_file.display().to_string()),
-            events: execution_output.event_log_path.clone(),
-            history: execution_output.history_log_path.clone(),
-            definitions: Some(point_definitions_file.display().to_string()),
-            results: Some(point_results_file.display().to_string()),
-            config: Some(point_config_file.display().to_string()),
-            analysis_dir: Some(point_analysis_dir.display().to_string()),
+            summary: Some(summary_file.display().to_string()),
+            events: outcome.event_log_path.clone(),
+            history: outcome.history_log_path.clone(),
+            definitions: Some(definitions_file.display().to_string()),
+            results: Some(results_file.display().to_string()),
+            config: Some(config_file.display().to_string()),
+            analysis_dir: Some(analysis_dir.display().to_string()),
         },
-        strategies: tournament_engine.definitions().to_vec(),
-        results: execution_output.results,
-        event_log: execution_output.event_log_path,
-        history_log: execution_output.history_log_path,
-        runtime: execution_output.runtime,
-        run_dir: Some(point_output_dir.display().to_string()),
+        strategies: engine.definitions().to_vec(),
+        results: outcome.results,
+        event_log: outcome.event_log_path,
+        history_log: outcome.history_log_path,
+        runtime: outcome.runtime,
+        run_dir: Some(cell_dir.display().to_string()),
     };
 
-    nit_games::output::write_summary(&point_summary_file, &cell_run_summary)
-        .with_context(|| format!("failed to write {}", point_summary_file.display()))?;
+    nit_games::output::write_summary(&summary_file, &run_summary)
+        .with_context(|| format!("failed to write {}", summary_file.display()))?;
 
-    Ok(SweepCellSummary {
-        cell_id: ordinal,
-        rounds: grid_point.rounds,
-        noise: grid_point.noise,
-        repetitions: grid_point.repetitions,
-        payoff_r: grid_point.payoff_r,
-        payoff_s: grid_point.payoff_s,
-        payoff_t: grid_point.payoff_t,
-        payoff_p: grid_point.payoff_p,
-        seed: cell_cfg.seed,
-        run_id: cell_cfg.content_hash,
-        run_dir: point_output_dir.display().to_string(),
-        summary_path: point_summary_file.display().to_string(),
-        top_strategy: winner_id,
-        top_strategies: podium_entries,
-        skipped: false,
-    })
+    Ok(build_cell_summary(
+        ordinal,
+        grid_point,
+        cell_cfg.seed,
+        cell_cfg.content_hash,
+        cell_dir.display().to_string(),
+        summary_file.display().to_string(),
+        winner_id,
+        podium,
+        false,
+    ))
 }
 
-/// Attempt to reuse a previously computed cell result.
 fn try_reuse_existing_cell(
     summary_path: &Path,
     sweep_context: &SweepContext<'_>,
@@ -179,21 +157,71 @@ fn try_reuse_existing_cell(
     grid_point: &GridCell,
 ) -> Option<SweepCellSummary> {
     let stored_text = fs::read_to_string(summary_path).ok()?;
-    let stored_summary: RunSummary = serde_json::from_str(&stored_text).ok()?;
+    let stored: RunSummary = serde_json::from_str(&stored_text).ok()?;
 
-    let (winning_strategy, ranked_entries) =
-        collect_sweep_results(&stored_summary.results, sweep_context, running_totals);
+    let (winner_id, podium) = collect_sweep_results(&stored.results, sweep_context, running_totals);
 
     if sweep_context.verbose {
         eprintln!(
             "Skipping existing cell {} ({}): {}",
             ordinal,
-            stored_summary.run_id,
+            stored.run_id,
             summary_path.display()
         );
     }
 
-    Some(SweepCellSummary {
+    let run_dir = stored.run_dir.clone().unwrap_or_else(|| {
+        summary_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .display()
+            .to_string()
+    });
+    let summary = stored
+        .paths
+        .summary
+        .clone()
+        .unwrap_or_else(|| summary_path.display().to_string());
+
+    Some(build_cell_summary(
+        ordinal,
+        grid_point,
+        stored.seed,
+        stored.run_id,
+        run_dir,
+        summary,
+        winner_id,
+        podium,
+        true,
+    ))
+}
+
+fn cell_dir_name(grid_point: &GridCell, ordinal: usize) -> String {
+    let noise_tag = format!("{:.4}", grid_point.noise).replace('.', "_");
+    format!(
+        "{ordinal:04}__r{}__n{noise_tag}__rep{}__R{}__S{}__T{}__P{}",
+        grid_point.rounds,
+        grid_point.repetitions,
+        grid_point.payoff_r,
+        grid_point.payoff_s,
+        grid_point.payoff_t,
+        grid_point.payoff_p,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cell_summary(
+    ordinal: usize,
+    grid_point: &GridCell,
+    seed: u64,
+    run_id: String,
+    run_dir: String,
+    summary_path: String,
+    top_strategy: String,
+    top_strategies: Vec<SweepTopEntry>,
+    skipped: bool,
+) -> SweepCellSummary {
+    SweepCellSummary {
         cell_id: ordinal,
         rounds: grid_point.rounds,
         noise: grid_point.noise,
@@ -202,24 +230,14 @@ fn try_reuse_existing_cell(
         payoff_s: grid_point.payoff_s,
         payoff_t: grid_point.payoff_t,
         payoff_p: grid_point.payoff_p,
-        seed: stored_summary.seed,
-        run_id: stored_summary.run_id.clone(),
-        run_dir: stored_summary.run_dir.clone().unwrap_or_else(|| {
-            summary_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .display()
-                .to_string()
-        }),
-        summary_path: stored_summary
-            .paths
-            .summary
-            .clone()
-            .unwrap_or_else(|| summary_path.display().to_string()),
-        top_strategy: winning_strategy,
-        top_strategies: ranked_entries,
-        skipped: true,
-    })
+        seed,
+        run_id,
+        run_dir,
+        summary_path,
+        top_strategy,
+        top_strategies,
+        skipped,
+    }
 }
 
 /// Update running score/top-count accumulators and return the podium for a single cell.

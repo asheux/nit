@@ -13,63 +13,57 @@ const DEFAULT_CONFIG_FILENAME: &str = "games.toml";
 
 pub(super) type LoadedConfig = (PathBuf, String, NormalizedConfig);
 
-/// Load and parse a games config, optionally appending strategies from an NDJSON sidecar.
 pub(super) fn load_games_config(
-    toml_source: Option<PathBuf>,
-    sidecar_source: Option<PathBuf>,
+    config: Option<PathBuf>,
+    sidecar: Option<PathBuf>,
 ) -> anyhow::Result<LoadedConfig> {
-    let canonical_config_path =
-        toml_source.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILENAME));
+    let path = config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILENAME));
 
-    let raw_toml_content = core_io::load_to_string(&canonical_config_path)
-        .with_context(|| format!("failed to read {}", canonical_config_path.display()))?;
+    let text = core_io::load_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
 
-    let mut parsed_config =
-        GamesConfig::from_toml_with_root(&raw_toml_content, canonical_config_path.parent())
-            .map_err(|config_parse_failure| anyhow::anyhow!(config_parse_failure))?;
+    let mut cfg =
+        GamesConfig::from_toml_with_root(&text, path.parent()).map_err(|e| anyhow::anyhow!(e))?;
 
-    if let Some(ndjson_sidecar) = sidecar_source {
-        let absolute_sidecar_path =
-            resolve_relative_path(&ndjson_sidecar, canonical_config_path.parent());
-        append_strategies_from_ndjson(&mut parsed_config, &absolute_sidecar_path)?;
+    if let Some(sidecar) = sidecar {
+        let resolved = resolve_relative_path(&sidecar, path.parent());
+        append_strategies_from_ndjson(&mut cfg, &resolved)?;
     }
 
-    Ok((canonical_config_path, raw_toml_content, parsed_config))
+    Ok((path, text, cfg))
 }
 
-/// Resolve the output base directory relative to the config file's parent.
 pub(super) fn resolve_output_dir(
     config_location: &Path,
-    user_specified_dir: Option<PathBuf>,
+    requested: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let anchor_directory = match config_location.parent() {
+    let anchor = match config_location.parent() {
         Some(parent) if parent.is_absolute() => parent.to_path_buf(),
         Some(parent) => cwd.join(parent),
         None => cwd,
     };
 
-    let resolved_destination = user_specified_dir.unwrap_or_else(|| anchor_directory.clone());
-    Ok(if resolved_destination.is_absolute() {
-        resolved_destination
+    let target = requested.unwrap_or_else(|| anchor.clone());
+    Ok(if target.is_absolute() {
+        target
     } else {
-        anchor_directory.join(resolved_destination)
+        anchor.join(target)
     })
 }
 
-fn resolve_relative_path(candidate_path: &Path, resolution_anchor: Option<&Path>) -> PathBuf {
-    if candidate_path.is_absolute() {
-        return candidate_path.to_path_buf();
+fn resolve_relative_path(candidate: &Path, anchor: Option<&Path>) -> PathBuf {
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
     }
-    if let Some(parent_directory) = resolution_anchor {
-        return parent_directory.join(candidate_path);
+    if let Some(parent) = anchor {
+        return parent.join(candidate);
     }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(candidate_path)
+        .join(candidate)
 }
 
-/// Apply TM strategy selection and accelerator validation before tournament execution.
 pub(super) fn finalize_config(raw: NormalizedConfig) -> anyhow::Result<NormalizedConfig> {
     let normalized =
         try_select_halting_turing_machine_strategies(raw).map_err(|e| anyhow::anyhow!(e))?;
@@ -83,49 +77,25 @@ pub(super) fn finalize_config(raw: NormalizedConfig) -> anyhow::Result<Normalize
     Ok(normalized)
 }
 
-/// Load strategy specs from an NDJSON file and append them to the config.
-///
-/// Blank lines are silently skipped; parse errors include the source path and line number.
-fn append_strategies_from_ndjson(
-    target_config: &mut NormalizedConfig,
-    sidecar_file: &Path,
-) -> anyhow::Result<()> {
-    let opened_handle = fs::File::open(sidecar_file)
-        .with_context(|| format!("failed to open strategies {}", sidecar_file.display()))?;
+// Blank lines skipped silently; parse errors carry source path and 1-based line number.
+fn append_strategies_from_ndjson(cfg: &mut NormalizedConfig, file: &Path) -> anyhow::Result<()> {
+    let handle = fs::File::open(file)
+        .with_context(|| format!("failed to open strategies {}", file.display()))?;
 
-    let line_reader = std::io::BufReader::new(opened_handle);
-    for (line_number, raw_line_result) in line_reader.lines().enumerate() {
-        let Some(parsed_strategy) = parse_ndjson_line(sidecar_file, line_number, raw_line_result?)?
-        else {
+    for (line_idx, raw) in std::io::BufReader::new(handle).lines().enumerate() {
+        let raw = raw?;
+        let line = raw.trim();
+        if line.is_empty() {
             continue;
-        };
-        target_config.strategies.push(parsed_strategy);
+        }
+        let spec: StrategySpec = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {} line {}", file.display(), line_idx + 1))?;
+        cfg.strategies.push(spec);
     }
 
     Ok(())
 }
 
-fn parse_ndjson_line(
-    origin_file: &Path,
-    line_number: usize,
-    input_text: String,
-) -> anyhow::Result<Option<StrategySpec>> {
-    let stripped_line = input_text.trim();
-    if stripped_line.is_empty() {
-        return Ok(None);
-    }
-    let deserialized_spec: StrategySpec =
-        serde_json::from_str(stripped_line).with_context(|| {
-            format!(
-                "failed to parse {} line {}",
-                origin_file.display(),
-                line_number + 1,
-            )
-        })?;
-    Ok(Some(deserialized_spec))
-}
-
-/// Create the parent directory of `path` if it has one and is not the empty path.
 pub(super) fn create_parent_dirs(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)

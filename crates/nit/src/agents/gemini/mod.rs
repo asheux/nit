@@ -4,22 +4,21 @@ mod js_parser;
 use std::collections::HashMap;
 use std::fs;
 
-use crate::agents::discover::{find_executable_in_path, probe_models_from_cli};
+use crate::agents::discover::{
+    find_executable_in_path, probe_models_from_cli, DEFAULT_MODEL_LIST_ARG_SETS,
+};
 
 use classify::{classify_gemini_model, record_if_better, ModelCandidate};
 
 pub(crate) use js_parser::parse_gemini_models_from_source;
 
 pub(in crate::agents) fn probe_gemini_models() -> (Vec<String>, Option<String>) {
-    let cli_attempts: &[&[&str]] = &[
-        &["models", "--json"],
-        &["models"],
-        &["list-models"],
-        &["--list-models"],
-        &["--models"],
-    ];
+    // Gemini's CLI also recognizes `--models`, which neither codex nor claude
+    // accept — append it after the shared set rather than redefining the list.
+    let mut cli_attempts: Vec<&[&str]> = DEFAULT_MODEL_LIST_ARG_SETS.to_vec();
+    cli_attempts.push(&["--models"]);
 
-    let (raw_models, probe_error) = probe_models_from_cli("gemini", cli_attempts);
+    let (raw_models, probe_error) = probe_models_from_cli("gemini", &cli_attempts);
     let filtered = select_current_gemini_models(raw_models);
     if !filtered.is_empty() {
         return (filtered, None);

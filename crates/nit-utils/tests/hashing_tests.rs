@@ -3,7 +3,11 @@ use nit_utils::{stable_hash_bytes, ContentTag, Fingerprint, SplitMix64};
 #[test]
 fn stable_hash_invariants() {
     let test = stable_hash_bytes(b"test");
-    assert_eq!(test, stable_hash_bytes(b"test"), "deterministic for same input");
+    assert_eq!(
+        test,
+        stable_hash_bytes(b"test"),
+        "deterministic for same input"
+    );
     assert_ne!(test, stable_hash_bytes(b"different"), "sensitive to input");
     let empty = stable_hash_bytes(b"");
     assert_eq!(empty, stable_hash_bytes(b""));
@@ -20,14 +24,20 @@ fn fingerprint_blanket_impl_agrees_across_byte_sources() {
     let owned_str = String::from("test");
     assert_eq!(owned_str.fingerprint(), "test".fingerprint());
     let owned_vec = vec![1u8, 2, 3];
-    assert_eq!(owned_vec.fingerprint(), [1u8, 2, 3].as_slice().fingerprint());
+    assert_eq!(
+        owned_vec.fingerprint(),
+        [1u8, 2, 3].as_slice().fingerprint()
+    );
 }
 
 #[test]
 fn content_tag_display_and_field_semantics() {
     let tag = ContentTag::new("v2", b"payload");
     let display = tag.to_string();
-    assert!(display.starts_with("v2-"), "expected v2- prefix, got {display}");
+    assert!(
+        display.starts_with("v2-"),
+        "expected v2- prefix, got {display}"
+    );
     assert_eq!(display.len(), "v2-".len() + 8);
     assert_eq!(display, ContentTag::new("v2", b"payload").to_string());
     assert_eq!(tag.prefix, "v2");

@@ -48,10 +48,9 @@ pub(super) fn read_and_sort_entries() -> anyhow::Result<(PathBuf, Vec<CodexModel
         .filter(|m| m.visibility.as_deref().unwrap_or("list") == "list")
         .collect();
     entries.sort_by(|a, b| {
-        a.priority
-            .unwrap_or(i64::MAX)
-            .cmp(&b.priority.unwrap_or(i64::MAX))
-            .then_with(|| a.slug.cmp(&b.slug))
+        let ap = a.priority.unwrap_or(i64::MAX);
+        let bp = b.priority.unwrap_or(i64::MAX);
+        ap.cmp(&bp).then_with(|| a.slug.cmp(&b.slug))
     });
     Ok((path, entries))
 }

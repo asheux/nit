@@ -97,138 +97,43 @@ pub(crate) struct MultipaneArgs {
     pub cwd: Option<PathBuf>,
 }
 
-/// Fuse `--lab <value>` into `--lab=<value>` so clap's subcommand_precedence_over_arg
-/// doesn't swallow the lab value as a subcommand when it matches a known name.
-pub(crate) fn normalize_lab_args<I>(args: I) -> Vec<String>
+// Fuse `--lab <value>` into `--lab=<value>` so clap's subcommand_precedence_over_arg
+// doesn't swallow the lab value as a subcommand when it matches a known name.
+pub(crate) fn normalize_lab_args<I>(argv: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut iter = args.into_iter();
-    let mut out = Vec::new();
-    if let Some(bin) = iter.next() {
-        out.push(bin);
+    let mut input = argv.into_iter();
+    let mut output: Vec<String> = Vec::new();
+    if let Some(binary_name) = input.next() {
+        output.push(binary_name);
     }
+    while let Some(flag) = input.next() {
+        emit_normalized(&mut output, flag, &mut input);
+    }
+    output
+}
 
-    while let Some(arg) = iter.next() {
-        if arg != "--lab" {
-            out.push(arg);
-            continue;
-        }
-        match iter.next() {
-            Some(value) if is_lab_name(&value) => out.push(format!("--lab={value}")),
-            Some(value) => {
-                out.push(arg);
-                out.push(value);
-            }
-            None => out.push(arg),
-        }
+fn emit_normalized<I>(out: &mut Vec<String>, flag: String, rest: &mut I)
+where
+    I: Iterator<Item = String>,
+{
+    if flag != "--lab" {
+        out.push(flag);
+        return;
     }
-    out
+    let Some(operand) = rest.next() else {
+        out.push(flag);
+        return;
+    };
+    if is_lab_name(&operand) {
+        out.push(format!("--lab={operand}"));
+        return;
+    }
+    out.push(flag);
+    out.push(operand);
 }
 
 fn is_lab_name(value: &str) -> bool {
     value.eq_ignore_ascii_case("gol") || value.eq_ignore_ascii_case("games")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(args.iter().copied())
-    }
-
-    #[test]
-    fn multipane_args_parses_with_backend() {
-        let cli = parse(&[
-            "nit",
-            "multipane",
-            "--backend",
-            "claude-haiku-4-5",
-            "--panes",
-            "4",
-            "--cwd",
-            "/tmp",
-        ])
-        .expect("parses");
-        match cli.command {
-            Some(Command::Multipane(args)) => {
-                assert_eq!(args.backend.as_deref(), Some("claude-haiku-4-5"));
-                assert_eq!(args.panes, 4);
-                assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
-            }
-            other => panic!("expected Multipane, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn multipane_defaults_eight_panes_and_no_cwd() {
-        let cli = parse(&["nit", "multipane", "--backend", "gpt-5"]).expect("parses");
-        match cli.command {
-            Some(Command::Multipane(args)) => {
-                assert_eq!(args.panes, 8);
-                assert_eq!(args.cwd, None);
-            }
-            other => panic!("expected Multipane, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn multipane_no_backend_now_accepted() {
-        let cli = parse(&["nit", "multipane"]).expect("parses without --backend");
-        match cli.command {
-            Some(Command::Multipane(args)) => {
-                assert!(args.backend.is_none());
-                assert_eq!(args.panes, 8);
-                assert_eq!(args.cwd, None);
-            }
-            other => panic!("expected Multipane, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn multipane_with_backend_family() {
-        let cli = parse(&["nit", "multipane", "--backend", "claude"]).expect("parses");
-        match cli.command {
-            Some(Command::Multipane(args)) => {
-                assert_eq!(args.backend.as_deref(), Some("claude"));
-                assert_eq!(args.panes, 8);
-            }
-            other => panic!("expected Multipane, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn multipane_panes_zero_rejected() {
-        let err = parse(&["nit", "multipane", "--backend", "x", "--panes", "0"])
-            .expect_err("--panes 0 must be rejected");
-        assert!(err.to_string().contains("0"));
-    }
-
-    #[test]
-    fn multipane_panes_thirtythree_rejected() {
-        let err = parse(&["nit", "multipane", "--backend", "x", "--panes", "33"])
-            .expect_err("--panes 33 must be rejected");
-        assert!(err.to_string().contains("33"));
-    }
-
-    #[test]
-    fn multipane_panes_at_bounds_accepted() {
-        for p in [1u8, 32u8] {
-            let cli = parse(&[
-                "nit",
-                "multipane",
-                "--backend",
-                "x",
-                "--panes",
-                &p.to_string(),
-            ])
-            .expect("parses at bound");
-            match cli.command {
-                Some(Command::Multipane(args)) => assert_eq!(args.panes, p),
-                _ => panic!("expected Multipane"),
-            }
-        }
-    }
 }
