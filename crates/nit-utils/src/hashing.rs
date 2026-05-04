@@ -1,7 +1,5 @@
 use std::fmt;
 
-pub use crate::rng::SplitMix64;
-
 /// BLAKE3 digest truncated to 64 bits (little-endian).
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {

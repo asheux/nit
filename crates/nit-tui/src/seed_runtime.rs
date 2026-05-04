@@ -8,7 +8,7 @@ use nit_core::seed::SeedViewMode;
 use nit_core::{
     encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
 };
-use nit_utils::hashing::SplitMix64;
+use nit_utils::rng::SplitMix64;
 
 use crate::gol_render::GolRenderState;
 use crate::seed_render::SeedRenderCache;

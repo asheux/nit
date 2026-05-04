@@ -5,20 +5,26 @@ pub struct SplitMix64 {
     state: u64,
 }
 
-impl SplitMix64 {
-    const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
-    const NONZERO_SEED: u64 = 0x4d59_5df4_d0f3_3173;
+const WEYL_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
+const NONZERO_FALLBACK_SEED: u64 = 0x4d59_5df4_d0f3_3173;
+const STAFFORD_C1: u64 = 0xBF58_476D_1CE4_E5B9;
+const STAFFORD_C2: u64 = 0x94D0_49BB_1331_11EB;
 
+impl SplitMix64 {
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        let state = if seed == 0 { Self::NONZERO_SEED } else { seed };
+        let state = if seed == 0 {
+            NONZERO_FALLBACK_SEED
+        } else {
+            seed
+        };
         Self { state }
     }
 
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(Self::INCREMENT);
-        Self::stafford_mix13(self.state)
+        self.state = self.state.wrapping_add(WEYL_INCREMENT);
+        stafford_mix13(self.state)
     }
 
     /// Uses rejection sampling to avoid modulo bias.
@@ -26,7 +32,7 @@ impl SplitMix64 {
         if upper <= 1 {
             return 0;
         }
-        let threshold = upper.wrapping_neg() % upper;
+        let threshold = unbiased_threshold(upper);
         let mut candidate = self.next_u64();
         while candidate < threshold {
             candidate = self.next_u64();
@@ -39,13 +45,6 @@ impl SplitMix64 {
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
-
-    #[inline]
-    const fn stafford_mix13(mut z: u64) -> u64 {
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
 }
 
 impl Iterator for SplitMix64 {
@@ -54,4 +53,21 @@ impl Iterator for SplitMix64 {
     fn next(&mut self) -> Option<u64> {
         Some(self.next_u64())
     }
+}
+
+// Smallest value `v` such that `v..u64::MAX` is the largest multiple of `upper`
+// fitting in `u64`. Drawing from `[v, u64::MAX]` and reducing mod `upper`
+// produces uniform output without modulo bias.
+#[inline]
+const fn unbiased_threshold(upper: u64) -> u64 {
+    upper.wrapping_neg() % upper
+}
+
+// Stafford's Variant 13 finalizer: avalanches the Weyl-incremented counter so
+// every output bit depends on every input bit.
+#[inline]
+const fn stafford_mix13(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(STAFFORD_C1);
+    z = (z ^ (z >> 27)).wrapping_mul(STAFFORD_C2);
+    z ^ (z >> 31)
 }

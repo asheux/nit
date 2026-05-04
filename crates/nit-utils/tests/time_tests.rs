@@ -1,7 +1,12 @@
 use nit_utils::time::now_millis;
 
+// `now_millis` reads `SystemTime` (wall clock), not `Instant` (monotonic), so
+// the strongest property we can pin is that two consecutive samples in the
+// same process do not regress. Renaming this test deters a future "fix" that
+// swaps in `Instant` and silently changes the contract for serialized
+// timestamps.
 #[test]
-fn now_millis_monotonic() {
+fn now_millis_non_decreasing() {
     let a = now_millis();
     let b = now_millis();
     assert!(b >= a, "expected non-decreasing: got {a} then {b}");

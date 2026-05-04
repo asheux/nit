@@ -26,6 +26,15 @@ impl Drop for TempGuard<'_> {
     }
 }
 
+// Take `writer` by value so the buffered bytes flush, then sync to disk, then
+// rename — order matters for the durability contract. A `&mut` parameter would
+// let a caller observe the file pre-flush.
+fn commit(mut writer: BufWriter<File>, tmp_path: &Path, dest: &Path) -> io::Result<()> {
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    fs::rename(tmp_path, dest)
+}
+
 pub fn write_atomic<F>(path: &Path, f: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
@@ -36,10 +45,7 @@ where
     let mut writer = BufWriter::new(file);
 
     f(&mut writer)?;
-
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    fs::rename(&tmp_path, path)?;
+    commit(writer, &tmp_path, path)?;
 
     guard.0 = None;
     Ok(())

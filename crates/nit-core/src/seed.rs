@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
 use nit_gol::Grid;
-use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
+use nit_utils::hashing::stable_hash_bytes;
+use nit_utils::rng::SplitMix64;
 
 use crate::config::GolSeedSource;
 

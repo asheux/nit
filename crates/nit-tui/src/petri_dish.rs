@@ -18,7 +18,7 @@ use nit_gol::snapshot_manager::{
 use nit_gol::step::step;
 use nit_gol::AttractorExtra;
 use nit_gol::{EdgeMode, Grid, Rule};
-use nit_utils::hashing::SplitMix64;
+use nit_utils::rng::SplitMix64;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},

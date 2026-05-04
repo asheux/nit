@@ -17,7 +17,7 @@ use crate::history::History;
 use crate::history_log::MatchHistory;
 use crate::output::StrategyDefinition;
 use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmRunStats};
-use nit_utils::hashing::SplitMix64;
+use nit_utils::rng::SplitMix64;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Convert [`TmRunStats`] into the serializable [`TmDerivedMetrics`](crate::output::TmDerivedMetrics)

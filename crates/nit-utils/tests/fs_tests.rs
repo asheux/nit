@@ -84,3 +84,27 @@ fn write_atomic_preserves_unrelated_tmp_sibling() {
 
     assert_eq!(std::fs::read_to_string(&bystander).unwrap(), "sentinel");
 }
+
+// Pins the RAII contract: a panic inside the writer callback must still
+// trigger TempGuard::drop and remove the tmp sibling. Without this test, a
+// refactor that collapses the guard into `?`-style cleanup would silently
+// regress the panic-safety invariant.
+#[test]
+fn write_atomic_cleans_tmp_when_callback_panics() {
+    let dir = ScratchDir::new("fs_panic");
+    let target = dir.join("boom.txt");
+    let target_ref = target.clone();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = nit_utils::write_atomic(&target_ref, |_w| -> std::io::Result<()> {
+            panic!("simulated callback panic");
+        });
+    }));
+
+    assert!(outcome.is_err(), "expected the panic to propagate");
+    assert!(!target.exists(), "destination must not exist after panic");
+    assert!(
+        !has_tmp_residue(&dir),
+        "temp file must be cleaned up when the callback panics"
+    );
+}

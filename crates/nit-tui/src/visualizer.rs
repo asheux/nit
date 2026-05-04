@@ -19,7 +19,8 @@ use nit_gol::{
     step::step,
     EdgeMode, Grid, Rule, AttractorExtra,
 };
-use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
+use nit_utils::hashing::stable_hash_bytes;
+use nit_utils::rng::SplitMix64;
 use tracing::{info, warn};
 
 use crate::gol_render::GolRenderState;
