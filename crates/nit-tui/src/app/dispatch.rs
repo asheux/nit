@@ -278,6 +278,15 @@ pub(super) fn maybe_dispatch_codex_turn(
         Some(ctx) => format!("{ctx}{prompt}"),
         None => prompt,
     };
+    // Always-on code-hygiene preamble. The operator shouldn't have to
+    // re-state "no inline tests, no padding, comment hygiene" on every
+    // chat prompt — making it a workspace default at the dispatch leaf
+    // covers chat dispatch, swarm tasks (deduped via the marker check),
+    // shadow main turns, and intake-augmented dispatches in one place.
+    let prompt = match crate::swarm::code_hygiene_preamble(&prompt) {
+        Some(preamble) => format!("{preamble}{prompt}"),
+        None => prompt,
+    };
 
     let resume_thread_id = if let Some(mission_id) = mission_id.as_deref() {
         state
@@ -691,6 +700,13 @@ pub(super) fn maybe_dispatch_claude_turn(
     // (e.g. from @new clones, artifacts popup, or queued turn dequeue).
     let prompt = match build_genome_context(state, &model) {
         Some(ctx) => format!("{ctx}{prompt}"),
+        None => prompt,
+    };
+    // Always-on code-hygiene preamble (see Codex equivalent above for the
+    // rationale). Deduped by marker check so the swarm `integrate` role
+    // contract — which inlines `NO_PADDING_CLAUSE` — isn't doubled.
+    let prompt = match crate::swarm::code_hygiene_preamble(&prompt) {
+        Some(preamble) => format!("{preamble}{prompt}"),
         None => prompt,
     };
 

@@ -72,6 +72,35 @@ pub(crate) const NO_PADDING_CLAUSE: &str =
      describe obvious behavior. Keep comments that explain WHY, document \
      non-obvious constraints, safety invariants, or algorithmic choices.";
 
+/// Marker that brackets the code-hygiene block when prepended at dispatch
+/// time. Used to detect double-prepend (e.g. when a swarm integrate
+/// dispatch already carries `NO_PADDING_CLAUSE` via its role contract,
+/// `code_hygiene_preamble` returns `None` to skip a redundant copy).
+pub(crate) const CODE_HYGIENE_OPEN_MARKER: &str = "[code hygiene]";
+
+/// Build the code-hygiene preamble that gets prepended to every dispatched
+/// agent prompt. Same intent as `NO_PADDING_CLAUSE` (no inline tests,
+/// no padding, comment hygiene) but always present so the operator never
+/// has to re-state it on every chat prompt — the writer agent already
+/// knows the workspace's defaults at turn-start.
+///
+/// Returns `None` when the prompt already contains the hygiene marker
+/// (e.g. it came through the swarm `integrate` role contract which
+/// inlines `NO_PADDING_CLAUSE` directly), so the same rules don't get
+/// duplicated word-for-word in the same prompt.
+pub(crate) fn code_hygiene_preamble(prompt: &str) -> Option<String> {
+    // Cheap dedup checks: the role-contract path inlines NO_PADDING_CLAUSE
+    // verbatim (no marker), so look for its leading literal too.
+    if prompt.contains(CODE_HYGIENE_OPEN_MARKER)
+        || prompt.contains("CODE SHAPE: Do NOT add inline test modules")
+    {
+        return None;
+    }
+    Some(format!(
+        "{CODE_HYGIENE_OPEN_MARKER}\n{NO_PADDING_CLAUSE}\n[/code hygiene]\n\n"
+    ))
+}
+
 /// Non-revert rule for any retry prompt (gate retry, per-agent genome
 /// retry). Reverting your own BROKEN code is fine — that's how you fix
 /// things. Rolling back WORKING real work to satisfy a metric is not.
@@ -95,3 +124,37 @@ pub(crate) const NO_REVERT_CLAUSE: &str =
 pub(super) const SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL: usize = 240_000;
 pub(super) const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
 pub(super) const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
+
+#[cfg(test)]
+mod hygiene_preamble_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_prompt_gets_preamble_with_inline_test_rule() {
+        let preamble = code_hygiene_preamble("refactor crates/foo to extract helpers")
+            .expect("fresh prompt should get a preamble");
+        assert!(
+            preamble.contains("Do NOT add inline test modules"),
+            "preamble should carry the no-inline-tests rule:\n{preamble}",
+        );
+        assert!(preamble.starts_with(CODE_HYGIENE_OPEN_MARKER));
+    }
+
+    #[test]
+    fn prompt_with_existing_marker_skips_preamble() {
+        // E.g. a re-dispatch that already ran through the leaf and was
+        // requeued; never double-prepend.
+        let already_prefixed =
+            format!("{CODE_HYGIENE_OPEN_MARKER}\nfoo\n[/code hygiene]\n\nrun the task");
+        assert!(code_hygiene_preamble(&already_prefixed).is_none());
+    }
+
+    #[test]
+    fn prompt_with_inline_no_padding_clause_skips_preamble() {
+        // The swarm `integrate` role contract inlines NO_PADDING_CLAUSE
+        // verbatim (no marker). Preamble dedup must catch this so the
+        // operator doesn't see the rule duplicated word-for-word.
+        let role_contract = format!("Operator request:\n...\n\n{NO_PADDING_CLAUSE}\n");
+        assert!(code_hygiene_preamble(&role_contract).is_none());
+    }
+}
