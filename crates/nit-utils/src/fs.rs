@@ -16,15 +16,12 @@ fn tmp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-struct TempGuard<'a> {
-    path: &'a Path,
-    active: bool,
-}
+struct TempGuard<'a>(Option<&'a Path>);
 
 impl Drop for TempGuard<'_> {
     fn drop(&mut self) {
-        if self.active {
-            let _ = fs::remove_file(self.path);
+        if let Some(path) = self.0 {
+            let _ = fs::remove_file(path);
         }
     }
 }
@@ -35,10 +32,7 @@ where
 {
     let tmp_path = tmp_sibling(path);
     let file = File::create(&tmp_path)?;
-    let mut guard = TempGuard {
-        path: &tmp_path,
-        active: true,
-    };
+    let mut guard = TempGuard(Some(&tmp_path));
     let mut writer = BufWriter::new(file);
 
     f(&mut writer)?;
@@ -47,10 +41,6 @@ where
     writer.get_ref().sync_all()?;
     fs::rename(&tmp_path, path)?;
 
-    guard.active = false;
+    guard.0 = None;
     Ok(())
-}
-
-pub fn ensure_dir(target: &Path) -> io::Result<()> {
-    fs::create_dir_all(target)
 }

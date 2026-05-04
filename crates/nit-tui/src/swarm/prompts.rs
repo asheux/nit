@@ -233,6 +233,12 @@ pub(super) fn build_planner_prompt(
             out.push_str(
                 "- Use `propose`, `research`, `review`, and `test` for the remaining lanes instead of repeating singleton roles.\n",
             );
+            out.push_str(
+                "- VERIFIER ORDERING (parallel): every `test` and `review` task MUST set `deps` to ALL `integrate` task ids. Verifiers cannot run before writers have produced output — a `test` task with empty deps will fire alongside the proposers and report nothing-to-test. The runtime auto-repairs missing deps as a safety net, but plans should set them explicitly so the dependency intent is visible in the DAG.\n",
+            );
+            out.push_str(
+                "- JUDGE ORDERING (parallel): every `judge` task MUST set `deps` to ALL `propose` / `research` task ids it's evaluating. A judge with empty deps would fire concurrently with the proposers and have no output to compare.\n",
+            );
         }
         SwarmTemplate::Lab => {
             out.push_str(

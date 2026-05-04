@@ -568,7 +568,7 @@ impl SubstrateState {
     pub fn save(&self, workspace_root: &Path) -> Result<(), SubstrateError> {
         let path = Self::state_path(workspace_root);
         if let Some(parent) = path.parent() {
-            nit_utils::fs::ensure_dir(parent)?;
+            std::fs::create_dir_all(parent)?;
         }
         let bytes = serde_json::to_vec_pretty(self)?;
         nit_utils::fs::write_atomic(&path, |w| w.write_all(&bytes))?;

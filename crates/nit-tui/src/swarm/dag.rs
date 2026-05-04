@@ -274,52 +274,228 @@ pub(super) fn repair_swarm_dag(tasks: &mut [SwarmTask]) -> Vec<String> {
     warnings
 }
 
-// Parallel-only auto-repair: when a writer task has unresolved dep ids AND
-// zero resolved deps, redirect its deps to every propose/research task.
-// Recovers the common failure mode where the planner writes
-// `integrate.deps = ["judge"]` against a parallel template that has no judge
-// phase. Non-writer tasks, and writers with any resolved dep, are left alone —
-// they surface through the Layer 1 warning path instead. Returns a per-repair
-// description; the caller emits one substrate signal per entry for traceability.
+// Parallel-only auto-repair, three passes:
+//   1. Writer tasks (`writes=true`) with unresolved deps AND zero resolved
+//      deps → redirect deps to every propose/research task. Recovers the
+//      common failure mode where the planner writes
+//      `integrate.deps = ["judge"]` against a parallel template that has
+//      no judge phase.
+//   2. Verifier tasks (`test`/`review`) with EMPTY deps → wire deps to all
+//      `integrate` tasks. Without this guard a `test` task starts in
+//      `Ready` state alongside the proposers and dispatches before any
+//      writer has run — the operator sees the test agent fire pre-plan
+//      and report nothing-to-test. The planner prompt steers compliant
+//      planners to set these deps, but this pass catches drift.
+//   3. `judge` tasks with EMPTY deps → wire deps to all propose/research
+//      tasks (analogous to integrate's fan-in).
+// Writers with any resolved dep are left alone — they surface through the
+// Layer 1 warning path instead. Returns a per-repair description; the
+// caller emits one substrate signal per entry for traceability.
 pub(super) fn ensure_deps_resolve(tasks: &mut [SwarmTask], template: SwarmTemplate) -> Vec<String> {
     if !matches!(template, SwarmTemplate::Parallel) {
         return Vec::new();
     }
     let task_ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
-    let propose_ids: Vec<String> = tasks
+    let propose_ids: Vec<String> = collect_role_ids(tasks, |role| {
+        matches!(
+            role,
+            "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE
+        )
+    });
+    let integrate_ids: Vec<String> =
+        collect_role_ids(tasks, |role| matches!(role, "integrate"));
+    let mut repairs = Vec::new();
+
+    // Pass 1: writers with all-unresolved deps → redirect to proposers.
+    if !propose_ids.is_empty() {
+        for task in tasks.iter_mut() {
+            if !task.writes || task.deps.is_empty() {
+                continue;
+            }
+            let has_resolved = task.deps.iter().any(|d| task_ids.contains(d.as_str()));
+            if has_resolved {
+                continue;
+            }
+            let original_deps = task.deps.join(",");
+            task.deps = propose_ids.clone();
+            repairs.push(format!(
+                "parallel auto-repair: {} deps [{}] unresolved -> redirected to propose tasks {:?}",
+                task.id, original_deps, propose_ids
+            ));
+        }
+    }
+
+    // Pass 2: test / review with empty deps → wire to integrate tasks so
+    // verifiers don't start before any writer has produced output.
+    if !integrate_ids.is_empty() {
+        for task in tasks.iter_mut() {
+            if !task.deps.is_empty() {
+                continue;
+            }
+            let role = task.role.as_deref().and_then(normalize_role_label);
+            let is_verifier = matches!(role.as_deref(), Some("test") | Some("review"));
+            if !is_verifier {
+                continue;
+            }
+            // Don't self-dep — the integrate task itself sometimes
+            // carries a `review`/`test` secondary intent in plans the
+            // operator hand-edits; skip wiring deps that would point
+            // to the task's own id.
+            let deps: Vec<String> = integrate_ids
+                .iter()
+                .filter(|id| id.as_str() != task.id.as_str())
+                .cloned()
+                .collect();
+            if deps.is_empty() {
+                continue;
+            }
+            task.deps = deps.clone();
+            repairs.push(format!(
+                "parallel auto-repair: verifier {} (role={}) had empty deps -> wired to integrate tasks {:?}",
+                task.id,
+                role.as_deref().unwrap_or("?"),
+                deps,
+            ));
+        }
+    }
+
+    // Pass 3: judge with empty deps → wire to proposers (judges fan in
+    // over proposer outputs in the same shape integrate would).
+    if !propose_ids.is_empty() {
+        for task in tasks.iter_mut() {
+            if !task.deps.is_empty() {
+                continue;
+            }
+            let role = task.role.as_deref().and_then(normalize_role_label);
+            if role.as_deref() != Some("judge") {
+                continue;
+            }
+            let deps: Vec<String> = propose_ids
+                .iter()
+                .filter(|id| id.as_str() != task.id.as_str())
+                .cloned()
+                .collect();
+            if deps.is_empty() {
+                continue;
+            }
+            task.deps = deps.clone();
+            repairs.push(format!(
+                "parallel auto-repair: judge {} had empty deps -> wired to propose tasks {:?}",
+                task.id, deps,
+            ));
+        }
+    }
+
+    repairs
+}
+
+fn collect_role_ids(tasks: &[SwarmTask], role_match: impl Fn(&str) -> bool) -> Vec<String> {
+    tasks
         .iter()
         .filter(|t| {
             t.role
                 .as_deref()
                 .and_then(normalize_role_label)
-                .map(|r| {
-                    matches!(
-                        r.as_str(),
-                        "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE
-                    )
-                })
+                .map(|r| role_match(r.as_str()))
                 .unwrap_or(false)
         })
         .map(|t| t.id.clone())
-        .collect();
-    if propose_ids.is_empty() {
-        return Vec::new();
-    }
-    let mut repairs = Vec::new();
-    for task in tasks.iter_mut() {
-        if !task.writes || task.deps.is_empty() {
-            continue;
+        .collect()
+}
+
+#[cfg(test)]
+mod ensure_deps_tests {
+    use super::*;
+    use crate::swarm::SwarmTaskState;
+
+    fn task(id: &str, role: &str, deps: Vec<&str>, writes: bool) -> SwarmTask {
+        SwarmTask {
+            id: id.into(),
+            agent_id: id.into(),
+            role: Some(role.into()),
+            title: id.into(),
+            task_prompt: String::new(),
+            deps: deps.into_iter().map(String::from).collect(),
+            writes,
+            artifacts: Vec::new(),
+            done_when: None,
+            state: SwarmTaskState::Pending,
+            output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
+            failed: false,
+            retries: 0,
         }
-        let has_resolved = task.deps.iter().any(|d| task_ids.contains(d.as_str()));
-        if has_resolved {
-            continue;
-        }
-        let original_deps = task.deps.join(",");
-        task.deps = propose_ids.clone();
-        repairs.push(format!(
-            "parallel auto-repair: {} deps [{}] unresolved -> redirected to propose tasks {:?}",
-            task.id, original_deps, propose_ids
-        ));
     }
-    repairs
+
+    #[test]
+    fn parallel_test_role_with_empty_deps_gets_wired_to_integrate() {
+        // Reproduces the operator-reported bug: planner emits a `test`
+        // task with no deps under the parallel template; without this
+        // repair, the test agent dispatches before the integrator and
+        // fires against an unchanged tree.
+        let mut tasks = vec![
+            task("propose-01", "propose", vec![], false),
+            task("integrate-01", "integrate", vec!["propose-01"], true),
+            task("test-01", "test", vec![], false),
+        ];
+        let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+        assert_eq!(tasks[2].deps, vec!["integrate-01"]);
+        assert!(
+            repairs.iter().any(|r| r.contains("verifier test-01")),
+            "expected a per-repair description, got {repairs:?}",
+        );
+    }
+
+    #[test]
+    fn parallel_review_role_with_empty_deps_gets_wired_to_integrate() {
+        let mut tasks = vec![
+            task("propose-01", "propose", vec![], false),
+            task("integrate-01", "integrate", vec!["propose-01"], true),
+            task("integrate-02", "integrate", vec!["propose-01"], true),
+            task("review-01", "review", vec![], false),
+        ];
+        let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+        let mut wired = tasks[3].deps.clone();
+        wired.sort();
+        assert_eq!(wired, vec!["integrate-01", "integrate-02"]);
+    }
+
+    #[test]
+    fn parallel_judge_role_with_empty_deps_gets_wired_to_proposers() {
+        let mut tasks = vec![
+            task("propose-01", "propose", vec![], false),
+            task("propose-02", "propose", vec![], false),
+            task("judge-01", "judge", vec![], false),
+        ];
+        let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+        let mut wired = tasks[2].deps.clone();
+        wired.sort();
+        assert_eq!(wired, vec!["propose-01", "propose-02"]);
+    }
+
+    #[test]
+    fn parallel_verifier_with_explicit_deps_is_left_alone() {
+        // Plans that already wire deps must NOT be rewritten — the
+        // operator's intent (which integrate task this verifier covers)
+        // wins over the auto-fan-out heuristic.
+        let mut tasks = vec![
+            task("integrate-01", "integrate", vec![], true),
+            task("integrate-02", "integrate", vec![], true),
+            task("test-01", "test", vec!["integrate-01"], false),
+        ];
+        let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+        assert_eq!(tasks[2].deps, vec!["integrate-01"]);
+    }
+
+    #[test]
+    fn lab_template_unaffected_by_verifier_repair() {
+        let mut tasks = vec![
+            task("integrate-01", "integrate", vec![], true),
+            task("test-01", "test", vec![], false),
+        ];
+        let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Lab);
+        assert!(repairs.is_empty());
+        assert!(tasks[1].deps.is_empty());
+    }
 }

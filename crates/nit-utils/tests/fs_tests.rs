@@ -84,25 +84,3 @@ fn write_atomic_preserves_unrelated_tmp_sibling() {
 
     assert_eq!(std::fs::read_to_string(&bystander).unwrap(), "sentinel");
 }
-
-#[test]
-fn ensure_dir_creates_nested() {
-    let dir = ScratchDir::new("fs_ensure");
-    let nested = dir.join("a").join("b");
-
-    nit_utils::ensure_dir(&nested).expect("ensure_dir failed");
-    assert!(
-        nested.is_dir(),
-        "nested directory should exist after ensure_dir"
-    );
-}
-
-#[test]
-fn ensure_dir_noop_on_existing() {
-    let dir = ScratchDir::new("fs_ensure_idem");
-    let nested = dir.join("c");
-
-    nit_utils::ensure_dir(&nested).expect("first call failed");
-    nit_utils::ensure_dir(&nested).expect("second call should succeed on existing dir");
-    assert!(nested.is_dir());
-}

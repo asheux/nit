@@ -69,11 +69,6 @@ impl Debouncer {
     }
 
     #[must_use]
-    pub fn pending(&self) -> bool {
-        self.phase() == DebouncerPhase::Pending
-    }
-
-    #[must_use]
     pub const fn delay(&self) -> Duration {
         self.quiet_period
     }

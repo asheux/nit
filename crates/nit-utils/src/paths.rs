@@ -19,22 +19,16 @@ fn project_path(extract: fn(&ProjectDirs) -> Option<&Path>) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-#[must_use]
-pub fn config_dir() -> Option<PathBuf> {
-    project_path(|pd| Some(pd.config_dir()))
+macro_rules! define_project_dir {
+    ($name:ident, $extract:expr) => {
+        #[must_use]
+        pub fn $name() -> Option<PathBuf> {
+            project_path($extract)
+        }
+    };
 }
 
-#[must_use]
-pub fn data_dir() -> Option<PathBuf> {
-    project_path(|pd| Some(pd.data_dir()))
-}
-
-#[must_use]
-pub fn state_dir() -> Option<PathBuf> {
-    project_path(|pd| pd.state_dir())
-}
-
-#[must_use]
-pub fn cache_dir() -> Option<PathBuf> {
-    project_path(|pd| Some(pd.cache_dir()))
-}
+define_project_dir!(config_dir, |pd| Some(pd.config_dir()));
+define_project_dir!(data_dir, |pd| Some(pd.data_dir()));
+define_project_dir!(state_dir, |pd| pd.state_dir());
+define_project_dir!(cache_dir, |pd| Some(pd.cache_dir()));
