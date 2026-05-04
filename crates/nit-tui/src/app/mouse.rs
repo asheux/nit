@@ -1602,6 +1602,12 @@ pub(super) fn handle_mouse_drag_with_swarm(
                 }
                 _ => return false,
             };
+            // Drag past the editor's top or bottom edge → bump the
+            // buffer viewport BEFORE mapping the click. Without this
+            // the `mouse_to_buffer_pos` clamp pins the line to whatever
+            // was visible at click time, `ensure_visible` is a no-op
+            // (cursor already in view), and selection gets stuck.
+            auto_scroll_buffer_for_drag(mouse, pane_rect, buffer);
             let Some((line, col)) = mouse_to_buffer_pos(mouse, pane_rect, buffer, tab_width, true)
             else {
                 return false;
@@ -1670,6 +1676,7 @@ pub(super) fn handle_mouse_drag_with_swarm(
                         .map(|(line_idx, col, _text_width, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::AgentConsole => {
+                    auto_scroll_agent_console_for_drag(mouse, screen, state);
                     map_agent_console_mouse_with_swarm(swarm, mouse, screen, state, true)
                 }
                 UiSelectionPane::GamesPetriDish => {
@@ -1682,6 +1689,7 @@ pub(super) fn handle_mouse_drag_with_swarm(
                     map_visualizer_side_mouse(mouse, screen, state, theme, true)
                 }
                 UiSelectionPane::GateMonitor => {
+                    auto_scroll_gate_monitor_for_drag(mouse, screen, state);
                     map_gate_monitor_mouse(mouse, screen, state, theme, true)
                 }
                 UiSelectionPane::HelpPopup => {
@@ -1691,6 +1699,12 @@ pub(super) fn handle_mouse_drag_with_swarm(
                     map_artifacts_history_popup_mouse(mouse, screen, state, theme, true)
                 }
                 UiSelectionPane::ArtifactsPopup => {
+                    // Drag past the popup's top or bottom edge → bump
+                    // scroll so the next hit-test (with clamp = true)
+                    // resolves to a freshly-revealed line. Without this
+                    // the operator can only select the rectangle that
+                    // happened to be visible at click time.
+                    auto_scroll_artifacts_popup_for_drag(swarm, mouse, screen, state);
                     map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, true)
                 }
                 UiSelectionPane::GamesAnalysisPopup => {

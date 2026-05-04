@@ -612,9 +612,33 @@ pub(super) fn run_loop(
                         mouse.kind,
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     );
+                    // Coalesce drag events the same way scroll events get
+                    // coalesced below: each drag fires the popup-body /
+                    // chat-thread mapper which calls `build_lines`
+                    // (markdown rendering + syntax highlighting), so a
+                    // burst of 30+ drag events per gesture compounds into
+                    // visible scroll lag. Replace the to-handle event
+                    // with the LAST drag in the burst — auto-scroll
+                    // overshoot already scales with mouse-distance-past-
+                    // edge so dropping intermediate drags doesn't hurt
+                    // scroll throughput.
+                    let mut to_handle = mouse;
+                    if matches!(to_handle.kind, MouseEventKind::Drag(_)) {
+                        while event::poll(Duration::ZERO)? {
+                            match event::read()? {
+                                Event::Mouse(m) if matches!(m.kind, MouseEventKind::Drag(_)) => {
+                                    to_handle = m;
+                                }
+                                other => {
+                                    stashed_event = Some(other);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     let mut mouse_changed = handle_mouse_event_with_swarm(
                         &swarm,
-                        mouse,
+                        to_handle,
                         screen,
                         state,
                         &mut fuzzy_runtime,

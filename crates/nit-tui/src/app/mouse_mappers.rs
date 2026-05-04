@@ -174,6 +174,109 @@ pub(super) fn map_help_popup_mouse(
     Some((line_idx, col, text_lines))
 }
 
+/// When a mouse drag-selection's cursor leaves the visible area through
+/// the top or bottom edge, bump the surface's scroll offset so the
+/// caller's subsequent hit-test (with `clamp = true`) lands on freshly
+/// revealed content. Returns `true` if the scroll changed.
+///
+/// `area_y` / `area_height` describe the rendered content rect. `scroll`
+/// is whatever line-offset the surface uses; `max_scroll` clamps the
+/// downward direction. The delta scales with how far past the edge the
+/// cursor has gone, so a single drag tick can scroll many rows when the
+/// operator slams the mouse to the screen edge — terminals don't fire
+/// drag events while the mouse is stationary, so we can't rely on a
+/// timer-driven autorepeat.
+pub(crate) fn drag_auto_scroll(
+    mouse_y: u16,
+    area_y: u16,
+    area_height: u16,
+    scroll: &mut usize,
+    max_scroll: usize,
+) -> bool {
+    if area_height == 0 {
+        return false;
+    }
+    let bottom = area_y.saturating_add(area_height);
+    if mouse_y < area_y {
+        let delta = (area_y - mouse_y).max(1) as usize;
+        let next = scroll.saturating_sub(delta);
+        if next != *scroll {
+            *scroll = next;
+            return true;
+        }
+    } else if mouse_y >= bottom {
+        let delta = (mouse_y - bottom + 1).max(1) as usize;
+        let next = scroll.saturating_add(delta).min(max_scroll);
+        if next != *scroll {
+            *scroll = next;
+            return true;
+        }
+    }
+    false
+}
+
+/// Auto-scroll the artifacts popup body when the operator drags past
+/// the top or bottom of the visible content area. Reads the popup's
+/// renderer-cached `last_max_scroll` (so the bound matches what the
+/// renderer last painted, not a stale guess) and bumps
+/// `state.agents.artifacts_popup_scroll` in place. The drag handler
+/// must call this BEFORE invoking `map_artifacts_popup_mouse_with_swarm`
+/// so the mapper's hit-test sees the new scroll.
+pub(crate) fn auto_scroll_artifacts_popup_for_drag(
+    swarm: &SwarmRuntime,
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+) {
+    if !state.agents.artifacts_popup_open {
+        return;
+    }
+    let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+    let inner = popup_text_area(area);
+    let content_height = artifacts_popup::content_area_height(state, swarm, area);
+    let max_scroll = state.agents.artifacts_popup_last_max_scroll;
+    drag_auto_scroll(
+        mouse.row,
+        inner.y,
+        content_height,
+        &mut state.agents.artifacts_popup_scroll,
+        max_scroll,
+    );
+}
+
+/// Single-pane variant of `auto_scroll_artifacts_popup_for_drag` for
+/// the agent-console chat thread. Uses `state.agents.console_max_scroll`
+/// (refreshed by the console renderer) and the chat thread text area
+/// computed from the current layout. Treats the
+/// `CONSOLE_SCROLL_BOTTOM` sentinel as `max_scroll` so a drag that
+/// started while the operator was follow-tailing the bottom doesn't
+/// snap to row 0 on the first up-edge tick.
+pub(crate) fn auto_scroll_agent_console_for_drag(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+) {
+    let layout = layout::split(screen);
+    let Some(text_area) = agent_console_view::thread_text_area(layout.notes, state) else {
+        return;
+    };
+    let max_scroll = state.agents.console_max_scroll;
+    let mut scroll = if state.agents.console_scroll == CONSOLE_SCROLL_BOTTOM {
+        max_scroll
+    } else {
+        state.agents.console_scroll.min(max_scroll)
+    };
+    if drag_auto_scroll(
+        mouse.row,
+        text_area.y,
+        text_area.height,
+        &mut scroll,
+        max_scroll,
+    ) {
+        state.agents.console_scroll = scroll;
+    }
+}
+
 pub(crate) fn map_artifacts_popup_mouse_with_swarm(
     swarm: &SwarmRuntime,
     mouse: MouseEvent,
@@ -186,21 +289,42 @@ pub(crate) fn map_artifacts_popup_mouse_with_swarm(
         return None;
     }
     let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
-    let text_area = popup_text_area(area);
-    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+    let inner = popup_text_area(area);
+    // The popup's body and chat-input share the inner area: body on top,
+    // chat-input on the bottom. `popup_text_area` returns the FULL inner
+    // (border-only); using it for the body click rect causes two bugs:
+    //   1. Clicks inside the chat-input rows still resolve to a body line
+    //      under `clamp = true`.
+    //   2. After scrolling, the mapper's `max_scroll` (computed against
+    //      the full inner height) is SMALLER than the renderer's (which
+    //      uses the content area height); the stored `artifacts_popup_scroll`
+    //      sits at the renderer's max, the mapper clamps it down, and
+    //      `scroll + row` lands on a line `input_box_height` rows above
+    //      what the operator actually sees. The selection drifts upward
+    //      by the chat-input box height.
+    // Fix: reconstruct the body rect using `content_area_height`, the
+    // same helper the renderer uses to size `content_area`.
+    let content_height = artifacts_popup::content_area_height(state, swarm, area);
+    let body_rect = ratatui::layout::Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: content_height,
+    };
+    if !point_in_rect(mouse.column, mouse.row, body_rect) && !clamp {
         return None;
     }
-    let lines = artifacts_popup::build_lines(state, swarm, theme, text_area.width);
+    let lines = artifacts_popup::build_lines(state, swarm, theme, body_rect.width);
     let text_lines = lines_to_strings(&lines);
     if text_lines.is_empty() {
         return None;
     }
-    let height = text_area.height as usize;
+    let height = body_rect.height as usize;
     let max_scroll = text_lines.len().saturating_sub(height);
     let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
-        text_area,
+        body_rect,
         &text_lines,
         scroll,
         state.settings.editor.tab_width as usize,
@@ -734,15 +858,85 @@ pub(super) fn map_gate_monitor_mouse(
     if text_lines.is_empty() {
         return None;
     }
+    // Pass the renderer's scroll, not 0 — the renderer paints with
+    // `Paragraph::scroll((state.gate_monitor_scroll, 0))`, so a click on
+    // visible row N actually targets `scroll + N`. Hardcoding `0` here
+    // made selection in Stats / FileScores tabs always pick the
+    // pre-scroll content. Mirrors the same fix applied to the artifact
+    // popup mapper.
+    let scroll = state
+        .gate_monitor_scroll
+        .min(text_lines.len().saturating_sub(1));
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         inner,
         &text_lines,
-        0,
+        scroll,
         state.settings.editor.tab_width as usize,
         clamp,
     )?;
     Some((line_idx, col, text_lines))
+}
+
+/// Bump `state.gate_monitor_scroll` when a drag selection's cursor
+/// leaves the visible gate-monitor pane through the top or bottom.
+/// Uses `state.gate_monitor_last_max_scroll` (the renderer-cached
+/// bound) so the scroll never advances past what the renderer can
+/// actually paint.
+pub(crate) fn auto_scroll_gate_monitor_for_drag(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+) {
+    let layout = layout::split(screen);
+    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+    if inner.height == 0 {
+        return;
+    }
+    let max_scroll = state.gate_monitor_last_max_scroll;
+    drag_auto_scroll(
+        mouse.row,
+        inner.y,
+        inner.height,
+        &mut state.gate_monitor_scroll,
+        max_scroll,
+    );
+}
+
+/// Bump the buffer's viewport offset when a drag selection's mouse
+/// cursor has left the editor's visible area through the top or
+/// bottom. Should be called BEFORE `mouse_to_buffer_pos` so the
+/// subsequent clamp lands on a freshly-revealed line. The buffer's
+/// `ensure_visible()` post-call then keeps the cursor inside the new
+/// viewport.
+pub(crate) fn auto_scroll_buffer_for_drag(
+    mouse: MouseEvent,
+    pane_rect: ratatui::layout::Rect,
+    buffer: &mut nit_core::Buffer,
+) {
+    // Match the inner rect `mouse_to_buffer_pos` carves out of `pane_rect`
+    // (1-cell border on each side). Without this alignment the auto-scroll
+    // edge detection fires one row too early at the top and too late at
+    // the bottom.
+    let inner_y = pane_rect.y.saturating_add(1);
+    let inner_height = pane_rect.height.saturating_sub(2);
+    if inner_height == 0 {
+        return;
+    }
+    let total_lines = buffer.lines_len().max(1);
+    let max_offset = total_lines.saturating_sub(inner_height as usize);
+    let bottom = inner_y.saturating_add(inner_height);
+    if mouse.row < inner_y {
+        let delta = (inner_y - mouse.row).max(1) as usize;
+        buffer.viewport.offset_line = buffer.viewport.offset_line.saturating_sub(delta);
+    } else if mouse.row >= bottom {
+        let delta = (mouse.row - bottom + 1).max(1) as usize;
+        buffer.viewport.offset_line = buffer
+            .viewport
+            .offset_line
+            .saturating_add(delta)
+            .min(max_offset);
+    }
 }
 
 pub(super) fn map_mouse_to_line_col(
@@ -900,4 +1094,80 @@ pub(super) fn char_idx_for_display_col(line: &str, target_col: usize, tab_width:
         idx += 1;
     }
     idx
+}
+
+#[cfg(test)]
+mod drag_auto_scroll_tests {
+    use super::drag_auto_scroll;
+
+    // Inside the area: nothing happens.
+    #[test]
+    fn no_change_when_inside_area() {
+        let mut scroll = 5;
+        // area: y=10, height=20 → bottom = 30. Cursor at 15 is inside.
+        assert!(!drag_auto_scroll(15, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 5);
+    }
+
+    // Above the top edge: scroll up by the distance.
+    #[test]
+    fn scrolls_up_when_above_top() {
+        let mut scroll = 50;
+        // Cursor at row 5, area starts at 10 → 5 rows above. Scroll
+        // should drop by 5.
+        assert!(drag_auto_scroll(5, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 45);
+    }
+
+    // Below the bottom edge: scroll down by the distance + 1 (so even
+    // a single-row overshoot still scrolls one row).
+    #[test]
+    fn scrolls_down_when_below_bottom() {
+        let mut scroll = 50;
+        // area: y=10, height=20 → bottom row index 29 (inclusive).
+        // Cursor at 30 is one past the bottom → scroll bumps by 1.
+        assert!(drag_auto_scroll(30, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 51);
+    }
+
+    // Big overshoot scales the scroll delta — operator slamming the
+    // cursor 50 rows past the bottom shouldn't have to wiggle to scroll
+    // each row.
+    #[test]
+    fn scales_with_overshoot_distance() {
+        let mut scroll = 0;
+        // Bottom = 30. Cursor at 80 → 51 rows past.
+        assert!(drag_auto_scroll(80, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 51);
+    }
+
+    // Already at min: no underflow, no change reported.
+    #[test]
+    fn no_change_when_already_at_top() {
+        let mut scroll = 0;
+        assert!(!drag_auto_scroll(0, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 0);
+    }
+
+    // Already at max: no overflow past max_scroll.
+    #[test]
+    fn clamps_to_max_scroll() {
+        let mut scroll = 99;
+        assert!(drag_auto_scroll(40, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 100);
+        // Subsequent drag past bottom does not move further.
+        assert!(!drag_auto_scroll(40, 10, 20, &mut scroll, 100));
+        assert_eq!(scroll, 100);
+    }
+
+    // Zero-height area never reports a change (defensive — divisor-zero
+    // analog for the bottom calculation).
+    #[test]
+    fn no_change_when_area_height_zero() {
+        let mut scroll = 5;
+        assert!(!drag_auto_scroll(0, 10, 0, &mut scroll, 100));
+        assert_eq!(scroll, 5);
+        assert!(!drag_auto_scroll(50, 10, 0, &mut scroll, 100));
+        assert_eq!(scroll, 5);
+    }
 }

@@ -266,6 +266,15 @@ fn drain_input_burst(
     theme: &Theme,
     area: Rect,
 ) -> io::Result<bool> {
+    // Drag events fire ~30/burst on fast mouse movement; each one calls
+    // build_lines via the popup / chat-thread mappers (markdown render
+    // + syntax highlighting). Coalesce by deferring drag events into
+    // `pending_drag` and only handling the LAST one — flushed when a
+    // non-drag event arrives or at end-of-drain. Auto-scroll overshoot
+    // already scales with mouse distance past the edge, so dropping
+    // intermediate drags doesn't hurt scroll throughput; it just stops
+    // the build_lines burst that was causing the visible lag.
+    let mut pending_drag: Option<MouseEvent> = None;
     for _ in 0..32 {
         match event::read()? {
             // Accept both Press and Repeat so held keys (Backspace,
@@ -273,6 +282,9 @@ fn drain_input_burst(
             // pane already does this in `app/runner.rs` and the UX
             // mismatch was breaking long edits in multipane.
             Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if let Some(drag) = pending_drag.take() {
+                    handle_mouse(state, swarm, theme, clipboard, area, drag);
+                }
                 if handle_key(
                     state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard, area,
                 ) {
@@ -283,13 +295,33 @@ fn drain_input_burst(
             // sequence of Char key events), so without this branch
             // Cmd-V / right-click-paste / iTerm paste in multipane is
             // silently dropped.
-            Event::Paste(text) => handle_paste(state, &text),
-            Event::Mouse(mouse) => handle_mouse(state, swarm, theme, clipboard, area, mouse),
+            Event::Paste(text) => {
+                if let Some(drag) = pending_drag.take() {
+                    handle_mouse(state, swarm, theme, clipboard, area, drag);
+                }
+                handle_paste(state, &text);
+            }
+            Event::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                    // Defer; if a later drag arrives this drain it
+                    // replaces this one. End-of-drain flushes whatever
+                    // remains.
+                    pending_drag = Some(mouse);
+                } else {
+                    if let Some(drag) = pending_drag.take() {
+                        handle_mouse(state, swarm, theme, clipboard, area, drag);
+                    }
+                    handle_mouse(state, swarm, theme, clipboard, area, mouse);
+                }
+            }
             _ => {}
         }
         if !event::poll(Duration::from_millis(0))? {
             break;
         }
+    }
+    if let Some(drag) = pending_drag.take() {
+        handle_mouse(state, swarm, theme, clipboard, area, drag);
     }
     Ok(false)
 }
@@ -1770,6 +1802,10 @@ fn handle_mouse_left_drag(
     // since `InputState` isn't plumbed here.
     if state.agents.artifacts_popup_open {
         if let Some((anchor_line, anchor_col)) = read_popup_anchor() {
+            // Match the single-pane drag: bump scroll when the cursor
+            // leaves the visible body so the operator can extend the
+            // selection past the rendered window.
+            crate::app::auto_scroll_artifacts_popup_for_drag(swarm, mouse, area, state);
             if let Some((line_idx, col, lines)) = crate::app::map_artifacts_popup_mouse_with_swarm(
                 swarm, mouse, area, state, theme, true,
             ) {
@@ -1834,6 +1870,13 @@ fn handle_mouse_left_drag(
         return;
     }
 
+    // Auto-scroll the pane that owns the active selection when the drag
+    // cursor leaves its thread rect through the top or bottom. Has to
+    // run BEFORE `resolve_chat_thread_hit_with_swarm` (which returns
+    // None on out-of-rect mouse positions) so the cursor moving below
+    // the bottom edge keeps extending the selection instead of stalling.
+    auto_scroll_drag_pane_chat_thread(state, swarm, area, mouse.row);
+
     // Same sentinel concern as the Down handler: a drag whose start
     // point landed on a sentinel-scrolled pane needs the swarm-aware
     // resolver, otherwise `chat_thread_scroll` is treated as 0 and the
@@ -1852,6 +1895,45 @@ fn handle_mouse_left_drag(
     }
     if let Some(pane) = pane_at_mut(state, pane_idx) {
         selection::extend_to(pane, line_idx, col_idx);
+    }
+}
+
+/// Finds the pane currently owning a chat-thread selection (only one
+/// pane can be mid-drag at a time) and bumps its `chat_thread_scroll`
+/// when `mouse_y` is outside its rendered thread rect. Mirrors
+/// `app::auto_scroll_agent_console_for_drag` but for per-pane scroll
+/// state.
+fn auto_scroll_drag_pane_chat_thread(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    area: Rect,
+    mouse_y: u16,
+) {
+    let Some(mp) = state.multipane.as_ref() else {
+        return;
+    };
+    let Some(pane_idx) = mp.panes.iter().position(|p| p.selection.is_some()) else {
+        return;
+    };
+    let pane = match mp.panes.get(pane_idx) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, &pane) else {
+        return;
+    };
+    let max_scroll = focused_pane_chat_thread_max_scroll(state, swarm, &pane, area, pane_idx);
+    let mut scroll = resolve_chat_scroll_sentinel(pane.chat_thread_scroll, max_scroll);
+    if crate::app::drag_auto_scroll(
+        mouse_y,
+        thread_area.y,
+        thread_area.height,
+        &mut scroll,
+        max_scroll,
+    ) {
+        if let Some(p) = pane_at_mut(state, pane_idx) {
+            p.chat_thread_scroll = scroll;
+        }
     }
 }
 
