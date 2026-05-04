@@ -10,18 +10,23 @@ use files::load_file_buffer;
 pub(crate) use state_paths::{export_legacy_notes_snapshot, load_notes};
 
 pub(crate) fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
-    open_target(path, "untitled", empty_gol_buffer)
+    open_target(path, "untitled", |dir| {
+        Ok((dir.to_path_buf(), Buffer::empty("untitled", None)))
+    })
 }
 
 pub(crate) fn open_target_games(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
     open_target(path, "games.toml", games_dir_buffer)
 }
 
-fn open_target(
+fn open_target<F>(
     path: Option<&Path>,
     default_name: &str,
-    dir_handler: fn(&Path) -> anyhow::Result<(PathBuf, Buffer)>,
-) -> anyhow::Result<(PathBuf, Buffer)> {
+    dir_handler: F,
+) -> anyhow::Result<(PathBuf, Buffer)>
+where
+    F: FnOnce(&Path) -> anyhow::Result<(PathBuf, Buffer)>,
+{
     match path {
         Some(p) if p.is_file() => {
             let buffer = load_file_buffer(p, default_name)?;
@@ -32,10 +37,6 @@ fn open_target(
         None => dir_handler(&std::env::current_dir()?),
         Some(missing) => anyhow::bail!("path does not exist: {}", missing.display()),
     }
-}
-
-fn empty_gol_buffer(dir: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
-    Ok((dir.to_path_buf(), Buffer::empty("untitled", None)))
 }
 
 fn games_dir_buffer(dir: &Path) -> anyhow::Result<(PathBuf, Buffer)> {

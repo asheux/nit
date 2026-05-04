@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use nit_core::io as core_io;
@@ -10,11 +10,6 @@ use crate::cli::{GraphArgs, InspectArgs, OutputFormat};
 use crate::graph::{build_strategy_graph, render_strategy_graph_dot, write_strategy_graph_json};
 
 use super::create_parent_dirs;
-
-enum GraphFormat {
-    Json,
-    Dot,
-}
 
 pub(super) fn run_games_inspect(args: InspectArgs) -> anyhow::Result<()> {
     let InspectArgs {
@@ -56,15 +51,20 @@ pub(super) fn run_games_graph(args: GraphArgs) -> anyhow::Result<()> {
     let intro = introspect_strategy(&spec);
     let graph = build_strategy_graph(&intro);
 
-    let kind = detect_graph_format(&out)?;
+    let extension = out
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     create_parent_dirs(&out)?;
 
-    match kind {
-        GraphFormat::Json => write_strategy_graph_json(&out, &graph)?,
-        GraphFormat::Dot => {
+    match extension.as_str() {
+        "json" => write_strategy_graph_json(&out, &graph)?,
+        "dot" | "gv" => {
             let dot = render_strategy_graph_dot(&graph);
             fs::write(&out, dot).with_context(|| format!("failed to write {}", out.display()))?;
         }
+        _ => anyhow::bail!("output path must end with .json, .dot, or .gv"),
     }
 
     eprintln!("Graph written: {}", out.display());
@@ -84,20 +84,6 @@ fn load_strategies_for_graph(
     }
     let (_, _, parsed) = super::load_games_config(config_path, None)?;
     Ok(parsed.strategies)
-}
-
-fn detect_graph_format(out_path: &Path) -> anyhow::Result<GraphFormat> {
-    let ext = out_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("");
-    if ext.eq_ignore_ascii_case("json") {
-        Ok(GraphFormat::Json)
-    } else if ext.eq_ignore_ascii_case("dot") || ext.eq_ignore_ascii_case("gv") {
-        Ok(GraphFormat::Dot)
-    } else {
-        anyhow::bail!("output path must end with .json, .dot, or .gv")
-    }
 }
 
 fn resolve_strategy(strategies: &[StrategySpec], id: &str) -> anyhow::Result<StrategySpec> {

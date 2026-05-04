@@ -14,38 +14,29 @@ pub(crate) fn parse_effort_choices_from_help(help_output: &str) -> Option<Vec<St
         .filter(|piece| !piece.is_empty() && piece.chars().all(|c| c.is_ascii_alphanumeric()))
         .collect();
 
-    choices.sort_by(|a, b| {
-        claude_effort_rank(a)
-            .cmp(&claude_effort_rank(b))
-            .then_with(|| a.cmp(b))
-    });
-    choices.dedup();
-
-    (!choices.is_empty()).then_some(choices)
-}
-
-fn claude_effort_rank(effort: &str) -> u8 {
-    match effort.to_ascii_lowercase().as_str() {
-        "low" => 0,
+    let rank = |effort: &str| match effort {
+        "low" => 0u8,
         "medium" => 1,
         "high" => 2,
         "xhigh" => 3,
         "max" => 4,
         _ => 10,
-    }
+    };
+    choices.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    choices.dedup();
+
+    (!choices.is_empty()).then_some(choices)
 }
 
 pub(super) fn pick_claude_default_effort(supported: &[String]) -> String {
-    let find = |target: &str| {
-        supported
-            .iter()
-            .find(|effort| effort.eq_ignore_ascii_case(target))
-            .cloned()
-    };
-
-    find(PREFERRED_DEFAULT_EFFORT)
-        .or_else(|| find("medium"))
-        .or_else(|| find("low"))
+    [PREFERRED_DEFAULT_EFFORT, "medium", "low"]
+        .iter()
+        .find_map(|target| {
+            supported
+                .iter()
+                .find(|effort| effort.eq_ignore_ascii_case(target))
+                .cloned()
+        })
         .or_else(|| supported.first().cloned())
         .unwrap_or_else(|| PREFERRED_DEFAULT_EFFORT.to_string())
 }

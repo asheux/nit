@@ -169,7 +169,7 @@ fn execute_all_cells(
         score_aggregation: scoring_mode,
         adjusted_scores: adjusted,
     };
-    let mut totals = SweepAccumulators::new();
+    let mut totals = SweepAccumulators::default();
     let mut completed = Vec::with_capacity(grid.len());
     for (ordinal, point) in grid.iter().enumerate() {
         completed.push(run_sweep_cell(&context, &mut totals, ordinal + 1, point)?);

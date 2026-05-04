@@ -5,21 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use nit_games::{enumerate_fsms, FsmDefinition, InputMode};
 
-use crate::cli::EnumerateCommand;
-
-pub(super) fn dispatch_enumerate(kind: EnumerateCommand) -> anyhow::Result<()> {
-    match kind {
-        EnumerateCommand::Fsm {
-            states,
-            out,
-            canonical,
-            limit,
-            input_mode,
-        } => run_games_enumerate_fsm(&states, &out, canonical, limit, input_mode),
-    }
-}
-
-fn run_games_enumerate_fsm(
+pub(super) fn run_games_enumerate_fsm(
     states: &str,
     out: &Path,
     canonical: bool,

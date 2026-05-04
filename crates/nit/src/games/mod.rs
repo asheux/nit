@@ -9,7 +9,7 @@ mod run;
 mod sweep;
 mod tournament;
 
-use crate::cli::GamesCommand;
+use crate::cli::{EnumerateCommand, GamesCommand};
 
 // Re-imports flatten the games-level helpers so descendant submodules
 // can reach them through `super::`.
@@ -24,7 +24,15 @@ pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
         GamesCommand::Sweep(args) => sweep::run_games_sweep(args),
         GamesCommand::Inspect(args) => inspect::run_games_inspect(args),
         GamesCommand::Graph(args) => inspect::run_games_graph(args),
-        GamesCommand::Enumerate { kind } => enumerate::dispatch_enumerate(kind),
+        GamesCommand::Enumerate { kind } => match kind {
+            EnumerateCommand::Fsm {
+                states,
+                out,
+                canonical,
+                limit,
+                input_mode,
+            } => enumerate::run_games_enumerate_fsm(&states, &out, canonical, limit, input_mode),
+        },
     }
 }
 

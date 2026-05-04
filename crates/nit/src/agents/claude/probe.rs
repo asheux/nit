@@ -44,7 +44,7 @@ pub(super) fn probe_claude_supported_efforts() -> Vec<String> {
     capture_cli_help_text("claude")
         .as_deref()
         .and_then(parse_effort_choices_from_help)
-        .unwrap_or_else(fallback_claude_efforts)
+        .unwrap_or_else(|| DEFAULT_CLAUDE_EFFORTS.iter().map(|s| (*s).into()).collect())
 }
 
 fn probe_claude_models_from_install() -> Option<Vec<String>> {
@@ -52,8 +52,4 @@ fn probe_claude_models_from_install() -> Option<Vec<String>> {
     let bytes = fs::read(executable).ok()?;
     let models = parse_claude_models_from_binary(&bytes);
     (!models.is_empty()).then_some(models)
-}
-
-fn fallback_claude_efforts() -> Vec<String> {
-    DEFAULT_CLAUDE_EFFORTS.iter().map(|s| (*s).into()).collect()
 }

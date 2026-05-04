@@ -43,7 +43,11 @@ pub(super) fn resolve_output_dir(
     user_specified_dir: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let anchor_directory = absolutize_parent(config_location.parent(), &cwd);
+    let anchor_directory = match config_location.parent() {
+        Some(parent) if parent.is_absolute() => parent.to_path_buf(),
+        Some(parent) => cwd.join(parent),
+        None => cwd,
+    };
 
     let resolved_destination = user_specified_dir.unwrap_or_else(|| anchor_directory.clone());
     Ok(if resolved_destination.is_absolute() {
@@ -51,14 +55,6 @@ pub(super) fn resolve_output_dir(
     } else {
         anchor_directory.join(resolved_destination)
     })
-}
-
-fn absolutize_parent(optional_base: Option<&Path>, fallback_cwd: &Path) -> PathBuf {
-    match optional_base {
-        Some(absolute_base) if absolute_base.is_absolute() => absolute_base.to_path_buf(),
-        Some(relative_base) => fallback_cwd.join(relative_base),
-        None => fallback_cwd.to_path_buf(),
-    }
 }
 
 fn resolve_relative_path(candidate_path: &Path, resolution_anchor: Option<&Path>) -> PathBuf {

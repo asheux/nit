@@ -1,20 +1,21 @@
 use std::collections::HashMap;
 
 pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
-    let const_bindings = collect_js_const_bindings(js_source);
+    let const_bindings: HashMap<String, String> =
+        js_source.lines().filter_map(parse_js_const_line).collect();
     let set_member_tokens = extract_valid_models_set_members(js_source);
 
     let mut resolved: Vec<String> = set_member_tokens
         .into_iter()
-        .filter_map(|token| resolve_set_member(token, &const_bindings))
+        .filter_map(|token| {
+            strip_single_quotes(token)
+                .map(|v| v.to_string())
+                .or_else(|| const_bindings.get(token).cloned())
+        })
         .collect();
     resolved.sort();
     resolved.dedup();
     resolved
-}
-
-fn collect_js_const_bindings(js_source: &str) -> HashMap<String, String> {
-    js_source.lines().filter_map(parse_js_const_line).collect()
 }
 
 fn parse_js_const_line(line: &str) -> Option<(String, String)> {
@@ -48,10 +49,4 @@ fn extract_valid_models_set_members(js_source: &str) -> Vec<&str> {
 fn strip_single_quotes(text: &str) -> Option<&str> {
     let inner = text.trim().strip_prefix('\'')?.strip_suffix('\'')?;
     (!inner.is_empty()).then_some(inner)
-}
-
-fn resolve_set_member(token: &str, bindings: &HashMap<String, String>) -> Option<String> {
-    strip_single_quotes(token)
-        .map(|v| v.to_string())
-        .or_else(|| bindings.get(token).cloned())
 }

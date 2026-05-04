@@ -9,14 +9,8 @@ pub(super) type SharedFile = Arc<Mutex<fs::File>>;
 
 #[derive(Clone)]
 pub(super) struct LogWriter {
-    tx: mpsc::Sender<String>,
-    file: Option<SharedFile>,
-}
-
-impl LogWriter {
-    pub(super) fn new(tx: mpsc::Sender<String>, file: Option<SharedFile>) -> Self {
-        Self { tx, file }
-    }
+    pub(super) tx: mpsc::Sender<String>,
+    pub(super) file: Option<SharedFile>,
 }
 
 impl<'a> MakeWriter<'a> for LogWriter {

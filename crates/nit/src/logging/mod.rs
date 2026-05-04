@@ -12,7 +12,7 @@ mod channel_writer;
 use channel_writer::{LogWriter, SharedFile};
 
 pub(crate) fn init_tracing(
-    tx: mpsc::Sender<String>,
+    log_sender: mpsc::Sender<String>,
     log_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let file: Option<SharedFile> = log_path
@@ -20,7 +20,10 @@ pub(crate) fn init_tracing(
         .and_then(|p| open_log_file(p).ok().map(|f| Arc::new(Mutex::new(f))));
 
     tracing_subscriber::fmt()
-        .with_writer(LogWriter::new(tx, file))
+        .with_writer(LogWriter {
+            tx: log_sender,
+            file,
+        })
         .with_ansi(false)
         .with_env_filter("info,nit_syntax::tree_sitter_engine=error")
         .try_init()

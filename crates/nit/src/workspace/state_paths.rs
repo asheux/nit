@@ -9,12 +9,13 @@ pub(crate) fn load_notes(workspace_root: &Path) -> Buffer {
     let Some(notes_path) = hashed_state_path(workspace_root, "notes", "md") else {
         return Buffer::empty("notes", None);
     };
-    if !notes_path.exists() {
-        return Buffer::empty("notes", Some(notes_path));
-    }
-    match core_io::load_to_string(&notes_path) {
-        Ok(saved_content) => Buffer::from_str("notes", &saved_content, Some(notes_path)),
-        Err(_) => Buffer::empty("notes", Some(notes_path)),
+    let saved = notes_path
+        .exists()
+        .then(|| core_io::load_to_string(&notes_path).ok())
+        .flatten();
+    match saved {
+        Some(content) => Buffer::from_str("notes", &content, Some(notes_path)),
+        None => Buffer::empty("notes", Some(notes_path)),
     }
 }
 

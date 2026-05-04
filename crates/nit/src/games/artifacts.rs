@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use serde::Serialize;
+
 use nit_games::output::{StrategyDefinition, TournamentResults};
 
 /// Persist run artifacts (config snapshot, strategy definitions, tournament results) to disk.
@@ -15,30 +17,23 @@ pub(super) fn write_run_artifacts(
     results_output_path: &Path,
     match_outcome_data: &TournamentResults,
 ) {
-    persist_artifact(toml_output_path, "config snapshot", |target_path| {
-        fs::write(target_path, raw_config_content)?;
+    persist_artifact(toml_output_path, "config snapshot", |target| {
+        fs::write(target, raw_config_content)?;
         Ok(())
     });
-
-    persist_artifact(
-        definitions_output_path,
-        "strategy definitions",
-        |target_path| {
-            nit_utils::fs::write_atomic(target_path, |json_writer| {
-                serde_json::to_writer_pretty(json_writer, compiled_strategy_list)
-                    .map_err(std::io::Error::other)
-            })?;
-            Ok(())
-        },
-    );
-
-    persist_artifact(results_output_path, "tournament results", |target_path| {
-        nit_utils::fs::write_atomic(target_path, |json_writer| {
-            serde_json::to_writer_pretty(json_writer, match_outcome_data)
-                .map_err(std::io::Error::other)
-        })?;
-        Ok(())
+    persist_artifact(definitions_output_path, "strategy definitions", |target| {
+        write_json_pretty(target, compiled_strategy_list)
     });
+    persist_artifact(results_output_path, "tournament results", |target| {
+        write_json_pretty(target, match_outcome_data)
+    });
+}
+
+fn write_json_pretty<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+    nit_utils::fs::write_atomic(path, |json_writer| {
+        serde_json::to_writer_pretty(json_writer, value).map_err(std::io::Error::other)
+    })?;
+    Ok(())
 }
 
 fn persist_artifact(

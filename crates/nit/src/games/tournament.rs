@@ -168,22 +168,19 @@ trait RecordSink: Send + 'static {
     fn finish(self) -> std::io::Result<PathBuf>;
 }
 
-impl RecordSink for EventWriter {
-    type Record = GameEvent;
-    fn accept(&mut self, record: &GameEvent) -> std::io::Result<()> {
-        self.write(record)
-    }
-    fn finish(self) -> std::io::Result<PathBuf> {
-        EventWriter::finish(self)
-    }
+macro_rules! impl_record_sink {
+    ($writer:ty, $record:ty) => {
+        impl RecordSink for $writer {
+            type Record = $record;
+            fn accept(&mut self, record: &$record) -> std::io::Result<()> {
+                self.write(record)
+            }
+            fn finish(self) -> std::io::Result<PathBuf> {
+                <$writer>::finish(self)
+            }
+        }
+    };
 }
 
-impl RecordSink for HistoryWriter {
-    type Record = MatchHistory;
-    fn accept(&mut self, record: &MatchHistory) -> std::io::Result<()> {
-        self.write(record)
-    }
-    fn finish(self) -> std::io::Result<PathBuf> {
-        HistoryWriter::finish(self)
-    }
-}
+impl_record_sink!(EventWriter, GameEvent);
+impl_record_sink!(HistoryWriter, MatchHistory);

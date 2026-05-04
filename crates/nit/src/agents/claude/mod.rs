@@ -48,8 +48,7 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
     let supported = probe::probe_claude_supported_efforts();
     let default_effort = effort::pick_claude_default_effort(&supported);
 
-    for idx in 0..roster.claude_models.len() {
-        let id = roster.claude_models[idx].clone();
+    for id in roster.claude_models.clone() {
         let window = if id.contains("[1m]") || id.contains("1m") {
             EXTENDED_CONTEXT_WINDOW
         } else {

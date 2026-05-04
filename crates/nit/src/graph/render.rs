@@ -16,20 +16,26 @@ pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
         writeln!(dot, "  start -> {};", dot_id(start)).unwrap();
     }
     for node in &graph.nodes {
-        let label = node.label.replace('"', "\\\"");
-        writeln!(dot, "  {} [label=\"{label}\"];", dot_id(&node.id)).unwrap();
-    }
-    for edge in &graph.edges {
-        let label = edge.label.replace('"', "\\\"");
-        let mut attrs = format!("label=\"{label}\"");
-        if let Some(color) = &edge.color {
-            write!(attrs, ", color=\"{color}\", fontcolor=\"{color}\"").unwrap();
-        }
         writeln!(
             dot,
-            "  {} -> {} [{attrs}];",
+            "  {} [label=\"{}\"];",
+            dot_id(&node.id),
+            escape_dot_str(&node.label)
+        )
+        .unwrap();
+    }
+    for edge in &graph.edges {
+        let color_attrs = edge
+            .color
+            .as_deref()
+            .map(|color| format!(", color=\"{color}\", fontcolor=\"{color}\""))
+            .unwrap_or_default();
+        writeln!(
+            dot,
+            "  {} -> {} [label=\"{}\"{color_attrs}];",
             dot_id(&edge.from),
-            dot_id(&edge.to)
+            dot_id(&edge.to),
+            escape_dot_str(&edge.label),
         )
         .unwrap();
     }
@@ -37,9 +43,12 @@ pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
     dot
 }
 
+fn escape_dot_str(s: &str) -> String {
+    s.replace('"', "\\\"")
+}
+
 fn dot_id(raw: &str) -> String {
-    let escaped = raw.replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    format!("\"{}\"", escape_dot_str(raw))
 }
 
 pub(crate) fn write_strategy_graph_json(

@@ -30,6 +30,8 @@ const DISQUALIFYING_KEYWORDS: &[&str] = &[
 
 const CLAUDE_DISPLAY_MARKERS: &[&str] = &["Haiku", "Sonnet", "Opus", "Claude "];
 
+const VERSION_DISQUALIFIERS: &[&str] = &["-latest", "-v1", "-v2", "-v3"];
+
 pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
     let fragments = extract_ascii_runs(bytes);
 
@@ -87,14 +89,12 @@ fn update_latest_per_family(
 }
 
 fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-
     let mut runs = Vec::new();
     let mut start: Option<usize> = None;
 
-    for (i, &b) in bytes.iter().enumerate() {
+    // The trailing 0u8 sentinel terminates any open run at index == bytes.len()
+    // so the trailing-run case folds into the same branch as the in-loop case.
+    for (i, &b) in bytes.iter().chain(std::iter::once(&0u8)).enumerate() {
         if b.is_ascii_graphic() || b == b' ' {
             start.get_or_insert(i);
             continue;
@@ -103,12 +103,6 @@ fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
             if i - begin >= MIN_ASCII_RUN_LENGTH {
                 runs.push(String::from_utf8_lossy(&bytes[begin..i]).into_owned());
             }
-        }
-    }
-
-    if let Some(begin) = start {
-        if bytes.len() - begin >= MIN_ASCII_RUN_LENGTH {
-            runs.push(String::from_utf8_lossy(&bytes[begin..]).into_owned());
         }
     }
 
@@ -128,12 +122,7 @@ fn is_probable_claude_model(raw: &str) -> bool {
     if name.contains("--") || name.contains("..") {
         return false;
     }
-    if name.ends_with("-latest")
-        || name.contains("-latest-")
-        || name.contains("-v1")
-        || name.contains("-v2")
-        || name.contains("-v3")
-    {
+    if VERSION_DISQUALIFIERS.iter().any(|tag| name.contains(tag)) {
         return false;
     }
     RECOGNIZED_FAMILIES.iter().any(|tag| name.contains(tag))

@@ -79,13 +79,11 @@ fn beats_incumbent(
 }
 
 fn parse_dotted_version(raw: &str) -> Option<Vec<u32>> {
-    raw.split('.').map(parse_version_segment).collect()
-}
-
-fn parse_version_segment(s: &str) -> Option<u32> {
-    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
-        s.parse().ok()
-    } else {
-        None
-    }
+    raw.split('.')
+        .map(|segment| {
+            (!segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| segment.parse().ok())
+                .flatten()
+        })
+        .collect()
 }

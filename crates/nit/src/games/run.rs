@@ -2,7 +2,7 @@
 //! write artifacts, and emit a summary.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use nit_games::events::EventWriter;
@@ -58,7 +58,17 @@ pub(super) fn run_games_headless(args: RunArgs) -> anyhow::Result<()> {
     }
 
     if verbose {
-        log_run_preamble(&prep.resolved_path, layout.as_ref());
+        eprintln!(
+            "[config-prep] Games config: {}",
+            prep.resolved_path.display()
+        );
+        match layout.as_ref() {
+            Some(disk) => eprintln!(
+                "[summary-emit] Games summary: {}",
+                disk.summary_path.display(),
+            ),
+            None => eprintln!("[summary-emit] Games summary: disabled (`save_data = false`)"),
+        }
     }
 
     let engine = TournamentKernel::new(prep.normalized.clone());
@@ -135,35 +145,16 @@ fn prepare_batch_config(
     })
 }
 
-fn log_run_preamble(toml_location: &Path, disk: Option<&RunLayout>) {
-    eprintln!("[config-prep] Games config: {}", toml_location.display());
-    match disk {
-        Some(layout) => eprintln!(
-            "[summary-emit] Games summary: {}",
-            layout.summary_path.display(),
-        ),
-        None => eprintln!("[summary-emit] Games summary: disabled (`save_data = false`)"),
-    }
-}
-
 fn build_run_paths(disk: Option<&RunLayout>, outcome: &super::TournamentRun) -> RunPaths {
-    let mut paths = RunPaths {
-        summary: None,
-        definitions: None,
-        results: None,
-        config: None,
-        analysis_dir: None,
+    RunPaths {
+        summary: disk.map(|l| l.summary_path.display().to_string()),
+        definitions: disk.map(|l| l.definitions_path.display().to_string()),
+        results: disk.map(|l| l.results_path.display().to_string()),
+        config: disk.map(|l| l.config_path.display().to_string()),
+        analysis_dir: disk.map(|l| l.analysis_dir.display().to_string()),
         events: outcome.event_log_path.clone(),
         history: outcome.history_log_path.clone(),
-    };
-    if let Some(layout) = disk {
-        paths.summary = Some(layout.summary_path.display().to_string());
-        paths.definitions = Some(layout.definitions_path.display().to_string());
-        paths.results = Some(layout.results_path.display().to_string());
-        paths.config = Some(layout.config_path.display().to_string());
-        paths.analysis_dir = Some(layout.analysis_dir.display().to_string());
     }
-    paths
 }
 
 fn build_headless_summary(

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
 use nit_games::config::EngineMode;
@@ -36,20 +36,12 @@ pub(super) struct SweepContext<'a> {
 }
 
 /// Running accumulators updated as each sweep cell completes.
+#[derive(Default)]
 pub(super) struct SweepAccumulators {
     /// Per-strategy score vectors accumulated across all cells.
     pub scores_by_strategy: HashMap<String, Vec<f64>>,
     /// Per-strategy first-place finish counts.
     pub top_counts: HashMap<String, u32>,
-}
-
-impl SweepAccumulators {
-    pub(super) fn new() -> Self {
-        Self {
-            scores_by_strategy: HashMap::new(),
-            top_counts: HashMap::new(),
-        }
-    }
 }
 
 /// Per-cell configuration produced by applying grid-point overrides to the base sweep config.
@@ -69,7 +61,16 @@ pub(super) fn run_sweep_cell(
 ) -> anyhow::Result<SweepCellSummary> {
     let cell_cfg = prepare_cell_config(sweep_context, grid_point)?;
 
-    let point_output_dir = cell_output_dir(sweep_context.cells_root, ordinal, grid_point);
+    let noise_tag = format!("{:.4}", grid_point.noise).replace('.', "_");
+    let point_output_dir = sweep_context.cells_root.join(format!(
+        "{ordinal:04}__r{}__n{noise_tag}__rep{}__R{}__S{}__T{}__P{}",
+        grid_point.rounds,
+        grid_point.repetitions,
+        grid_point.payoff_r,
+        grid_point.payoff_s,
+        grid_point.payoff_t,
+        grid_point.payoff_p
+    ));
     fs::create_dir_all(&point_output_dir)
         .with_context(|| format!("failed to create {}", point_output_dir.display()))?;
 
@@ -150,17 +151,23 @@ pub(super) fn run_sweep_cell(
     nit_games::output::write_summary(&point_summary_file, &cell_run_summary)
         .with_context(|| format!("failed to write {}", point_summary_file.display()))?;
 
-    Ok(assemble_cell_summary(
-        ordinal,
-        grid_point,
-        cell_cfg.seed,
-        cell_cfg.content_hash,
-        point_output_dir.display().to_string(),
-        point_summary_file.display().to_string(),
-        winner_id,
-        podium_entries,
-        false,
-    ))
+    Ok(SweepCellSummary {
+        cell_id: ordinal,
+        rounds: grid_point.rounds,
+        noise: grid_point.noise,
+        repetitions: grid_point.repetitions,
+        payoff_r: grid_point.payoff_r,
+        payoff_s: grid_point.payoff_s,
+        payoff_t: grid_point.payoff_t,
+        payoff_p: grid_point.payoff_p,
+        seed: cell_cfg.seed,
+        run_id: cell_cfg.content_hash,
+        run_dir: point_output_dir.display().to_string(),
+        summary_path: point_summary_file.display().to_string(),
+        top_strategy: winner_id,
+        top_strategies: podium_entries,
+        skipped: false,
+    })
 }
 
 /// Attempt to reuse a previously computed cell result.
@@ -186,27 +193,33 @@ fn try_reuse_existing_cell(
         );
     }
 
-    Some(assemble_cell_summary(
-        ordinal,
-        grid_point,
-        stored_summary.seed,
-        stored_summary.run_id.clone(),
-        stored_summary.run_dir.clone().unwrap_or_else(|| {
+    Some(SweepCellSummary {
+        cell_id: ordinal,
+        rounds: grid_point.rounds,
+        noise: grid_point.noise,
+        repetitions: grid_point.repetitions,
+        payoff_r: grid_point.payoff_r,
+        payoff_s: grid_point.payoff_s,
+        payoff_t: grid_point.payoff_t,
+        payoff_p: grid_point.payoff_p,
+        seed: stored_summary.seed,
+        run_id: stored_summary.run_id.clone(),
+        run_dir: stored_summary.run_dir.clone().unwrap_or_else(|| {
             summary_path
                 .parent()
                 .unwrap_or(Path::new("."))
                 .display()
                 .to_string()
         }),
-        stored_summary
+        summary_path: stored_summary
             .paths
             .summary
             .clone()
             .unwrap_or_else(|| summary_path.display().to_string()),
-        winning_strategy,
-        ranked_entries,
-        true,
-    ))
+        top_strategy: winning_strategy,
+        top_strategies: ranked_entries,
+        skipped: true,
+    })
 }
 
 /// Update running score/top-count accumulators and return the podium for a single cell.
@@ -291,49 +304,4 @@ fn prepare_cell_config(
         serialized,
         content_hash,
     })
-}
-
-/// Build the on-disk directory path for a sweep cell from its ordinal and grid parameters.
-fn cell_output_dir(cells_root: &Path, ordinal: usize, grid_point: &GridCell) -> PathBuf {
-    let noise_tag = format!("{:.4}", grid_point.noise).replace('.', "_");
-    cells_root.join(format!(
-        "{ordinal:04}__r{}__n{noise_tag}__rep{}__R{}__S{}__T{}__P{}",
-        grid_point.rounds,
-        grid_point.repetitions,
-        grid_point.payoff_r,
-        grid_point.payoff_s,
-        grid_point.payoff_t,
-        grid_point.payoff_p
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assemble_cell_summary(
-    cell_id: usize,
-    cell: &GridCell,
-    seed: u64,
-    run_id: String,
-    run_dir: String,
-    summary_path: String,
-    top_strategy: String,
-    top_strategies: Vec<SweepTopEntry>,
-    skipped: bool,
-) -> SweepCellSummary {
-    SweepCellSummary {
-        cell_id,
-        rounds: cell.rounds,
-        noise: cell.noise,
-        repetitions: cell.repetitions,
-        payoff_r: cell.payoff_r,
-        payoff_s: cell.payoff_s,
-        payoff_t: cell.payoff_t,
-        payoff_p: cell.payoff_p,
-        seed,
-        run_id,
-        run_dir,
-        summary_path,
-        top_strategy,
-        top_strategies,
-        skipped,
-    }
 }
