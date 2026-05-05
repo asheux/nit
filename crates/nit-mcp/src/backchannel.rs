@@ -20,7 +20,7 @@ pub trait Backchannel {
 }
 
 pub struct BackchannelClient {
-    /// Unix socket path, or decimal TCP port (validated to `u16` in [`Self::from_env`]).
+    /// Unix socket path, or decimal TCP port (validated by [`Self::from_env`]).
     addr: String,
 }
 
@@ -33,7 +33,7 @@ impl BackchannelClient {
         let addr = {
             let raw = std::env::var("NIT_MCP_BACKCHANNEL_PORT")
                 .map_err(|_| anyhow::anyhow!("NIT_MCP_BACKCHANNEL_PORT not set"))?;
-            let _: u16 = raw.parse()?;
+            raw.parse::<u16>()?;
             raw
         };
         Ok(Self { addr })

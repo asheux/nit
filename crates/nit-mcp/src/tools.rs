@@ -18,7 +18,7 @@ static TOOLS_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         .expect("embedded tools_schema.json must be valid JSON")
 });
 
-pub fn handle_initialize(_params: Value) -> Result<Value, JsonRpcError> {
+pub(crate) fn handle_initialize(_params: Value) -> Result<Value, JsonRpcError> {
     Ok(json!({
         "protocolVersion": "2024-11-05",
         "capabilities": { "tools": {} },
@@ -29,11 +29,11 @@ pub fn handle_initialize(_params: Value) -> Result<Value, JsonRpcError> {
     }))
 }
 
-pub fn handle_tools_list() -> Result<Value, JsonRpcError> {
+pub(crate) fn handle_tools_list() -> Result<Value, JsonRpcError> {
     Ok(TOOLS_SCHEMA.clone())
 }
 
-pub fn handle_tools_call<B: Backchannel>(
+pub(crate) fn handle_tools_call<B: Backchannel>(
     params: Value,
     bc: &B,
     agent_id: &str,
@@ -63,9 +63,7 @@ pub fn handle_tools_call<B: Backchannel>(
     }
 }
 
-/// Translate a `tools/call` argument bag into a typed `BackchannelRequest`.
-/// Public so tests can drive it directly without a full `handle_line` cycle.
-pub fn build_backchannel_request(
+pub(crate) fn build_backchannel_request(
     tool: &str,
     request_id: u64,
     agent_id: &str,

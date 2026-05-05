@@ -18,10 +18,8 @@ pub fn run<R: BufRead, W: Write, B: Backchannel>(
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(err) => return Err(err.into()),
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
         }
         let raw = line.trim();
         if raw.is_empty() {

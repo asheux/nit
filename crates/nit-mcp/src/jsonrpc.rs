@@ -12,12 +12,12 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
+pub(crate) const INTERNAL_ERROR: i64 = -32603;
 
 #[derive(Debug)]
-pub struct JsonRpcError {
-    pub code: i64,
-    pub message: String,
+pub(crate) struct JsonRpcError {
+    pub(crate) code: i64,
+    pub(crate) message: String,
 }
 
 /// Parse one JSON-RPC request line, dispatch, and return the wire-encoded
