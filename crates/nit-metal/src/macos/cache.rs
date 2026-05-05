@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) const POLICY_CACHE_SCHEMA_VERSION: u32 = 1;
+pub(super) const POLICY_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PolicyCacheEntry {
-    pub(crate) schema_version: u32,
-    pub(crate) device_name: String,
-    pub(crate) payload_signature: String,
-    pub(crate) matches_per_batch_cap: usize,
-    pub(crate) inflight_batches: usize,
+pub(super) struct PolicyCacheEntry {
+    pub(super) schema_version: u32,
+    pub(super) device_name: String,
+    pub(super) payload_signature: String,
+    pub(super) matches_per_batch_cap: usize,
+    pub(super) inflight_batches: usize,
 }
 
 impl PolicyCacheEntry {
@@ -53,7 +53,7 @@ impl PolicyCacheEntry {
 
 /// Lowercases ASCII alphanumerics and collapses every other character run into
 /// a single `_`. Used to form device-name slugs that are safe as filenames.
-pub(crate) fn sanitize_cache_component(raw: &str) -> String {
+pub(super) fn sanitize_cache_component(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_was_sep = true;
     for ch in raw.chars() {
@@ -89,7 +89,7 @@ pub(super) fn policy_cache_path(root: &Path, device_name: &str, sig: &str) -> Pa
     ))
 }
 
-pub(crate) fn load_cached_policy_from_dir(
+pub(super) fn load_cached_policy_from_dir(
     root: &Path,
     device_name: &str,
     sig: &str,
@@ -104,7 +104,7 @@ pub(super) fn load_cached_policy(device_name: &str, sig: &str) -> Option<PolicyC
     load_cached_policy_from_dir(&root, device_name, sig)
 }
 
-pub(crate) fn persist_cached_policy_from_dir(cache_root: &Path, entry: &PolicyCacheEntry) {
+pub(super) fn persist_cached_policy_from_dir(cache_root: &Path, entry: &PolicyCacheEntry) {
     if fs::create_dir_all(cache_root).is_err() {
         return;
     }
@@ -144,7 +144,7 @@ fn cache_io_error(verb: &str, dir: &Path, err: std::io::Error) -> String {
 
 /// Sorted by key for deterministic UI output; unreadable or
 /// schema-mismatched entries are silently skipped rather than failing.
-pub(crate) fn snapshot_policy_cache_from_dir(dir: &Path) -> MetalResult<BatchPolicyCacheSnapshot> {
+pub(super) fn snapshot_policy_cache_from_dir(dir: &Path) -> MetalResult<BatchPolicyCacheSnapshot> {
     let root_label = dir.to_string_lossy().into_owned();
 
     let listing = match fs::read_dir(dir) {
@@ -182,7 +182,9 @@ pub(crate) fn snapshot_policy_cache_from_dir(dir: &Path) -> MetalResult<BatchPol
 
 /// Security-adjacent guard: refuses to delete paths outside `cache_root`,
 /// so callers can pass untrusted `target` strings without a path traversal.
-pub(crate) fn clear_policy_cache_entry_in_root(
+/// Symlinks are rejected because the textual `starts_with` prefix check above
+/// can be defeated by a symlink under `cache_root` that resolves elsewhere.
+pub(super) fn clear_policy_cache_entry_in_root(
     cache_root: &Path,
     target: &Path,
 ) -> MetalResult<bool> {
@@ -191,6 +193,22 @@ pub(crate) fn clear_policy_cache_entry_in_root(
             "refusing to delete Metal cache entry outside {}",
             cache_root.display()
         ));
+    }
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to delete symlinked Metal cache entry {}",
+                target.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(format!(
+                "failed to inspect Metal cache entry {}: {err}",
+                target.display()
+            ));
+        }
     }
     match fs::remove_file(target) {
         Ok(()) => Ok(true),
@@ -202,7 +220,7 @@ pub(crate) fn clear_policy_cache_entry_in_root(
     }
 }
 
-pub(crate) fn clear_policy_cache_in_root(cache_root: &Path) -> MetalResult<usize> {
+pub(super) fn clear_policy_cache_in_root(cache_root: &Path) -> MetalResult<usize> {
     let snapshot = snapshot_policy_cache_from_dir(cache_root)?;
     snapshot.entries.iter().try_fold(0usize, |deleted, entry| {
         let removed = clear_policy_cache_entry_in_root(cache_root, Path::new(&entry.path))?;

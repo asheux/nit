@@ -2,7 +2,7 @@
 //!
 //! On non-macOS platforms every public function is a no-op stub so the
 //! workspace compiles unconditionally. The authoritative public surface is
-//! the `pub use` list in [`macos::mod`] (macOS) or [`stubs`] (elsewhere).
+//! the `pub use` list in [`macos`] (macOS) or [`stubs`] (elsewhere).
 
 mod types;
 pub use types::*;

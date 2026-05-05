@@ -1,7 +1,4 @@
-//! End-to-end coverage for the macOS Metal backend. Device-tier heuristics,
-//! shader-key widening, payload signatures, input sanitisation, and the
-//! on-disk policy cache each live in their own `#[test]` below with shared
-//! fixtures at the top.
+//! macOS Metal backend tests covering tiers, shader-key widening, signatures, and policy cache I/O.
 
 use crate::macos::cache::{
     clear_policy_cache_entry_in_root, clear_policy_cache_in_root, load_cached_policy_from_dir,

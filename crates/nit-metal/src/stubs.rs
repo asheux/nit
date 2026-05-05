@@ -1,6 +1,4 @@
-//! Non-macOS stubs for the Metal GPU backend. Every public item mirrors the
-//! macOS surface with a no-op body so callers can `use nit_metal::...`
-//! unconditionally.
+//! Non-macOS no-op stubs mirroring the macOS Metal surface signature-by-signature.
 
 use crate::{
     BatchEvalConfig, BatchPayload, BatchPolicyCacheSnapshot, MatchPair, RecommendedBatchPolicy,

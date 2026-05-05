@@ -5,7 +5,7 @@
 /// Shared by policy tuning and [`MetalBackendInfo`] so a single source of
 /// truth drives batch-size / queue-depth heuristics.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AppleTier {
+pub(super) enum AppleTier {
     Base,
     Pro,
     Max,
@@ -14,7 +14,7 @@ pub(crate) enum AppleTier {
 
 /// Ordered by specificity: every Ultra also contains "Max" historically, so
 /// Ultra must be matched first.
-pub(crate) fn apple_tier(device_name: &str) -> AppleTier {
+pub(super) fn apple_tier(device_name: &str) -> AppleTier {
     if device_name.contains("Ultra") {
         return AppleTier::Ultra;
     }

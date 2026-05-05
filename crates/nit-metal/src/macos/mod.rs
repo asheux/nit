@@ -1,5 +1,4 @@
-//! macOS Metal GPU backend. Each submodule owns a single concern; this file
-//! only wires the public surface.
+//! macOS Metal GPU backend.
 
 mod cache;
 mod device;

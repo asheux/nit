@@ -39,7 +39,7 @@ fn payload_static_bytes(payload: &BatchPayload) -> usize {
 /// Strategy count with a `.max(1)` guard on the CA divisor so a zero-stride
 /// payload still reports one "strategy" for benchmarking purposes.
 /// [`BatchPayload::population_count`] intentionally returns 0 in that case.
-pub(crate) fn payload_strategy_count(payload: &BatchPayload) -> usize {
+pub(super) fn payload_strategy_count(payload: &BatchPayload) -> usize {
     match payload {
         BatchPayload::Fsm(fsm) => fsm.starts.len(),
         BatchPayload::Ca(ca) => {
@@ -50,7 +50,7 @@ pub(crate) fn payload_strategy_count(payload: &BatchPayload) -> usize {
     }
 }
 
-pub(crate) fn payload_signature(payload: &BatchPayload) -> String {
+pub(super) fn payload_signature(payload: &BatchPayload) -> String {
     let static_bytes = payload_static_bytes(payload);
     let mib_rounded = static_bytes.div_ceil(1024 * 1024).max(1);
     let static_mib_bucket = mib_rounded.next_power_of_two();
@@ -73,7 +73,7 @@ pub(crate) fn payload_signature(payload: &BatchPayload) -> String {
 }
 
 /// Higher-end Apple Silicon tiers benefit from deeper dispatch queues.
-pub(crate) fn preferred_inflight_batches(gpu_device_name: &str) -> usize {
+pub(super) fn preferred_inflight_batches(gpu_device_name: &str) -> usize {
     match apple_tier(gpu_device_name) {
         AppleTier::Ultra => 5,
         AppleTier::Max => 4,
@@ -84,7 +84,7 @@ pub(crate) fn preferred_inflight_batches(gpu_device_name: &str) -> usize {
 
 /// FSM kernels are lightweight per-pair (larger batches); TM kernels are
 /// heavier (smaller batches to stay within budget).
-pub(crate) fn preferred_base_limit(gpu_device_name: &str, payload: &BatchPayload) -> usize {
+pub(super) fn preferred_base_limit(gpu_device_name: &str, payload: &BatchPayload) -> usize {
     let tier = apple_tier(gpu_device_name);
     match payload {
         BatchPayload::Fsm(_) if matches!(tier, AppleTier::Max | AppleTier::Ultra) => 262_144,

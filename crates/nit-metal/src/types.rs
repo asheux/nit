@@ -166,7 +166,7 @@ impl BatchPayload {
         }
     }
 
-    /// State-space dimension: internal states (FSM/TM) or cell symbols (CA).
+    /// Internal states (FSM/TM) or cell symbols (CA).
     pub fn state_dimension(&self) -> u32 {
         match self {
             Self::Fsm(fsm) => fsm.states,

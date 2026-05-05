@@ -12,7 +12,7 @@ use crate::{
     BatchEvalConfig, BatchPayload, CaBatch, FsmBatch, MatchPair, ScorePair, TmBatch, TmHaltingPair,
     TmTransitionPacked,
 };
-use metal::{MTLResourceOptions, MTLSize};
+use metal::{MTLCommandBufferStatus, MTLResourceOptions, MTLSize};
 use std::ffi::c_void;
 use std::mem::{size_of, size_of_val};
 use std::slice;
@@ -153,8 +153,7 @@ impl From<&TmTransitionPacked> for TmTransitionPod {
     }
 }
 
-/// Byte footprint of an in-flight match pair (inputs + outputs), used by the
-/// policy layer to turn working-set size into a pair count budget.
+/// Used by the policy layer to turn working-set size into a pair count budget.
 pub(super) fn bytes_per_match_pair() -> usize {
     size_of::<MatchPairPod>() + size_of::<ScorePairPod>()
 }
@@ -179,6 +178,9 @@ fn tm_transition_pods(source: &[TmTransitionPacked]) -> Vec<TmTransitionPod> {
 /// StorageModeShared means the slice aliases GPU memory directly, so the
 /// buffer must outlive the returned [`Vec`]'s construction.
 unsafe fn extract_scores(buffer: &metal::BufferRef, count: usize) -> Vec<ScorePair> {
+    if count == 0 {
+        return Vec::new();
+    }
     let raw = buffer.contents() as *const ScorePairPod;
     slice::from_raw_parts(raw, count)
         .iter()
@@ -193,6 +195,9 @@ unsafe fn extract_scores(buffer: &metal::BufferRef, count: usize) -> Vec<ScorePa
 /// Buffer must contain at least `count` valid `TmHaltingPairPod` values, and
 /// the command buffer that wrote them must have completed execution.
 unsafe fn extract_tm_halting(buffer: &metal::BufferRef, count: usize) -> Vec<TmHaltingPair> {
+    if count == 0 {
+        return Vec::new();
+    }
     let raw = buffer.contents() as *const TmHaltingPairPod;
     slice::from_raw_parts(raw, count)
         .iter()
@@ -484,6 +489,9 @@ pub fn try_evaluate_prepared_batch(
 
 pub fn try_finish_prepared_batch(pending: PendingBatch) -> MetalResult<Vec<ScorePair>> {
     pending.command_buffer.wait_until_completed();
+    if pending.command_buffer.status() == MTLCommandBufferStatus::Error {
+        return Err("Metal batch failed: command buffer reported error status".to_string());
+    }
     Ok(unsafe { extract_scores(&pending.score_output, pending.dispatched_pair_count) })
 }
 
@@ -491,6 +499,9 @@ pub fn try_finish_prepared_tm_halting_batch(
     pending: PendingBatch,
 ) -> MetalResult<Vec<TmHaltingPair>> {
     pending.command_buffer.wait_until_completed();
+    if pending.command_buffer.status() == MTLCommandBufferStatus::Error {
+        return Err("Metal batch failed: command buffer reported error status".to_string());
+    }
     let halting = pending
         .tm_halting_output
         .as_ref()

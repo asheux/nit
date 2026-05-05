@@ -19,14 +19,14 @@ fn widen_limit(required: u32, compiled_default: u32) -> u32 {
 /// Specialized-shader identity: every distinct combination of bounds yields a
 /// distinct Metal library, compiled once and cached for the process lifetime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ShaderKey {
-    pub(crate) ca_max_window: u32,
-    pub(crate) tm_max_width: u32,
-    pub(crate) fsm_max_states: u32,
+pub(super) struct ShaderKey {
+    pub(super) ca_max_window: u32,
+    pub(super) tm_max_width: u32,
+    pub(super) fsm_max_states: u32,
 }
 
 impl ShaderKey {
-    pub(crate) fn defaults() -> Self {
+    pub(super) fn defaults() -> Self {
         Self {
             ca_max_window: CA_MAX_WINDOW.max(1),
             tm_max_width: TM_MAX_WIDTH.max(1),
@@ -34,7 +34,7 @@ impl ShaderKey {
         }
     }
 
-    pub(crate) fn for_fsm(required_states: u32) -> Self {
+    pub(super) fn for_fsm(required_states: u32) -> Self {
         Self {
             fsm_max_states: widen_limit(required_states, FSM_MAX_STATES),
             ..Self::defaults()
@@ -43,21 +43,21 @@ impl ShaderKey {
 
     /// Scratch width must be at least `max_steps + 1` for the longest tape
     /// expansion the kernel may encounter.
-    pub(crate) fn for_tm(max_steps: u32) -> Self {
+    pub(super) fn for_tm(max_steps: u32) -> Self {
         Self {
             tm_max_width: widen_limit(max_steps.saturating_add(1), TM_MAX_WIDTH),
             ..Self::defaults()
         }
     }
 
-    pub(crate) fn for_ca(window_size: u32) -> Self {
+    pub(super) fn for_ca(window_size: u32) -> Self {
         Self {
             ca_max_window: widen_limit(window_size, CA_MAX_WINDOW),
             ..Self::defaults()
         }
     }
 
-    pub(crate) fn for_payload(payload: &BatchPayload) -> Self {
+    pub(super) fn for_payload(payload: &BatchPayload) -> Self {
         match payload {
             BatchPayload::Fsm(fsm) => Self::for_fsm(fsm.states),
             BatchPayload::Tm(tm) => Self::for_tm(tm.max_steps),
@@ -123,8 +123,9 @@ impl MetalContext {
 /// Per-key context cache. Contexts are intentionally leaked to provide a
 /// `'static` lifetime — GPU pipeline objects are expensive to build and the
 /// key space is bounded (a handful of specialized variants per process).
-static CONTEXTS: OnceLock<Mutex<HashMap<ShaderKey, MetalResult<&'static MetalContext>>>> =
-    OnceLock::new();
+/// Only successful compiles are memoized; transient errors (driver hiccup,
+/// IOSurface exhaustion) fall through so the next call retries.
+static CONTEXTS: OnceLock<Mutex<HashMap<ShaderKey, &'static MetalContext>>> = OnceLock::new();
 
 pub(super) fn context_for_key(key: ShaderKey) -> MetalResult<&'static MetalContext> {
     let cache = CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -133,13 +134,12 @@ pub(super) fn context_for_key(key: ShaderKey) -> MetalResult<&'static MetalConte
         .map_err(|_| "Metal context cache lock poisoned".to_string())?;
 
     if let Some(existing) = guard.get(&key) {
-        return existing.clone();
+        return Ok(*existing);
     }
 
-    let result =
-        MetalContext::compile(key).map(|ctx| Box::leak(Box::new(ctx)) as &'static MetalContext);
-    guard.insert(key, result.clone());
-    result
+    let ctx: &'static MetalContext = Box::leak(Box::new(MetalContext::compile(key)?));
+    guard.insert(key, ctx);
+    Ok(ctx)
 }
 
 pub fn prewarm_default_batch_shaders() -> MetalResult<()> {
