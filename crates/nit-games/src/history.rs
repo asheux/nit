@@ -2,7 +2,7 @@
 
 use crate::game::{Action, Outcome};
 
-/// 2 bits per outcome, so 31 rounds fit in a `u64`.
+// 2 bits per outcome means a u64 holds at most 31 rounds.
 pub const MAX_ROLLING_DEPTH: usize = 31;
 
 #[derive(Copy, Clone, Debug)]
@@ -12,7 +12,6 @@ pub struct RoundRecord {
 }
 
 impl RoundRecord {
-    /// Returns `(own_action, opponent_action)` oriented to the given player.
     pub fn oriented_actions(self, player_a: bool) -> (Action, Action) {
         if player_a {
             (self.a, self.b)
@@ -35,8 +34,7 @@ pub struct History {
 }
 
 impl History {
-    /// `max_memory` controls how many recent rounds the rolling window
-    /// tracks (capped at 31).
+    /// `max_memory` is the rolling-window depth; it is silently clamped to [`MAX_ROLLING_DEPTH`].
     pub fn new(max_memory: usize) -> Self {
         Self {
             rounds: Vec::new(),
@@ -60,8 +58,8 @@ impl History {
         self.rounds.last().copied()
     }
 
-    /// Returns the rolling memory index for the given player over the last `n`
-    /// rounds, or `None` if insufficient history is available.
+    /// Bit-packed memory index over the last `n` rounds, or `None` when the
+    /// window has not yet seen `n` rounds.
     pub fn memory_index(&self, player_a: bool, n: usize) -> Option<usize> {
         self.memory_window.index_for(player_a, n)
     }
@@ -72,11 +70,10 @@ impl History {
     }
 }
 
-/// Bit-packed sliding window: 2 bits per outcome, one window per player perspective.
 #[derive(Clone, Debug)]
 struct RollingHistory {
-    window_depth: usize,
-    /// `(1 << (2 * window_depth)) - 1` — truncates the window to the configured depth.
+    depth: usize,
+    // Mask = (1 << (2 * depth)) - 1; truncates each window to the configured depth.
     window_mask: u64,
     window_a: u64,
     window_b: u64,
@@ -84,18 +81,16 @@ struct RollingHistory {
 }
 
 impl RollingHistory {
-    /// Creates an empty rolling window that will track the most recent
-    /// `depth` rounds (silently clamped to 31).
     fn new(depth: usize) -> Self {
-        let clamped_depth = depth.min(MAX_ROLLING_DEPTH);
-        let computed_mask = if clamped_depth == 0 {
+        let depth = depth.min(MAX_ROLLING_DEPTH);
+        let window_mask = if depth == 0 {
             0
         } else {
-            (1u64 << (2 * clamped_depth)) - 1
+            (1u64 << (2 * depth)) - 1
         };
         Self {
-            window_depth: clamped_depth,
-            window_mask: computed_mask,
+            depth,
+            window_mask,
             window_a: 0,
             window_b: 0,
             rounds_recorded: 0,
@@ -103,37 +98,26 @@ impl RollingHistory {
     }
 
     fn update(&mut self, action_a: Action, action_b: Action) {
-        if self.window_depth == 0 {
+        if self.depth == 0 {
             return;
         }
-
-        let outcome_bits_a = Outcome::from_actions(action_a, action_b).index() as u64;
-        let outcome_bits_b = Outcome::from_actions(action_b, action_a).index() as u64;
-
-        self.window_a = ((self.window_a << 2) | outcome_bits_a) & self.window_mask;
-        self.window_b = ((self.window_b << 2) | outcome_bits_b) & self.window_mask;
-
-        self.rounds_recorded = self
-            .rounds_recorded
-            .saturating_add(1)
-            .min(self.window_depth);
+        let bits_a = Outcome::from_actions(action_a, action_b).index() as u64;
+        let bits_b = Outcome::from_actions(action_b, action_a).index() as u64;
+        self.window_a = ((self.window_a << 2) | bits_a) & self.window_mask;
+        self.window_b = ((self.window_b << 2) | bits_b) & self.window_mask;
+        self.rounds_recorded = self.rounds_recorded.saturating_add(1).min(self.depth);
     }
 
-    /// Returns the memory index for the given player over the last `depth`
-    /// rounds, or `None` when fewer than `depth` rounds have been recorded.
     fn index_for(&self, player_a: bool, depth: usize) -> Option<usize> {
-        if depth == 0 || depth > self.window_depth || self.rounds_recorded < depth {
+        if depth == 0 || depth > self.depth || self.rounds_recorded < depth {
             return None;
         }
-
-        let depth_mask = (1u64 << (2 * depth)) - 1;
-
-        let perspective_window = if player_a {
+        let mask = (1u64 << (2 * depth)) - 1;
+        let window = if player_a {
             self.window_a
         } else {
             self.window_b
         };
-
-        Some((perspective_window & depth_mask) as usize)
+        Some((window & mask) as usize)
     }
 }

@@ -38,7 +38,8 @@ pub struct MatchHistory {
 }
 
 impl MatchHistory {
-    /// Falls back to `score_idx` length when `rounds` is zero.
+    /// Falls back to the per-round digit count in `score_idx` when `rounds` is unset
+    /// (legacy logs predating the explicit `rounds` field).
     pub fn resolved_rounds(&self) -> u32 {
         if self.rounds > 0 {
             return self.rounds;

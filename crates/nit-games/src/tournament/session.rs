@@ -1,8 +1,5 @@
-//! Match session management: strategy construction, round execution, and match lifecycle.
-//!
-//! Contains [`MatchSession`] construction, the core round-play loop
-//! (`play_round_core`), and the batch-mode `run_match_core` entry point
-//! used by both the kernel and the runner.
+//! Match session lifecycle: strategy construction, per-round play, and the
+//! batch-mode `run_match_core` entry point shared by the kernel and the runner.
 
 use super::metal::adjusted_total_for_match;
 use super::types::{
@@ -20,8 +17,6 @@ use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmR
 use nit_utils::rng::SplitMix64;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// Convert [`TmRunStats`] into the serializable [`TmDerivedMetrics`](crate::output::TmDerivedMetrics)
-/// format for inclusion in tournament results and history logs.
 pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
     let rounds = stats.rounds.max(1);
     let avg_steps = stats.steps as f64 / rounds as f64;
@@ -38,11 +33,8 @@ pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDeri
     }
 }
 
-/// Execute a single round of play for both strategies in `session`.
-///
-/// Queries each strategy for its next action (catching panics), applies noise,
-/// computes payoffs, updates the session's cumulative scores and history buffers,
-/// and returns a [`RoundOutcome`] with the snapshot and crash flags.
+/// Query each strategy for its next action under panic isolation, apply
+/// noise, compute payoffs, then commit the round to the session buffers.
 pub(super) fn play_round_core(
     session: &mut MatchSession,
     config: &NormalizedConfig,
@@ -95,7 +87,9 @@ pub(super) fn play_round_core(
     session.b_total += b_payoff as i64;
     session.history.push(a_action, b_action);
     if session.record_history || session.record_trace {
-        session.history_scores.push(outcome.digit_char());
+        session
+            .history_scores
+            .push(char::from(outcome.digit_byte()));
     }
     if session.record_trace {
         session.history_payoffs.push([a_payoff, b_payoff]);
@@ -131,7 +125,10 @@ fn apply_noise(noise: f32, action: Action, rng: &mut SplitMix64) -> Action {
         return action;
     }
     if rng.next_f32() < noise {
-        action.flip()
+        match action {
+            Action::Cooperate => Action::Defect,
+            Action::Defect => Action::Cooperate,
+        }
     } else {
         action
     }
@@ -216,11 +213,8 @@ impl MatchSession {
     }
 }
 
-/// Run a complete match between two strategies, returning the final [`MatchOutcome`].
-///
-/// Attempts the fast-eval (FSM product-graph) path first when eligible, falling
-/// back to round-by-round simulation via [`play_round_core`]. Emits event and
-/// history records through the provided callback closures.
+/// Run a full match, preferring the fast-eval product graph and falling back
+/// to per-round play. Emits events and history records through the closures.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_match_core<E, H>(
     matchup: &Matchup,
@@ -459,9 +453,6 @@ where
     }
 }
 
-/// Build the serializable [`StrategyDefinition`] list from the roster specs.
-///
-/// Used by both the kernel and runner to populate the run summary output.
 pub(super) fn build_strategy_definitions(strategies: &[StrategySpec]) -> Vec<StrategyDefinition> {
     strategies
         .iter()
@@ -475,8 +466,8 @@ pub(super) fn build_strategy_definitions(strategies: &[StrategySpec]) -> Vec<Str
         .collect()
 }
 
-/// Derive a short display identifier for a strategy, preferring the compact
-/// numeric form (FSM index, CA rule number, or TM rule code) when available.
+/// Compact display id for a strategy: prefer the numeric FSM index, CA
+/// rule number, or TM rule code when present, otherwise fall back to `id`.
 pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
     match &spec.kind {
         StrategySpecKind::Fsm {
@@ -491,10 +482,6 @@ pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
     }
 }
 
-/// Construct a boxed [`Strategy`] trait object from a [`StrategySpec`].
-///
-/// Dispatches on the spec kind to build the correct concrete strategy type
-/// (FSM, CA, or one-sided TM).
 pub(crate) fn build_strategy(spec: &StrategySpec, _seed: u64) -> Box<dyn Strategy> {
     match &spec.kind {
         StrategySpecKind::Fsm {

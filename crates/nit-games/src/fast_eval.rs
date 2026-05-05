@@ -148,7 +148,18 @@ pub fn evaluate_match(
                         outcome_counts[3].saturating_sub(snap.outcome_counts[3]),
                     ];
                     if record_cycle && cycle_meta.is_none() {
-                        cycle_meta = Some(build_cycle_metadata(snap.round, period, delta_counts));
+                        let [cc, cd, dc, dd] = delta_counts;
+                        let denom = period.max(1) as f64;
+                        cycle_meta = Some(CycleMetadata {
+                            transient_rounds: snap.round,
+                            cycle_rounds: period,
+                            cycle_cc: cc,
+                            cycle_cd: cd,
+                            cycle_dc: dc,
+                            cycle_dd: dd,
+                            a_cycle_coop_rate: (cc + cd) as f64 / denom,
+                            b_cycle_coop_rate: (cc + dc) as f64 / denom,
+                        });
                     }
                     let delta_a = a_total.saturating_sub(snap.a_total);
                     let delta_b = b_total.saturating_sub(snap.b_total);
@@ -216,25 +227,6 @@ fn replicate_cycle_outcomes(
     history.reserve(cycle_len.saturating_mul(full_cycles as usize));
     for _ in 0..full_cycles {
         history.extend_from_within(range.clone());
-    }
-}
-
-fn build_cycle_metadata(
-    transient_rounds: u32,
-    cycle_rounds: u32,
-    counts: [u64; 4],
-) -> CycleMetadata {
-    let [cc, cd, dc, dd] = counts;
-    let denominator = cycle_rounds.max(1) as f64;
-    CycleMetadata {
-        transient_rounds,
-        cycle_rounds,
-        cycle_cc: cc,
-        cycle_cd: cd,
-        cycle_dc: dc,
-        cycle_dd: dd,
-        a_cycle_coop_rate: (cc + cd) as f64 / denominator,
-        b_cycle_coop_rate: (cc + dc) as f64 / denominator,
     }
 }
 

@@ -27,32 +27,11 @@ fn baseline_history_fixture() -> MatchHistory {
     }
 }
 
-fn single_round_fixture() -> MatchHistory {
-    MatchHistory {
-        match_id: 0,
-        match_index: 1,
-        total_matches: 1,
-        a: "one".into(),
-        b: "two".into(),
-        repetition: 0,
-        rounds: 1,
-        score_idx: "0".into(),
-        a_score: -1,
-        b_score: -1,
-        cycle: None,
-        a_tm_metrics: None,
-        b_tm_metrics: None,
-    }
-}
-
 #[test]
 fn compact_payload_contains_expected_fields() {
-    let compact_history_record = baseline_history_fixture();
-
     let json_output_string =
-        serde_json::to_string(&compact_history_record).expect("serialize compact history");
+        serde_json::to_string(&baseline_history_fixture()).expect("serialize compact history");
 
-    // Verify that the core fields are present in the output.
     assert!(json_output_string.contains("\"score_idx\":\"0123\""));
     assert!(json_output_string.contains("\"a\":\"fsm_alpha\""));
     assert!(json_output_string.contains("\"b\":\"fsm_beta\""));
@@ -68,10 +47,8 @@ fn compact_payload_contains_expected_fields() {
 
 #[test]
 fn none_optional_fields_are_omitted_from_json() {
-    let history_without_optionals = baseline_history_fixture();
-
     let json_without_optionals =
-        serde_json::to_string(&history_without_optionals).expect("serialize history");
+        serde_json::to_string(&baseline_history_fixture()).expect("serialize history");
 
     assert!(
         !json_without_optionals.contains("\"cycle\""),
@@ -89,7 +66,20 @@ fn none_optional_fields_are_omitted_from_json() {
 
 #[test]
 fn single_round_fixture_serialises_correctly() {
-    let record = single_round_fixture();
+    let record = MatchHistory {
+        match_id: 0,
+        match_index: 1,
+        total_matches: 1,
+        a: "one".into(),
+        b: "two".into(),
+        repetition: 0,
+        rounds: 1,
+        score_idx: "0".into(),
+        a_score: -1,
+        b_score: -1,
+        ..baseline_history_fixture()
+    };
+
     let json = serde_json::to_string(&record).expect("serialize single-round fixture");
     assert!(json.contains("\"a\":\"one\""));
     assert!(json.contains("\"b\":\"two\""));

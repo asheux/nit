@@ -46,7 +46,7 @@ pub enum GameEvent {
         round: u32,
         a_action: char,
         b_action: char,
-        /// Defaults to `true` for backward compat with non-TM match records.
+        // Defaults to true so legacy non-TM round records still deserialize.
         #[serde(default = "default_true")]
         a_halted: bool,
         #[serde(default = "default_true")]
@@ -75,7 +75,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Writes NDJSON event records with atomic rename on completion.
+/// Buffered NDJSON event writer; finalises with an atomic rename.
 pub struct EventWriter {
     inner: crate::ndjson::AtomicNdjsonWriter,
     include_rounds: bool,
@@ -101,6 +101,10 @@ impl EventWriter {
         self.inner.finish()
     }
 
+    pub fn final_path(&self) -> &Path {
+        self.inner.final_path()
+    }
+
     pub fn timestamp() -> String {
         OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -109,9 +113,5 @@ impl EventWriter {
 
     pub fn default_name(prefix: &str) -> String {
         format!("{prefix}__{}", Self::timestamp().replace(':', "-"))
-    }
-
-    pub fn final_path(&self) -> &Path {
-        self.inner.final_path()
     }
 }

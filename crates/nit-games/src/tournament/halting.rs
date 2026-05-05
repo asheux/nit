@@ -252,8 +252,8 @@ fn notebook_tm_family_halting_mask(
         .iter()
         .map(|spec| notebook_tm_spec(spec).expect("TM roster should only contain TM strategies"))
         .collect::<Vec<_>>();
-    // TM-vs-TM halting outcomes are deterministic, so repetitions repeat the same ordered
-    // matchup work. Scan one repetition and reuse the result across all repetitions.
+    // TM-vs-TM halting outcomes are deterministic, so one repetition's scan
+    // covers every repetition. Scan once, reuse the keep-mask everywhere.
     let scanned_matchups = matches_per_repetition(strategy_count, config.self_play).unwrap_or(0);
     if scanned_matchups == 0 {
         return (keep, NotebookTmFamilyStats::default());
@@ -781,7 +781,5 @@ pub fn try_select_halting_turing_machine_strategies(
 pub fn select_halting_turing_machine_strategies(config: NormalizedConfig) -> NormalizedConfig {
     select_halting_turing_machine_strategies_inner(config, false)
         .map(|(config, _)| config)
-        .expect(
-            "TM halting selection should fall back to the CPU path when strict Metal is not required",
-        )
+        .expect("non-strict TM halting selection always falls back to CPU")
 }

@@ -16,20 +16,13 @@ impl Action {
         }
     }
 
-    /// Parses case-insensitive action strings: `"c"`, `"coop"`, `"cooperate"`,
-    /// `"cooperation"`, `"d"`, `"defect"`, `"defection"`.
+    /// Parses case-insensitive `c`/`coop`/`cooperate`/`cooperation` and
+    /// `d`/`defect`/`defection`. Whitespace is trimmed.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "c" | "coop" | "cooperate" | "cooperation" => Some(Self::Cooperate),
             "d" | "defect" | "defection" => Some(Self::Defect),
             _ => None,
-        }
-    }
-
-    pub fn flip(self) -> Self {
-        match self {
-            Self::Cooperate => Self::Defect,
-            Self::Defect => Self::Cooperate,
         }
     }
 }
@@ -54,8 +47,9 @@ impl std::str::FromStr for Action {
 pub const ACTION_COUNT: usize = 2;
 pub const OUTCOME_COUNT: usize = 4;
 
-/// Joint outcome of a round: (self_action, opponent_action) encoded as
-/// Cooperate/Defect initials.
+/// Joint outcome of a round: `(self_action, opponent_action)` encoded as
+/// Cooperate/Defect initials. The numeric `index()` (0..4) doubles as an
+/// ASCII-digit offset, used by FSM lookup tables and history-string scores.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     CC,
@@ -76,7 +70,6 @@ impl Outcome {
         }
     }
 
-    /// Numeric index in `0..4`, used for lookup-table indexing in FSM strategies.
     pub fn index(self) -> usize {
         match self {
             Self::CC => 0,
@@ -86,51 +79,28 @@ impl Outcome {
         }
     }
 
-    pub fn actions(self) -> (Action, Action) {
-        match self {
-            Self::CC => (Action::Cooperate, Action::Cooperate),
-            Self::CD => (Action::Cooperate, Action::Defect),
-            Self::DC => (Action::Defect, Action::Cooperate),
-            Self::DD => (Action::Defect, Action::Defect),
-        }
-    }
-
-    pub fn mirror(self) -> Self {
-        match self {
-            Self::CC => Self::CC,
-            Self::CD => Self::DC,
-            Self::DC => Self::CD,
-            Self::DD => Self::DD,
-        }
-    }
-
-    /// ASCII digit byte encoding: CC=`b'0'`, CD=`b'1'`, DC=`b'2'`, DD=`b'3'`.
+    /// ASCII digit byte: CC=`b'0'`, CD=`b'1'`, DC=`b'2'`, DD=`b'3'`. Used to
+    /// build the compact per-round outcome string in the history log.
     pub fn digit_byte(self) -> u8 {
         b'0' + self.index() as u8
-    }
-
-    /// ASCII digit char encoding: CC=`'0'`, CD=`'1'`, DC=`'2'`, DD=`'3'`.
-    pub fn digit_char(self) -> char {
-        char::from(self.digit_byte())
     }
 }
 
 impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tag = match self {
+        f.write_str(match self {
             Self::CC => "CC",
             Self::CD => "CD",
             Self::DC => "DC",
             Self::DD => "DD",
-        };
-        f.write_str(tag)
+        })
     }
 }
 
-/// A 2x2 payoff matrix for a symmetric two-player game.
-/// Named fields use standard PD parameterization: R (reward), S (sucker),
-/// T (temptation), P (punishment). The `matrix` stores the full
-/// `[a_action][b_action] -> [a_payoff, b_payoff]` lookup.
+/// 2x2 payoff matrix for a symmetric two-player game. Named fields use the
+/// standard PD parameterization (R, S, T, P); `matrix` stores the full
+/// `[a_action][b_action] -> [a_payoff, b_payoff]` lookup, which is the
+/// shape consumed by the GPU shaders and the fast-eval path.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct PayoffMatrix {
     pub r: i32,
@@ -142,10 +112,17 @@ pub struct PayoffMatrix {
 
 impl PayoffMatrix {
     pub fn default_pd() -> Self {
-        Self::from_matrix([[[-1, -1], [-3, 0]], [[0, -3], [-2, -2]]])
+        Self {
+            r: -1,
+            s: -3,
+            t: 0,
+            p: -2,
+            matrix: [[[-1, -1], [-3, 0]], [[0, -3], [-2, -2]]],
+        }
     }
 
-    /// Layout: `[a_choice][b_choice] = [a_payoff, b_payoff]`.
+    /// Layout: `[a_choice][b_choice] = [a_payoff, b_payoff]`. Reads R/S/T/P
+    /// out of the canonical `(0,0) / (0,1) / (1,0) / (1,1)` cells.
     pub fn from_matrix(raw: [[[i32; 2]; 2]; 2]) -> Self {
         Self {
             r: raw[0][0][0],
@@ -161,8 +138,10 @@ impl PayoffMatrix {
         (cell[0], cell[1])
     }
 
-    /// Returns `(min, max)` payoff across all cells. Widens the range when
-    /// all values are identical to prevent division-by-zero in normalization.
+    /// Returns `(min, max)` payoff across all cells. When every cell is
+    /// identical the lower bound is widened by one (or anchored at zero
+    /// when all values are positive) so downstream normalization can
+    /// divide by the span without hitting zero.
     pub fn min_max(self) -> (i32, i32) {
         let (lo, hi) = self
             .matrix

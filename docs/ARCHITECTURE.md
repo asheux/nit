@@ -274,6 +274,8 @@ Cancellation/timeouts in MCP mode:
 
 #### Swarm orchestration (`@swarm`)
 
+![Swarm DAG orchestrator: planner fans out into parallel proposers, converges through judge and review, integrates, then verifies — with a retry loop from verify back to integrate on gate failure or genome degradation](/nit-hero-swarm-dag.svg)
+
 Operator guide: `docs/SWARM.md`.
 
 nit supports two “multi-agent” modes:

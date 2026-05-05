@@ -58,9 +58,10 @@ impl StrategyResult {
         aggregation: ScoreAggregation,
         adjusted: bool,
     ) -> f64 {
+        let score = self.score(aggregation, adjusted);
         match aggregation {
-            ScoreAggregation::Mean => self.score(aggregation, adjusted) * self.matches as f64,
-            ScoreAggregation::Total => self.score(aggregation, adjusted),
+            ScoreAggregation::Mean => score * self.matches as f64,
+            ScoreAggregation::Total => score,
         }
     }
 
@@ -332,19 +333,10 @@ fn unique_run_dir(root: &Path, base: &str, run_id: &str) -> PathBuf {
     if !candidate.exists() {
         return candidate;
     }
-
     let suffix = run_id.get(0..8).unwrap_or(run_id);
-
-    // Try the plain suffixed name, then numbered variants 1..=9.
-    let names = std::iter::once(format!("{base}__run-{suffix}"))
-        .chain((1..=9).map(|n| format!("{base}__run-{suffix}-{n}")));
-
-    for name in names {
-        let candidate = root.join(&name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    root.join(format!("{base}__run-{suffix}-overflow"))
+    std::iter::once(format!("{base}__run-{suffix}"))
+        .chain((1..=9).map(|n| format!("{base}__run-{suffix}-{n}")))
+        .map(|name| root.join(name))
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| root.join(format!("{base}__run-{suffix}-overflow")))
 }

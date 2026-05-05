@@ -36,6 +36,13 @@ pub use types::{
 };
 
 #[cfg(test)]
-pub(crate) use metal::{metal_batch_totals_for_test, metal_policy_probe_for_test};
-#[cfg(test)]
 pub(crate) use session::build_strategy;
+
+#[cfg(test)]
+pub(crate) mod test_internals {
+    pub(crate) use super::metal::{
+        encode_matchup_pairs, match_outcomes_from_scores,
+        try_metal_batch_outcomes_chunked_prepared, try_prepare_metal_batch,
+    };
+    pub(crate) use super::types::{MatchOutcome, Matchup, PreparedMetalBatch};
+}
