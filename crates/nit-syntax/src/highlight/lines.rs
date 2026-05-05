@@ -24,8 +24,10 @@ pub(crate) fn find_line(offsets: &[usize], target_byte: usize) -> usize {
         .saturating_sub(1)
 }
 
-/// Line-ending-agnostic FNV-1a: strips a trailing `\n` and skips `\r`, so
-/// `"a\n"`, `"a\r\n"`, and `"a"` all hash identically.
+/// FNV-1a over `raw` with `\n`/`\r` stripped so `"a\n"`, `"a\r\n"`, and `"a"`
+/// hash identically. Callers may treat `0` as an "unhashed" sentinel: a real
+/// FNV-1a output equal to `0` is astronomically unlikely (≈1/2⁶⁴) and would
+/// just trigger a redundant re-highlight, never silent corruption.
 #[must_use]
 pub fn hash_line_bytes(raw: &[u8]) -> u64 {
     const BASIS: u64 = 14695981039346656037;
@@ -54,11 +56,4 @@ pub(crate) fn recompute_line_hashes(
             hashes[i] = hash_line_bytes(&text[line_starts[i]..line_starts[i + 1]]);
         }
     }
-}
-
-pub(crate) fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
-    let line_count = offsets.len().saturating_sub(1);
-    let mut hashes = vec![0u64; line_count];
-    recompute_line_hashes(text.as_bytes(), offsets, &mut hashes, 0..line_count);
-    hashes
 }

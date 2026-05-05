@@ -77,10 +77,25 @@ pub(super) fn viewport_highlight(
     let offsets = compute_line_starts(&job.text);
     let total = offsets.len().saturating_sub(1);
 
-    let start_line = viewport.first_line.saturating_sub(VIEWPORT_MARGIN_LINES);
-    let end_line = (viewport.last_line + VIEWPORT_MARGIN_LINES).min(total.saturating_sub(1));
+    // Clamp the viewport against the actual buffer size: a request can carry a
+    // `first_line` from a previous, larger buffer, and indexing `offsets`
+    // unguarded would panic and force the worker to drop BufferState every
+    // frame, defeating incremental highlight entirely.
+    let last_line_idx = total.saturating_sub(1);
+    let start_line = viewport
+        .first_line
+        .saturating_sub(VIEWPORT_MARGIN_LINES)
+        .min(last_line_idx);
+    let end_line = (viewport.last_line + VIEWPORT_MARGIN_LINES)
+        .min(last_line_idx)
+        .max(start_line);
 
-    let start_byte = offsets[start_line];
+    debug_assert!(
+        start_line < offsets.len(),
+        "start_line {start_line} out of offsets len {}",
+        offsets.len()
+    );
+    let start_byte = offsets.get(start_line).copied().unwrap_or(0);
     let end_byte = offsets.get(end_line + 1).copied().unwrap_or(job.text.len());
 
     let Some(cfg) = query_configs.get(&job.language) else {

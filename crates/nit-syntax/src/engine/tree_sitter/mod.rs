@@ -13,7 +13,6 @@ use super::{HighlightRequest, SyntaxEngine};
 
 mod incremental;
 mod job;
-mod logging;
 mod modes;
 mod progressive;
 mod worker;
@@ -39,22 +38,7 @@ impl TreeSitterEngine {
     }
 
     pub fn prewarm_language(&self, lang: LanguageId) {
-        let _ = self.req_tx.send(HighlightRequest {
-            buffer_id: usize::MAX,
-            version: 0,
-            language: lang,
-            text: String::new(),
-            edits: Vec::new(),
-            full_reparse: true,
-            max_spans_per_line: 0,
-            viewport: None,
-        });
-    }
-
-    fn drain_results(&mut self) {
-        while let Ok(r) = self.res_rx.try_recv() {
-            self.cache.insert(r.buffer_id, r.snapshot);
-        }
+        let _ = self.req_tx.send(HighlightRequest::prewarm(lang));
     }
 }
 
@@ -64,7 +48,9 @@ impl SyntaxEngine for TreeSitterEngine {
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        self.drain_results();
+        while let Ok(r) = self.res_rx.try_recv() {
+            self.cache.insert(r.buffer_id, r.snapshot);
+        }
         self.cache
             .get(&buffer_id)
             .filter(|s| s.version == version)

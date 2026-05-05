@@ -27,42 +27,36 @@ pub(crate) fn distribute_spans_to_lines(
         if span.end_byte <= span.start_byte {
             continue;
         }
-        assign_span_to_lines(span, offsets, segments, max_per_line, &predicate);
-    }
-}
+        let first = find_line(offsets, span.start_byte);
+        let last = find_line(offsets, span.end_byte);
 
-fn assign_span_to_lines(
-    span: &HighlightSpan,
-    offsets: &[usize],
-    segments: &mut [Vec<LineSegment>],
-    max_per_line: usize,
-    predicate: &impl Fn(usize) -> bool,
-) {
-    let first = find_line(offsets, span.start_byte);
-    let last = find_line(offsets, span.end_byte);
+        for line in first..=last {
+            if line + 1 >= offsets.len() || line >= segments.len() {
+                break;
+            }
+            if !predicate(line) {
+                continue;
+            }
+            if max_per_line > 0 && segments[line].len() >= max_per_line {
+                continue;
+            }
 
-    for line in first..=last {
-        if line + 1 >= offsets.len() || line >= segments.len() {
-            break;
-        }
-        if !predicate(line) {
-            continue;
-        }
-        if max_per_line > 0 && segments[line].len() >= max_per_line {
-            continue;
-        }
+            let line_start = offsets[line];
+            let line_end = offsets[line + 1];
+            debug_assert!(
+                span.end_byte >= line_start,
+                "span ending before line start: span={span:?} line_start={line_start}"
+            );
+            let seg_start = span.start_byte.max(line_start) - line_start;
+            let seg_end = span.end_byte.min(line_end) - line_start;
 
-        let line_start = offsets[line];
-        let line_end = offsets[line + 1];
-        let seg_start = span.start_byte.max(line_start) - line_start;
-        let seg_end = span.end_byte.min(line_end) - line_start;
-
-        if seg_start < seg_end {
-            segments[line].push(LineSegment {
-                start: seg_start,
-                end: seg_end,
-                group: span.group,
-            });
+            if seg_start < seg_end {
+                segments[line].push(LineSegment {
+                    start: seg_start,
+                    end: seg_end,
+                    group: span.group,
+                });
+            }
         }
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::language::LanguageId;
 
-use super::lines::{compute_line_hashes, compute_line_starts};
+use super::lines::{compute_line_starts, recompute_line_hashes};
 use super::spans::{distribute_spans_to_lines, sort_spans};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -123,7 +123,9 @@ impl HighlightSnapshot {
         text: &str,
     ) -> Self {
         let offsets = compute_line_starts(text);
-        let hashes = compute_line_hashes(text, &offsets);
+        let line_count = offsets.len().saturating_sub(1);
+        let mut hashes = vec![0u64; line_count];
+        recompute_line_hashes(text.as_bytes(), &offsets, &mut hashes, 0..line_count);
 
         Self {
             buffer_id,
@@ -132,7 +134,7 @@ impl HighlightSnapshot {
             engine,
             status,
             duration_ms: 0,
-            per_line: vec![Vec::new(); hashes.len()],
+            per_line: vec![Vec::new(); line_count],
             line_start_bytes: offsets,
             line_hashes: hashes,
             highlighted_range: None,
@@ -153,10 +155,12 @@ impl HighlightSnapshot {
         sort_spans(&mut spans);
 
         let offsets = compute_line_starts(text);
-        let mut per_line = vec![Vec::new(); offsets.len().saturating_sub(1)];
+        let line_count = offsets.len().saturating_sub(1);
+        let mut per_line = vec![Vec::new(); line_count];
         distribute_spans_to_lines(&spans, &offsets, &mut per_line, max_per_line, |_| true);
 
-        let hashes = compute_line_hashes(text, &offsets);
+        let mut hashes = vec![0u64; line_count];
+        recompute_line_hashes(text.as_bytes(), &offsets, &mut hashes, 0..line_count);
 
         Self {
             buffer_id,

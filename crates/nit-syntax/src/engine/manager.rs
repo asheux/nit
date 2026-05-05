@@ -56,28 +56,29 @@ impl SyntaxManager {
             .map(|m| m.status.clone())
             .unwrap_or_else(|| SyntaxStatus::Ok(self.config.engine))
     }
-
-    fn set_buffer_meta(&mut self, buffer_id: usize, engine: EngineKind, status: SyntaxStatus) {
-        self.buffers
-            .insert(buffer_id, BufferMeta { engine, status });
-    }
-
-    fn engine_for(&self, buffer_id: usize) -> EngineKind {
-        self.buffers
-            .get(&buffer_id)
-            .map_or(EngineKind::Plain, |m| m.engine)
-    }
 }
 
 impl SyntaxEngine for SyntaxManager {
     fn schedule_rehighlight(&mut self, request: HighlightRequest) {
         if !self.config.enabled {
-            self.set_buffer_meta(request.buffer_id, EngineKind::Plain, SyntaxStatus::Disabled);
+            self.buffers.insert(
+                request.buffer_id,
+                BufferMeta {
+                    engine: EngineKind::Plain,
+                    status: SyntaxStatus::Disabled,
+                },
+            );
             return;
         }
 
         let engine = self.config.engine;
-        self.set_buffer_meta(request.buffer_id, engine, SyntaxStatus::Ok(engine));
+        self.buffers.insert(
+            request.buffer_id,
+            BufferMeta {
+                engine,
+                status: SyntaxStatus::Ok(engine),
+            },
+        );
 
         match engine {
             EngineKind::Plain => self.plain_engine.schedule_rehighlight(request),
@@ -86,11 +87,14 @@ impl SyntaxEngine for SyntaxManager {
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        let snapshot = match self.engine_for(buffer_id) {
+        let engine = self
+            .buffers
+            .get(&buffer_id)
+            .map_or(EngineKind::Plain, |m| m.engine);
+        let snapshot = match engine {
             EngineKind::TreeSitter => self.tree_engine.try_get_highlights(buffer_id, version),
             EngineKind::Plain => self.plain_engine.try_get_highlights(buffer_id, version),
         };
-        // Keep the buffer's public status in sync with whatever the engine just produced.
         if let (Some(s), Some(meta)) = (&snapshot, self.buffers.get_mut(&buffer_id)) {
             meta.status = s.status.clone();
         }

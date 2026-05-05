@@ -17,10 +17,10 @@ use crate::language::LanguageId;
 
 use super::modes::collect_spans;
 
-/// Re-highlight only the lines affected by edits, reusing the rest of the
-/// previous snapshot. Flow: carry forward unchanged lines from `prev`, mark
-/// lines touched by `changed_ranges` plus any that couldn't be mapped as
-/// dirty, then re-collect spans and hashes for just those dirty lines.
+/// Re-highlight only the lines affected by edits, reusing carried-forward
+/// content from `prev` for everything else. Lines marked dirty are those
+/// `changed_ranges` reports plus any that couldn't be mapped from the prior
+/// snapshot.
 pub(super) fn incremental_highlight(
     prev: &HighlightSnapshot,
     edited_old: Option<&Tree>,
@@ -72,6 +72,16 @@ fn carry_forward_lines(
     edits: &[BufferEdit],
     line_count: usize,
 ) -> (Vec<Vec<LineSegment>>, Vec<u64>, Vec<bool>) {
+    // Snapshot invariant: per_line and line_hashes are produced together; a
+    // length skew would silently zero-fill hashes for lines we still copy.
+    debug_assert_eq!(
+        prev.line_hashes.len(),
+        prev.per_line.len(),
+        "snapshot per_line/line_hashes length skew: {} vs {}",
+        prev.per_line.len(),
+        prev.line_hashes.len(),
+    );
+
     let mut per_line = vec![Vec::new(); line_count];
     let mut line_hashes = vec![0u64; line_count];
     let mut copied = vec![false; line_count];
@@ -115,8 +125,8 @@ fn compute_dirty_lines(
                 line_count.saturating_sub(1),
             );
             let bound = end.saturating_add(1).min(dirty.len());
-            for slot in dirty.iter_mut().take(bound).skip(start) {
-                *slot = true;
+            if start < bound {
+                dirty[start..bound].fill(true);
             }
         }
     }

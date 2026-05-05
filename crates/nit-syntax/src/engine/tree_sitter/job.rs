@@ -2,8 +2,10 @@
 //! viewport-scoped highlight, and incremental update; wraps the actual work
 //! in a panic-catching boundary so one bad buffer can't take the worker down.
 
+use std::any::Any;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use nit_core::BufferPoint;
 use tracing::{debug, error};
@@ -16,8 +18,8 @@ use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
 use crate::language::{LanguageId, LanguageRegistry};
 
 use super::incremental::incremental_highlight;
-use super::logging::{log_completion, log_error};
 use super::modes::{full_highlight, viewport_highlight};
+use super::progressive::ProgressiveFill;
 use super::worker::WorkerState;
 
 pub(super) struct BufferState {
@@ -28,9 +30,41 @@ pub(super) struct BufferState {
     pub cursor: QueryCursor,
 }
 
+// Single-slot throttle: `f` runs at most once per `interval`. Seeded so the
+// first call always fires even before `interval` has elapsed at process start.
+// Recovers from lock poison so a panicked logger doesn't silently kill all
+// subsequent logging on this slot.
+struct RateLimiter {
+    state: OnceLock<Mutex<Instant>>,
+    interval: Duration,
+}
+
+impl RateLimiter {
+    const fn new(interval: Duration) -> Self {
+        Self {
+            state: OnceLock::new(),
+            interval,
+        }
+    }
+
+    fn throttled(&self, f: impl FnOnce()) {
+        let now = Instant::now();
+        let guard = self.state.get_or_init(|| Mutex::new(now - self.interval));
+        let mut last = guard.lock().unwrap_or_else(|p| p.into_inner());
+        if now.duration_since(*last) >= self.interval {
+            *last = now;
+            f();
+        }
+    }
+}
+
+static LOG_COMPLETE: RateLimiter = RateLimiter::new(Duration::from_secs(1));
+static LOG_ERROR: RateLimiter = RateLimiter::new(Duration::from_secs(1));
+
 pub(super) fn run_highlight_job(
     job: &HighlightRequest,
     state: &mut WorkerState,
+    fills: &mut HashMap<usize, ProgressiveFill>,
 ) -> HighlightSnapshot {
     let start = Instant::now();
     let WorkerState {
@@ -54,18 +88,51 @@ pub(super) fn run_highlight_job(
             fallback_snapshot(job, SyntaxStatus::Error(err.to_string()))
         }
         Err(panic_info) => {
-            let msg = extract_panic_message(&panic_info);
+            let msg = extract_panic_message(&*panic_info);
             error!(
                 buffer_id = job.buffer_id,
                 version = job.version,
                 "syntax worker panic: {msg}"
             );
+            // Drop both the buffer's parser/tree state and any outstanding
+            // progressive fill — the fill references the BufferState we just
+            // removed, and stepping it would no-op forever otherwise.
             buffers.remove(&job.buffer_id);
+            fills.remove(&job.buffer_id);
             fallback_snapshot(job, SyntaxStatus::Error(format!("worker panic: {msg}")))
         }
     };
     snapshot.duration_ms = start.elapsed().as_millis();
     snapshot
+}
+
+fn log_completion(buffer_id: usize, version: u64, snapshot: &HighlightSnapshot) {
+    LOG_COMPLETE.throttled(|| {
+        let span_count: usize = snapshot.per_line.iter().map(|line| line.len()).sum();
+        debug!(
+            buffer_id,
+            version,
+            span_count,
+            duration_ms = snapshot.duration_ms,
+            "syntax highlight complete"
+        );
+    });
+}
+
+fn log_error(buffer_id: usize, version: u64, err: &anyhow::Error) {
+    LOG_ERROR.throttled(|| {
+        error!(buffer_id, version, error = %err, "syntax highlight error");
+    });
+}
+
+fn extract_panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "unknown panic".to_string()
 }
 
 fn highlight_job(
@@ -190,13 +257,6 @@ fn to_input_edit(edit: &nit_core::BufferEdit) -> InputEdit {
     }
 }
 
-fn to_point(p: BufferPoint) -> Point {
-    Point::new(p.row, p.column)
-}
-
-fn extract_panic_message(info: &(dyn std::any::Any + Send)) -> String {
-    info.downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| info.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".to_string())
+fn to_point(point: BufferPoint) -> Point {
+    Point::new(point.row, point.column)
 }

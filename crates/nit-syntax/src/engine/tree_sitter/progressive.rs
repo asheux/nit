@@ -43,6 +43,10 @@ pub(super) fn make_progressive_fill(
 ) -> Option<ProgressiveFill> {
     let (hl_start, hl_end) = snapshot.highlighted_range?;
     let total = snapshot.per_line.len();
+    debug_assert!(
+        hl_end < total,
+        "highlighted_range end {hl_end} >= total lines {total}"
+    );
 
     if hl_end + 1 >= total && hl_start == 0 {
         return None;
@@ -113,6 +117,11 @@ fn process_fill_chunk(
         return true;
     }
 
+    debug_assert!(
+        start_line < fill.line_start_bytes.len(),
+        "start_line {start_line} out of fill line_start_bytes len {}",
+        fill.line_start_bytes.len()
+    );
     let start_byte = fill.line_start_bytes[start_line];
     let end_byte = fill
         .line_start_bytes

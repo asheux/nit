@@ -53,6 +53,13 @@ pub(crate) fn capture_names() -> Vec<&'static str> {
 }
 
 pub(crate) fn capture_group(event_index: usize) -> HighlightGroup {
+    // Out-of-range events fall back to Normal in release; assert in dev so a
+    // future drop/reorder of CAPTURES surfaces here, not as silent miscoloring.
+    debug_assert!(
+        event_index < CAPTURES.len(),
+        "tree-sitter event index {event_index} exceeds CAPTURES len {}",
+        CAPTURES.len()
+    );
     CAPTURES
         .get(event_index)
         .map(|(_, group)| *group)

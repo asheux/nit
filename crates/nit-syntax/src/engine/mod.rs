@@ -1,7 +1,4 @@
 //! Syntax engine trait + shared request/config DTOs.
-//!
-//! The plain-text fallback lives in [`plain`]; the tree-sitter/plain-text
-//! multiplexer lives in [`manager`].
 
 use std::path::Path;
 
@@ -45,6 +42,9 @@ pub struct ViewportRange {
     pub total_lines: usize,
 }
 
+/// Sentinel buffer id for grammar prewarm jobs (no real buffer to write back to).
+pub(crate) const PREWARM_BUFFER_ID: usize = usize::MAX;
+
 #[derive(Clone, Debug)]
 pub struct HighlightRequest {
     pub buffer_id: usize,
@@ -55,6 +55,21 @@ pub struct HighlightRequest {
     pub full_reparse: bool,
     pub max_spans_per_line: usize,
     pub viewport: Option<ViewportRange>,
+}
+
+impl HighlightRequest {
+    pub(crate) fn prewarm(language: LanguageId) -> Self {
+        Self {
+            buffer_id: PREWARM_BUFFER_ID,
+            version: 0,
+            language,
+            text: String::new(),
+            edits: Vec::new(),
+            full_reparse: true,
+            max_spans_per_line: 0,
+            viewport: None,
+        }
+    }
 }
 
 pub trait SyntaxEngine {

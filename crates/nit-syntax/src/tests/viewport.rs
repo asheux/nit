@@ -104,3 +104,64 @@ fn progressive_fill_covers_full_file() {
         "line 350 should have spans after progressive fill"
     );
 }
+
+#[test]
+fn stale_viewport_first_line_past_total_does_not_panic() {
+    // Bug #2 regression: an operator can carry a ViewportRange over
+    // from a previous, larger buffer when files swap. The pre-fix
+    // viewport_highlight indexed `offsets[start_line]` unguarded and
+    // panicked; the worker would catch_unwind and drop BufferState
+    // every frame, defeating incremental highlight. The fix in
+    // engine/tree_sitter/modes.rs clamps start_line to the buffer's
+    // last valid line.
+    let mut engine = TreeSitterEngine::new();
+    let req = make_viewport_request(
+        70,
+        1,
+        LanguageId::Rust,
+        "fn main() {}\n",
+        ViewportRange {
+            first_line: 200,
+            last_line: 220,
+            total_lines: 500,
+        },
+    );
+    engine.schedule_rehighlight(req);
+    let snap = wait_for(&mut engine, 70, 1);
+
+    assert_eq!(
+        snap.status,
+        SyntaxStatus::Ok(EngineKind::TreeSitter),
+        "stale-viewport request must produce a healthy snapshot, got {:?}",
+        snap.status,
+    );
+    assert!(
+        !snap.per_line[0].is_empty(),
+        "buffer's single line should still receive spans after clamping"
+    );
+}
+
+#[test]
+fn one_line_buffer_with_viewport_first_line_above_zero() {
+    // Edge case: viewport.first_line > 0 against a 1-line buffer. The
+    // last_line_idx clamp in viewport_highlight reduces start_line to 0
+    // and end_line to 0; the snapshot must come back Ok with the line
+    // populated.
+    let mut engine = TreeSitterEngine::new();
+    let req = make_viewport_request(
+        80,
+        1,
+        LanguageId::Rust,
+        "fn main() {}\n",
+        ViewportRange {
+            first_line: 1,
+            last_line: 1,
+            total_lines: 1,
+        },
+    );
+    engine.schedule_rehighlight(req);
+    let snap = wait_for(&mut engine, 80, 1);
+
+    assert_eq!(snap.status, SyntaxStatus::Ok(EngineKind::TreeSitter));
+    assert!(!snap.per_line[0].is_empty());
+}

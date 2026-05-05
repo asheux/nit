@@ -8,6 +8,7 @@ use crate::{
 mod classification;
 mod debouncer;
 mod engines;
+mod language_detect;
 mod segments;
 mod span_distribution;
 mod viewport;

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use tracing::debug;
+use tracing::{debug, warn};
 use tree_sitter::Query;
 use tree_sitter_highlight::HighlightConfiguration;
 
@@ -42,7 +42,8 @@ pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfigur
     for (lang, grammar, highlights) in grammar_entries() {
         let injections = LanguageRegistry::injections_query(lang);
         let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
-            debug!("highlight config for {lang:?} failed (with and without injections)");
+            // Both injection and bare modes failed; the language silently drops to plain.
+            warn!("highlight config for {lang:?} failed (with and without injections)");
             continue;
         };
         cfg.configure(&names);

@@ -52,21 +52,22 @@ fn detect_from_path(file_path: &Path) -> LanguageId {
 }
 
 fn detect_shebang(first_line: &str) -> Option<LanguageId> {
-    let line = first_line.trim();
-    let after_hash = line.strip_prefix("#!")?;
+    // Positional parser. The first whitespace token is the interpreter path;
+    // its basename names the language. If the basename is `env`, the next
+    // non-flag token names the actual interpreter — this also handles
+    // `env -S deno run`, where `-S` and any value after it are skipped.
+    let after_hash = first_line.trim().strip_prefix("#!")?;
+    let mut tokens = after_hash.split_whitespace();
+    let basename = |tok: &str| tok.rsplit('/').next().unwrap_or("").to_lowercase();
 
-    // Use the last whitespace-separated word so `/usr/bin/env python3`
-    // resolves to `python3` rather than `env`.
-    let interpreter = after_hash
-        .split_whitespace()
-        .last()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let first = tokens.next()?;
+    let mut name = basename(first);
+    if name == "env" {
+        let interpreter = tokens.find(|tok| !tok.starts_with('-'))?;
+        name = basename(interpreter);
+    }
 
-    match interpreter.as_str() {
+    match name.as_str() {
         "bash" | "sh" | "zsh" => Some(LanguageId::Bash),
         "python" | "python3" => Some(LanguageId::Python),
         "node" | "deno" => Some(LanguageId::JavaScript),

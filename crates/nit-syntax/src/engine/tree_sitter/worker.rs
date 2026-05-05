@@ -50,7 +50,7 @@ pub(super) fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<Highlig
 
             for job in &jobs {
                 fills.remove(&job.buffer_id);
-                let snapshot = run_highlight_job(job, &mut state);
+                let snapshot = run_highlight_job(job, &mut state, &mut fills);
 
                 if let Some(fill) = make_progressive_fill(job, &snapshot) {
                     fills.insert(job.buffer_id, fill);
