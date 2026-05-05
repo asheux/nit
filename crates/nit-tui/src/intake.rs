@@ -187,27 +187,18 @@ fn target_lane_is_claude(state: &AppState, target_agent_id: &str) -> bool {
 }
 
 fn lane_backend_label(state: &AppState, target_agent_id: &str) -> &'static str {
-    state
-        .agents
-        .agents
-        .iter()
-        .find(|l| l.id == target_agent_id)
-        .map(|l| match l.kind {
-            nit_core::AgentLaneKind::Claude => "claude",
-            nit_core::AgentLaneKind::Codex => "codex",
-            nit_core::AgentLaneKind::Gemini => "gemini",
-            nit_core::AgentLaneKind::Mock => "mock",
-            nit_core::AgentLaneKind::Unknown => {
-                if l.is_claude() {
-                    "claude"
-                } else if l.is_codex() {
-                    "codex"
-                } else {
-                    "unknown"
-                }
-            }
-        })
-        .unwrap_or("missing")
+    let Some(lane) = state.agents.agents.iter().find(|l| l.id == target_agent_id) else {
+        return "missing";
+    };
+    match lane.kind {
+        nit_core::AgentLaneKind::Claude => "claude",
+        nit_core::AgentLaneKind::Codex => "codex",
+        nit_core::AgentLaneKind::Gemini => "gemini",
+        nit_core::AgentLaneKind::Mock => "mock",
+        nit_core::AgentLaneKind::Unknown if lane.is_claude() => "claude",
+        nit_core::AgentLaneKind::Unknown if lane.is_codex() => "codex",
+        nit_core::AgentLaneKind::Unknown => "unknown",
+    }
 }
 
 /// Stash the operator's chat-state context AFTER the intake turn was
@@ -527,14 +518,11 @@ fn extract_json_block(output: &str) -> &str {
 }
 
 /// Strict prefix check protecting `prompts_leak_test.rs` invariants.
-/// Six conjunctive rules (all must pass):
-/// 1. Both inputs trimmed of trailing whitespace; raw matches augmented head.
-/// 2. Leading whitespace must match exactly (no silent typo "fixes").
-/// 3. After the raw prefix, augmented continues with `\n` (paragraph break).
-/// 4. Must contain the literal `## FILE CHECKLIST (non-negotiable)` marker.
-/// 5. Augmented MUST be strictly longer than raw (no zero-byte append).
-/// 6. The augmented body's first line beyond the raw must look like a header
-///    or list — no inline-rewrite that just slips a word in.
+/// All four rules must pass:
+/// 1. Augmented (trim_end) starts with raw (trim_end).
+/// 2. Augmented is strictly longer than raw (zero-byte appends rejected).
+/// 3. The append begins with `\n` (paragraph break, not inline rewrite).
+/// 4. The append contains the literal `## FILE CHECKLIST (non-negotiable)` marker.
 fn validate_prefix(raw: &str, augmented: &str) -> Result<(), String> {
     let raw_trim = raw.trim_end();
     let aug_trim = augmented.trim_end();

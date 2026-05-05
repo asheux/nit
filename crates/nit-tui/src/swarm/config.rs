@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{Gate, SwarmDagValidationMode};
 
-pub(super) fn read_workspace_gate_default(workspace_root: &Path) -> Result<Option<String>, String> {
+fn load_workspace_toml(workspace_root: &Path) -> Result<Option<toml::Value>, String> {
     let path = workspace_root.join(".nit").join("config.toml");
     if !path.exists() {
         return Ok(None);
@@ -12,6 +12,13 @@ pub(super) fn read_workspace_gate_default(workspace_root: &Path) -> Result<Optio
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     let value = toml::from_str::<toml::Value>(&contents)
         .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    Ok(Some(value))
+}
+
+pub(super) fn read_workspace_gate_default(workspace_root: &Path) -> Result<Option<String>, String> {
+    let Some(value) = load_workspace_toml(workspace_root)? else {
+        return Ok(None);
+    };
     Ok(value
         .get("swarm")
         .and_then(|value| value.get("gates"))
@@ -44,14 +51,9 @@ pub(super) fn read_workspace_gate_default(workspace_root: &Path) -> Result<Optio
 pub(super) fn read_workspace_custom_gates(
     workspace_root: &Path,
 ) -> Result<Option<Vec<Gate>>, String> {
-    let path = workspace_root.join(".nit").join("config.toml");
-    if !path.exists() {
+    let Some(value) = load_workspace_toml(workspace_root)? else {
         return Ok(None);
-    }
-    let contents = fs::read_to_string(&path)
-        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
-    let value = toml::from_str::<toml::Value>(&contents)
-        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    };
     let Some(array) = value
         .get("swarm")
         .and_then(|value| value.get("gates"))
@@ -100,14 +102,9 @@ pub(super) fn read_workspace_custom_gates(
 pub(super) fn read_workspace_dag_validation_mode(
     workspace_root: &Path,
 ) -> Result<Option<SwarmDagValidationMode>, String> {
-    let path = workspace_root.join(".nit").join("config.toml");
-    if !path.exists() {
+    let Some(value) = load_workspace_toml(workspace_root)? else {
         return Ok(None);
-    }
-    let contents = fs::read_to_string(&path)
-        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
-    let value = toml::from_str::<toml::Value>(&contents)
-        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    };
     let Some(mode) = value
         .get("swarm")
         .and_then(|value| value.get("dag_validation"))

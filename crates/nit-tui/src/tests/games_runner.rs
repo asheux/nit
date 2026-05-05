@@ -88,15 +88,14 @@ k = 2
 
 #[test]
 fn adaptive_chunk_steps_batch_starts_at_256_matches() {
+    // Batch mode floor: rounds_per_match * 256 = 51200.
     let chunk = adaptive_chunk_steps(250_000, None, 200, EngineMode::Batch, false);
-    // Batch mode starts at rounds_per_match * 256 = 51200
     assert_eq!(chunk, 51_200);
 }
 
 #[test]
 fn adaptive_chunk_steps_preserves_batch_match_floor() {
     let chunk = adaptive_chunk_steps(400, Some(25), 200, EngineMode::Batch, false);
-
     assert_eq!(chunk, 200);
 }
 
@@ -109,7 +108,6 @@ fn next_adaptive_chunk_steps_grows_after_fast_chunk() {
         EngineMode::Batch,
         false,
     );
-
     assert_eq!(next, 16_384);
 }
 
@@ -122,7 +120,6 @@ fn next_adaptive_chunk_steps_shrinks_after_slow_chunk() {
         EngineMode::Batch,
         false,
     );
-
     assert_eq!(next, 2_048);
 }
 
@@ -135,15 +132,14 @@ fn next_adaptive_chunk_steps_can_grow_from_batch_match_floor() {
         EngineMode::Batch,
         false,
     );
-
     assert_eq!(next, 20_000);
 }
 
+// When chunk_steps is not a multiple of rounds_per_match (e.g. u32::MAX from
+// saturating arithmetic), the remainder would trigger slow round-by-round CPU
+// processing — normalize_chunk_steps must round down.
 #[test]
 fn whole_match_chunks_align_to_rounds_per_match() {
-    // When chunk_steps is not a multiple of rounds_per_match (e.g. u32::MAX
-    // from saturating arithmetic), the remainder would trigger slow
-    // round-by-round CPU processing.  normalize_chunk_steps must round down.
     let rounds_per_match = 500_000u32;
     let chunk = normalize_chunk_steps(
         u32::MAX,
@@ -152,38 +148,26 @@ fn whole_match_chunks_align_to_rounds_per_match() {
         EngineMode::Interactive,
         true,
     );
-    assert_eq!(
-        chunk % rounds_per_match,
-        0,
-        "chunk_steps should be aligned to rounds_per_match"
-    );
+    assert_eq!(chunk % rounds_per_match, 0, "aligned to rounds_per_match");
     assert_eq!(chunk, (u32::MAX / rounds_per_match) * rounds_per_match);
 }
 
 #[test]
 fn whole_match_chunks_preserve_already_aligned_values() {
-    let rounds_per_match = 200u32;
     let chunk = normalize_chunk_steps(
         51_200, // 256 * 200, already aligned
         u32::MAX,
-        rounds_per_match,
+        200,
         EngineMode::Interactive,
         true,
     );
     assert_eq!(chunk, 51_200);
 }
 
+// Even with a sub-match candidate, result floors to one whole match.
 #[test]
 fn whole_match_chunks_floor_at_one_match() {
-    // Even with a very small candidate, the result should be at least
-    // one match (= minimum_chunk_steps for whole_match_chunks).
-    let chunk = normalize_chunk_steps(
-        100, // less than one match
-        u32::MAX,
-        500_000,
-        EngineMode::Interactive,
-        true,
-    );
+    let chunk = normalize_chunk_steps(100, u32::MAX, 500_000, EngineMode::Interactive, true);
     assert_eq!(chunk, 500_000);
 }
 

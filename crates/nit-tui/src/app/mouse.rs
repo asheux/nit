@@ -1,73 +1,21 @@
-#![allow(unused_imports)]
 #![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime, SWARM_CLONE_INFIX,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
 use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
+use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
+    AgentOpsTab, AppKind, AppState, UiSelection, UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
 };
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
+use ratatui::layout::Rect;
+use ratatui::widgets::{Block, Borders};
+
+use crate::layout;
+use crate::swarm::{SwarmRuntime, SWARM_CLONE_INFIX};
+use crate::theme::Theme;
+use crate::widgets::{
+    agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, editor_view,
+    fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup, games_match_history_popup,
+    games_replay_popup, games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
+    gate_monitor_view, help_overlay, substrate_overlay,
 };
 
 use super::*;
@@ -85,295 +33,7 @@ pub(super) fn handle_mouse_event_with_swarm(
 ) -> bool {
     match mouse.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let fast = mouse
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
-            let step = if fast {
-                SCROLL_LINES_FAST
-            } else {
-                SCROLL_LINES
-            };
-            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                -(step as i32)
-            } else {
-                step as i32
-            };
-            if state.command_line.is_some() || state.prompt.is_some() {
-                return true;
-            }
-
-            if state.rule_picker.open || state.protocol_picker.open {
-                return true;
-            }
-
-            if state.fuzzy_search.open {
-                use ratatui::layout::{Constraint, Direction, Layout, Rect};
-                let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
-                let list_height = area
-                    .height
-                    .saturating_sub(6) // outer(2) + header/footer(2) + results block(2)
-                    .max(1) as usize;
-                let mut over_preview = false;
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let inner = Rect {
-                        x: area.x.saturating_add(1),
-                        y: area.y.saturating_add(1),
-                        width: area.width.saturating_sub(2),
-                        height: area.height.saturating_sub(2),
-                    };
-                    let body = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Min(1),
-                            Constraint::Length(1),
-                        ])
-                        .split(inner)[1];
-                    let halves = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .split(body);
-                    over_preview = point_in_rect(mouse.column, mouse.row, halves[1]);
-                }
-                if over_preview {
-                    fuzzy_runtime.preview_scroll_delta =
-                        fuzzy_runtime.preview_scroll_delta.saturating_add(delta);
-                } else {
-                    let len = fuzzy_results_len(state);
-                    if len > 0 {
-                        if delta.is_negative() {
-                            state.fuzzy_search.selected = state
-                                .fuzzy_search
-                                .selected
-                                .saturating_sub(delta.unsigned_abs() as usize);
-                        } else {
-                            state.fuzzy_search.selected =
-                                (state.fuzzy_search.selected + delta as usize).min(len - 1);
-                        }
-                        adjust_fuzzy_scroll(state, list_height);
-                        fuzzy_runtime.request_preview_for_selection(state);
-                    }
-                }
-                // Modal: don't scroll underlying panes while open.
-                return true;
-            }
-
-            if state.agents.artifacts_popup_open {
-                let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    // Use the cached max_scroll from the last render — rebuilding
-                    // the rendered markdown just to clamp a wheel tick was making
-                    // scroll feel sluggish on large artifacts. Render re-clamps.
-                    //
-                    // If the cache is still `usize::MAX` (popup just opened and
-                    // no render has run yet), fall back to computing metrics
-                    // inline ONCE so the forward clamp at max actually holds.
-                    // Without this, a burst of wheel-down events before the
-                    // first render could over-inflate `artifacts_popup_scroll`
-                    // past the real max, and subsequent reverse scrolls would
-                    // appear stuck until the inflation unwound.
-                    let mut max_scroll = state.agents.artifacts_popup_last_max_scroll;
-                    if max_scroll == usize::MAX {
-                        let (computed, _) =
-                            artifacts_popup_scroll_metrics(state, swarm, screen, theme);
-                        max_scroll = computed;
-                        state.agents.artifacts_popup_last_max_scroll = computed;
-                    }
-                    bump_scroll_clamped(
-                        &mut state.agents.artifacts_popup_scroll,
-                        delta,
-                        max_scroll,
-                    );
-                }
-                return true;
-            }
-
-            if state.agents.global_archive_open {
-                let area =
-                    dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let (max_scroll, _) = global_archive_scroll_metrics(state, screen, theme);
-                    bump_scroll_clamped(&mut state.agents.global_archive_scroll, delta, max_scroll);
-                }
-                return true;
-            }
-
-            if state.show_help {
-                let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = help_popup_max_scroll(screen, theme);
-                    bump_scroll_clamped(&mut state.help_scroll, delta, max_scroll);
-                }
-                return true;
-            }
-
-            if state.show_substrate_overlay {
-                let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = state.substrate_overlay_last_max_scroll;
-                    let max_scroll = if max_scroll == usize::MAX {
-                        usize::MAX
-                    } else {
-                        max_scroll
-                    };
-                    bump_scroll_clamped(&mut state.substrate_overlay_scroll, delta, max_scroll);
-                }
-                return true;
-            }
-
-            if state.app_kind == AppKind::Games && state.games.analysis.open {
-                let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_analysis_popup_max_scroll(state, screen, theme);
-                    bump_scroll_clamped(&mut state.games.analysis.scroll_offset, delta, max_scroll);
-                }
-                return true;
-            }
-
-            if state.app_kind == AppKind::Games && state.games.run_browser.open {
-                let area =
-                    dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_run_browser_popup_max_scroll(state, screen, theme);
-                    bump_scroll_clamped(
-                        &mut state.games.run_browser.scroll_offset,
-                        delta,
-                        max_scroll,
-                    );
-                }
-                return true;
-            }
-
-            if state.app_kind == AppKind::Games && state.games.replay.open {
-                let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
-                    bump_scroll_clamped(&mut state.games.replay.scroll_offset, delta, max_scroll);
-                }
-                return true;
-            }
-
-            if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
-                let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_strategy_popup_max_scroll(state, screen);
-                    bump_scroll_clamped(
-                        &mut state.games.strategy_inspect.scroll_offset,
-                        delta,
-                        max_scroll,
-                    );
-                }
-                return true;
-            }
-            if state.app_kind == AppKind::Games && state.games.tm_sim.open {
-                let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_tm_sim_popup_max_scroll(state, screen, theme);
-                    bump_scroll_clamped(&mut state.games.tm_sim.scroll_offset, delta, max_scroll);
-                }
-                return true;
-            }
-            if state.app_kind == AppKind::Games && state.games.ca_sim.open {
-                let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max_scroll = games_ca_sim_popup_max_scroll(state, screen, theme);
-                    bump_scroll_clamped(&mut state.games.ca_sim.scroll_offset, delta, max_scroll);
-                }
-                return true;
-            }
-            if state.app_kind == AppKind::Games && state.games.match_history.open {
-                let area =
-                    dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let max = games_match_history_max_offset(state, screen);
-                    if delta > 0 {
-                        state.games.match_history.column_offset =
-                            state.games.match_history.column_offset.saturating_sub(1);
-                    } else if games_match_history_total_entries(state) > 0 {
-                        state.games.match_history.column_offset =
-                            (state.games.match_history.column_offset + 1).min(max);
-                    }
-                }
-                return true;
-            }
-
-            if games_petri_visible(state) {
-                return true;
-            }
-
-            let layout = layout::split(screen);
-            if point_in_rect(mouse.column, mouse.row, layout.editor) {
-                scroll_buffer(state.editor_buffer_mut(), delta);
-                return true;
-            }
-            if point_in_rect(mouse.column, mouse.row, layout.notes) {
-                if let Some(metrics) =
-                    agent_console_view::chat_input_scroll_metrics(layout.notes, state)
-                {
-                    if point_in_rect(mouse.column, mouse.row, metrics.area) {
-                        let mut start = metrics.window_start;
-                        bump_scroll(&mut start, delta);
-                        state.agents.chat_input_scroll = start.min(metrics.max_scroll);
-                        return true;
-                    }
-                }
-                if let Some(thread_area) = agent_console_view::thread_text_area(layout.notes, state)
-                {
-                    let lines = agent_console_view::thread_lines_for_selection_with_swarm(
-                        state,
-                        swarm,
-                        thread_area.width.max(1) as usize,
-                    );
-                    let max_scroll = lines
-                        .len()
-                        .saturating_sub(thread_area.height.max(1) as usize);
-                    let mut scroll = state.agents.console_scroll.min(max_scroll);
-                    bump_scroll(&mut scroll, delta);
-                    state.agents.console_scroll = scroll.min(max_scroll);
-                } else {
-                    bump_scroll_clamped(
-                        &mut state.agents.console_scroll,
-                        delta,
-                        state.agents.console_max_scroll,
-                    );
-                }
-                return true;
-            }
-            if point_in_rect(mouse.column, mouse.row, layout.gate) {
-                // Prefer cached max_scroll populated during render. Fall back
-                // to rebuilding the full genome report only when no render
-                // has run yet since the panel became visible.
-                let mut max_scroll = state.gate_monitor_last_max_scroll;
-                if max_scroll == usize::MAX {
-                    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
-                    let lines =
-                        gate_monitor_view::build_lines(state, None, theme, inner.width as usize);
-                    max_scroll = lines.len().saturating_sub(inner.height as usize);
-                    state.gate_monitor_last_max_scroll = max_scroll;
-                }
-                bump_scroll_clamped(&mut state.gate_monitor_scroll, delta, max_scroll);
-                return true;
-            }
-            if point_in_rect(mouse.column, mouse.row, layout.job) {
-                if state.agents.dock_tab == AgentOpsTab::Scratchpad {
-                    scroll_buffer(state.notes_buffer_mut(), delta);
-                } else {
-                    let text_area = job_output_text_area(layout.job);
-                    let text_width = text_area.width as usize;
-                    let lines = agent_ops_view::current_lines_for_width_with_swarm(
-                        state,
-                        Some(swarm),
-                        text_width,
-                    );
-                    let height = text_area.height as usize;
-                    let max_scroll = lines.len().saturating_sub(height);
-                    let mut scroll = state.agents.ops_scroll;
-                    bump_scroll(&mut scroll, delta);
-                    state.agents.ops_scroll = scroll.min(max_scroll);
-                }
-                return true;
-            }
-            false
+            handle_scroll_event(swarm, mouse, screen, state, fuzzy_runtime, theme)
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if state.fuzzy_search.open {
@@ -407,6 +67,342 @@ pub(super) fn handle_mouse_event_with_swarm(
         }
         _ => false,
     }
+}
+
+fn scroll_delta(mouse: &MouseEvent) -> i32 {
+    let fast = mouse
+        .modifiers
+        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
+    let step = if fast {
+        SCROLL_LINES_FAST
+    } else {
+        SCROLL_LINES
+    };
+    if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+        -(step as i32)
+    } else {
+        step as i32
+    }
+}
+
+fn scroll_clamped_in_rect(
+    mouse: &MouseEvent,
+    rect: Rect,
+    delta: i32,
+    target: &mut usize,
+    max_scroll: usize,
+) {
+    if point_in_rect(mouse.column, mouse.row, rect) {
+        bump_scroll_clamped(target, delta, max_scroll);
+    }
+}
+
+fn scroll_fuzzy_search_popup(
+    mouse: &MouseEvent,
+    screen: Rect,
+    state: &mut AppState,
+    fuzzy_runtime: &mut FuzzySearchRuntime,
+    delta: i32,
+) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+    let list_height = area
+        .height
+        .saturating_sub(6) // outer(2) + header/footer(2) + results block(2)
+        .max(1) as usize;
+    let mut over_preview = false;
+    if point_in_rect(mouse.column, mouse.row, area) {
+        let inner = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner)[1];
+        let halves = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(body);
+        over_preview = point_in_rect(mouse.column, mouse.row, halves[1]);
+    }
+    if over_preview {
+        fuzzy_runtime.preview_scroll_delta =
+            fuzzy_runtime.preview_scroll_delta.saturating_add(delta);
+        return;
+    }
+    let len = fuzzy_results_len(state);
+    if len == 0 {
+        return;
+    }
+    if delta.is_negative() {
+        state.fuzzy_search.selected = state
+            .fuzzy_search
+            .selected
+            .saturating_sub(delta.unsigned_abs() as usize);
+    } else {
+        state.fuzzy_search.selected = (state.fuzzy_search.selected + delta as usize).min(len - 1);
+    }
+    adjust_fuzzy_scroll(state, list_height);
+    fuzzy_runtime.request_preview_for_selection(state);
+}
+
+fn scroll_artifacts_popup(
+    mouse: &MouseEvent,
+    screen: Rect,
+    swarm: &SwarmRuntime,
+    state: &mut AppState,
+    delta: i32,
+    theme: &Theme,
+) {
+    let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+    if !point_in_rect(mouse.column, mouse.row, area) {
+        return;
+    }
+    // Prefer the cached max_scroll from the last render; rebuilding the rendered
+    // markdown for every wheel tick made scroll feel sluggish on large artifacts.
+    // When the cache is still the `usize::MAX` sentinel (popup just opened, no
+    // render yet) recompute once so a burst of pre-render scrolls cannot inflate
+    // `artifacts_popup_scroll` past the real max and freeze reverse scrolling.
+    let mut max_scroll = state.agents.artifacts_popup_last_max_scroll;
+    if max_scroll == usize::MAX {
+        let (computed, _) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+        max_scroll = computed;
+        state.agents.artifacts_popup_last_max_scroll = computed;
+    }
+    bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, delta, max_scroll);
+}
+
+fn scroll_match_history_popup(mouse: &MouseEvent, screen: Rect, state: &mut AppState, delta: i32) {
+    let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+    if !point_in_rect(mouse.column, mouse.row, area) {
+        return;
+    }
+    let max = games_match_history_max_offset(state, screen);
+    if delta > 0 {
+        state.games.match_history.column_offset =
+            state.games.match_history.column_offset.saturating_sub(1);
+    } else if games_match_history_total_entries(state) > 0 {
+        state.games.match_history.column_offset =
+            (state.games.match_history.column_offset + 1).min(max);
+    }
+}
+
+fn scroll_main_layout_panes(
+    mouse: &MouseEvent,
+    screen: Rect,
+    swarm: &SwarmRuntime,
+    state: &mut AppState,
+    delta: i32,
+    theme: &Theme,
+) -> bool {
+    let layout = layout::split(screen);
+    if point_in_rect(mouse.column, mouse.row, layout.editor) {
+        scroll_buffer(state.editor_buffer_mut(), delta);
+        return true;
+    }
+    if point_in_rect(mouse.column, mouse.row, layout.notes) {
+        if let Some(metrics) = agent_console_view::chat_input_scroll_metrics(layout.notes, state) {
+            if point_in_rect(mouse.column, mouse.row, metrics.area) {
+                let mut start = metrics.window_start;
+                bump_scroll(&mut start, delta);
+                state.agents.chat_input_scroll = start.min(metrics.max_scroll);
+                return true;
+            }
+        }
+        if let Some(thread_area) = agent_console_view::thread_text_area(layout.notes, state) {
+            let lines = agent_console_view::thread_lines_for_selection_with_swarm(
+                state,
+                swarm,
+                thread_area.width.max(1) as usize,
+            );
+            let max_scroll = lines
+                .len()
+                .saturating_sub(thread_area.height.max(1) as usize);
+            let mut scroll = state.agents.console_scroll.min(max_scroll);
+            bump_scroll(&mut scroll, delta);
+            state.agents.console_scroll = scroll.min(max_scroll);
+        } else {
+            bump_scroll_clamped(
+                &mut state.agents.console_scroll,
+                delta,
+                state.agents.console_max_scroll,
+            );
+        }
+        return true;
+    }
+    if point_in_rect(mouse.column, mouse.row, layout.gate) {
+        // Prefer the cached max_scroll populated during render. Fall back to
+        // rebuilding the full genome report only when no render has run since
+        // the panel became visible.
+        let mut max_scroll = state.gate_monitor_last_max_scroll;
+        if max_scroll == usize::MAX {
+            let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+            let lines = gate_monitor_view::build_lines(state, None, theme, inner.width as usize);
+            max_scroll = lines.len().saturating_sub(inner.height as usize);
+            state.gate_monitor_last_max_scroll = max_scroll;
+        }
+        bump_scroll_clamped(&mut state.gate_monitor_scroll, delta, max_scroll);
+        return true;
+    }
+    if point_in_rect(mouse.column, mouse.row, layout.job) {
+        if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+            scroll_buffer(state.notes_buffer_mut(), delta);
+        } else {
+            let text_area = job_output_text_area(layout.job);
+            let text_width = text_area.width as usize;
+            let lines =
+                agent_ops_view::current_lines_for_width_with_swarm(state, Some(swarm), text_width);
+            let height = text_area.height as usize;
+            let max_scroll = lines.len().saturating_sub(height);
+            let mut scroll = state.agents.ops_scroll;
+            bump_scroll(&mut scroll, delta);
+            state.agents.ops_scroll = scroll.min(max_scroll);
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_scroll_event(
+    swarm: &SwarmRuntime,
+    mouse: MouseEvent,
+    screen: Rect,
+    state: &mut AppState,
+    fuzzy_runtime: &mut FuzzySearchRuntime,
+    theme: &Theme,
+) -> bool {
+    let delta = scroll_delta(&mouse);
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return true;
+    }
+    if state.rule_picker.open || state.protocol_picker.open {
+        return true;
+    }
+    if state.fuzzy_search.open {
+        scroll_fuzzy_search_popup(&mouse, screen, state, fuzzy_runtime, delta);
+        return true;
+    }
+    if state.agents.artifacts_popup_open {
+        scroll_artifacts_popup(&mouse, screen, swarm, state, delta, theme);
+        return true;
+    }
+    if state.agents.global_archive_open {
+        let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+        let (max_scroll, _) = global_archive_scroll_metrics(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.agents.global_archive_scroll,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.show_help {
+        let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
+        let max_scroll = help_popup_max_scroll(screen, theme);
+        scroll_clamped_in_rect(&mouse, area, delta, &mut state.help_scroll, max_scroll);
+        return true;
+    }
+    if state.show_substrate_overlay {
+        let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
+        let max_scroll = state.substrate_overlay_last_max_scroll;
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.substrate_overlay_scroll,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.analysis.open {
+        let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
+        let max_scroll = games_analysis_popup_max_scroll(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.analysis.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.run_browser.open {
+        let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
+        let max_scroll = games_run_browser_popup_max_scroll(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.run_browser.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.replay.open {
+        let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
+        let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.replay.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
+        let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
+        let max_scroll = games_strategy_popup_max_scroll(state, screen);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.strategy_inspect.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.tm_sim.open {
+        let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
+        let max_scroll = games_tm_sim_popup_max_scroll(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.tm_sim.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+        let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+        let max_scroll = games_ca_sim_popup_max_scroll(state, screen, theme);
+        scroll_clamped_in_rect(
+            &mouse,
+            area,
+            delta,
+            &mut state.games.ca_sim.scroll_offset,
+            max_scroll,
+        );
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.match_history.open {
+        scroll_match_history_popup(&mouse, screen, state, delta);
+        return true;
+    }
+    if games_petri_visible(state) {
+        return true;
+    }
+    scroll_main_layout_panes(&mouse, screen, swarm, state, delta, theme)
 }
 
 pub(super) const SCROLL_LINES: usize = 3;
@@ -1444,9 +1440,7 @@ pub(super) fn apply_agent_ops_click_selection(
                         && !agent.id.contains(SWARM_CLONE_INFIX)
                         && (1..5).contains(&col);
                     if checkbox_hit {
-                        if state.agents.swarm_priority_agent_ids.remove(&agent.id) {
-                            // removed
-                        } else {
+                        if !state.agents.swarm_priority_agent_ids.remove(&agent.id) {
                             state
                                 .agents
                                 .swarm_priority_agent_ids

@@ -10,9 +10,9 @@ pub struct MainLayout {
     pub gate: Rect,
 }
 
-// Column percentages sum to 100. The editor gets the widest slice because that
-// is where the user types; on the right, the visualiser gets more vertical
-// space than the gate monitor for the same reason.
+// Column percentages sum to 100. The editor takes the widest slice because
+// that is where typing happens; on the right, the visualiser is taller than
+// the gate monitor for the same reason.
 const COL_LEFT_PCT: u16 = 25;
 const COL_EDITOR_PCT: u16 = 40;
 const COL_RIGHT_PCT: u16 = 35;

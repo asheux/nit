@@ -1,8 +1,8 @@
 //! Tests for the single-agent shadow pipeline.
 //!
-//! Parser/helper checks are lightweight unit tests. The DAG tests drive the
+//! Parser/helper checks are lightweight units. The DAG tests drive the
 //! full pipeline — start → propose-a + propose-b → judge → review → main —
-//! using an `AppState` plus a minimal mock roster so they don't depend on
+//! using an `AppState` plus a minimal mock roster, so they don't depend on
 //! any runner.
 
 use nit_core::state::AgentTurnState;
@@ -14,6 +14,66 @@ use crate::shadow::{
     parse_shadow_command, parse_shadow_lane_id, shadow_lane_id, shadow_stage_label_from_state,
     should_auto_enable_shadows, ShadowRuntime, SHADOW_ROLES,
 };
+
+fn codex_lane(id: &str, role: &str, status: AgentStatus, shadow: bool) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: role.into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow,
+    }
+}
+
+fn make_state_with_main_agent(id: &str) -> AppState {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(root, editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state
+        .agents
+        .agents
+        .push(codex_lane(id, "coder", AgentStatus::Idle, false));
+    state.agents.selected_agent = Some(id.into());
+    state
+}
+
+fn completed_event(agent_id: &str, message: &str) -> AgentBusEvent {
+    AgentBusEvent::TurnCompleted {
+        agent_id: agent_id.into(),
+        mission_id: None,
+        message: message.into(),
+        thread_id: None,
+        token_count: None,
+    }
+}
+
+fn active_turn_state() -> AgentTurnState {
+    let now = Instant::now();
+    AgentTurnState {
+        started_at: now,
+        last_heartbeat_at: now,
+        last_output_at: now,
+        stage: None,
+    }
+}
+
+#[allow(dead_code)]
+fn shadow_lane_ids(base: &str, run_id: &str) -> [String; 4] {
+    [
+        shadow_lane_id(base, run_id, "propose-a"),
+        shadow_lane_id(base, run_id, "propose-b"),
+        shadow_lane_id(base, run_id, "judge"),
+        shadow_lane_id(base, run_id, "review"),
+    ]
+}
 
 #[test]
 fn parse_shadow_command_accepts_explicit_prefix() {
@@ -236,66 +296,41 @@ fn is_agent_busy_detects_shadow_run_on_main_agent() {
     // exact role doesn't matter, only that the lane id starts with
     // `<main>#shadow-` and there's an active_turn entry for it.
     let shadow_id = shadow_lane_id(main_id, "01", "propose-a");
-    state.agents.agents.push(AgentLane {
-        id: shadow_id.clone(),
-        role: "shadow".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: true,
-    });
+    state
+        .agents
+        .agents
+        .push(codex_lane(&shadow_id, "shadow", AgentStatus::Running, true));
     state
         .agents
         .active_turns
         .insert(shadow_id, active_turn_state());
 
-    // Direct lane: idle. With the pre-fix `is_agent_busy` this was the
-    // only signal checked — false → second prompt would dispatch.
+    // Direct lane: idle. Pre-fix this was the only signal checked, so the
+    // second prompt would dispatch. Post-fix, the shadow lane is enough.
     assert!(matches!(
         state.agents.agents_get(main_id).map(|l| l.status),
         Some(AgentStatus::Idle)
     ));
-    // Post-fix: shadow lane is enough to count main as busy.
     assert!(crate::swarm::is_agent_busy(&state, main_id));
 }
 
+// Shadow on agent A must not make agent B look busy.
 #[test]
 fn is_agent_busy_ignores_shadow_lanes_for_unrelated_agent() {
-    // Shadow on agent A must not make agent B look busy.
     let mut state = make_state_with_main_agent("agent-a");
     let shadow_id = shadow_lane_id("agent-a", "01", "judge");
-    state.agents.agents.push(AgentLane {
-        id: shadow_id.clone(),
-        role: "shadow".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: true,
-    });
+    state
+        .agents
+        .agents
+        .push(codex_lane(&shadow_id, "shadow", AgentStatus::Running, true));
     state
         .agents
         .active_turns
         .insert(shadow_id, active_turn_state());
-    state.agents.agents.push(AgentLane {
-        id: "agent-b".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    state
+        .agents
+        .agents
+        .push(codex_lane("agent-b", "coder", AgentStatus::Idle, false));
     assert!(crate::swarm::is_agent_busy(&state, "agent-a"));
     assert!(!crate::swarm::is_agent_busy(&state, "agent-b"));
 }
@@ -317,49 +352,6 @@ fn parse_shadow_lane_id_handles_roles_with_dashes() {
     assert_eq!(base, "claude-main");
     assert_eq!(run_id, "07");
     assert_eq!(role, "propose-b");
-}
-
-fn make_state_with_main_agent(id: &str) -> AppState {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: id.into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some(id.into());
-    state
-}
-
-fn completed_event(agent_id: &str, message: &str) -> AgentBusEvent {
-    AgentBusEvent::TurnCompleted {
-        agent_id: agent_id.into(),
-        mission_id: None,
-        message: message.into(),
-        thread_id: None,
-        token_count: None,
-    }
-}
-
-fn active_turn_state() -> AgentTurnState {
-    let now = Instant::now();
-    AgentTurnState {
-        started_at: now,
-        last_heartbeat_at: now,
-        last_output_at: now,
-        stage: None,
-    }
 }
 
 #[test]

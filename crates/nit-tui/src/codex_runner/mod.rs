@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -9,6 +9,23 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
+
+mod args;
+mod evaluate_genome;
+mod jsonl;
+
+#[cfg(test)]
+pub(super) use args::codex_model_slug_for_agent_id;
+use args::{
+    build_codex_exec_args, build_codex_mcp_tool_call, codex_exec_endpoint_label,
+    prepare_codex_command, push_nit_mcp_config_args,
+};
+use jsonl::{
+    extract_context_window, extract_thread_id_from_jsonl, extract_token_count_from_jsonl,
+    extract_total_tokens, token_count_from_value,
+};
+
+pub use evaluate_genome::{handle_evaluate_genome_request, EVALUATE_GENOME_TOOL_DESCRIPTION};
 
 #[derive(Clone, Debug)]
 pub struct CodexRunnerConfig {
@@ -66,10 +83,10 @@ pub enum CodexCommand {
     McpStop,
     McpReconnect,
     Shutdown,
-    /// Cancel any in-flight turn for `agent_id` (kills the subprocess via
-    /// the per-turn `cancel` AtomicBool) and drop matching queued turns
-    /// from this runner's pending queue. Idempotent — no-op if the agent
-    /// has no in-flight or queued work.
+    /// Cancel any in-flight turn for `agent_id` (kills the subprocess via the
+    /// per-turn `cancel` AtomicBool) and drop matching queued turns from this
+    /// runner's pending queue. Idempotent — no-op if the agent has no
+    /// in-flight or queued work.
     CancelTurn {
         agent_id: String,
     },
@@ -112,8 +129,8 @@ impl CodexRunner {
         }
     }
 
-    /// Send a command to the runner. Returns `true` if the command was accepted,
-    /// `false` if the runner's channel is disconnected (runner shut down or crashed).
+    /// Returns `true` if the command was accepted, `false` if the runner's
+    /// channel is disconnected (runner shut down or crashed).
     pub fn send(&self, command: CodexCommand) -> bool {
         self.cmd_tx.send(command).is_ok()
     }
@@ -125,8 +142,9 @@ impl CodexRunner {
             return;
         };
 
-        // Ensure quitting the TUI can't hang indefinitely if Codex is stuck. The runner loop
-        // applies a short shutdown deadline; join in a helper thread with a matching timeout.
+        // Ensure quitting the TUI can't hang indefinitely if Codex is stuck. The
+        // runner loop applies a short shutdown deadline; join in a helper thread
+        // with a matching timeout.
         let (done_tx, done_rx) = mpsc::channel();
         let _ = thread::Builder::new()
             .name("nit-codex-join".into())
@@ -199,16 +217,16 @@ fn runner_loop_exec(
                     }
                 }
                 CodexCommand::CancelTurn { agent_id } => {
-                    // Kill any in-flight turn for this agent: the worker
-                    // checks `cancel` between try_wait polls and calls
-                    // child.kill() within ~50ms.
+                    // Kill any in-flight turn for this agent: the worker checks
+                    // `cancel` between try_wait polls and calls child.kill()
+                    // within ~50ms.
                     for turn in active.iter() {
                         if turn.agent_id == agent_id {
                             turn.cancel.store(true, Ordering::Relaxed);
                         }
                     }
-                    // Drop pending RunTurn commands for the same agent so
-                    // a queued turn doesn't fire after the user aborted.
+                    // Drop pending RunTurn commands for the same agent so a
+                    // queued turn doesn't fire after the user aborted.
                     queue.retain(|cmd| match cmd {
                         CodexCommand::RunTurn { model, .. } => model.as_str() != agent_id,
                         _ => true,
@@ -329,7 +347,7 @@ struct McpServer {
 
 impl McpServer {
     fn start(shutdown: Arc<AtomicBool>, config: &CodexRunnerConfig) -> Result<Self, String> {
-        let mut cmd = Command::new("codex");
+        let mut cmd = std::process::Command::new("codex");
         // nit-mcp override: if the back-channel is live, tell `codex mcp-server`
         // about the `nit` tool server so the model can discover our tools.
         // Re-uses the same helper as per-turn `codex exec` for consistency.
@@ -642,10 +660,9 @@ fn runner_loop_mcp(
                     queue.clear();
                 }
                 CodexCommand::CancelTurn { agent_id } => {
-                    // MCP turns multiplex through the shared mcp-server
-                    // process; cancellation is per-RPC by request id.
-                    // Find every in-flight turn for this agent, fail it,
-                    // and free its slot.
+                    // MCP turns multiplex through the shared mcp-server process;
+                    // cancellation is per-RPC by request id. Find every in-flight
+                    // turn for this agent, fail it, free its slot.
                     let ids_to_cancel: Vec<u64> = in_flight
                         .iter()
                         .filter(|(_, t)| t.agent_id == agent_id)
@@ -891,9 +908,9 @@ fn runner_loop_mcp(
         }
 
         // Per-turn idle timeouts: a single tool call that stops producing
-        // events is a model-side stall, not a server-side failure. Fail
-        // only the stalled turn(s) and keep the multiplexed server alive
-        // for the other in-flight turns.
+        // events is a model-side stall, not a server-side failure. Fail only
+        // the stalled turn(s) and keep the multiplexed server alive for the
+        // other in-flight turns.
         if let Some(idle_timeout) = idle_timeout {
             let now = Instant::now();
             let stalled_ids: Vec<u64> = in_flight
@@ -1344,9 +1361,9 @@ fn handle_codex_mcp_notification(
     }
 
     // Detect file writes from tool_use events for per-agent genome attribution.
-    // Agents write files via tools (edit, write, str_replace_editor, bash).
-    // Extract file paths from item events so the genome system knows which
-    // agent modified which file — no filesystem-level guessing.
+    // Agents write files via tools (edit, write, str_replace_editor, bash);
+    // pulling paths from item events lets the genome system know which agent
+    // modified which file without filesystem-level guessing.
     if kind == "item_completed" || kind == "item.completed" {
         if let Some(item) = msg.get("item").or_else(|| msg.get("info")) {
             extract_file_write_paths(item, cwd)
@@ -1385,7 +1402,6 @@ fn extract_file_write_paths(
         "new_file_path",
     ];
 
-    // Recursively search for path-like string values in the JSON tree.
     fn extract_paths_recursive(
         value: &serde_json::Value,
         keys: &[&str],
@@ -1395,7 +1411,7 @@ fn extract_file_write_paths(
         depth: usize,
     ) {
         if depth > 5 {
-            return; // Avoid unbounded recursion.
+            return; // Bound recursion against pathological JSON.
         }
         match value {
             serde_json::Value::Object(map) => {
@@ -1698,8 +1714,9 @@ fn run_turn(
                             let payload = value.get("payload").unwrap_or(&value);
                             let kind = payload.get("type").and_then(|v| v.as_str());
                             if let Some(kind) = kind {
-                                // Emit a compact "stage" update so the UI can show progress even
-                                // when Codex doesn't stream intermediate messages.
+                                // Emit a compact "stage" update so the UI can
+                                // show progress even when Codex doesn't stream
+                                // intermediate messages.
                                 let stage = if matches!(kind, "item.started" | "item.completed") {
                                     payload
                                         .get("item")
@@ -1810,9 +1827,9 @@ fn run_turn(
         let _ = std::fs::remove_file(&out_file);
         // Emit a TurnFailed so AppState releases this active turn and the
         // breather/UI stop showing the agent as Running. The bus handler
-        // detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel and routes
-        // this down a "soft" path (Idle status, Info diag) rather than
-        // the "Error" path that genuine subprocess failures take.
+        // detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel and routes this
+        // down a "soft" path (Idle status, Info diag) rather than the "Error"
+        // path that genuine subprocess failures take.
         let _ = event_tx.send(AgentBusEvent::TurnFailed {
             agent_id: model,
             mission_id,
@@ -1902,403 +1919,6 @@ fn run_turn(
     });
 }
 
-fn codex_exec_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> String {
-    let model_slug = codex_model_slug_for_agent_id(agent_id);
-    let suffix = if model_slug == agent_id {
-        String::new()
-    } else {
-        format!(" (agent {agent_id})")
-    };
-    if let Some(thread_id) = resume_thread_id {
-        format!(
-            "codex exec resume {} -m {model_slug}{suffix}",
-            shorten_thread_id(thread_id),
-        )
-    } else {
-        format!("codex exec -m {model_slug}{suffix}")
-    }
-}
-
-fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
-    // Strip every clone-style suffix in one go: split on the first '#'.
-    // All known suffix conventions (`#swarm-…`, `#chat-clone-…`,
-    // `#shadow-…`, `#mp-pane-…`) start with `#`, and base model slugs
-    // never contain `#`. This also handles nested suffixes like
-    // `claude-opus-4-7#mp-pane-01#swarm-mis-001-clone-01` — the FIRST
-    // `#` always separates the model slug from the lane decoration.
-    match agent_id.split_once('#') {
-        Some((base, _)) if !base.trim().is_empty() => base,
-        _ => agent_id,
-    }
-}
-
-fn build_codex_mcp_tool_call(
-    agent_id: &str,
-    prompt: &str,
-    cwd: &Path,
-    reasoning_effort: Option<&str>,
-    config: &CodexRunnerConfig,
-    resume_thread_id: Option<&str>,
-    read_only: bool,
-) -> (&'static str, serde_json::Value) {
-    if let Some(thread_id) = resume_thread_id {
-        return (
-            "codex-reply",
-            serde_json::json!({ "threadId": thread_id, "prompt": prompt }),
-        );
-    }
-
-    let mut args = serde_json::Map::new();
-    args.insert(
-        "prompt".into(),
-        serde_json::Value::String(prompt.to_string()),
-    );
-    args.insert(
-        "model".into(),
-        serde_json::Value::String(codex_model_slug_for_agent_id(agent_id).to_string()),
-    );
-    args.insert(
-        "cwd".into(),
-        serde_json::Value::String(cwd.to_string_lossy().to_string()),
-    );
-    if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
-        args.insert(
-            "config".into(),
-            serde_json::json!({ "model_reasoning_effort": effort }),
-        );
-    }
-    let sandbox_override = if read_only { Some("read-only") } else { None };
-    let sandbox_value = sandbox_override.or_else(|| {
-        config
-            .sandbox
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    });
-    if let Some(sandbox) = sandbox_value {
-        args.insert(
-            "sandbox".into(),
-            serde_json::Value::String(sandbox.to_string()),
-        );
-    }
-    if let Some(policy) = config
-        .approval_policy
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        args.insert(
-            "approval-policy".into(),
-            serde_json::Value::String(policy.to_string()),
-        );
-    }
-    ("codex", serde_json::Value::Object(args))
-}
-
-/// Spawn-site cwd binding for the codex subprocess. `-C <cwd>` is
-/// dropped on resume turns; `current_dir` is the only consistent cwd
-/// channel across fresh and resumed dispatches.
-fn prepare_codex_command(cwd: &Path, args: Vec<String>) -> Command {
-    let mut cmd = Command::new("codex");
-    cmd.current_dir(cwd).args(args);
-    cmd
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_codex_exec_args(
-    agent_id: &str,
-    cwd: &Path,
-    persist_session: bool,
-    reasoning_effort: Option<&str>,
-    out_file: &Path,
-    resume_thread_id: Option<&str>,
-    read_only: bool,
-    config: &CodexRunnerConfig,
-) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(policy) = config
-        .approval_policy
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        args.push("-a".into());
-        args.push(policy.to_string());
-    }
-    let sandbox_override = if read_only { Some("read-only") } else { None };
-    let sandbox_value = sandbox_override.or_else(|| {
-        config
-            .sandbox
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    });
-    if let Some(sandbox) = sandbox_value {
-        args.push("-s".into());
-        args.push(sandbox.to_string());
-    }
-
-    let model_slug = codex_model_slug_for_agent_id(agent_id);
-    if let Some(thread_id) = resume_thread_id {
-        args.push("exec".into());
-        args.push("resume".into());
-        args.push("--json".into());
-        args.push("-m".into());
-        args.push(model_slug.to_string());
-        if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
-            // Override any global config (e.g. `xhigh`) that some models don't support.
-            args.push("-c".into());
-            args.push(format!("model_reasoning_effort={effort:?}"));
-        }
-        // nit-mcp override (when a back-channel socket is set): register
-        // `nit-mcp-server` as a Codex-discoverable tool server.
-        push_nit_mcp_config_args(&mut args, config, agent_id);
-        args.push("-o".into());
-        args.push(out_file.to_string_lossy().to_string());
-        // Positional SESSION_ID comes after options for `codex exec resume`.
-        args.push(thread_id.to_string());
-        args.push("-".into());
-        return args;
-    }
-
-    args.push("exec".into());
-    args.push("--json".into());
-    args.push("--color".into());
-    args.push("never".into());
-    if !persist_session {
-        args.push("--ephemeral".into());
-    }
-    args.push("-m".into());
-    args.push(model_slug.to_string());
-    args.push("-C".into());
-    args.push(cwd.to_string_lossy().to_string());
-    if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
-        // Override any global config (e.g. `xhigh`) that some models don't support.
-        args.push("-c".into());
-        args.push(format!("model_reasoning_effort={effort:?}"));
-    }
-    push_nit_mcp_config_args(&mut args, config, agent_id);
-    args.push("-o".into());
-    args.push(out_file.to_string_lossy().to_string());
-    args.push("-".into());
-    args
-}
-
-// Push `-c mcp_servers.nit=...` overrides so the child Codex process can
-// discover the back-channel MCP server via a TOML inline table. The agent id
-// propagates via env so signals/claims carry the right `posted_by`.
-//
-// Note: Codex's exact TOML inline-table escaping for `-c` overrides hasn't
-// been empirically verified — if Codex rejects this override at runtime the
-// in-process nit-mcp side still works; only the Codex-discoverable tool
-// bridge is affected.
-fn push_nit_mcp_config_args(args: &mut Vec<String>, config: &CodexRunnerConfig, agent_id: &str) {
-    let Some(socket_path) = config
-        .mcp_backchannel_socket
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return;
-    };
-    let Some(bin_path) = nit_mcp_server_binary_path() else {
-        return;
-    };
-    // Escape backslashes and double quotes so the TOML-string literals remain
-    // well-formed no matter what lives in $PATH.
-    let bin_esc = escape_toml_string(&bin_path);
-    let sock_esc = escape_toml_string(socket_path);
-    let agent_esc = escape_toml_string(agent_id);
-    let value = format!(
-        "{{ command = \"{bin_esc}\", args = [], env = {{ NIT_MCP_BACKCHANNEL_SOCKET = \"{sock_esc}\", NIT_MCP_AGENT_ID = \"{agent_esc}\" }} }}"
-    );
-    args.push("-c".into());
-    args.push(format!("mcp_servers.nit={value}"));
-}
-
-// Locate `nit-mcp-server` next to the running binary. `cargo install` lays it
-// down alongside `nit`; development builds land it in the same `target/debug`.
-// Returns `None` when discovery fails so callers can skip the `-c` injection.
-fn nit_mcp_server_binary_path() -> Option<String> {
-    let self_exe = std::env::current_exe().ok()?;
-    let dir = self_exe.parent()?;
-    let candidate = dir.join("nit-mcp-server");
-    Some(candidate.to_string_lossy().into_owned())
-}
-
-fn escape_toml_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-fn shorten_thread_id(thread_id: &str) -> String {
-    const MAX_CHARS: usize = 8;
-    let id = thread_id.trim();
-    match id.char_indices().nth(MAX_CHARS) {
-        Some((idx, _)) => format!("{}…", &id[..idx]),
-        None => id.to_string(),
-    }
-}
-
-fn extract_thread_id_from_jsonl(stdout: &[u8]) -> Option<String> {
-    // `codex exec --json` emits a "thread.started" event with a `thread_id` field.
-    let text = String::from_utf8_lossy(stdout);
-    for raw in text.lines() {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-            continue;
-        };
-        let Some(thread_id) = value.get("thread_id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if thread_id.trim().is_empty() {
-            continue;
-        }
-        // Prefer the canonical thread lifecycle events, but accept any event containing thread_id.
-        if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
-            if kind.starts_with("thread.") {
-                return Some(thread_id.to_string());
-            }
-        }
-        return Some(thread_id.to_string());
-    }
-    None
-}
-
-fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
-    // Codex streams "token_count" events that include total token usage + context window.
-    // We accept both exec-mode JSONL and session-style wrapped events.
-    let text = String::from_utf8_lossy(stdout);
-    let mut last: Option<AgentTokenCount> = None;
-    for raw in text.lines() {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-            continue;
-        };
-
-        if let Some(token_count) = token_count_from_value(&value) {
-            last = Some(token_count);
-        }
-    }
-    last
-}
-
-fn token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> {
-    let payload = value.get("payload").unwrap_or(value);
-    let kind = payload.get("type").and_then(|v| v.as_str())?;
-    if kind == "token_count" {
-        let info = payload.get("info")?;
-        let context_window = extract_context_window(info)?;
-        let total_tokens = extract_total_tokens(info)?;
-        if context_window > u32::MAX as u64 || total_tokens > u32::MAX as u64 {
-            return None;
-        }
-        return Some(AgentTokenCount {
-            total_tokens: total_tokens as u32,
-            context_window: context_window as u32,
-        });
-    }
-
-    // Fallback: some Codex CLI versions only report per-turn token usage at `turn.completed`.
-    // Those payloads often omit the context window size; the UI can stitch that in from the
-    // models cache. We use `context_window=0` to mean "unknown".
-    let usage = payload.get("usage")?;
-    let input = usage
-        .get("input_tokens")
-        .or_else(|| usage.get("prompt_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let total = input.saturating_add(output);
-    if total == 0 || total > u32::MAX as u64 {
-        return None;
-    }
-    Some(AgentTokenCount {
-        total_tokens: total as u32,
-        context_window: 0,
-    })
-}
-
-fn extract_context_window(info: &serde_json::Value) -> Option<u64> {
-    info.get("model_context_window")
-        .or_else(|| info.get("context_window"))
-        .or_else(|| info.get("context_window_tokens"))
-        .or_else(|| info.get("model_context_window_tokens"))
-        .and_then(|v| v.as_u64())
-        .filter(|v| *v > 0)
-}
-
-fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
-    // Prefer the *last* model-visible token usage over lifetime totals.
-    //
-    // Codex can auto-compact context when it nears the model context window. When that happens,
-    // lifetime token usage (total_token_usage) keeps increasing, but the model-visible history
-    // size can decrease. `last_token_usage` reflects that post-compaction size.
-    info.get("last_token_usage")
-        .and_then(|u| u.get("total_tokens"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            info.get("total_token_usage")
-                .and_then(|u| u.get("total_tokens"))
-                .and_then(|v| v.as_u64())
-        })
-        .or_else(|| info.get("total_tokens").and_then(|v| v.as_u64()))
-        .or_else(|| info.get("used_tokens").and_then(|v| v.as_u64()))
-}
-
-// Evaluate-genome tool — injected into every agent prompt so agents know nit
-// measures their output automatically. They don't call the tool; the runner
-// watches for the marker in case an agent explicitly requests a report.
-pub const EVALUATE_GENOME_TOOL_DESCRIPTION: &str = r#"
-[nit tool: evaluate_genome]
-nit evaluates genome quality automatically in real time as you write files.
-You do NOT need to call [evaluate_genome] — nit measures quality externally
-after your changes are written to disk. If quality degrades, nit will retry
-your turn automatically with specific per-encoder feedback.
-
-Focus on writing good code using the encoder guide and recommendations above.
-nit handles the measurement.
-[/nit tool]
-"#;
-
-// Looks for `[evaluate_genome:<path>]` in agent output and returns a formatted
-// genome report when the path resolves to a readable file.
-pub fn handle_evaluate_genome_request(workspace_root: &Path, message: &str) -> Option<String> {
-    let marker = "[evaluate_genome:";
-    let start = message.find(marker)?;
-    let rest = &message[start + marker.len()..];
-    let end = rest.find(']')?;
-    let raw_path = rest[..end].trim();
-    if raw_path.is_empty() {
-        return None;
-    }
-    let file_path = if std::path::Path::new(raw_path).is_absolute() {
-        std::path::PathBuf::from(raw_path)
-    } else {
-        workspace_root.join(raw_path)
-    };
-    let text = std::fs::read_to_string(&file_path).ok()?;
-    let report = nit_core::compute_genome_report(&text, &file_path);
-    Some(nit_core::format_genome_report(&report))
-}
-
 #[cfg(test)]
-#[path = "tests/codex_runner.rs"]
+#[path = "../tests/codex_runner.rs"]
 mod tests;

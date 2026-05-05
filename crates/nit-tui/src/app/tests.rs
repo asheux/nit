@@ -6396,3 +6396,111 @@ fn multipane_runtime_drains_queued_codex_turn_on_finish() {
         "queued turns must drain when the helper observes a finished event ({before} -> {after})",
     );
 }
+
+mod dispatch_resolve_cwd {
+    use super::super::resolve_dispatch_cwd;
+    use nit_core::{AppState, Buffer, MultipaneState, PaneSession};
+    use std::path::PathBuf;
+
+    fn fixture_state() -> AppState {
+        AppState::new(
+            PathBuf::from("/workspace"),
+            Buffer::empty("scratch", None),
+            Buffer::empty("notes", None),
+        )
+    }
+
+    #[test]
+    fn falls_back_to_workspace_root_when_not_multipane() {
+        let state = fixture_state();
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "any-agent"),
+            PathBuf::from("/workspace")
+        );
+    }
+
+    #[test]
+    fn returns_pane_cwd_in_multipane() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: "claude-haiku-4-5".into(),
+            panes: vec![
+                PaneSession {
+                    pane_id: 0,
+                    agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                    cwd: PathBuf::from("/pane0"),
+                    ..PaneSession::default()
+                },
+                PaneSession {
+                    pane_id: 1,
+                    agent_id: "claude-haiku-4-5#mp-pane-01".into(),
+                    cwd: PathBuf::from("/pane1"),
+                    ..PaneSession::default()
+                },
+            ],
+            focused: 0,
+            grid_cols: 2,
+            grid_rows: 1,
+            backend_filter: Some("claude-haiku-4-5".into()),
+            help_open: false,
+        });
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
+            PathBuf::from("/pane0")
+        );
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-01"),
+            PathBuf::from("/pane1")
+        );
+    }
+
+    #[test]
+    fn unknown_agent_falls_back() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: "claude-haiku-4-5".into(),
+            panes: vec![PaneSession {
+                pane_id: 0,
+                agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                cwd: PathBuf::from("/pane0"),
+                ..PaneSession::default()
+            }],
+            focused: 0,
+            grid_cols: 1,
+            grid_rows: 1,
+            backend_filter: Some("claude-haiku-4-5".into()),
+            help_open: false,
+        });
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "non-pane-agent"),
+            PathBuf::from("/workspace")
+        );
+    }
+
+    // Lazy-bound pane: a roster selection commits both `agent_id` and
+    // `selected_agent_id` to the pane-suffixed lane id, so dispatch routes
+    // to the pane's cwd even before a backend is pinned.
+    #[test]
+    fn walks_lazy_no_backend_pane_lane() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: String::new(),
+            panes: vec![PaneSession {
+                pane_id: 0,
+                agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                cwd: PathBuf::from("/pane-lazy"),
+                selected_agent_id: Some("claude-haiku-4-5#mp-pane-00".into()),
+                ..PaneSession::default()
+            }],
+            focused: 0,
+            grid_cols: 1,
+            grid_rows: 1,
+            backend_filter: None,
+            help_open: false,
+        });
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
+            PathBuf::from("/pane-lazy")
+        );
+    }
+}

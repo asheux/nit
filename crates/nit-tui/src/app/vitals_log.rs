@@ -1,76 +1,13 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime, SWARM_CLONE_INFIX,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
-use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
+use crate::swarm::SWARM_CLONE_INFIX;
+use crate::vitals::{AgentVitalsState, DiagSeverity, VitalsState};
 use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
+    AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentStatus, AppKind, AppState,
+    McpConnectionState, OPERATOR_CANCEL_TURN_MESSAGE,
 };
 
-use super::*;
+use super::chat_cursor::timestamp_label;
 
 pub(super) fn is_lab_job_running(state: &AppState) -> bool {
     match state.app_kind {
@@ -104,11 +41,9 @@ pub(super) fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) 
         message: trimmed.to_string(),
         at: timestamp_label(state),
     });
-    if state.agents.diag_events.len() > 512 {
-        let drop = state.agents.diag_events.len().saturating_sub(512);
-        if drop > 0 {
-            state.agents.diag_events.drain(0..drop);
-        }
+    let len = state.agents.diag_events.len();
+    if len > 512 {
+        state.agents.diag_events.drain(0..len - 512);
     }
 }
 
@@ -119,8 +54,7 @@ pub(super) fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBus
         // so it shouldn't push the LAB indicator into WARN. Match on the
         // OPERATOR_CANCEL_TURN_MESSAGE sentinel and skip recording — the
         // bus handler already logs it as an Info diag.
-        AgentBusEvent::TurnFailed { message, .. }
-            if message == nit_core::OPERATOR_CANCEL_TURN_MESSAGE => {}
+        AgentBusEvent::TurnFailed { message, .. } if message == OPERATOR_CANCEL_TURN_MESSAGE => {}
         AgentBusEvent::TurnFailed { .. } => vitals.record_diag_event(now, DiagSeverity::Error),
         AgentBusEvent::TurnLog { message, .. } => {
             let lowered = message.to_ascii_lowercase();

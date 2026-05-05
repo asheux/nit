@@ -11,10 +11,11 @@ pub(super) fn derive_cargo_packages(scope_files: &[String], spawn_cwd: &Path) ->
     }
     let mut packages: Vec<String> = Vec::new();
     for path in scope_files {
-        // Normalize separators for cross-platform path handling.
         let normalized = path.replace('\\', "/");
+        // File sits outside `crates/` → scope is mixed or unknown; bail out
+        // so callers fall back to full-workspace commands rather than a
+        // misleading partial scope.
         let Some(rest) = normalized.strip_prefix("crates/") else {
-            // File sits outside `crates/` — scope is mixed or unknown.
             return Vec::new();
         };
         let Some(pkg) = rest.split('/').next() else {
@@ -61,9 +62,8 @@ pub(super) fn stage_label(stage: SwarmStage) -> &'static str {
     }
 }
 
-// Prefers the `"custom"` label when custom gates are configured; falls back to
-// the detected language bundle (`"rust-ci"` / `"node-ci"` / …). `None` means
-// no gates are active.
+// `"custom"` wins when explicit gates are configured; otherwise fall back to
+// the detected language bundle. `None` means no gates are active.
 pub(super) fn run_gates_label(run: &SwarmRun) -> Option<String> {
     if run.gate_custom.is_some() {
         Some("custom".to_string())
@@ -72,11 +72,10 @@ pub(super) fn run_gates_label(run: &SwarmRun) -> Option<String> {
     }
 }
 
-/// Resolve the effective gate list for a swarm run. Prefers project-defined
-/// custom gates from `.nit/config.toml` (if any), otherwise falls back to the
-/// auto-detected language bundle's default gates. Returns the gates as
-/// already-rendered commands scoped to the run's cargo packages (when the
-/// scope can be derived cleanly) or as full-workspace commands otherwise.
+// Custom gates from `.nit/config.toml` win over the auto-detected language
+// bundle's default gates. The result is rendered against the run's cargo
+// packages so each command is correctly scoped (or full-workspace when the
+// scope can't be derived cleanly).
 pub(super) fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
     let cargo_packages = derive_cargo_packages(&run.scope_files, run.spawn_cwd.as_path());
     let base_gates = if let Some(custom) = run.gate_custom.as_ref() {
@@ -88,41 +87,39 @@ pub(super) fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
     };
     base_gates
         .into_iter()
-        .map(|gate| {
-            let rendered = gate.rendered_command(&cargo_packages);
-            Gate {
-                name: gate.name,
-                command: rendered,
-                scoped_command: None,
-            }
+        .map(|gate| Gate {
+            command: gate.rendered_command(&cargo_packages),
+            name: gate.name,
+            scoped_command: None,
         })
         .collect()
 }
 
 pub(super) fn dashboard_gate_rows(run: &SwarmRun) -> Vec<SwarmGateDashboardRow> {
-    let mut rows = Vec::new();
-    for gate in run_effective_gates(run) {
-        rows.push(SwarmGateDashboardRow {
+    let mut rows: Vec<SwarmGateDashboardRow> = run_effective_gates(run)
+        .into_iter()
+        .map(|gate| SwarmGateDashboardRow {
             name: gate.name,
             command: gate.command,
             status: "PENDING".into(),
             notes: None,
-        });
-    }
-    if let Some(report) = run.gate_report.as_ref() {
-        for reported in report.gates.iter() {
-            if let Some(existing) = rows.iter_mut().find(|row| row.name == reported.name) {
-                existing.status = reported.ui_status().into();
-                existing.command = reported.command.clone();
-                existing.notes = reported.notes.clone();
-            } else {
-                rows.push(SwarmGateDashboardRow {
-                    name: reported.name.clone(),
-                    command: reported.command.clone(),
-                    status: reported.ui_status().into(),
-                    notes: reported.notes.clone(),
-                });
-            }
+        })
+        .collect();
+    let Some(report) = run.gate_report.as_ref() else {
+        return rows;
+    };
+    for reported in report.gates.iter() {
+        if let Some(existing) = rows.iter_mut().find(|row| row.name == reported.name) {
+            existing.status = reported.ui_status().into();
+            existing.command = reported.command.clone();
+            existing.notes = reported.notes.clone();
+        } else {
+            rows.push(SwarmGateDashboardRow {
+                name: reported.name.clone(),
+                command: reported.command.clone(),
+                status: reported.ui_status().into(),
+                notes: reported.notes.clone(),
+            });
         }
     }
     rows

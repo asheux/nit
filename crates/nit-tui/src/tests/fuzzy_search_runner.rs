@@ -47,11 +47,14 @@ fn write(path: &Path, content: &str) {
     std::fs::write(path, content).expect("write file");
 }
 
+fn contains_path(paths: &[String], rel: &str) -> bool {
+    paths.iter().any(|p| p == rel)
+}
+
 #[test]
 fn fuzzy_score_bytes_returns_matched_indices() {
     let hay = b"src/main.rs";
-    let needle = b"srs";
-    let (score, indices) = fuzzy_score_bytes(hay, needle).expect("match should exist");
+    let (score, indices) = fuzzy_score_bytes(hay, b"srs").expect("match should exist");
     assert!(score > 0);
     assert_eq!(indices, vec![0, 1, 10]);
     assert!(fuzzy_score_bytes(hay, b"zz").is_none());
@@ -75,21 +78,21 @@ fn list_index_paths_respects_gitignore_and_hidden() {
     write(&tmp.path.join("target/build.log"), "ignored\n");
 
     let paths = list_index_paths(&tmp.path, false, false).expect("list_index_paths");
-    assert!(paths.contains(&"src/main.rs".to_string()));
-    assert!(!paths.iter().any(|p| p == ".env"));
-    assert!(!paths.iter().any(|p| p == "ignored.txt"));
-    assert!(!paths.iter().any(|p| p == "target/build.log"));
+    assert!(contains_path(&paths, "src/main.rs"));
+    assert!(!contains_path(&paths, ".env"));
+    assert!(!contains_path(&paths, "ignored.txt"));
+    assert!(!contains_path(&paths, "target/build.log"));
 
     let paths = list_index_paths(&tmp.path, true, false).expect("list_index_paths");
-    assert!(paths.contains(&"src/main.rs".to_string()));
-    assert!(paths.contains(&".env".to_string()));
-    assert!(!paths.iter().any(|p| p == "ignored.txt"));
+    assert!(contains_path(&paths, "src/main.rs"));
+    assert!(contains_path(&paths, ".env"));
+    assert!(!contains_path(&paths, "ignored.txt"));
 
     let paths = list_index_paths(&tmp.path, true, true).expect("list_index_paths");
-    assert!(paths.contains(&"src/main.rs".to_string()));
-    assert!(paths.contains(&".env".to_string()));
-    assert!(paths.contains(&"ignored.txt".to_string()));
-    assert!(paths.contains(&"target/build.log".to_string()));
+    assert!(contains_path(&paths, "src/main.rs"));
+    assert!(contains_path(&paths, ".env"));
+    assert!(contains_path(&paths, "ignored.txt"));
+    assert!(contains_path(&paths, "target/build.log"));
 }
 
 #[test]

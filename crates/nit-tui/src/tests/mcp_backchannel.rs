@@ -54,8 +54,8 @@ fn spawn_and_drop_removes_socket() {
     let path = bc.socket_path.clone();
     assert!(std::path::Path::new(&path).exists());
     drop(bc);
-    // Drop is best-effort; the listener thread exits when the sender half is
-    // dropped, so the socket file is unlinked by Drop before the test ends.
+    // The listener thread exits when the sender half is dropped, so the
+    // socket file is unlinked by Drop before the test ends.
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!std::path::Path::new(&path).exists());
 }

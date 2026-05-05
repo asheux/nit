@@ -2,9 +2,6 @@ use super::*;
 use nit_core::{AgentLane, AgentLaneKind, Buffer};
 use std::path::PathBuf;
 
-/// Build an empty `AppState` rooted at the crate's manifest dir with the two
-/// default buffers the app expects. Tests that only need a fresh state to
-/// seed lanes/missions/tasks call this instead of repeating the boilerplate.
 fn new_state() -> AppState {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let editor = Buffer::empty("editor", None);
@@ -3879,12 +3876,12 @@ fn collect_unresolved_deps_walks_all_tasks() {
     let run = make_run_with_tasks(SwarmTemplate::Parallel, tasks);
     let unresolved = collect_unresolved_deps(&run);
     assert_eq!(unresolved.len(), 2);
-    let pairs: Vec<(String, String)> = unresolved
+    let pairs: Vec<(&str, &str)> = unresolved
         .iter()
-        .map(|u| (u.task_id.clone(), u.missing_dep.clone()))
+        .map(|u| (u.task_id.as_str(), u.missing_dep.as_str()))
         .collect();
-    assert!(pairs.contains(&("b".to_string(), "missing-1".to_string())));
-    assert!(pairs.contains(&("c".to_string(), "missing-2".to_string())));
+    assert!(pairs.contains(&("b", "missing-1")));
+    assert!(pairs.contains(&("c", "missing-2")));
 }
 
 #[test]
@@ -4241,4 +4238,471 @@ fn abort_all_aborts_every_active_run() {
     assert!(!runtime.is_active_mission("mis-002"));
     assert!(runtime.mission_is_complete("mis-001"));
     assert!(runtime.mission_is_complete("mis-002"));
+}
+
+#[test]
+fn fresh_prompt_gets_preamble_with_inline_test_rule() {
+    let preamble = code_hygiene_preamble("refactor crates/foo to extract helpers")
+        .expect("fresh prompt should get a preamble");
+    assert!(
+        preamble.contains("Do NOT add inline test modules"),
+        "preamble should carry the no-inline-tests rule:\n{preamble}",
+    );
+    assert!(preamble.starts_with(CODE_HYGIENE_OPEN_MARKER));
+}
+
+#[test]
+fn prompt_with_existing_marker_skips_preamble() {
+    let already_prefixed =
+        format!("{CODE_HYGIENE_OPEN_MARKER}\nfoo\n[/code hygiene]\n\nrun the task");
+    assert!(code_hygiene_preamble(&already_prefixed).is_none());
+}
+
+#[test]
+fn prompt_with_inline_no_padding_clause_skips_preamble() {
+    // The swarm `integrate` role contract inlines NO_PADDING_CLAUSE verbatim
+    // (no marker), so dedup must catch it without relying on the marker.
+    let role_contract = format!("Operator request:\n...\n\n{NO_PADDING_CLAUSE}\n");
+    assert!(code_hygiene_preamble(&role_contract).is_none());
+}
+
+fn dag_task(id: &str, role: &str, deps: Vec<&str>, writes: bool) -> SwarmTask {
+    SwarmTask {
+        id: id.into(),
+        agent_id: id.into(),
+        role: Some(role.into()),
+        title: id.into(),
+        task_prompt: String::new(),
+        deps: deps.into_iter().map(String::from).collect(),
+        writes,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    }
+}
+
+#[test]
+fn parallel_test_role_with_empty_deps_gets_wired_to_integrate() {
+    // Reproduces the operator-reported bug: planner emits a `test` task with
+    // no deps under the parallel template; without this repair, the test
+    // agent dispatches before the integrator and fires against an unchanged
+    // tree.
+    let mut tasks = vec![
+        dag_task("propose-01", "propose", vec![], false),
+        dag_task("integrate-01", "integrate", vec!["propose-01"], true),
+        dag_task("test-01", "test", vec![], false),
+    ];
+    let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+    assert_eq!(tasks[2].deps, vec!["integrate-01"]);
+    assert!(
+        repairs.iter().any(|r| r.contains("verifier test-01")),
+        "expected a per-repair description, got {repairs:?}",
+    );
+}
+
+#[test]
+fn parallel_review_role_with_empty_deps_gets_wired_to_integrate() {
+    let mut tasks = vec![
+        dag_task("propose-01", "propose", vec![], false),
+        dag_task("integrate-01", "integrate", vec!["propose-01"], true),
+        dag_task("integrate-02", "integrate", vec!["propose-01"], true),
+        dag_task("review-01", "review", vec![], false),
+    ];
+    let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+    let mut wired = tasks[3].deps.clone();
+    wired.sort();
+    assert_eq!(wired, vec!["integrate-01", "integrate-02"]);
+}
+
+#[test]
+fn parallel_judge_role_with_empty_deps_gets_wired_to_proposers() {
+    let mut tasks = vec![
+        dag_task("propose-01", "propose", vec![], false),
+        dag_task("propose-02", "propose", vec![], false),
+        dag_task("judge-01", "judge", vec![], false),
+    ];
+    let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+    let mut wired = tasks[2].deps.clone();
+    wired.sort();
+    assert_eq!(wired, vec!["propose-01", "propose-02"]);
+}
+
+#[test]
+fn parallel_verifier_with_explicit_deps_is_left_alone() {
+    // Plans that already wire deps must NOT be rewritten — the operator's
+    // intent (which integrate task this verifier covers) wins over the
+    // auto-fan-out heuristic.
+    let mut tasks = vec![
+        dag_task("integrate-01", "integrate", vec![], true),
+        dag_task("integrate-02", "integrate", vec![], true),
+        dag_task("test-01", "test", vec!["integrate-01"], false),
+    ];
+    let _ = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+    assert_eq!(tasks[2].deps, vec!["integrate-01"]);
+}
+
+#[test]
+fn lab_template_unaffected_by_verifier_repair() {
+    let mut tasks = vec![
+        dag_task("integrate-01", "integrate", vec![], true),
+        dag_task("test-01", "test", vec![], false),
+    ];
+    let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Lab);
+    assert!(repairs.is_empty());
+    assert!(tasks[1].deps.is_empty());
+}
+
+#[test]
+fn ceiling_saturates_at_max_when_fds_abundant() {
+    assert_eq!(compute_effective_max_swarm_size(65_536), MAX_SWARM_SIZE);
+    assert_eq!(compute_effective_max_swarm_size(usize::MAX), MAX_SWARM_SIZE);
+}
+
+#[test]
+fn ceiling_scales_with_macos_default_ulimit() {
+    // (256 - 32) / 4 = 56.
+    assert_eq!(compute_effective_max_swarm_size(256), 56);
+}
+
+#[test]
+fn ceiling_scales_with_linux_default_ulimit() {
+    // (1024 - 32) / 4 = 248.
+    assert_eq!(compute_effective_max_swarm_size(1024), 248);
+}
+
+#[test]
+fn ceiling_clamps_to_one_for_degenerate_limits() {
+    assert_eq!(compute_effective_max_swarm_size(0), 1);
+    assert_eq!(compute_effective_max_swarm_size(NIT_BASELINE_FDS - 1), 1);
+    assert_eq!(compute_effective_max_swarm_size(NIT_BASELINE_FDS), 1);
+    assert_eq!(compute_effective_max_swarm_size(NIT_BASELINE_FDS + 1), 1);
+}
+
+#[test]
+fn warn_threshold_fires_below_static_when_fd_bound() {
+    // ulimit -n 256 → ceiling 56 → warn at 42 (75%).
+    assert_eq!(compute_large_swarm_warn_threshold(256), 42);
+}
+
+#[test]
+fn warn_threshold_uses_static_when_fds_abundant() {
+    // ulimit -n 4096 → ceiling 256 (saturated) → static threshold 64.
+    assert_eq!(
+        compute_large_swarm_warn_threshold(4096),
+        LARGE_SWARM_WARN_THRESHOLD
+    );
+}
+
+#[test]
+fn warn_threshold_never_zero() {
+    assert_eq!(compute_large_swarm_warn_threshold(0), 1);
+}
+
+#[test]
+fn current_soft_limit_is_positive() {
+    assert!(current_fd_soft_limit() > NIT_BASELINE_FDS);
+}
+
+#[test]
+fn is_light_planner_matches_known_lightweight_tiers() {
+    assert!(is_light_planner("claude-haiku-4-5"));
+    assert!(is_light_planner("claude-haiku-3-5"));
+    assert!(is_light_planner("gpt-5-mini"));
+    assert!(is_light_planner("gpt-5-nano"));
+    assert!(is_light_planner("o4-mini"));
+    assert!(is_light_planner("gemini-2.5-flash"));
+    assert!(is_light_planner("Claude-HAIKU-4-5"));
+    assert!(is_light_planner("GPT-5-MINI"));
+}
+
+#[test]
+fn is_light_planner_excludes_heavy_tiers() {
+    assert!(!is_light_planner("claude-opus-4-7"));
+    assert!(!is_light_planner("claude-sonnet-4-6"));
+    assert!(!is_light_planner("gpt-5"));
+    assert!(!is_light_planner("gpt-5.4"));
+    assert!(!is_light_planner("gemini-2.5-pro"));
+    assert!(!is_light_planner(""));
+    assert!(!is_light_planner("custom-model"));
+}
+
+#[test]
+fn is_light_planner_strips_clone_suffix() {
+    assert!(is_light_planner("claude-haiku-4-5#swarm-mis-001-clone-01"));
+    assert!(!is_light_planner("claude-opus-4-7#swarm-mis-001-clone-01"));
+}
+
+mod scope_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn fresh_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("nit-scope-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn returns_empty_when_no_token_resolves_to_dir() {
+        let root = fresh_root("no_match");
+        let scope = enumerate_scope_files(&root, "rewrite Myproject/foo/myproject1/ to do X");
+        assert!(scope.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walks_real_directory_and_lists_source_files() {
+        let root = fresh_root("real_dir");
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/src/lib.rs"), "// lib").unwrap();
+        fs::write(root.join("crates/foo/src/notes.txt"), "skip me").unwrap();
+        let scope = enumerate_scope_files(&root, "edit crates/foo/");
+        assert!(scope.iter().any(|p| p.ends_with("lib.rs")));
+        assert!(!scope.iter().any(|p| p.ends_with("notes.txt")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skips_target_node_modules_and_dot_dirs() {
+        let root = fresh_root("skipped");
+        fs::create_dir_all(root.join("crates/foo/target/build")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/node_modules/dep")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/.cache")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/target/build/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/node_modules/dep/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
+        let scope = enumerate_scope_files(&root, "look at crates/foo/");
+        assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
+        for path in &scope {
+            assert!(!path.contains("target/"), "leaked target/: {path}");
+            assert!(
+                !path.contains("node_modules"),
+                "leaked node_modules: {path}"
+            );
+            assert!(!path.contains(".cache"), "leaked .cache: {path}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn does_not_follow_symlinks_so_self_loops_terminate() {
+        let root = fresh_root("symlink_loop");
+        fs::create_dir_all(root.join("crates/foo")).unwrap();
+        fs::write(root.join("crates/foo/real.rs"), "x").unwrap();
+        // foo/loop → foo would recurse forever without the symlink guard.
+        symlink(root.join("crates/foo"), root.join("crates/foo/loop")).unwrap();
+        let scope =
+            enumerate_scope_files_with_deadline(&root, "scan crates/foo/", Duration::from_secs(2));
+        assert!(scope.iter().any(|p| p.ends_with("real.rs")));
+        for path in &scope {
+            assert!(!path.contains("loop"), "followed symlink: {path}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn caps_recursion_depth() {
+        let root = fresh_root("deep");
+        let mut p = root.join("crates/deep");
+        for i in 0..(SCOPE_WALK_MAX_DEPTH + 5) {
+            p = p.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("buried.rs"), "x").unwrap();
+        let scope = enumerate_scope_files(&root, "trace crates/deep/");
+        assert!(!scope.iter().any(|p| p.ends_with("buried.rs")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn caps_total_files_returned() {
+        let root = fresh_root("many_files");
+        let dir = root.join("crates/many");
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..(SCOPE_WALK_MAX_FILES + 50) {
+            fs::write(dir.join(format!("f{i}.rs")), "x").unwrap();
+        }
+        let scope = enumerate_scope_files(&root, "process crates/many/");
+        assert_eq!(scope.len(), SCOPE_WALK_MAX_FILES);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deadline_zero_returns_immediately_with_empty() {
+        let root = fresh_root("deadline_zero");
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/src/lib.rs"), "x").unwrap();
+        let scope =
+            enumerate_scope_files_with_deadline(&root, "review crates/foo/", Duration::ZERO);
+        assert!(scope.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Reads a process-wide env var; serialise against any other test that
+    // touches the same var.
+    #[test]
+    fn scope_walk_timeout_env_parsing() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        const VAR: &str = "NIT_SCOPE_WALK_TIMEOUT_MS";
+
+        let prior = std::env::var(VAR).ok();
+
+        std::env::remove_var(VAR);
+        assert_eq!(
+            scope_walk_timeout(),
+            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
+        );
+
+        std::env::set_var(VAR, "  ");
+        assert_eq!(
+            scope_walk_timeout(),
+            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
+        );
+
+        std::env::set_var(VAR, "0");
+        assert_eq!(scope_walk_timeout(), Duration::ZERO);
+
+        std::env::set_var(VAR, "750");
+        assert_eq!(scope_walk_timeout(), Duration::from_millis(750));
+
+        std::env::set_var(VAR, "garbage");
+        assert_eq!(
+            scope_walk_timeout(),
+            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
+        );
+
+        match prior {
+            Some(value) => std::env::set_var(VAR, value),
+            None => std::env::remove_var(VAR),
+        }
+    }
+
+    fn run_git(args: &[&str], cwd: &std::path::Path) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(cwd);
+        cmd.env("GIT_AUTHOR_NAME", "scope-test")
+            .env("GIT_AUTHOR_EMAIL", "scope@test")
+            .env("GIT_COMMITTER_NAME", "scope-test")
+            .env("GIT_COMMITTER_EMAIL", "scope@test");
+        cmd.output().expect("git command")
+    }
+
+    #[test]
+    fn git_fallback_includes_uncommitted_changes_when_prompt_has_no_paths() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_changed");
+
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/src/lib.rs"), "// initial\n").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
+        fs::write(root.join("crates/foo/src/lib.rs"), "// changed\n").unwrap();
+
+        let scope = enumerate_scope_files(&root, "fix the bug");
+        assert!(
+            scope.iter().any(|p| p.ends_with("crates/foo/src/lib.rs")),
+            "expected git fallback to include the modified .rs file, got {scope:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_skips_target_and_dot_dirs() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_filters");
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
+        fs::create_dir_all(root.join("crates/foo/target")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/.cache")).unwrap();
+        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        fs::write(root.join("crates/foo/target/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
+        fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
+        fs::write(root.join("notes.txt"), "x").unwrap();
+        fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
+        fs::write(root.join("crates/foo/target/keep.rs"), "y").unwrap();
+        fs::write(root.join("crates/foo/.cache/keep.rs"), "y").unwrap();
+        fs::write(root.join("crates/foo/src/keep.rs"), "y").unwrap();
+        fs::write(root.join("notes.txt"), "y").unwrap();
+
+        let scope = enumerate_scope_files(&root, "general cleanup");
+        assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
+        for path in &scope {
+            assert!(!path.contains("target/"), "leaked target/: {path}");
+            assert!(!path.contains(".cache"), "leaked .cache: {path}");
+            assert!(!path.ends_with(".txt"), "wrong-ext slipped: {path}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_includes_dotfile_changes() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("git_dotfiles");
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
+        fs::write(root.join(".zshrc"), "alias ll='ls -la'\n").unwrap();
+        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env bash\n").unwrap();
+        fs::write(root.join(".tmux.conf"), "set -g mouse on\n").unwrap();
+        fs::write(root.join("README.md"), "# dotfiles\n").unwrap();
+        fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
+        fs::write(root.join(".zshrc"), "alias l='ls'\n").unwrap();
+        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env zsh\n").unwrap();
+        fs::write(root.join(".tmux.conf"), "set -g mouse off\n").unwrap();
+        fs::write(root.join("README.md"), "# dotfiles updated\n").unwrap();
+
+        let scope = enumerate_scope_files(&root, "general cleanup");
+        assert!(scope.iter().any(|p| p.ends_with(".zshrc")));
+        assert!(scope.iter().any(|p| p.ends_with("tmux-gpu.sh")));
+        assert!(scope.iter().any(|p| p.ends_with(".tmux.conf")));
+        assert!(scope.iter().any(|p| p.ends_with("README.md")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_fallback_returns_empty_when_not_a_git_repo() {
+        let root = fresh_root("not_a_repo");
+        let scope = enumerate_scope_files(&root, "do something");
+        assert!(scope.is_empty(), "expected empty scope, got {scope:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

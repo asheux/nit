@@ -17,11 +17,11 @@ pub enum SwarmSize {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SwarmTemplate {
-    /// Parallel task splitting (v1-style): keep tasks independent and preferably one per agent.
+    /// v1-style: keep tasks independent and preferably one per agent.
     Parallel,
-    /// "Lab" workflow: read-only analysis/proposal/review feeding a single-writer integrator.
+    /// Read-only analysis/proposal/review feeding a single-writer integrator.
     Lab,
-    /// "Bulk orchestration": propose many candidate solutions in parallel, then converge via a
+    /// Propose many candidate solutions in parallel, then converge via a
     /// judge step feeding a single-writer integrator.
     Bulk,
 }
@@ -152,7 +152,6 @@ pub struct SwarmDispatch {
     pub agent_id: String,
     pub mission_id: String,
     pub prompt: String,
-    /// Task role (e.g. "review", "code") to apply to the agent lane on dispatch.
     pub task_role: Option<String>,
 }
 
@@ -188,21 +187,15 @@ pub(super) enum GateBundle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Gate {
     pub(super) name: String,
-    /// Full command as a fallback when no scope information is available.
-    /// Typically runs against the whole workspace (e.g. `cargo test --workspace`).
+    /// Full command run when no cargo-package scope is known. Typically
+    /// hits the whole workspace (e.g. `cargo test --workspace`).
     pub(super) command: String,
-    /// Optional scoped command template. When the swarm knows which cargo
-    /// packages were touched (derived from the operator's scope_files), the
-    /// verifier prompt renders this template with `{cargo_packages}` replaced
-    /// by `-p pkg1 -p pkg2 ...`. Leave `None` to always run the full command.
+    /// Renders with `{cargo_packages}` → `-p pkg1 -p pkg2 ...` when the
+    /// swarm knows which packages it touched. `None` = always full command.
     pub(super) scoped_command: Option<String>,
 }
 
 impl Gate {
-    /// Build the command text to embed in the verifier prompt. When scoped
-    /// execution is viable (we have cargo packages AND the gate has a scoped
-    /// template), substitute placeholders; otherwise fall back to the full
-    /// command.
     pub(super) fn rendered_command(&self, cargo_packages: &[String]) -> String {
         if !cargo_packages.is_empty() {
             if let Some(template) = self.scoped_command.as_deref() {
@@ -221,21 +214,16 @@ impl Gate {
     }
 }
 
-/// Single structural gate for "should this prompt mention cargo / Rust crate
-/// scoping at all?". Checks for `Cargo.toml` directly at the spawn cwd — no
-/// walk-up — so a child project nested under an unrelated Rust workspace
-/// does not inherit Rust framing. Used by `wrap_task_prompt`'s test/review
-/// branch and `dashboard::derive_cargo_packages` to suppress cargo-specific
-/// text on non-Rust workspaces.
+/// Checks `Cargo.toml` directly at the spawn cwd — no walk-up — so a child
+/// project nested under an unrelated Rust workspace does not inherit Rust
+/// framing. Suppresses cargo-specific text on non-Rust workspaces.
 pub(crate) fn is_cargo_workspace(cwd: &Path) -> bool {
     cwd.join("Cargo.toml").is_file()
 }
 
-/// Best-effort discovery of the git repository root containing `cwd`. Walks
-/// ancestors looking for a `.git` entry (file for worktrees, dir for plain
-/// repos). Returns `None` when no `.git` is found before reaching the
-/// filesystem root. Used to bound `GateBundle::detect`'s ancestor walk so a
-/// stray ancestor manifest cannot leak gates into an unrelated child.
+// Bounds `GateBundle::detect`'s ancestor walk so a stray ancestor manifest
+// cannot leak gates into an unrelated child. `.git` may be a file (worktree)
+// or a dir (plain repo).
 fn git_repo_root(cwd: &Path) -> Option<PathBuf> {
     let mut cursor = Some(cwd);
     while let Some(path) = cursor {
@@ -268,10 +256,9 @@ impl GateBundle {
         None
     }
 
-    /// Detect the auto-gate bundle for a spawn cwd. The walk is bounded at
-    /// `cwd` itself or the surrounding git root (whichever is shallower) so a
-    /// stray ancestor `Cargo.toml` cannot impose Rust gates on an unrelated
-    /// child project.
+    /// Walk is bounded at `cwd` or the surrounding git root (whichever is
+    /// shallower) so a stray ancestor `Cargo.toml` cannot impose Rust gates
+    /// on an unrelated child project.
     pub(super) fn detect(cwd: &Path) -> GateBundleSelection {
         let config_default = read_workspace_gate_default(cwd);
         if let Ok(Some(default)) = config_default.as_ref() {
@@ -357,11 +344,10 @@ impl GateBundle {
         }
     }
 
-    /// Default gate steps for this bundle. Rust gates include `scoped_command`
-    /// templates so the verifier prompt can run `-p <pkg>` commands when the
-    /// swarm's scope maps cleanly onto cargo packages. Other bundles currently
-    /// only expose full-workspace commands — users who want scoped Node/Python/
-    /// Go runs can provide custom gates via `.nit/config.toml`.
+    /// Rust gates include `scoped_command` templates so the verifier can run
+    /// `-p <pkg>` when the swarm's scope maps cleanly onto cargo packages.
+    /// Other bundles only expose full-workspace commands — users who want
+    /// scoped runs can provide custom gates via `.nit/config.toml`.
     pub(super) fn gates(&self) -> Vec<Gate> {
         match self {
             GateBundle::Rust => vec![
@@ -513,9 +499,9 @@ impl SwarmTaskState {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum SwarmDagValidationMode {
-    /// Reject plans with cycles/unknown deps (do not auto-repair).
+    /// Reject plans with cycles or unknown deps; do not auto-repair.
     Strict,
-    /// Attempt to make the graph runnable (drop unknown deps + break cycles) with warnings.
+    /// Drop unknown deps and break cycles to make the graph runnable.
     Repair,
 }
 
@@ -668,25 +654,19 @@ pub(super) struct SwarmTask {
     pub(super) parsed_artifacts: Option<SwarmTaskArtifacts>,
     pub(super) expected_artifacts_missing: bool,
     pub(super) failed: bool,
-    /// Number of times this task has been retried after failure.
     pub(super) retries: u8,
 }
 
-/// Holds the state for a genome gate evaluation running in a background thread.
-/// When the evaluation completes, the result is received via `rx` and the
-/// verifier dispatch proceeds — the verifier prompt reads the effective gate
-/// list directly from the `SwarmRun`, so we only need the display label
-/// ("rust-ci", "custom", etc.) for system-message logging.
+// `label` is the display string ("rust-ci", "custom", ...) used in system
+// messages; the actual gate list is read from the `SwarmRun`.
 pub(super) struct GenomeGatePending {
     pub(super) rx: mpsc::Receiver<String>,
     pub(super) label: String,
     pub(super) verifier: String,
 }
 
-/// Holds the state for a genome reviewer prompt being built in a background
-/// thread. When the prompt is ready, the reviewer dispatch proceeds. An empty
-/// prompt means the worker had nothing to evaluate (no modified files) and
-/// the reviewer is silently skipped.
+// Empty prompt = worker had nothing to evaluate; reviewer is silently
+// skipped in that case.
 pub(super) struct GenomeReviewPending {
     pub(super) rx: mpsc::Receiver<String>,
     pub(super) reviewer_id: String,
@@ -697,23 +677,20 @@ pub(super) struct SwarmRun {
     pub(super) root_prompt: String,
     pub(super) template: SwarmTemplate,
     pub(super) mission_kind: SwarmMissionKind,
-    /// Directory the spawned agents will execute in. In single-pane this is
-    /// `state.workspace_root`; in multipane it is the dispatching pane's cwd.
-    /// Prompt builders consult this (not `state.workspace_root`) for cargo /
-    /// language gating so a non-Rust pane never sees Rust framing even when
-    /// the harness was launched from a Rust repo.
+    /// Single-pane: `state.workspace_root`; multipane: the dispatching
+    /// pane's cwd. Prompt builders consult this (not `state.workspace_root`)
+    /// for cargo / language gating so a non-Rust pane never sees Rust
+    /// framing even when the harness was launched from a Rust repo.
     pub(super) spawn_cwd: PathBuf,
     pub(super) planner_agent_id: String,
     pub(super) integrator_agent_id: Option<String>,
     pub(super) integrator_locked: bool,
     pub(super) verifier_agent_id: Option<String>,
     pub(super) gate_bundle: Option<GateBundle>,
-    /// Project-defined custom gates from `.nit/config.toml` (via
-    /// `read_workspace_custom_gates`). When `Some`, these fully override the
-    /// auto-detected `gate_bundle` — the downstream verify/dashboard code
-    /// should iterate this list instead of `bundle.gates()`. Kept separate
-    /// from `gate_bundle` so the UI source label can still show which
-    /// language was detected and whether the user overrode it.
+    /// `.nit/config.toml` overrides — when `Some`, fully replace the
+    /// auto-detected `gate_bundle` for verify/dashboard iteration. Kept
+    /// separate from `gate_bundle` so the UI source label can still show
+    /// which language was detected and whether the user overrode it.
     pub(super) gate_custom: Option<Vec<Gate>>,
     pub(super) gate_selection: String,
     pub(super) agent_ids: Vec<String>,
@@ -723,28 +700,21 @@ pub(super) struct SwarmRun {
     pub(super) gate_output: Option<String>,
     pub(super) gate_report: Option<GateReport>,
     pub(super) genome_gate_results: Option<String>,
-    /// Background genome gate evaluation — `None` when idle, `Some` while
-    /// waiting for the background thread to finish.
     pub(super) genome_gate_pending: Option<GenomeGatePending>,
-    /// Background genome review prompt build — `None` when idle, `Some`
-    /// while waiting for the worker to finish computing per-file genome
-    /// reports for the reviewer agent.
     pub(super) genome_review_pending: Option<GenomeReviewPending>,
     pub(super) report_status: Option<String>,
     pub(super) report_output: Option<String>,
-    /// Source files in the scope referenced by the operator prompt (e.g.
-    /// `crates/nit-games`).  Populated at run creation; injected into
-    /// integrate task prompts so agents cannot skip files.
+    /// Files in the scope referenced by the operator prompt. Populated at
+    /// run creation; injected into integrate task prompts so agents cannot
+    /// skip files.
     pub(super) scope_files: Vec<String>,
-    /// Genome reports snapshot taken at swarm start, frozen for the life of
-    /// the mission. Used as the "before" side of the final genome review so
-    /// the reviewer sees real swarm-wide deltas.  The per-turn
-    /// `state.genome_baselines` is unsuitable here because it gets cleared
-    /// between agent turns and re-captured from post-edit state on the next
-    /// `TurnStarted` — making every review show `+0.00` across all encoders.
+    /// Genome reports frozen at swarm start; the "before" side of the final
+    /// review. Per-turn `state.genome_baselines` is unsuitable here — it
+    /// gets cleared between agent turns and re-captured from post-edit
+    /// state on the next `TurnStarted`, making every review show `+0.00`.
     pub(super) initial_genome_baselines: HashMap<PathBuf, GenomeReport>,
-    /// Number of swarm-level retries consumed after a gate FAIL. Capped by
-    /// `settings.swarm.gate_retry_limit` (default 3). Each increment
-    /// dispatches a fix task to the integrator and re-enters `Verifying`.
+    /// Bumped per gate-FAIL retry; capped by `settings.swarm.gate_retry_limit`
+    /// (default 3). Each increment dispatches a fix task to the integrator
+    /// and re-enters `Verifying`.
     pub(super) gate_retry_count: u8,
 }

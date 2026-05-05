@@ -1,74 +1,7 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
-use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
-};
+use crossterm::event::{KeyCode, KeyEvent};
+use nit_core::{actions::Action, AgentOpsTab, AppState, Mode, PaneId, UiSelectionPane};
 
 use super::*;
 
@@ -134,20 +67,14 @@ pub(super) fn focus_by_direction(state: &AppState, dir: FocusDir) -> PaneId {
 }
 
 /// Pending vim operator waiting for its character argument.
-/// Scoped to the editor (only consumed when the editor is in motion mode).
+/// Only consumed when the editor is in motion mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum PendingEditorOp {
-    /// `r<c>` — replace char under cursor with `c`.
     Replace,
-    /// `f<c>` — jump to next occurrence of `c` on this line.
     FindForward,
-    /// `F<c>` — jump to previous occurrence of `c` on this line.
     FindBack,
-    /// `t<c>` — jump to one before next `c` on this line.
     TillForward,
-    /// `T<c>` — jump to one after previous `c` on this line.
     TillBack,
-    /// `z<z|t|b>` — viewport alignment chord.
     ZMotion,
 }
 
@@ -180,62 +107,44 @@ impl InputState {
         }
     }
 
-    pub(super) fn set_pending_editor_op(&mut self, op: PendingEditorOp) {
-        self.pending_editor_op = Some(op);
-    }
-
-    pub(super) fn clear_pending_editor_op(&mut self) {
-        self.pending_editor_op = None;
-    }
-
-    pub(super) fn reset_normal(&mut self) {
-        self.normal_last_char = None;
-    }
-
-    pub(super) fn reset_insert(&mut self) {
-        self.pending_insert = None;
-    }
-
+    /// Vim-style two-key chord recognition. Returns true on the second key of
+    /// a matching pair (e.g. `gg`, `dd`, `yy`) when it lands within
+    /// `CHORD_TIMEOUT`; otherwise records this key as a half-chord and returns
+    /// false. The next call either completes the chord or starts a new one.
     pub(super) fn chord_normal(&mut self, c: char, now: Instant) -> bool {
         if self.normal_last_char == Some(c)
             && now.duration_since(self.normal_last_time) <= CHORD_TIMEOUT
         {
             self.normal_last_char = None;
-            true
-        } else {
-            self.normal_last_char = Some(c);
-            self.normal_last_time = now;
-            false
+            return true;
         }
-    }
-
-    pub(super) fn set_pending_insert(&mut self, c: char, now: Instant) {
-        self.pending_insert = Some((c, now));
+        self.normal_last_char = Some(c);
+        self.normal_last_time = now;
+        false
     }
 
     pub(super) fn take_pending_insert(&mut self) -> Option<char> {
         self.pending_insert.take().map(|(c, _)| c)
     }
 
+    /// Insert-mode chord (e.g. `jk` → escape) that ages out after
+    /// `CHORD_TIMEOUT`. Returns the deferred char as a literal `InsertChar`
+    /// action so the buffer still receives the keystroke when the second key
+    /// never arrives.
     pub(super) fn flush_insert_timeout(&mut self) -> Option<Action> {
-        if let Some((c, t)) = self.pending_insert {
-            if Instant::now().duration_since(t) >= CHORD_TIMEOUT {
-                self.pending_insert = None;
-                return Some(Action::InsertChar(c));
-            }
+        let (c, t) = self.pending_insert?;
+        if Instant::now().duration_since(t) < CHORD_TIMEOUT {
+            return None;
         }
-        None
+        self.pending_insert = None;
+        Some(Action::InsertChar(c))
     }
 
     pub(super) fn pending_insert_matches(&self, key: &KeyEvent) -> bool {
-        match (self.pending_insert, key.code) {
-            (Some((pending, _)), KeyCode::Char(c)) => pending == c,
-            _ => false,
-        }
-    }
-
-    pub(super) fn defer_key(&mut self, key: KeyEvent) {
-        self.deferred_key = Some(key);
+        let Some((pending, _)) = self.pending_insert else {
+            return false;
+        };
+        matches!(key.code, KeyCode::Char(c) if c == pending)
     }
 
     pub(super) fn take_deferred(&mut self) -> Option<KeyEvent> {
@@ -250,45 +159,42 @@ impl InputState {
         });
     }
 
-    pub(super) fn clear_visualizer_jump(&mut self) {
-        self.visualizer_jump = None;
-    }
-
+    /// Append a base-10 digit to the in-flight visualizer jump (e.g. typing
+    /// `1234<enter>` jumps to generation 1234). Caps digit count at 18 to
+    /// stay inside `u64`. Idle resets the timeout.
     pub(super) fn push_visualizer_digit(&mut self, digit: u8) {
-        if let Some(jump) = self.visualizer_jump.as_mut() {
-            if jump.digits >= 18 {
-                return;
-            }
-            jump.value = jump.value.saturating_mul(10).saturating_add(digit as u64);
-            jump.digits += 1;
-            jump.started = Instant::now();
+        let Some(jump) = self.visualizer_jump.as_mut() else {
+            return;
+        };
+        if jump.digits >= 18 {
+            return;
         }
+        jump.value = jump.value.saturating_mul(10).saturating_add(digit as u64);
+        jump.digits += 1;
+        jump.started = Instant::now();
     }
 
     pub(super) fn pop_visualizer_digit(&mut self) {
-        if let Some(jump) = self.visualizer_jump.as_mut() {
-            if jump.digits == 0 {
-                return;
-            }
-            jump.value /= 10;
-            jump.digits -= 1;
-            jump.started = Instant::now();
+        let Some(jump) = self.visualizer_jump.as_mut() else {
+            return;
+        };
+        if jump.digits == 0 {
+            return;
         }
+        jump.value /= 10;
+        jump.digits -= 1;
+        jump.started = Instant::now();
     }
 
-    pub(super) fn visualizer_jump_value(&self) -> Option<u64> {
-        self.visualizer_jump.as_ref().map(|jump| jump.value)
-    }
-
-    pub(super) fn visualizer_jump_active(&self) -> bool {
-        self.visualizer_jump.is_some()
-    }
-
+    /// Drops the visualizer jump if no key has touched it for
+    /// `INSPECTOR_JUMP_TIMEOUT`. Called once per frame from the input pump
+    /// so half-typed jumps don't linger indefinitely.
     pub(super) fn expire_visualizer_jump(&mut self) {
-        if let Some(jump) = self.visualizer_jump.as_ref() {
-            if Instant::now().duration_since(jump.started) >= INSPECTOR_JUMP_TIMEOUT {
-                self.visualizer_jump = None;
-            }
+        let Some(jump) = self.visualizer_jump.as_ref() else {
+            return;
+        };
+        if Instant::now().duration_since(jump.started) >= INSPECTOR_JUMP_TIMEOUT {
+            self.visualizer_jump = None;
         }
     }
 }

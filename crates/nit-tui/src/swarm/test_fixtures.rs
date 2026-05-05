@@ -4,20 +4,19 @@ use super::{
     SwarmMissionKind, SwarmRun, SwarmRuntime, SwarmStage, SwarmTask, SwarmTaskState, SwarmTemplate,
 };
 
-/// Test helper: merge a single-mission fixture (built via
-/// `test_runtime_with_running_tasks`) into an accumulator runtime.
-/// Lets multipane tests build a runtime where multiple missions are
-/// simultaneously active without exposing the private `runs` field.
+/// Merge a single-mission fixture into an accumulator. Lets multipane tests
+/// build a runtime where multiple missions are simultaneously active without
+/// exposing the private `runs` field.
 pub(crate) fn merge_single_mission_runtime(accumulator: &mut SwarmRuntime, single: SwarmRuntime) {
     for (k, v) in single.runs {
         accumulator.runs.insert(k, v);
     }
 }
 
-/// Test helper: build a `SwarmRuntime` fixture with one Running task per
-/// `(agent_id, role)` pair *and* one Dispatched (dashboard label "Queued")
-/// task per entry in `queued`. Used by the breather regression test that
-/// reproduces a queued task poisoning the role-uniformity check.
+/// Build a `SwarmRuntime` fixture with one Running task per `(agent_id, role)`
+/// pair AND one Dispatched (dashboard label "Queued") task per entry in
+/// `queued`. Used by the breather regression test that reproduces a queued
+/// task poisoning the role-uniformity check.
 pub(crate) fn test_runtime_with_running_and_queued_tasks(
     mission_id: &str,
     running: &[(&str, &str)],
@@ -27,23 +26,12 @@ pub(crate) fn test_runtime_with_running_and_queued_tasks(
     if let Some(run) = runtime.runs.get_mut(mission_id) {
         let base = run.tasks.len();
         for (idx, (agent_id, role)) in queued.iter().enumerate() {
-            run.tasks.push(SwarmTask {
-                id: format!("queued-{:02}", base + idx),
-                agent_id: agent_id.to_string(),
-                role: Some(role.to_string()),
-                title: format!("{role} task (queued)"),
-                task_prompt: String::new(),
-                deps: Vec::new(),
-                writes: false,
-                artifacts: Vec::new(),
-                done_when: None,
-                state: SwarmTaskState::Dispatched,
-                output: None,
-                parsed_artifacts: None,
-                expected_artifacts_missing: false,
-                failed: false,
-                retries: 0,
-            });
+            run.tasks.push(make_task(
+                base + idx,
+                agent_id,
+                role,
+                SwarmTaskState::Dispatched,
+            ));
             if !run.agent_ids.iter().any(|id| id == agent_id) {
                 run.agent_ids.push(agent_id.to_string());
             }
@@ -52,9 +40,6 @@ pub(crate) fn test_runtime_with_running_and_queued_tasks(
     runtime
 }
 
-/// Test helper: build a `SwarmRuntime` fixture with one running task per
-/// `(agent_id, role)` pair. Used by `agent_console_view` breather tests to
-/// exercise role-aware labels without going through the full planner flow.
 pub(crate) fn test_runtime_with_running_tasks(
     mission_id: &str,
     tasks: &[(&str, &str)],
@@ -63,8 +48,8 @@ pub(crate) fn test_runtime_with_running_tasks(
 }
 
 /// Same as `test_runtime_with_running_tasks` but lets callers pin the
-/// template explicitly — needed for tests that verify prompt parity across
-/// parallel vs lab vs bulk templates.
+/// template — needed for tests that verify prompt parity across parallel /
+/// lab / bulk templates.
 pub(crate) fn test_runtime_with_running_tasks_and_template(
     mission_id: &str,
     tasks: &[(&str, &str)],
@@ -75,23 +60,7 @@ pub(crate) fn test_runtime_with_running_tasks_and_template(
     let swarm_tasks: Vec<SwarmTask> = tasks
         .iter()
         .enumerate()
-        .map(|(idx, (agent_id, role))| SwarmTask {
-            id: format!("task-{idx:02}"),
-            agent_id: agent_id.to_string(),
-            role: Some(role.to_string()),
-            title: format!("{role} task"),
-            task_prompt: String::new(),
-            deps: Vec::new(),
-            writes: false,
-            artifacts: Vec::new(),
-            done_when: None,
-            state: SwarmTaskState::Running,
-            output: None,
-            parsed_artifacts: None,
-            expected_artifacts_missing: false,
-            failed: false,
-            retries: 0,
-        })
+        .map(|(idx, (agent_id, role))| make_task(idx, agent_id, role, SwarmTaskState::Running))
         .collect();
     let run = SwarmRun {
         mission_id: mission_id.to_string(),
@@ -126,4 +95,28 @@ pub(crate) fn test_runtime_with_running_tasks_and_template(
     };
     runtime.runs.insert(mission_id.to_string(), run);
     runtime
+}
+
+fn make_task(idx: usize, agent_id: &str, role: &str, state: SwarmTaskState) -> SwarmTask {
+    let (id, title) = match state {
+        SwarmTaskState::Dispatched => (format!("queued-{idx:02}"), format!("{role} task (queued)")),
+        _ => (format!("task-{idx:02}"), format!("{role} task")),
+    };
+    SwarmTask {
+        id,
+        agent_id: agent_id.to_string(),
+        role: Some(role.to_string()),
+        title,
+        task_prompt: String::new(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    }
 }

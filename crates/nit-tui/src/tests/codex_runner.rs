@@ -27,10 +27,9 @@ fn custom_config() -> CodexRunnerConfig {
     }
 }
 
-/// Pin the Lens-E spawn-site invariant: every codex turn (fresh or
-/// resume) must spawn with `current_dir` bound to the per-pane cwd.
-/// `-C <cwd>` is dropped on resume, so this is the only consistent
-/// channel.
+// Pin the Lens-E spawn-site invariant: every codex turn (fresh or resume)
+// must spawn with current_dir bound to the per-pane cwd. `-C <cwd>` is
+// dropped on resume, so this is the only consistent channel.
 #[test]
 fn prepare_codex_command_binds_current_dir_with_empty_args() {
     let cwd = Path::new("/tmp/pane0-cwd");
@@ -103,12 +102,11 @@ fn shadow_clone_agent_ids_resolve_to_base_model_slug() {
     );
 }
 
+// Regression: original suffix table omitted `#mp-pane-`, so multipane-spawned
+// turns went out with the full id and Codex/Claude rejected with "selected
+// model (… #mp-pane-NN) does not exist". Strips on the FIRST `#`.
 #[test]
 fn multipane_pane_agent_ids_resolve_to_base_model_slug() {
-    // Regression: the original suffix table omitted `#mp-pane-`, so
-    // multipane-spawned turns went out with the full agent_id as the
-    // CLI model name and Codex/Claude rejected with "selected model
-    // (… #mp-pane-NN) does not exist". Now strips on the FIRST `#`.
     assert_eq!(codex_model_slug_for_agent_id("gpt-5#mp-pane-00"), "gpt-5");
     assert_eq!(
         codex_model_slug_for_agent_id("gpt-5.4#mp-pane-12"),
@@ -116,12 +114,10 @@ fn multipane_pane_agent_ids_resolve_to_base_model_slug() {
     );
 }
 
+// Multipane lane spawns a swarm: pane suffix prepended + swarm suffix appended.
+// `<base>#mp-pane-NN#swarm-…`. Slug stripper splits on the FIRST `#`.
 #[test]
 fn nested_multipane_swarm_clone_agent_ids_resolve_to_base_model_slug() {
-    // Multipane lane spawns a swarm — pane suffix prepended, swarm
-    // suffix appended on top: `<base>#mp-pane-NN#swarm-mis-…-clone-NN`.
-    // The slug stripper must split on the FIRST `#` to peel both at
-    // once.
     assert_eq!(
         codex_model_slug_for_agent_id("gpt-5#mp-pane-01#swarm-mis-001-clone-01"),
         "gpt-5"
@@ -293,7 +289,6 @@ fn read_only_shadow_turn_forces_read_only_sandbox_in_exec_args() {
         true,
         &config,
     );
-    // -s read-only must replace the workspace-write config value.
     let pos = args
         .iter()
         .position(|a| a == "-s")
@@ -399,11 +394,11 @@ fn mcp_token_count_notifications_emit_agent_bus_token_count() {
     assert!(saw_token_count);
 }
 
-// --- append_stdout_line_capped ---------------------------------------------
+// --- append_stdout_line_capped --------------------------------------------
 //
-// These tests exist to guarantee the cap path can never panic, OOB, or
-// silently drop the wrong bytes — it runs inside the spawn_turn_worker
-// stdout reader thread and a bug here would corrupt every Codex turn.
+// The cap path runs inside spawn_turn_worker's stdout reader thread; a bug
+// here would corrupt every Codex turn — guarantee no panic / OOB / silent
+// drop of the wrong bytes.
 
 #[test]
 fn cap_is_noop_when_under_threshold() {
@@ -443,43 +438,41 @@ fn cap_drains_at_newline_boundary_on_overflow() {
     // Must have shrunk to ≤75% of the cap.
     assert!(buf.len() <= STDOUT_TAIL_CAP_BYTES);
     assert!(buf.len() >= STDOUT_TAIL_CAP_BYTES * 3 / 4 - line.len());
-    // Must START on a record boundary (first byte is start of a line, i.e.
-    // the previous byte before the drain was '\n'). Equivalently: the
-    // remaining buffer ends in '\n' and contains only complete records.
+    // First byte after the drain is the start of a complete record (the
+    // previous byte was '\n'), so the trailing buffer ends in '\n' and
+    // contains only complete records.
     assert_eq!(buf.last().copied(), Some(b'\n'));
-    // Every byte that isn't '\n' is 'x' from our padding — proves no record
+    // Every byte is either '\n' or 'x' from our padding — proves no record
     // got split mid-way.
     assert!(buf.iter().all(|&b| b == b'x' || b == b'\n'));
 }
 
+// A pathological subprocess emits a single huge byte stream with no newline.
+// The cap can't preserve a record boundary, so it must drain everything
+// rather than leave a half-record. Critical: bounded final size, no panic.
 #[test]
 fn cap_truncates_single_mega_line_with_no_newline() {
-    // A pathological subprocess emits a single huge unbroken byte stream.
-    // The cap can't preserve any record boundary because there isn't one,
-    // so it must drain everything rather than leave a half-record. Critical:
-    // no panic and final size is bounded.
     let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 1);
     let huge: Vec<u8> = vec![b'A'; STDOUT_TAIL_CAP_BYTES + 1];
     append_stdout_line_capped(&mut buf, &huge);
     assert!(buf.is_empty(), "no newline ⇒ drain everything");
 }
 
+// Single line bigger than the cap: only the terminating '\n' is in the
+// trailing 75% slice, so drain runs through end-of-buffer.
 #[test]
 fn cap_truncates_single_mega_line_with_terminal_newline() {
     let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 1);
     let mut huge: Vec<u8> = vec![b'A'; STDOUT_TAIL_CAP_BYTES];
     huge.push(b'\n');
     append_stdout_line_capped(&mut buf, &huge);
-    // Single line bigger than the cap: only the terminating '\n' is in
-    // the trailing 75% slice, so drain runs through end-of-buffer. Result
-    // is empty (correct — nothing to preserve).
     assert!(buf.is_empty());
 }
 
 #[test]
 fn cap_stays_bounded_under_repeated_overflow() {
-    // Append 4× the cap worth of data and confirm the buffer never exceeds
-    // the cap and always ends on a newline.
+    // Append 4× the cap worth of data. The buffer must never exceed the cap
+    // and must always end on a newline.
     let line: Vec<u8> = {
         let mut v = vec![b'y'; 4095];
         v.push(b'\n');
@@ -501,7 +494,7 @@ fn cap_stays_bounded_under_repeated_overflow() {
     assert_eq!(buf.last().copied(), Some(b'\n'));
 }
 
-// --- push_json_error_capped ------------------------------------------------
+// --- push_json_error_capped ----------------------------------------------
 
 #[test]
 fn json_errors_cap_keeps_size_bounded() {
@@ -510,7 +503,6 @@ fn json_errors_cap_keeps_size_bounded() {
         push_json_error_capped(&mut errors, format!("err{i}"));
     }
     assert!(errors.len() <= JSON_ERRORS_CAP);
-    // Most-recent must always be retained.
     assert_eq!(
         errors.last().unwrap(),
         &format!("err{}", JSON_ERRORS_CAP * 4 - 1)
@@ -524,19 +516,16 @@ fn json_errors_cap_drains_oldest_half_on_overflow() {
     // After the drain (oldest 128) + push (1), len = 256 - 128 + 1 = 129.
     assert_eq!(errors.len(), JSON_ERRORS_CAP / 2 + 1);
     assert_eq!(errors.last().unwrap(), "new");
-    // The oldest entries (e0..e127) are gone; e128 is now the front.
     assert_eq!(
         errors.first().unwrap(),
         &format!("e{}", JSON_ERRORS_CAP / 2)
     );
 }
 
-// Codex-side companion to claude_runner's queue_len parity test.
-// Pins propose-03 important #3: when codex_runner's CancelAll /
-// CancelTurn drops queued commands, today it does NOT emit
-// TurnFailed for them. State-side queue_len was incremented at
-// dispatch but the bus-side decrement at agent_bus.rs:482 never
-// runs without TurnFailed — ghost queue rows remain.
+// Codex-side companion to claude_runner's queue_len parity test. Pins
+// propose-03 important #3: when CancelAll/CancelTurn drops queued
+// commands, today it does NOT emit TurnFailed for them, so the bus-side
+// queue_len decrement at agent_bus.rs:482 never runs.
 #[test]
 #[ignore = "fails until codex_runner::CancelAll emits TurnFailed for dropped queued items"]
 fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
@@ -561,7 +550,6 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     });
     state.agents.rebuild_agents_index();
 
-    // Today CancelAll emits a single TurnFailed (active only).
     AgentBusEvent::TurnFailed {
         agent_id: "gpt-test".into(),
         mission_id: None,

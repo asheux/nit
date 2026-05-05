@@ -5,32 +5,14 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-/// Hard upper bound on entries returned to the planner. The walk also early-
-/// exits the moment this is reached so we never visit more dirs than needed.
-const SCOPE_WALK_MAX_FILES: usize = 100;
+pub(super) const SCOPE_WALK_MAX_FILES: usize = 100;
 
-/// Hard cap on directory recursion depth — defense against pathological deep
-/// trees even when the wrapping deadline is generous.
-const SCOPE_WALK_MAX_DEPTH: usize = 12;
+pub(super) const SCOPE_WALK_MAX_DEPTH: usize = 12;
 
-/// Default deadline waited on the foreground thread for the background walk
-/// to complete. If the walk exceeds this, dispatch proceeds with an empty
-/// scope (same behavior as if no path tokens were detected). The walker
-/// thread keeps running in the background and will exit on its own once it
-/// finishes or hits its size/depth caps.
-const SCOPE_WALK_DEFAULT_TIMEOUT_MS: u64 = 200;
+pub(super) const SCOPE_WALK_DEFAULT_TIMEOUT_MS: u64 = 200;
 
-/// Directories never descended into. The existing `.*` skip already covers
-/// `.git`, `.cache`, etc.; this list extends it to common source mounds that
-/// would balloon the walk for no useful planner signal.
 const SCOPE_WALK_SKIP_DIRS: &[&str] = &["target", "node_modules"];
 
-/// Source-file extensions accepted by the scope walk. Covers the major
-/// compiled / typed languages plus common scripting and config-as-code
-/// surfaces (shell, lua, ruby, conf, md) so dotfiles / sysadmin / scripts-
-/// only workspaces produce a non-empty `scope_files` list. Without these,
-/// a swarm dispatched in a `dotbox`-style repo gets an empty checklist and
-/// the FILE CHECKLIST template renders as an empty section.
 fn is_source_extension(ext: &str) -> bool {
     matches!(
         ext,
@@ -56,11 +38,9 @@ fn is_source_extension(ext: &str) -> bool {
     )
 }
 
-/// Recognise dotfiles and config-style files that have no separate
-/// extension (`.zshrc`, `.bashrc`, `.tmux.conf`, `Makefile`, etc.). Required
-/// because `Path::extension()` returns `None` for `.zshrc` (the whole basename
-/// is treated as the file name with no separate extension), so the leading-
-/// dot pattern is the only reliable way to surface them.
+// `Path::extension()` returns `None` for `.zshrc` (the whole basename is the
+// file name with no separate extension), so the leading-dot pattern is the
+// only reliable way to surface dotfile-style sources.
 fn is_source_filename(name: &str) -> bool {
     matches!(
         name,
@@ -91,23 +71,20 @@ pub(super) fn sanitize_for_filename(input: &str) -> String {
         .collect()
 }
 
-/// Extract directory/module paths from the operator prompt and enumerate their
-/// source files.  Returns relative paths sorted alphabetically, capped at
+/// Extract directory tokens from the operator prompt and enumerate their
+/// source files. Result is alphabetically sorted and capped at
 /// `SCOPE_WALK_MAX_FILES`.
 ///
-/// The walk runs on a background thread and the foreground thread waits up to
-/// `scope_walk_timeout()` (default 200 ms, override with the
-/// `NIT_SCOPE_WALK_TIMEOUT_MS` env var). If the walk is slower than that —
-/// big trees, slow disks, or pathological structures — the foreground returns
-/// an empty `Vec` immediately so the UI never freezes. The walker thread
-/// keeps draining and exits on its own; its result is discarded since the
-/// channel receiver has already been dropped.
+/// The walk runs on a background thread; the foreground waits up to
+/// `scope_walk_timeout()` (default 200 ms; override via
+/// `NIT_SCOPE_WALK_TIMEOUT_MS`). On slow disks or pathological trees the
+/// foreground returns an empty `Vec` so the UI never freezes — the walker
+/// continues in the background and its result is discarded.
 ///
-/// When the prompt contains no usable path tokens (no token with `/`), the
-/// walk falls back to `git diff --name-only` against the merge-base with
-/// `main` (or `master`) so the verifier can still scope to the operator's
-/// in-progress edits instead of running `--workspace --all-features`.
-/// Returns empty if the workspace isn't a git repo or git is missing.
+/// When the prompt contains no path tokens (no token with `/`), the walk
+/// falls back to `git diff --name-only` against the merge-base with `main`
+/// (or `master`) so the verifier can scope to in-progress edits instead of
+/// running `--workspace`. Empty when not a git repo or git is unavailable.
 pub(crate) fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
     enumerate_scope_files_with_deadline(workspace_root, prompt, scope_walk_timeout())
 }
@@ -117,9 +94,9 @@ pub(crate) fn enumerate_scope_files_with_deadline(
     prompt: &str,
     deadline: Duration,
 ) -> Vec<String> {
-    // A zero deadline means "skip the walk". `recv_timeout(Duration::ZERO)`
-    // races with the worker on fast machines (the walker can deliver a
-    // result before the timeout fires), so short-circuit before spawning.
+    // `recv_timeout(Duration::ZERO)` races with the worker on fast machines
+    // (the walker can deliver before the timeout fires), so short-circuit
+    // before spawning when callers explicitly request "skip the walk".
     if deadline.is_zero() {
         return Vec::new();
     }
@@ -135,37 +112,20 @@ pub(crate) fn enumerate_scope_files_with_deadline(
         })
         .is_err()
     {
-        // Spawn failure (e.g. fd exhaustion). Fall back to no-scope rather
-        // than blocking the UI thread on a synchronous walk.
+        // Spawn failure (fd exhaustion) → no-scope rather than block the UI
+        // on a synchronous walk.
         return Vec::new();
     }
 
     rx.recv_timeout(deadline).unwrap_or_default()
 }
 
-/// Synchronous implementation. Bounded by `SCOPE_WALK_MAX_FILES` and
-/// `SCOPE_WALK_MAX_DEPTH`, and never follows symlinks (so a self-referential
-/// or upward-pointing symlink can't spin the walk forever).
 fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<String> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for token in prompt.split_whitespace() {
-        let token = token.trim_matches(|c: char| c == ',' || c == '.' || c == '"' || c == '\'');
-        if token.is_empty() {
-            continue;
-        }
-        if !token.contains('/') {
-            continue;
-        }
-        let candidate = workspace_root.join(token);
-        if candidate.is_dir() {
-            dirs.push(candidate);
-        }
-    }
+    let dirs = collect_prompt_dirs(workspace_root, prompt);
     if dirs.is_empty() {
-        // Prompt had no usable path tokens. Fall back to whatever the
-        // operator has actually changed in the working tree so the
-        // verifier still runs scoped commands (`-p <pkg>`) instead of
-        // collapsing to `--workspace --all-features`.
+        // No usable path tokens. Fall back to operator's working-tree edits
+        // so the verifier still runs scoped commands instead of collapsing
+        // to `--workspace --all-features`.
         return git_changed_scope_files(workspace_root);
     }
 
@@ -182,20 +142,28 @@ fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<St
     files
 }
 
-/// Last-resort scope source: ask git which files have changed in the
-/// current branch (committed + staged + unstaged), starting from the
-/// merge-base with `main`/`master`. Returns paths relative to
-/// `workspace_root`, filtered to the same source-file extensions the
-/// directory walk uses, and capped at `SCOPE_WALK_MAX_FILES`.
-///
-/// Returns `Vec::new()` on any failure: not a git repo, git missing,
-/// no merge-base, command nonzero exit, garbled output. Callers treat
-/// an empty result the same as "no scope" — verifier falls back to
-/// unscoped (`--workspace`) commands.
+fn collect_prompt_dirs(workspace_root: &Path, prompt: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for token in prompt.split_whitespace() {
+        let token = token.trim_matches(|c: char| c == ',' || c == '.' || c == '"' || c == '\'');
+        if token.is_empty() || !token.contains('/') {
+            continue;
+        }
+        let candidate = workspace_root.join(token);
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+    }
+    dirs
+}
+
+// Last-resort scope source: ask git which files changed in the current
+// branch, starting from the merge-base with `main`/`master`. Filtered to
+// the walk's accepted extensions, capped at `SCOPE_WALK_MAX_FILES`. Empty
+// on any failure (not a git repo, git missing, no merge-base, garbled
+// output) — caller treats empty as "no scope" and falls back to unscoped
+// commands.
 fn git_changed_scope_files(workspace_root: &Path) -> Vec<String> {
-    // Pick the diff base. Prefer `main`, fall back to `master`. If
-    // neither exists, fall back to plain `HEAD` so we still catch
-    // uncommitted edits.
     let base = git_diff_base(workspace_root).unwrap_or_else(|| "HEAD".to_string());
 
     let output = Command::new("git")
@@ -217,40 +185,9 @@ fn git_changed_scope_files(workspace_root: &Path) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| {
-            // Match the directory walk's accepted extensions.
-            let path = std::path::Path::new(line);
-            let ext_match = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(is_source_extension);
-            let filename_match = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(is_source_filename);
-            ext_match || filename_match
-        })
-        .filter(|line| {
-            // Skip files in directories the walk skips, so the two
-            // sources stay consistent. Allow leaf files starting with `.`
-            // (dotfiles like .zshrc) — only intermediate dot-DIRS are
-            // skipped.
-            let parts: Vec<&str> = line.split('/').collect();
-            let dir_components = if parts.len() > 1 {
-                &parts[..parts.len() - 1]
-            } else {
-                &[][..]
-            };
-            !dir_components.iter().any(|component| {
-                component.starts_with('.') || SCOPE_WALK_SKIP_DIRS.contains(component)
-            })
-        })
-        .filter(|line| {
-            // Final sanity check: file must currently exist on disk
-            // (a deletion would be in the diff but produce no
-            // verifier-relevant scope).
-            workspace_root.join(line).exists()
-        })
+        .filter(|line| has_source_basename(line))
+        .filter(|line| !line_is_in_skipped_dir(line))
+        .filter(|line| workspace_root.join(line).exists())
         .map(String::from)
         .collect();
     files.sort();
@@ -259,10 +196,37 @@ fn git_changed_scope_files(workspace_root: &Path) -> Vec<String> {
     files
 }
 
-/// Try to find a diff base by asking git for the merge-base of
-/// `HEAD` against `main`, then `master`. Returns `None` if neither
-/// branch exists or git fails. Caller treats `None` as "no committed
-/// branch base" and falls back to `HEAD` (uncommitted only).
+fn has_source_basename(line: &str) -> bool {
+    let path = Path::new(line);
+    let ext_match = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(is_source_extension);
+    let filename_match = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_source_filename);
+    ext_match || filename_match
+}
+
+// Skip files in directories the walk skips so the two sources stay
+// consistent. Allow leaf files starting with `.` (dotfiles like .zshrc) —
+// only intermediate dot-DIRS are skipped.
+fn line_is_in_skipped_dir(line: &str) -> bool {
+    let parts: Vec<&str> = line.split('/').collect();
+    let dir_components: &[&str] = if parts.len() > 1 {
+        &parts[..parts.len() - 1]
+    } else {
+        &[]
+    };
+    dir_components
+        .iter()
+        .any(|component| component.starts_with('.') || SCOPE_WALK_SKIP_DIRS.contains(component))
+}
+
+// Walk ancestors looking for `merge-base HEAD <branch>` against `main`,
+// then `master`. `None` when neither exists; caller falls back to `HEAD`
+// so we still catch uncommitted edits.
 fn git_diff_base(workspace_root: &Path) -> Option<String> {
     for branch in ["main", "master"] {
         let output = Command::new("git")
@@ -282,10 +246,7 @@ fn git_diff_base(workspace_root: &Path) -> Option<String> {
 }
 
 fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>, depth: usize) {
-    if depth >= SCOPE_WALK_MAX_DEPTH {
-        return;
-    }
-    if out.len() >= SCOPE_WALK_MAX_FILES {
+    if depth >= SCOPE_WALK_MAX_DEPTH || out.len() >= SCOPE_WALK_MAX_FILES {
         return;
     }
     let Ok(entries) = fs::read_dir(dir) else {
@@ -296,9 +257,8 @@ fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>
             return;
         }
         // `symlink_metadata` does not follow symlinks: any symlink (including
-        // a self-loop or one pointing back to an ancestor) shows up as a
-        // symlink, not as the dir/file it points at, so we skip it. This is
-        // our cycle guard — cheap and traversal-free.
+        // self-loops or upward-pointing links) shows up as a symlink, not as
+        // its target. This is the cycle guard — cheap and traversal-free.
         let Ok(meta) = entry.path().symlink_metadata() else {
             continue;
         };
@@ -313,332 +273,32 @@ fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>
                 }
             }
             collect_source_files(&path, workspace_root, out, depth + 1);
-        } else if meta.is_file() {
-            let name = path.file_name().and_then(|n| n.to_str());
-            let ext_match = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(is_source_extension);
-            let filename_match = name.is_some_and(is_source_filename);
-            if ext_match || filename_match {
-                if let Ok(rel) = path.strip_prefix(workspace_root) {
-                    out.push(rel.display().to_string());
-                }
+        } else if meta.is_file() && has_source_basename_path(&path) {
+            if let Ok(rel) = path.strip_prefix(workspace_root) {
+                out.push(rel.display().to_string());
             }
         }
     }
 }
 
-fn scope_walk_timeout() -> Duration {
+fn has_source_basename_path(path: &Path) -> bool {
+    has_source_basename(path.to_str().unwrap_or(""))
+}
+
+pub(super) fn scope_walk_timeout() -> Duration {
     let default = Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS);
-    match std::env::var("NIT_SCOPE_WALK_TIMEOUT_MS") {
-        Ok(raw) => {
-            let raw = raw.trim();
-            if raw.is_empty() {
-                return default;
-            }
-            match raw.parse::<u64>() {
-                // 0 means "skip the walk entirely" — return-immediately
-                // semantic. The worker thread is still spawned but the
-                // foreground returns Vec::new() right away.
-                Ok(0) => Duration::ZERO,
-                Ok(ms) => Duration::from_millis(ms),
-                Err(_) => default,
-            }
-        }
+    let Ok(raw) = std::env::var("NIT_SCOPE_WALK_TIMEOUT_MS") else {
+        return default;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return default;
+    }
+    match raw.parse::<u64>() {
+        // `0` = "skip the walk entirely". Worker thread is still spawned but
+        // the foreground returns Vec::new() right away.
+        Ok(0) => Duration::ZERO,
+        Ok(ms) => Duration::from_millis(ms),
         Err(_) => default,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-
-    fn fresh_root(name: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("nit-scope-test-{}-{}", name, std::process::id(),));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    #[test]
-    fn returns_empty_when_no_token_resolves_to_dir() {
-        let root = fresh_root("no_match");
-        let scope = enumerate_scope_files(&root, "rewrite Myproject/foo/myproject1/ to do X");
-        assert!(scope.is_empty());
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn walks_real_directory_and_lists_source_files() {
-        let root = fresh_root("real_dir");
-        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
-        fs::write(root.join("crates/foo/src/lib.rs"), "// lib").unwrap();
-        fs::write(root.join("crates/foo/src/notes.txt"), "skip me").unwrap();
-        let scope = enumerate_scope_files(&root, "edit crates/foo/");
-        assert!(scope.iter().any(|p| p.ends_with("lib.rs")));
-        assert!(!scope.iter().any(|p| p.ends_with("notes.txt"))); // wrong ext
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn skips_target_node_modules_and_dot_dirs() {
-        let root = fresh_root("skipped");
-        fs::create_dir_all(root.join("crates/foo/target/build")).unwrap();
-        fs::create_dir_all(root.join("crates/foo/node_modules/dep")).unwrap();
-        fs::create_dir_all(root.join("crates/foo/.cache")).unwrap();
-        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
-        fs::write(root.join("crates/foo/target/build/keep.rs"), "x").unwrap();
-        fs::write(root.join("crates/foo/node_modules/dep/keep.rs"), "x").unwrap();
-        fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
-        fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
-        let scope = enumerate_scope_files(&root, "look at crates/foo/");
-        assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
-        for path in &scope {
-            assert!(!path.contains("target/"), "leaked target/: {path}");
-            assert!(
-                !path.contains("node_modules"),
-                "leaked node_modules: {path}"
-            );
-            assert!(!path.contains(".cache"), "leaked .cache: {path}");
-        }
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn does_not_follow_symlinks_so_self_loops_terminate() {
-        let root = fresh_root("symlink_loop");
-        fs::create_dir_all(root.join("crates/foo")).unwrap();
-        fs::write(root.join("crates/foo/real.rs"), "x").unwrap();
-        // Make foo/loop point back at foo — would recurse forever without the symlink guard.
-        symlink(root.join("crates/foo"), root.join("crates/foo/loop")).unwrap();
-        let scope =
-            enumerate_scope_files_with_deadline(&root, "scan crates/foo/", Duration::from_secs(2));
-        assert!(scope.iter().any(|p| p.ends_with("real.rs")));
-        // The symlink target's contents must NOT appear via the loop path.
-        for path in &scope {
-            assert!(!path.contains("loop"), "followed symlink: {path}");
-        }
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn caps_recursion_depth() {
-        let root = fresh_root("deep");
-        // Build a chain deeper than SCOPE_WALK_MAX_DEPTH so the cap is the
-        // only thing that stops the walk.
-        let mut p = root.join("crates/deep");
-        for i in 0..(SCOPE_WALK_MAX_DEPTH + 5) {
-            p = p.join(format!("d{i}"));
-        }
-        fs::create_dir_all(&p).unwrap();
-        fs::write(p.join("buried.rs"), "x").unwrap();
-        let scope = enumerate_scope_files(&root, "trace crates/deep/");
-        // `buried.rs` lives below the cap, so it must not appear.
-        assert!(!scope.iter().any(|p| p.ends_with("buried.rs")));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn caps_total_files_returned() {
-        let root = fresh_root("many_files");
-        let dir = root.join("crates/many");
-        fs::create_dir_all(&dir).unwrap();
-        for i in 0..(SCOPE_WALK_MAX_FILES + 50) {
-            fs::write(dir.join(format!("f{i}.rs")), "x").unwrap();
-        }
-        let scope = enumerate_scope_files(&root, "process crates/many/");
-        assert_eq!(scope.len(), SCOPE_WALK_MAX_FILES);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn deadline_zero_returns_immediately_with_empty() {
-        // Even if a real directory exists, a zero deadline means the
-        // foreground returns an empty Vec without waiting on the worker.
-        let root = fresh_root("deadline_zero");
-        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
-        fs::write(root.join("crates/foo/src/lib.rs"), "x").unwrap();
-        let scope =
-            enumerate_scope_files_with_deadline(&root, "review crates/foo/", Duration::ZERO);
-        assert!(scope.is_empty());
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // `scope_walk_timeout` reads a process-wide env var; this test must be
-    // serialized against any other test that touches the same var.
-    #[test]
-    fn scope_walk_timeout_env_parsing() {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        const VAR: &str = "NIT_SCOPE_WALK_TIMEOUT_MS";
-
-        let prior = std::env::var(VAR).ok();
-
-        std::env::remove_var(VAR);
-        assert_eq!(
-            scope_walk_timeout(),
-            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
-        );
-
-        std::env::set_var(VAR, "  ");
-        assert_eq!(
-            scope_walk_timeout(),
-            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
-        );
-
-        std::env::set_var(VAR, "0");
-        assert_eq!(scope_walk_timeout(), Duration::ZERO);
-
-        std::env::set_var(VAR, "750");
-        assert_eq!(scope_walk_timeout(), Duration::from_millis(750));
-
-        std::env::set_var(VAR, "garbage");
-        assert_eq!(
-            scope_walk_timeout(),
-            Duration::from_millis(SCOPE_WALK_DEFAULT_TIMEOUT_MS)
-        );
-
-        match prior {
-            Some(value) => std::env::set_var(VAR, value),
-            None => std::env::remove_var(VAR),
-        }
-    }
-
-    fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(cwd);
-        // Make sure committer/author env doesn't leak from the host.
-        cmd.env("GIT_AUTHOR_NAME", "scope-test")
-            .env("GIT_AUTHOR_EMAIL", "scope@test")
-            .env("GIT_COMMITTER_NAME", "scope-test")
-            .env("GIT_COMMITTER_EMAIL", "scope@test");
-        cmd.output().expect("git command")
-    }
-
-    #[test]
-    fn git_fallback_includes_uncommitted_changes_when_prompt_has_no_paths() {
-        // Skip cleanly when git is missing on the build host (CI sandbox,
-        // minimal images, etc.) so the test doesn't false-fail.
-        if Command::new("git").arg("--version").output().is_err() {
-            eprintln!("git missing — skipping");
-            return;
-        }
-        let root = fresh_root("git_changed");
-
-        assert!(run_git(&["init", "-q", "-b", "main"], &root)
-            .status
-            .success());
-        // Seed the repo with a committed .rs file inside `crates/`.
-        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
-        fs::write(root.join("crates/foo/src/lib.rs"), "// initial\n").unwrap();
-        assert!(run_git(&["add", "-A"], &root).status.success());
-        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
-            .status
-            .success());
-        // Now modify it — `git diff --name-only HEAD` should report it.
-        fs::write(root.join("crates/foo/src/lib.rs"), "// changed\n").unwrap();
-
-        // Prompt deliberately has no path tokens (no `/`), so the
-        // directory walk returns empty and the git fallback kicks in.
-        let scope = enumerate_scope_files(&root, "fix the bug");
-        assert!(
-            scope.iter().any(|p| p.ends_with("crates/foo/src/lib.rs")),
-            "expected git fallback to include the modified .rs file, got {scope:?}"
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_fallback_skips_target_and_dot_dirs() {
-        if Command::new("git").arg("--version").output().is_err() {
-            eprintln!("git missing — skipping");
-            return;
-        }
-        let root = fresh_root("git_filters");
-        assert!(run_git(&["init", "-q", "-b", "main"], &root)
-            .status
-            .success());
-        // Track files in target/ and .cache/ so they show up in the
-        // diff. The fallback must filter them out the same way the
-        // directory walk does.
-        fs::create_dir_all(root.join("crates/foo/target")).unwrap();
-        fs::create_dir_all(root.join("crates/foo/.cache")).unwrap();
-        fs::create_dir_all(root.join("crates/foo/src")).unwrap();
-        fs::write(root.join("crates/foo/target/keep.rs"), "x").unwrap();
-        fs::write(root.join("crates/foo/.cache/keep.rs"), "x").unwrap();
-        fs::write(root.join("crates/foo/src/keep.rs"), "x").unwrap();
-        // notes.txt is wrong-extension (txt is intentionally not in the
-        // source allowlist); must not slip through.
-        fs::write(root.join("notes.txt"), "x").unwrap();
-        // Force git to track even the normally-ignored paths.
-        fs::write(root.join(".gitignore"), "").unwrap();
-        assert!(run_git(&["add", "-A"], &root).status.success());
-        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
-            .status
-            .success());
-        // Touch all four files so they show in the diff.
-        fs::write(root.join("crates/foo/target/keep.rs"), "y").unwrap();
-        fs::write(root.join("crates/foo/.cache/keep.rs"), "y").unwrap();
-        fs::write(root.join("crates/foo/src/keep.rs"), "y").unwrap();
-        fs::write(root.join("notes.txt"), "y").unwrap();
-
-        let scope = enumerate_scope_files(&root, "general cleanup");
-        assert!(scope.iter().any(|p| p.ends_with("src/keep.rs")));
-        for path in &scope {
-            assert!(!path.contains("target/"), "leaked target/: {path}");
-            assert!(!path.contains(".cache"), "leaked .cache: {path}");
-            assert!(!path.ends_with(".txt"), "wrong-ext slipped: {path}");
-        }
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_fallback_includes_dotfile_changes() {
-        if Command::new("git").arg("--version").output().is_err() {
-            eprintln!("git missing — skipping");
-            return;
-        }
-        let root = fresh_root("git_dotfiles");
-        assert!(run_git(&["init", "-q", "-b", "main"], &root)
-            .status
-            .success());
-        // Seed dotfile-style files. The walker now treats .zshrc / .sh /
-        // .tmux.conf as source so dotfiles repos can produce a non-empty
-        // scope_files list at the planner.
-        fs::write(root.join(".zshrc"), "alias ll='ls -la'\n").unwrap();
-        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env bash\n").unwrap();
-        fs::write(root.join(".tmux.conf"), "set -g mouse on\n").unwrap();
-        fs::write(root.join("README.md"), "# dotfiles\n").unwrap();
-        fs::write(root.join(".gitignore"), "").unwrap();
-        assert!(run_git(&["add", "-A"], &root).status.success());
-        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
-            .status
-            .success());
-        // Modify each tracked file so it appears in the diff.
-        fs::write(root.join(".zshrc"), "alias l='ls'\n").unwrap();
-        fs::write(root.join("tmux-gpu.sh"), "#!/usr/bin/env zsh\n").unwrap();
-        fs::write(root.join(".tmux.conf"), "set -g mouse off\n").unwrap();
-        fs::write(root.join("README.md"), "# dotfiles updated\n").unwrap();
-
-        let scope = enumerate_scope_files(&root, "general cleanup");
-        assert!(scope.iter().any(|p| p.ends_with(".zshrc")));
-        assert!(scope.iter().any(|p| p.ends_with("tmux-gpu.sh")));
-        assert!(scope.iter().any(|p| p.ends_with(".tmux.conf")));
-        assert!(scope.iter().any(|p| p.ends_with("README.md")));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_fallback_returns_empty_when_not_a_git_repo() {
-        // Plain temp dir, no `git init`. The fallback must fail
-        // gracefully and not panic / hang / leak the host's repo.
-        let root = fresh_root("not_a_repo");
-        let scope = enumerate_scope_files(&root, "do something");
-        assert!(scope.is_empty(), "expected empty scope, got {scope:?}");
-        let _ = fs::remove_dir_all(&root);
     }
 }

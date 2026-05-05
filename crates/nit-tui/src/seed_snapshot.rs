@@ -121,15 +121,9 @@ struct LastSeedSnapshotKey {
 
 impl LastSeedSnapshotKey {
     fn allows(&self, key: &SeedSnapshotKey, now: Instant, min_interval: Duration) -> bool {
-        if let Some(prev) = &self.key {
-            if prev == key {
-                return false;
-            }
-        }
-        if now.duration_since(self.last_at) < min_interval {
-            return false;
-        }
-        true
+        let same_key = self.key.as_ref().is_some_and(|prev| prev == key);
+        let too_soon = now.duration_since(self.last_at) < min_interval;
+        !same_key && !too_soon
     }
 }
 

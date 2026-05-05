@@ -54,53 +54,19 @@ pub(crate) fn drain_codex_event(
     genome_worker: Option<&GenomeWorker>,
     event: AgentBusEvent,
 ) -> EventDrainOutcome {
-    record_agent_bus_vitals(vitals, &event);
-    let finished = matches!(
+    drain_event_inner(
+        state,
+        vitals,
+        codex,
+        claude,
+        swarm,
+        shadow,
+        genome_worker,
         event,
-        AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
-    );
-    let pinned_popup_ref = snapshot_pinned_popup_ref(state, swarm);
-    let pending_thread_clear = pending_codex_thread_clear(&event);
-
-    event.apply(state);
-
-    if let Some((agent_id, mission_id)) = pending_thread_clear {
-        clear_codex_thread_context_for_agent(state, agent_id.as_str(), mission_id.as_deref());
-    }
-
-    drain_pending_claim_retries(state, vitals, codex, claude);
-    drain_pending_interventions(state, vitals, codex, claude);
-
-    let swarm_outcome = swarm.handle_event_outcome(state, &event);
-    maybe_follow_swarm_artifact_in_popup(state, swarm, swarm_outcome.artifact_focus.as_ref());
-    for mut dispatch in swarm_outcome.dispatches {
-        augment_dispatch_prompt_with_landscape(state, swarm, &mut dispatch);
-        apply_swarm_task_role(state, &dispatch);
-        dispatch_agent_prompt(
-            state,
-            vitals,
-            Some(codex),
-            Some(claude),
-            dispatch.agent_id,
-            Some(dispatch.mission_id),
-            dispatch.prompt,
-        );
-    }
-
-    drain_intake_outcome(state, vitals, codex, claude, &event);
-    drain_shadow_outcome(state, vitals, codex, claude, shadow, &event);
-
-    if finished {
-        maybe_dispatch_next_queued_codex_turn(state, vitals, Some(codex));
-        maybe_dispatch_next_queued_claude_turn(state, vitals, Some(claude));
-        cleanup_chat_clone_for_finished_event(state, &event);
-        if let Some(genome) = genome_worker {
-            maybe_dispatch_genome_evals(state, genome, &event);
-        }
-    }
-
-    re_resolve_pinned_popup_ref(state, swarm, pinned_popup_ref.as_ref());
-    EventDrainOutcome { redraw: true }
+        pending_codex_thread_clear,
+        |state, event| event.apply(state),
+        clear_codex_thread_context_for_agent,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -114,18 +80,47 @@ pub(crate) fn drain_claude_event(
     genome_worker: Option<&GenomeWorker>,
     event: AgentBusEvent,
 ) -> EventDrainOutcome {
+    drain_event_inner(
+        state,
+        vitals,
+        codex,
+        claude,
+        swarm,
+        shadow,
+        genome_worker,
+        event,
+        pending_claude_session_clear,
+        apply_claude_event,
+        clear_claude_session_context_for_agent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_event_inner(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+    swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
+    genome_worker: Option<&GenomeWorker>,
+    event: AgentBusEvent,
+    pending_clear: impl FnOnce(&AgentBusEvent) -> Option<(String, Option<String>)>,
+    apply_fn: impl FnOnce(&mut AppState, &AgentBusEvent),
+    do_clear: impl FnOnce(&mut AppState, &str, Option<&str>),
+) -> EventDrainOutcome {
     record_agent_bus_vitals(vitals, &event);
     let finished = matches!(
         event,
         AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
     );
     let pinned_popup_ref = snapshot_pinned_popup_ref(state, swarm);
-    let pending_session_clear = pending_claude_session_clear(&event);
+    let pending = pending_clear(&event);
 
-    apply_claude_event(state, &event);
+    apply_fn(state, &event);
 
-    if let Some((agent_id, mission_id)) = pending_session_clear {
-        clear_claude_session_context_for_agent(state, agent_id.as_str(), mission_id.as_deref());
+    if let Some((agent_id, mission_id)) = pending {
+        do_clear(state, agent_id.as_str(), mission_id.as_deref());
     }
 
     drain_pending_claim_retries(state, vitals, codex, claude);

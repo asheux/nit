@@ -202,7 +202,7 @@ fn external_file_change_does_not_trigger_reeval() {
     nit_core::agent_bus::persist_genome_report(&root, &report);
 
     let mut state = make_state(root.clone());
-    state.genome_reports.insert(file.clone(), report.clone());
+    state.genome_reports.insert(file.clone(), report);
 
     let mut scan = WorkspaceScanRuntime::new();
     scan.note_change(&mut state, file.clone());
@@ -537,7 +537,7 @@ fn external_change_leaves_cache_unchanged_regardless_of_mtime_skew() {
             grid_size: 32,
             parsimony: Default::default(),
         };
-        state.genome_reports.insert(file.clone(), report.clone());
+        state.genome_reports.insert(file.clone(), report);
 
         let mut scan = WorkspaceScanRuntime::new();
         scan.note_change(&mut state, file.clone());

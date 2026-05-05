@@ -105,6 +105,41 @@ pub(super) fn build_planner_prompt(
     let scope_files = enumerate_scope_files(workspace_root, root_prompt);
     let large_scope = scope_files.len() > 15;
     let mut out = String::new();
+    append_planner_header(&mut out, template, mission_kind, integrator_agent_id);
+    append_planner_constraints(
+        &mut out,
+        template,
+        mission_kind,
+        integrator_agent_id,
+        &available,
+        role_hints,
+        priority_agent_ids,
+        &scope_files,
+        large_scope,
+    );
+    append_template_specific_constraints(&mut out, template);
+    out.push_str(
+        "- When the operator request involves refactoring or modifying a module/directory, the plan MUST cover ALL files in that scope. Assign a recon or propose task to survey the full directory tree first, and ensure the integrate task prompt lists every affected file.\n",
+    );
+    out.push_str(
+        "- Each task prompt should be specific about which files or areas to focus on, not generic. The more concrete the prompt, the better the agent output.\n",
+    );
+    append_planner_output_format(&mut out, template);
+    append_planner_scope_section(&mut out, &scope_files);
+    append_planner_memory_hits(&mut out, memory_hits, workspace_root);
+
+    out.push_str("\nOperator request:\n");
+    out.push_str(root_prompt.trim());
+    out.push('\n');
+    out
+}
+
+fn append_planner_header(
+    out: &mut String,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+) {
     out.push_str(
         "You are the SWARM PLANNER inside nit. Create an execution plan for a multi-agent workflow.\n\n",
     );
@@ -117,7 +152,20 @@ pub(super) fn build_planner_prompt(
     } else if matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
         out.push_str("Single-writer integrator: (none)\n\n");
     }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn append_planner_constraints(
+    out: &mut String,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+    available: &[String],
+    role_hints: &[(String, String)],
+    priority_agent_ids: &[String],
+    scope_files: &[String],
+    large_scope: bool,
+) {
     out.push_str("Constraints:\n");
     out.push_str("- Only assign tasks to these agent ids:\n");
     for id in available.iter() {
@@ -144,6 +192,39 @@ pub(super) fn build_planner_prompt(
     out.push_str(
         "- If you assign `research` or `computational-research`, ensure the task output asks for sources, methods, assumptions, and ranked strategy recommendations.\n",
     );
+    append_mission_kind_lines(out, mission_kind);
+    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        if large_scope {
+            out.push_str(
+                "- Treat `judge` as a singleton role. The `integrate` role may be split across MULTIPLE tasks when the scope is large — assign disjoint file subsets to each integrate task so every file is covered.\n",
+            );
+        } else {
+            out.push_str(
+                "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
+            );
+        }
+    }
+    append_integrator_constraints(
+        out,
+        mission_kind,
+        integrator_agent_id,
+        scope_files,
+        large_scope,
+    );
+    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
+        && !priority_agent_ids.is_empty()
+    {
+        out.push_str("- Priority agents (from roster):\n");
+        for id in priority_agent_ids.iter() {
+            out.push_str(&format!("  - {id}\n"));
+        }
+        out.push_str(
+            "- When multiple assignments are viable, prefer priority agents for the most critical/high-impact work.\n",
+        );
+    }
+}
+
+fn append_mission_kind_lines(out: &mut String, mission_kind: SwarmMissionKind) {
     match mission_kind {
         SwarmMissionKind::General => out.push_str(
             "- This mission is not research-oriented, so avoid `research` / `computational-research` roles unless the operator explicitly changes the mission focus.\n",
@@ -171,51 +252,43 @@ pub(super) fn build_planner_prompt(
             );
         }
     }
-    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        if large_scope {
-            out.push_str(
-                "- Treat `judge` as a singleton role. The `integrate` role may be split across MULTIPLE tasks when the scope is large — assign disjoint file subsets to each integrate task so every file is covered.\n",
-            );
-        } else {
-            out.push_str(
-                "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
-            );
-        }
+}
+
+fn append_integrator_constraints(
+    out: &mut String,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+    scope_files: &[String],
+    large_scope: bool,
+) {
+    let Some(integrator_agent_id) = integrator_agent_id else {
+        return;
+    };
+    if large_scope {
+        out.push_str(&format!(
+            "- Code changes: assign `writes=true` and `role=integrate` to tasks. The scope has {} files — split integrate work across multiple agents with disjoint file subsets. Each integrate task prompt MUST list the exact files it is responsible for. Any agent may receive `role=integrate` and `writes=true` when the scope is large.\n",
+            scope_files.len()
+        ));
+    } else {
+        out.push_str(&format!(
+            "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
+        ));
     }
-    if let Some(integrator_agent_id) = integrator_agent_id {
-        if large_scope {
-            out.push_str(&format!(
-                "- Code changes: assign `writes=true` and `role=integrate` to tasks. The scope has {} files — split integrate work across multiple agents with disjoint file subsets. Each integrate task prompt MUST list the exact files it is responsible for. Any agent may receive `role=integrate` and `writes=true` when the scope is large.\n",
-                scope_files.len()
-            ));
-        } else {
-            out.push_str(&format!(
-                "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
-            ));
-        }
-        if matches!(mission_kind, SwarmMissionKind::General) {
-            if large_scope {
-                out.push_str(
-                    "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include at least one task with `role=integrate` and `writes=true`. Split across multiple integrate tasks so every file in the scope is covered. Without integrate tasks, no workspace edits will be made.\n"
-                );
-            } else {
-                out.push_str(&format!(
-                    "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
-                ));
-            }
-        }
+    if !matches!(mission_kind, SwarmMissionKind::General) {
+        return;
     }
-    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
-        && !priority_agent_ids.is_empty()
-    {
-        out.push_str("- Priority agents (from roster):\n");
-        for id in priority_agent_ids.iter() {
-            out.push_str(&format!("  - {id}\n"));
-        }
+    if large_scope {
         out.push_str(
-            "- When multiple assignments are viable, prefer priority agents for the most critical/high-impact work.\n",
+            "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include at least one task with `role=integrate` and `writes=true`. Split across multiple integrate tasks so every file in the scope is covered. Without integrate tasks, no workspace edits will be made.\n"
         );
+    } else {
+        out.push_str(&format!(
+            "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+        ));
     }
+}
+
+fn append_template_specific_constraints(out: &mut String, template: SwarmTemplate) {
     match template {
         SwarmTemplate::Parallel => {
             out.push_str(
@@ -282,12 +355,9 @@ pub(super) fn build_planner_prompt(
             out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
         }
     }
-    out.push_str(
-        "- When the operator request involves refactoring or modifying a module/directory, the plan MUST cover ALL files in that scope. Assign a recon or propose task to survey the full directory tree first, and ensure the integrate task prompt lists every affected file.\n",
-    );
-    out.push_str(
-        "- Each task prompt should be specific about which files or areas to focus on, not generic. The more concrete the prompt, the better the agent output.\n",
-    );
+}
+
+fn append_planner_output_format(out: &mut String, template: SwarmTemplate) {
     out.push_str("\nOutput format:\n");
     out.push_str("1) 3-6 bullets summarizing the plan.\n");
     out.push_str("2) A JSON plan in a ```json code block with this schema (v2):\n");
@@ -314,65 +384,71 @@ pub(super) fn build_planner_prompt(
         "  \"synthesis_prompt\": \"(optional extra guidance for the final synthesis step)\"\n",
     );
     out.push_str("}\n");
+}
 
-    if !scope_files.is_empty() {
-        out.push_str("\nScope — files in the referenced module/directory (");
-        out.push_str(&format!("{} files):\n", scope_files.len()));
-        for path in scope_files.iter() {
-            out.push_str(&format!("  - {path}\n"));
-        }
-        out.push_str("\nSCOPE RULES:\n");
-        out.push_str("- \"Refactor module\" means refactor EVERY file listed above. No file may remain unchanged.\n");
-        out.push_str("- Each integrate task prompt MUST embed the exact file paths it is responsible for as a numbered checklist, e.g.:\n");
-        out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. <path/to/first/file>\\n2. <path/to/second/file>\\n...\"\n");
-        out.push_str("- Distribute ALL files across integrate tasks so every file is assigned to exactly one task.\n");
-        out.push_str("- If there is one integrate task, it must list all files. If there are multiple, split them into disjoint subsets.\n");
+fn append_planner_scope_section(out: &mut String, scope_files: &[String]) {
+    if scope_files.is_empty() {
+        return;
     }
+    out.push_str("\nScope — files in the referenced module/directory (");
+    out.push_str(&format!("{} files):\n", scope_files.len()));
+    for path in scope_files.iter() {
+        out.push_str(&format!("  - {path}\n"));
+    }
+    out.push_str("\nSCOPE RULES:\n");
+    out.push_str("- \"Refactor module\" means refactor EVERY file listed above. No file may remain unchanged.\n");
+    out.push_str("- Each integrate task prompt MUST embed the exact file paths it is responsible for as a numbered checklist, e.g.:\n");
+    out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. <path/to/first/file>\\n2. <path/to/second/file>\\n...\"\n");
+    out.push_str("- Distribute ALL files across integrate tasks so every file is assigned to exactly one task.\n");
+    out.push_str("- If there is one integrate task, it must list all files. If there are multiple, split them into disjoint subsets.\n");
+}
 
-    if !memory_hits.is_empty() {
-        out.push_str(
-            "\nPrior similar missions (read-only context — do not re-plan these, use as precedent):\n",
-        );
-        for hit in memory_hits.iter() {
-            let m = &hit.mission;
+fn append_planner_memory_hits(
+    out: &mut String,
+    memory_hits: &[nit_core::MissionHit],
+    workspace_root: &Path,
+) {
+    if memory_hits.is_empty() {
+        return;
+    }
+    out.push_str(
+        "\nPrior similar missions (read-only context — do not re-plan these, use as precedent):\n",
+    );
+    for hit in memory_hits.iter() {
+        let m = &hit.mission;
+        out.push_str(&format!(
+            "- {} [{}, {}]: {}\n",
+            m.mission_id, m.template, m.status, m.title
+        ));
+        for s in m.task_summaries.iter().take(3) {
+            out.push_str(&format!("    * {}\n", truncate_chars(s, 180)));
+        }
+        if m.files_touched.is_empty() {
+            continue;
+        }
+        // Filter out paths that no longer exist in the current spawn
+        // workspace. Without this, a polluted `.nit/swarm` index (e.g.
+        // mission memory carried over from a prior, different workspace)
+        // bleeds nit-internal paths into the planner — which then echoes
+        // them into integrate task_prompts. The self-reinforcing leak
+        // loop the operator hit on dotbox.
+        let preview: Vec<&String> = m
+            .files_touched
+            .iter()
+            .filter(|p| workspace_root.join(p).exists())
+            .take(5)
+            .collect();
+        if !preview.is_empty() {
             out.push_str(&format!(
-                "- {} [{}, {}]: {}\n",
-                m.mission_id, m.template, m.status, m.title
-            ));
-            for s in m.task_summaries.iter().take(3) {
-                out.push_str(&format!("    * {}\n", truncate_chars(s, 180)));
-            }
-            if !m.files_touched.is_empty() {
-                // Filter out paths that no longer exist in the current spawn
-                // workspace. Without this, a polluted `.nit/swarm` index (e.g.
-                // mission memory carried over from a prior, different
-                // workspace) bleeds nit-internal paths into the planner —
-                // which then echoes them into integrate task_prompts. The
-                // self-reinforcing leak loop the operator hit on dotbox.
-                let preview: Vec<&String> = m
-                    .files_touched
+                "    files: {}\n",
+                preview
                     .iter()
-                    .filter(|p| workspace_root.join(p).exists())
-                    .take(5)
-                    .collect();
-                if !preview.is_empty() {
-                    out.push_str(&format!(
-                        "    files: {}\n",
-                        preview
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-            }
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
-
-    out.push_str("\nOperator request:\n");
-    out.push_str(root_prompt.trim());
-    out.push('\n');
-    out
 }
 
 pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
@@ -506,29 +582,76 @@ pub(super) fn wrap_task_prompt(
     spawn_cwd: &Path,
 ) -> String {
     let mut out = String::new();
-    // Continuation preamble: when a task has been re-dispatched because its
-    // prior output failed the sign-off check, surface the partial output and
-    // tell the agent to pick up where it left off instead of restarting.
-    if task.retries > 0 {
-        out.push_str(&format!(
-            "## CONTINUATION (attempt {})\n\
-             Your previous attempt on this task did NOT complete the sign-off check — either the {TASK_COMPLETE_SENTINEL} sentinel was missing, or your output ended by asking for approval / offering options. That is a task failure, not a valid stopping point.\n\
-             - Treat this turn as a CONTINUATION of your prior work, not a fresh start.\n\
-             - Pick up where you left off and finish the ENTIRE scope.\n\
-             - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just do the remaining work.\n\
-             - End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
-            task.retries + 1
-        ));
-        if let Some(prior) = task.output.as_deref() {
-            let prior = prior.trim();
-            if !prior.is_empty() {
-                out.push_str("\nYour previous partial output (for context):\n");
-                out.push_str("```\n");
-                out.push_str(&truncate_chars(prior, 4000));
-                out.push_str("\n```\n\n");
-            }
+    append_task_continuation_preamble(&mut out, task);
+    append_task_header(&mut out, task);
+    append_task_execution_mode(&mut out, task);
+    append_task_mission_contract(&mut out, mission_kind);
+    append_task_role_contract(&mut out, task);
+    append_task_done_and_artifacts(&mut out, task);
+
+    out.push_str("\nOperator request:\n");
+    out.push_str(root_prompt.trim());
+    out.push('\n');
+
+    // Inject the scope file list BEFORE the task prompt so the agent sees
+    // the full file checklist first, then the task instructions. Prevents
+    // the agent from forming a plan that ignores files.
+    append_task_scope_section(&mut out, task, scope_files, spawn_cwd);
+
+    out.push_str("\nYour task:\n");
+    out.push_str(task.task_prompt.trim());
+    out.push('\n');
+
+    append_task_dependency_outputs(&mut out, task, deps);
+    append_task_structured_artifacts(&mut out, task);
+
+    out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
+
+    // Embed genome quality instructions so every role sees the measurement
+    // system, regardless of whether genome context is also injected at
+    // dispatch time.
+    out.push('\n');
+    out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    out.push('\n');
+
+    // Machine-checked sign-off. Orchestrator scans for it on TurnCompleted
+    // and auto-retries tasks that omit it. Kept verbatim — do not
+    // paraphrase, quote, or wrap in backticks.
+    out.push_str(&format!(
+        "\n## SIGN-OFF (REQUIRED)\n\
+         After the structured artifacts JSON block above, on its own final line, emit the literal sentinel:\n\
+         {TASK_COMPLETE_SENTINEL}\n\
+         Do not paraphrase it, do not wrap it in code fences, do not comment on it. Its presence is how the orchestrator knows you are done. Its absence triggers an automatic continuation turn with your partial output.\n"
+    ));
+
+    out
+}
+
+fn append_task_continuation_preamble(out: &mut String, task: &SwarmTask) {
+    if task.retries == 0 {
+        return;
+    }
+    out.push_str(&format!(
+        "## CONTINUATION (attempt {})\n\
+         Your previous attempt on this task did NOT complete the sign-off check — either the {TASK_COMPLETE_SENTINEL} sentinel was missing, or your output ended by asking for approval / offering options. That is a task failure, not a valid stopping point.\n\
+         - Treat this turn as a CONTINUATION of your prior work, not a fresh start.\n\
+         - Pick up where you left off and finish the ENTIRE scope.\n\
+         - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just do the remaining work.\n\
+         - End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
+        task.retries + 1
+    ));
+    if let Some(prior) = task.output.as_deref() {
+        let prior = prior.trim();
+        if !prior.is_empty() {
+            out.push_str("\nYour previous partial output (for context):\n");
+            out.push_str("```\n");
+            out.push_str(&truncate_chars(prior, 4000));
+            out.push_str("\n```\n\n");
         }
     }
+}
+
+fn append_task_header(out: &mut String, task: &SwarmTask) {
     out.push_str(&format!(
         "SWARM TASK: {} ({})\n",
         task.title.trim(),
@@ -539,10 +662,11 @@ pub(super) fn wrap_task_prompt(
             out.push_str(&format!("ROLE: {}\n", role.trim()));
         }
     }
-    // NON-INTERACTIVE contract: this runs in an autonomous swarm. Agents that
-    // pause to ask for approval will stall the pipeline (there is no human in
-    // the loop to answer). The sentinel below is how the orchestrator detects
-    // completion; missing it triggers an automatic continuation turn.
+}
+
+fn append_task_execution_mode(out: &mut String, task: &SwarmTask) {
+    // Sentinel below is how the orchestrator detects completion; missing
+    // it triggers an automatic continuation turn.
     out.push_str(
         "EXECUTION MODE: non-interactive (autonomous swarm — no human reviewer between turns).\n\
          - Complete the ENTIRE scope described below before returning; do not stop halfway.\n\
@@ -556,32 +680,43 @@ pub(super) fn wrap_task_prompt(
     } else {
         out.push_str("MODE: read-only (do not edit the workspace)\n");
     }
-    if mission_kind.allows_research_roles() {
-        out.push_str(&format!("MISSION FOCUS: {}\n", mission_kind.label()));
-        out.push_str("MISSION CONTRACT:\n");
-        match mission_kind {
-            SwarmMissionKind::Research => out.push_str(
-                "- This is a research mission: prioritize external sources, evidence, and ranked strategy discovery over routine code implementation.\n",
-            ),
-            SwarmMissionKind::ComputationalResearch => out.push_str(
-                "- This is a computational-research mission: prioritize modeling, experiments, quantitative evidence, and reproducible analysis over routine code implementation.\n",
-            ),
-            SwarmMissionKind::General => {}
-        }
+}
+
+fn append_task_mission_contract(out: &mut String, mission_kind: SwarmMissionKind) {
+    if !mission_kind.allows_research_roles() {
+        return;
     }
-    if let Some(role) = task.role.as_deref().and_then(normalize_role_label) {
-        out.push_str("ROLE CONTRACT:\n");
-        out.push_str("- Act strictly as the assigned role for this task.\n");
-        for line in role_contract_lines(role.as_str()) {
+    out.push_str(&format!("MISSION FOCUS: {}\n", mission_kind.label()));
+    out.push_str("MISSION CONTRACT:\n");
+    match mission_kind {
+        SwarmMissionKind::Research => out.push_str(
+            "- This is a research mission: prioritize external sources, evidence, and ranked strategy discovery over routine code implementation.\n",
+        ),
+        SwarmMissionKind::ComputationalResearch => out.push_str(
+            "- This is a computational-research mission: prioritize modeling, experiments, quantitative evidence, and reproducible analysis over routine code implementation.\n",
+        ),
+        SwarmMissionKind::General => {}
+    }
+}
+
+fn append_task_role_contract(out: &mut String, task: &SwarmTask) {
+    let Some(role) = task.role.as_deref().and_then(normalize_role_label) else {
+        return;
+    };
+    out.push_str("ROLE CONTRACT:\n");
+    out.push_str("- Act strictly as the assigned role for this task.\n");
+    for line in role_contract_lines(role.as_str()) {
+        out.push_str(&format!("- {line}\n"));
+    }
+    if let Some(lines) = role_response_format_lines(role.as_str()) {
+        out.push_str("RESPONSE FORMAT:\n");
+        for line in lines {
             out.push_str(&format!("- {line}\n"));
         }
-        if let Some(lines) = role_response_format_lines(role.as_str()) {
-            out.push_str("RESPONSE FORMAT:\n");
-            for line in lines {
-                out.push_str(&format!("- {line}\n"));
-            }
-        }
     }
+}
+
+fn append_task_done_and_artifacts(out: &mut String, task: &SwarmTask) {
     if let Some(done_when) = task.done_when.as_deref() {
         if !done_when.trim().is_empty() {
             out.push_str(&format!("DONE WHEN: {}\n", done_when.trim()));
@@ -597,193 +732,194 @@ pub(super) fn wrap_task_prompt(
             out.push_str(&format!("- {item}\n"));
         }
     }
+}
 
-    out.push_str("\nOperator request:\n");
-    out.push_str(root_prompt.trim());
-    out.push('\n');
-
-    // Inject the scope file list BEFORE the task prompt so the agent sees the
-    // full file checklist first, then the task instructions.  This prevents the
-    // agent from forming a plan that ignores files.
-    if !scope_files.is_empty() {
-        let is_integrate = task
-            .role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some("integrate");
-        let is_propose = task
-            .role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some("propose");
-        if is_integrate {
-            out.push_str("\n## FILE CHECKLIST (non-negotiable)\n");
-            out.push_str(
-                "\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n",
-            );
-            out.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
-            out.push_str(
-                "Even if a file looks clean, improve naming, docs, structure, or consistency.\n",
-            );
-            out.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
-            out.push_str("COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior (e.g. \"/// Returns the value\" on fn value()). Keep comments that explain WHY something is done, document non-obvious constraints, safety invariants, or algorithmic choices. A comment worth keeping tells the reader something the code alone cannot.\n");
-            out.push_str("Your task is NOT complete until every file has been modified.\n\n");
-            for (i, path) in scope_files.iter().enumerate() {
-                out.push_str(&format!("{}. {path}\n", i + 1));
-            }
-            out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
-        } else if is_propose {
-            out.push_str("\n## SCOPE — files in the target module\n");
-            out.push_str("Your proposal must cover ALL of these files (no exceptions):\n");
-            for (i, path) in scope_files.iter().enumerate() {
-                out.push_str(&format!("{}. {path}\n", i + 1));
-            }
-        } else {
-            // Test / review / judge / other read-only roles: inject the exact
-            // crate scope derived from the scope files so the agent can't
-            // drift into `cargo test --all`. Agents have ignored the
-            // prose-only discipline rules repeatedly; giving them the
-            // concrete command leaves no room to improvise.
-            let role = task.role.as_deref().and_then(normalize_role_label);
-            let is_test = role.as_deref() == Some("test");
-            let is_review = role.as_deref() == Some("review");
-            // Only emit the cargo-specific REQUIRED COMMANDS block on actual
-            // cargo workspaces. A workspace can contain a `crates/` directory
-            // without being a Cargo workspace (vendored deps, monorepos with
-            // non-Rust subdirs, dotfiles repos that happen to share a token);
-            // injecting `cargo test -p <name>` into a non-Rust agent's prompt
-            // is the leak the operator reported on dotbox.
-            if (is_test || is_review) && is_cargo_workspace(spawn_cwd) {
-                let crates = crate_names_from_paths(scope_files);
-                if !crates.is_empty() {
-                    out.push_str("\n## SCOPE — crates touched by this mission\n");
-                    out.push_str(
-                        "These are the ONLY crates you may exercise. Do NOT widen to workspace-wide (`--all` / `--workspace`) under any circumstance, even \"just to be safe\".\n",
-                    );
-                    for c in &crates {
-                        out.push_str(&format!("- {c}\n"));
-                    }
-                    out.push_str("\nREQUIRED COMMANDS (use exactly these; do not add `--all` or `--workspace`):\n");
-                    let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
-                    if is_test {
-                        out.push_str(&format!(
-                            "- `cargo test{pkg_flags}` — run the scoped test suite.\n"
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "- `cargo test{pkg_flags}` — if you need to confirm tests still pass.\n"
-                        ));
-                        out.push_str(&format!(
-                            "- `cargo clippy{pkg_flags} --all-targets -- -D warnings` — lint only the touched crates.\n"
-                        ));
-                    }
-                    out.push_str(
-                        "If a targeted command fails, report the failure and STOP — do not broaden the scope to diagnose.\n",
-                    );
-                }
-            }
-        }
+fn append_task_scope_section(
+    out: &mut String,
+    task: &SwarmTask,
+    scope_files: &[String],
+    spawn_cwd: &Path,
+) {
+    if scope_files.is_empty() {
+        return;
     }
-
-    out.push_str("\nYour task:\n");
-    out.push_str(task.task_prompt.trim());
-    out.push('\n');
-
-    if let Some(deps) = deps {
-        if !deps.is_empty() {
-            let normalized_role = task.role.as_deref().and_then(normalize_role_label);
-            let role_kind = normalized_role.as_deref();
-            let is_judge = role_kind == Some("judge");
-            let is_integrate = role_kind == Some("integrate");
-            // Header phrasing signals how the integrator should treat the
-            // payload. "Dependency outputs" reads as informational; for
-            // integrate we escalate to "IMPLEMENTATION PLAN (BINDING)" so
-            // the writer knows the proposer choices aren't suggestions.
-            if is_judge {
-                out.push_str(&format!(
-                    "\nDependency outputs ({} proposals to evaluate — read ALL of them carefully before choosing):\n",
-                    deps.len()
-                ));
-            } else if is_integrate {
-                out.push_str(
-                    "\n## IMPLEMENTATION PLAN (BINDING — follow verbatim)\n\
-                     The proposer/judge output(s) below are the authoritative plan for this task. \
-                     Treat specific file paths, identifiers, constants, and ordering as fixed \
-                     requirements, not suggestions. See PROPOSER-PLAN BINDING in your ROLE \
-                     CONTRACT above for when a deviation is allowed and how to report it.\n",
-                );
-            } else {
-                out.push_str("\nDependency outputs:\n");
-            }
-            for (label, output) in deps.iter() {
-                out.push_str(&format!("\n---\nDEP: {label}\n"));
-                out.push_str(output.trim());
-                out.push('\n');
-            }
-        }
+    let role = task.role.as_deref().and_then(normalize_role_label);
+    let role_kind = role.as_deref();
+    if role_kind == Some("integrate") {
+        append_task_integrate_checklist(out, scope_files);
+    } else if role_kind == Some("propose") {
+        append_task_propose_scope(out, scope_files);
+    } else if matches!(role_kind, Some("test") | Some("review")) && is_cargo_workspace(spawn_cwd) {
+        append_task_cargo_scope(out, scope_files, role_kind == Some("test"));
     }
+}
 
-    // Propose/judge tasks must always emit the structured-artifacts block
-    // so downstream integrators can parse the declared `files` array (the
+fn append_task_integrate_checklist(out: &mut String, scope_files: &[String]) {
+    out.push_str("\n## FILE CHECKLIST (non-negotiable)\n");
+    out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
+    out.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
+    out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+    out.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
+    out.push_str("COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior (e.g. \"/// Returns the value\" on fn value()). Keep comments that explain WHY something is done, document non-obvious constraints, safety invariants, or algorithmic choices. A comment worth keeping tells the reader something the code alone cannot.\n");
+    out.push_str("Your task is NOT complete until every file has been modified.\n\n");
+    for (i, path) in scope_files.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
+    }
+    out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
+}
+
+fn append_task_propose_scope(out: &mut String, scope_files: &[String]) {
+    out.push_str("\n## SCOPE — files in the target module\n");
+    out.push_str("Your proposal must cover ALL of these files (no exceptions):\n");
+    for (i, path) in scope_files.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
+    }
+}
+
+// Inject the exact crate scope so test/review agents can't drift into
+// `cargo test --all`. Only emit on actual cargo workspaces — a workspace
+// can contain a `crates/` directory without being a Cargo workspace
+// (vendored deps, monorepos with non-Rust subdirs, dotfiles repos that
+// happen to share a token); injecting `cargo test -p <name>` into a
+// non-Rust agent's prompt is the leak the operator reported on dotbox.
+fn append_task_cargo_scope(out: &mut String, scope_files: &[String], is_test: bool) {
+    let crates = crate_names_from_paths(scope_files);
+    if crates.is_empty() {
+        return;
+    }
+    out.push_str("\n## SCOPE — crates touched by this mission\n");
+    out.push_str(
+        "These are the ONLY crates you may exercise. Do NOT widen to workspace-wide (`--all` / `--workspace`) under any circumstance, even \"just to be safe\".\n",
+    );
+    for c in &crates {
+        out.push_str(&format!("- {c}\n"));
+    }
+    out.push_str("\nREQUIRED COMMANDS (use exactly these; do not add `--all` or `--workspace`):\n");
+    let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
+    if is_test {
+        out.push_str(&format!(
+            "- `cargo test{pkg_flags}` — run the scoped test suite.\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "- `cargo test{pkg_flags}` — if you need to confirm tests still pass.\n"
+        ));
+        out.push_str(&format!(
+            "- `cargo clippy{pkg_flags} --all-targets -- -D warnings` — lint only the touched crates.\n"
+        ));
+    }
+    out.push_str(
+        "If a targeted command fails, report the failure and STOP — do not broaden the scope to diagnose.\n",
+    );
+}
+
+fn append_task_dependency_outputs(
+    out: &mut String,
+    task: &SwarmTask,
+    deps: Option<&[(String, String)]>,
+) {
+    let Some(deps) = deps.filter(|d| !d.is_empty()) else {
+        return;
+    };
+    let role_kind = task.role.as_deref().and_then(normalize_role_label);
+    let role_kind = role_kind.as_deref();
+    // Header phrasing signals how the integrator should treat the payload.
+    // "Dependency outputs" reads as informational; for integrate we
+    // escalate to "IMPLEMENTATION PLAN (BINDING)" so the writer knows
+    // the proposer choices aren't suggestions.
+    if role_kind == Some("judge") {
+        out.push_str(&format!(
+            "\nDependency outputs ({} proposals to evaluate — read ALL of them carefully before choosing):\n",
+            deps.len()
+        ));
+    } else if role_kind == Some("integrate") {
+        out.push_str(
+            "\n## IMPLEMENTATION PLAN (BINDING — follow verbatim)\n\
+             The proposer/judge output(s) below are the authoritative plan for this task. \
+             Treat specific file paths, identifiers, constants, and ordering as fixed \
+             requirements, not suggestions. See PROPOSER-PLAN BINDING in your ROLE \
+             CONTRACT above for when a deviation is allowed and how to report it.\n",
+        );
+    } else {
+        out.push_str("\nDependency outputs:\n");
+    }
+    for (label, output) in deps.iter() {
+        out.push_str(&format!("\n---\nDEP: {label}\n"));
+        out.push_str(output.trim());
+        out.push('\n');
+    }
+}
+
+fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
+    // Propose/judge tasks always emit the structured-artifacts block so
+    // downstream integrators can parse the declared `files` array (the
     // substrate's structural-compliance check diffs this against on-disk
     // writes). Other read-only roles get the block only when the planner
     // explicitly requested it via task.artifacts.
-    let always_emit_artifacts_for_role = matches!(
+    let always_emit_for_role = matches!(
         task.role
             .as_deref()
             .and_then(normalize_role_label)
             .as_deref(),
         Some("propose") | Some("judge"),
     );
-    if !task.artifacts.is_empty() || always_emit_artifacts_for_role {
-        out.push_str("\n## STRUCTURED ARTIFACTS (REQUIRED)\n");
-        out.push_str("You MUST include a ```json code block at the END of your response with this exact structure:\n");
-        out.push_str("```\n");
-        out.push_str("{\n");
-        out.push_str("  \"type\": \"swarm_artifacts\",\n");
-        out.push_str("  \"version\": 1,\n");
-        out.push_str(&format!("  \"task_id\": \"{}\",\n", task.id));
-        out.push_str("  \"summary\": \"one-line summary of what you did or found\",\n");
-        out.push_str("  \"artifacts\": {\n");
-        out.push_str("    \"files\": [\"path/to/file\"],\n");
-        out.push_str(
-            "    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n",
-        );
-        out.push_str("    \"commands\": [\"<project test command>\"],\n");
-        out.push_str("    \"risks\": [\"potential issue\"],\n");
-        out.push_str("    \"notes\": [\"additional context\"]\n");
-        out.push_str("  }\n");
-        out.push_str("}\n");
-        out.push_str("```\n");
-        out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked.\n");
+    if task.artifacts.is_empty() && !always_emit_for_role {
+        return;
     }
-
-    out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
-
-    // Embed genome quality instructions so every role is aware of the measurement system,
-    // regardless of whether genome context is also injected at dispatch time.
-    out.push('\n');
-    out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
-    out.push('\n');
-
-    // Machine-checked sign-off. Every successfully completed task must end
-    // with this exact line. Orchestrator scans for it on TurnCompleted and
-    // auto-retries tasks that omit it. Kept verbatim — do not paraphrase,
-    // quote, or wrap in backticks.
-    out.push_str(&format!(
-        "\n## SIGN-OFF (REQUIRED)\n\
-         After the structured artifacts JSON block above, on its own final line, emit the literal sentinel:\n\
-         {TASK_COMPLETE_SENTINEL}\n\
-         Do not paraphrase it, do not wrap it in code fences, do not comment on it. Its presence is how the orchestrator knows you are done. Its absence triggers an automatic continuation turn with your partial output.\n"
-    ));
-
-    out
+    out.push_str("\n## STRUCTURED ARTIFACTS (REQUIRED)\n");
+    out.push_str("You MUST include a ```json code block at the END of your response with this exact structure:\n");
+    out.push_str("```\n");
+    out.push_str("{\n");
+    out.push_str("  \"type\": \"swarm_artifacts\",\n");
+    out.push_str("  \"version\": 1,\n");
+    out.push_str(&format!("  \"task_id\": \"{}\",\n", task.id));
+    out.push_str("  \"summary\": \"one-line summary of what you did or found\",\n");
+    out.push_str("  \"artifacts\": {\n");
+    out.push_str("    \"files\": [\"path/to/file\"],\n");
+    out.push_str("    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n");
+    out.push_str("    \"commands\": [\"<project test command>\"],\n");
+    out.push_str("    \"risks\": [\"potential issue\"],\n");
+    out.push_str("    \"notes\": [\"additional context\"]\n");
+    out.push_str("  }\n");
+    out.push_str("}\n");
+    out.push_str("```\n");
+    out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked.\n");
 }
 
 pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
-    let has_reviewer = run.tasks.iter().any(|t| {
+    let has_reviewer = run_has_reviewer_role(run);
+    let mut out = String::new();
+    append_synthesis_constraints(&mut out, has_reviewer);
+    out.push_str("Operator request:\n");
+    out.push_str(run.root_prompt.trim());
+    out.push_str("\n\nAgent outputs:\n");
+    for task in run.tasks.iter() {
+        append_synthesis_agent_output(&mut out, run, task);
+    }
+    append_synthesis_gates(&mut out, run);
+    if let Some(genome_results) = run.genome_gate_results.as_deref() {
+        out.push_str("\n\nGenome quality review:\n");
+        out.push_str(genome_results);
+        out.push('\n');
+    }
+    if let Some(extra) = run.synthesis_prompt.as_deref() {
+        out.push_str("\n\nSynthesis notes:\n");
+        out.push_str(extra.trim());
+        out.push('\n');
+    }
+    out.push_str(
+        "\nResponse requirements (TEXT ONLY — no tool calls, no edits, no commands):\n\
+        - Produce a cohesive synthesis of what the agents actually did and found.\n\
+        - Be decisive about the outcome: what worked, what didn't, what's still open.\n\
+        - If follow-up work or code changes are needed, DESCRIBE them in prose — do NOT perform them and do NOT produce diffs/patches. The operator will decide what to do next.\n\
+        - If gates failed or tests are missing, REPORT that as a finding in the synthesis. Do NOT attempt to fix or rerun anything.\n\
+        - Remember: you are a read-only text summarizer. Every tool call you make is a bug.\n",
+    );
+    out
+}
+
+fn run_has_reviewer_role(run: &SwarmRun) -> bool {
+    run.tasks.iter().any(|t| {
         t.role
             .as_deref()
             .map(|r| {
@@ -793,8 +929,10 @@ pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
                     || r.eq_ignore_ascii_case("genome-reviewer")
             })
             .unwrap_or(false)
-    });
-    let mut out = String::new();
+    })
+}
+
+fn append_synthesis_constraints(out: &mut String, has_reviewer: bool) {
     out.push_str(
         "You are the SWARM SYNTHESIZER. Your ONLY job is to produce a text report that combines the agent outputs below into a single cohesive answer for the operator.\n\n",
     );
@@ -815,91 +953,80 @@ pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
             "This swarm did not include a dedicated review/test agent. If verification is missing from the agent reports below, SURFACE THAT AS A GAP in your synthesis text (e.g. \"tests were not run by any agent — operator should verify manually\"). DO NOT run verification yourself. DO NOT edit files to fix issues. Your output is text only.\n\n",
         );
     }
-    out.push_str("Operator request:\n");
-    out.push_str(run.root_prompt.trim());
-    out.push_str("\n\nAgent outputs:\n");
-    for task in run.tasks.iter() {
+}
+
+fn append_synthesis_agent_output(out: &mut String, run: &SwarmRun, task: &SwarmTask) {
+    out.push_str(&format!(
+        "\n---\nAGENT: {}\nTASK: {} ({})\n",
+        task.agent_id,
+        task.title.trim(),
+        task.id
+    ));
+    if let Some(role) = task.role.as_deref() {
+        if !role.trim().is_empty() {
+            out.push_str(&format!("ROLE: {}\n", role.trim()));
+        }
+    }
+    if !task.deps.is_empty() {
+        out.push_str(&format!("DEPS: {}\n", task.deps.join(", ")));
+    }
+    out.push_str(&format!(
+        "STATUS: {}\n",
+        task_state_synthesis_label(task.state)
+    ));
+    if let Some(summary) = task_artifacts_summary_for_prompt(task, &run.mission_id) {
+        out.push_str("ARTIFACTS:\n");
+        out.push_str(summary.trim());
+        out.push('\n');
+    } else if task.expected_artifacts_missing {
+        out.push_str("ARTIFACTS: expected but missing parseable swarm_artifacts JSON block\n");
+    }
+    if let Some(output) = task.output.as_deref() {
+        out.push_str(output.trim());
+        out.push('\n');
+    } else {
+        out.push_str("(no output)\n");
+    }
+}
+
+fn task_state_synthesis_label(state: SwarmTaskState) -> &'static str {
+    match state {
+        SwarmTaskState::Done => "DONE",
+        SwarmTaskState::Failed => "FAILED",
+        SwarmTaskState::Skipped => "SKIPPED",
+        SwarmTaskState::Pending => "PENDING",
+        SwarmTaskState::Ready => "READY",
+        SwarmTaskState::Dispatched => "QUEUED",
+        SwarmTaskState::Running => "RUNNING",
+    }
+}
+
+fn append_synthesis_gates(out: &mut String, run: &SwarmRun) {
+    let Some(label) = run_gates_label(run) else {
+        return;
+    };
+    out.push_str("\n\nVerification gates:\n");
+    out.push_str(&format!("Bundle: {label}\n"));
+    for gate in dashboard_gate_rows(run).iter() {
         out.push_str(&format!(
-            "\n---\nAGENT: {}\nTASK: {} ({})\n",
-            task.agent_id,
-            task.title.trim(),
-            task.id
+            "- {}: {} ({})\n",
+            gate.name, gate.status, gate.command
         ));
-        if let Some(role) = task.role.as_deref() {
-            if !role.trim().is_empty() {
-                out.push_str(&format!("ROLE: {}\n", role.trim()));
-            }
-        }
-        if !task.deps.is_empty() {
-            out.push_str(&format!("DEPS: {}\n", task.deps.join(", ")));
-        }
-        let status = match task.state {
-            SwarmTaskState::Done => "DONE",
-            SwarmTaskState::Failed => "FAILED",
-            SwarmTaskState::Skipped => "SKIPPED",
-            SwarmTaskState::Pending => "PENDING",
-            SwarmTaskState::Ready => "READY",
-            SwarmTaskState::Dispatched => "QUEUED",
-            SwarmTaskState::Running => "RUNNING",
-        };
-        out.push_str(&format!("STATUS: {status}\n"));
-        if let Some(summary) = task_artifacts_summary_for_prompt(task, &run.mission_id) {
-            out.push_str("ARTIFACTS:\n");
-            out.push_str(summary.trim());
-            out.push('\n');
-        } else if task.expected_artifacts_missing {
-            out.push_str("ARTIFACTS: expected but missing parseable swarm_artifacts JSON block\n");
-        }
-        if let Some(output) = task.output.as_deref() {
-            out.push_str(output.trim());
-            out.push('\n');
-        } else {
-            out.push_str("(no output)\n");
-        }
     }
-    if let Some(label) = run_gates_label(run) {
-        out.push_str("\n\nVerification gates:\n");
-        out.push_str(&format!("Bundle: {label}\n"));
-        for gate in dashboard_gate_rows(run).iter() {
-            out.push_str(&format!(
-                "- {}: {} ({})\n",
-                gate.name, gate.status, gate.command
-            ));
-        }
-        if let Some(report) = run.gate_report.as_ref() {
-            out.push_str("Structured report:\n```json\n");
-            if let Ok(json) = serde_json::to_string_pretty(report) {
-                out.push_str(&json);
-            } else {
-                out.push_str("{\"overall_ok\":false}");
-            }
-            out.push_str("\n```\n");
+    if let Some(report) = run.gate_report.as_ref() {
+        out.push_str("Structured report:\n```json\n");
+        if let Ok(json) = serde_json::to_string_pretty(report) {
+            out.push_str(&json);
         } else {
-            out.push_str("Structured report: (missing)\n");
+            out.push_str("{\"overall_ok\":false}");
         }
-        if let Some(output) = run.gate_output.as_deref() {
-            out.push_str("\nVerifier raw output (truncated):\n");
-            out.push_str(&truncate_chars(output, SWARM_VERIFY_MAX_CHARS));
-            out.push('\n');
-        }
+        out.push_str("\n```\n");
+    } else {
+        out.push_str("Structured report: (missing)\n");
     }
-    if let Some(genome_results) = run.genome_gate_results.as_deref() {
-        out.push_str("\n\nGenome quality review:\n");
-        out.push_str(genome_results);
+    if let Some(output) = run.gate_output.as_deref() {
+        out.push_str("\nVerifier raw output (truncated):\n");
+        out.push_str(&truncate_chars(output, SWARM_VERIFY_MAX_CHARS));
         out.push('\n');
     }
-    if let Some(extra) = run.synthesis_prompt.as_deref() {
-        out.push_str("\n\nSynthesis notes:\n");
-        out.push_str(extra.trim());
-        out.push('\n');
-    }
-    out.push_str(
-        "\nResponse requirements (TEXT ONLY — no tool calls, no edits, no commands):\n\
-        - Produce a cohesive synthesis of what the agents actually did and found.\n\
-        - Be decisive about the outcome: what worked, what didn't, what's still open.\n\
-        - If follow-up work or code changes are needed, DESCRIBE them in prose — do NOT perform them and do NOT produce diffs/patches. The operator will decide what to do next.\n\
-        - If gates failed or tests are missing, REPORT that as a finding in the synthesis. Do NOT attempt to fix or rerun anything.\n\
-        - Remember: you are a read-only text summarizer. Every tool call you make is a bug.\n",
-    );
-    out
 }

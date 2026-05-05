@@ -19,8 +19,8 @@ pub struct SeedRenderConfig {
     pub zoom: u8,
 }
 
-// Stateless renderer for one preview mode. Implementors read from `seed`
-// and the precomputed `cache`, and write a single frame into `buf`.
+// Stateless per-mode renderer; reads `seed` + precomputed `cache` and writes
+// one frame into `buf`. Implementors must not mutate any shared state.
 pub(super) trait SeedRenderer {
     fn render(
         &self,

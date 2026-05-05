@@ -33,11 +33,5 @@ fn rotate_quadrant(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
 }
 
 pub(super) fn order_for_width(width: usize) -> u32 {
-    let mut order = 0u32;
-    let mut size = 1usize;
-    while size < width {
-        size <<= 1;
-        order += 1;
-    }
-    order
+    width.next_power_of_two().max(1).trailing_zeros()
 }

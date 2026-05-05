@@ -58,18 +58,14 @@ pub(super) fn mark_task_running(run: &mut SwarmRun, agent_id: &str) {
 pub(super) struct TaskCompletion {
     pub(super) task_id: String,
     pub(super) expected_artifacts_missing: bool,
-    /// Task declared `writes: true` — it was supposed to modify files.
     pub(super) writes_expected: bool,
-    /// At least one file was attributed to this agent via `FileWrite` events.
     pub(super) writes_detected: bool,
 }
 
-/// Post-integrate structural compliance: walks the integrator's proposer/
-/// judge dependencies, collects declared file paths from their parsed
-/// artifacts, and returns any that the integrator did not actually touch
-/// (not on disk, or not in `genome_mission_modified`). Empty return means
-/// the integrator honored the declared file outputs; non-empty means the
-/// proposer plan specified files the writer silently skipped.
+// Walks the integrator's proposer/judge dependencies, collects declared file
+// paths from their parsed artifacts, and returns any that the integrator did
+// not actually touch (not on disk, or not in `genome_mission_modified`).
+// Empty return means the integrator honored the declared file outputs.
 pub(super) fn structural_compliance_missing_files(
     run: &SwarmRun,
     integrator_task_id: &str,
@@ -116,9 +112,8 @@ pub(super) fn structural_compliance_missing_files(
             }
         }
     }
-    // If there were no declarations at all, don't flag — proposers aren't
-    // required to enumerate every file they recommend (it's stronger when
-    // they do, but absence isn't non-compliance).
+    // Proposers aren't required to enumerate every file they recommend
+    // (it's stronger when they do), so absence isn't non-compliance.
     if declared_count == 0 {
         return Vec::new();
     }
@@ -132,81 +127,37 @@ pub(super) fn mark_task_finished(
     failed: bool,
     agent_has_file_writes: bool,
 ) -> Option<TaskCompletion> {
-    // Look for an active (Running or Dispatched) task first.
-    let pos_active = run
-        .tasks
-        .iter()
-        .position(|task| task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running))
-        .or_else(|| {
-            run.tasks.iter().position(|task| {
-                task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
-            })
-        });
-
-    // Fall back to an already-finished task so late/intermediate responses
-    // can still append artifacts.
-    let pos_finished = || {
-        run.tasks.iter().position(|task| {
-            task.agent_id == agent_id
-                && matches!(task.state, SwarmTaskState::Done | SwarmTaskState::Failed)
-        })
-    };
-    let pos = pos_active.or_else(pos_finished)?;
+    let pos_active = find_active_task_pos(run, agent_id);
+    let pos = pos_active.or_else(|| find_finished_task_pos(run, agent_id))?;
     let already_finished = pos_active.is_none();
 
     let parsed_artifacts = parse_task_artifacts(&run.tasks[pos].id, &message);
-    // Write-role tasks (integrate) produce file modifications as their primary
-    // output — the structured artifacts JSON is optional metadata.  Only flag
-    // missing artifacts for read-only tasks where the JSON is the sole output.
+    // Write-role tasks (integrate) produce file modifications as their
+    // primary output — the structured-artifacts JSON is optional metadata.
+    // Only flag missing artifacts for read-only tasks where the JSON is the
+    // sole output.
     let expected_artifacts_missing = !run.tasks[pos].artifacts.is_empty()
         && parsed_artifacts.is_none()
         && !run.tasks[pos].writes;
 
-    let task = &mut run.tasks[pos];
-
     if already_finished {
-        // Append output to existing response.
-        if let Some(existing) = task.output.as_mut() {
-            existing.push_str("\n\n---\n\n");
-            existing.push_str(&message);
-        } else {
-            task.output = Some(message);
-        }
+        append_late_task_output(&mut run.tasks[pos], message);
     } else {
-        // Reporting-failure rescue: if the subprocess exited non-zero but the
-        // task is a write-role task AND FileWrite events fired for this agent,
-        // the work likely landed on disk and the crash was in the agent's
-        // final summary step (classic end-of-turn context overflow). Downgrade
-        // to Done so the swarm doesn't discard a completed refactor. The
-        // original failure message is kept in `output` for inspection.
-        let reporting_failure_rescue = failed && task.writes && agent_has_file_writes;
-        let effective_failed = failed && !reporting_failure_rescue;
-        task.output = Some(if reporting_failure_rescue {
-            format!(
-                "(rescue) subprocess reported failure but FileWrite events fired for this agent — \
-treating as success. Inspect on-disk artifacts to confirm.\n\n\
-original failure message:\n{message}"
-            )
-        } else {
-            message
-        });
-        task.failed = effective_failed;
-        task.state = if effective_failed {
-            SwarmTaskState::Failed
-        } else {
-            SwarmTaskState::Done
-        };
-        task.expected_artifacts_missing = expected_artifacts_missing;
+        finalize_task(
+            &mut run.tasks[pos],
+            message,
+            failed,
+            agent_has_file_writes,
+            expected_artifacts_missing,
+        );
     }
 
-    // Merge artifacts with any previously collected ones instead of overwriting.
+    let task = &mut run.tasks[pos];
     match (task.parsed_artifacts.as_mut(), parsed_artifacts) {
         (Some(existing), Some(new)) => merge_task_artifacts(existing, new),
         (None, new @ Some(_)) => task.parsed_artifacts = new,
         _ => {}
     }
-
-    let writes_expected = task.writes;
 
     Some(TaskCompletion {
         task_id: task.id.clone(),
@@ -215,9 +166,69 @@ original failure message:\n{message}"
         } else {
             expected_artifacts_missing
         },
-        writes_expected,
+        writes_expected: task.writes,
         writes_detected: agent_has_file_writes,
     })
+}
+
+fn find_active_task_pos(run: &SwarmRun, agent_id: &str) -> Option<usize> {
+    run.tasks
+        .iter()
+        .position(|task| task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running))
+        .or_else(|| {
+            run.tasks.iter().position(|task| {
+                task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
+            })
+        })
+}
+
+fn find_finished_task_pos(run: &SwarmRun, agent_id: &str) -> Option<usize> {
+    run.tasks.iter().position(|task| {
+        task.agent_id == agent_id
+            && matches!(task.state, SwarmTaskState::Done | SwarmTaskState::Failed)
+    })
+}
+
+fn append_late_task_output(task: &mut SwarmTask, message: String) {
+    if let Some(existing) = task.output.as_mut() {
+        existing.push_str("\n\n---\n\n");
+        existing.push_str(&message);
+    } else {
+        task.output = Some(message);
+    }
+}
+
+// Reporting-failure rescue: if the subprocess exited non-zero but the task
+// is a write-role task AND FileWrite events fired for this agent, the work
+// likely landed on disk and the crash was in the agent's final summary step
+// (classic end-of-turn context overflow). Downgrade to Done so the swarm
+// doesn't discard a completed refactor; keep the original failure message in
+// `output` for inspection.
+fn finalize_task(
+    task: &mut SwarmTask,
+    message: String,
+    failed: bool,
+    agent_has_file_writes: bool,
+    expected_artifacts_missing: bool,
+) {
+    let reporting_failure_rescue = failed && task.writes && agent_has_file_writes;
+    let effective_failed = failed && !reporting_failure_rescue;
+    task.output = Some(if reporting_failure_rescue {
+        format!(
+            "(rescue) subprocess reported failure but FileWrite events fired for this agent — \
+treating as success. Inspect on-disk artifacts to confirm.\n\n\
+original failure message:\n{message}"
+        )
+    } else {
+        message
+    });
+    task.failed = effective_failed;
+    task.state = if effective_failed {
+        SwarmTaskState::Failed
+    } else {
+        SwarmTaskState::Done
+    };
+    task.expected_artifacts_missing = expected_artifacts_missing;
 }
 
 pub(super) fn refresh_task_readiness(run: &mut SwarmRun) {
@@ -237,10 +248,9 @@ pub(super) fn refresh_task_readiness(run: &mut SwarmRun) {
             continue;
         }
         let ready = task.deps.iter().all(|dep| {
-            terminal_ids
-                .contains(dep)
-                // Unknown dep shouldn't happen after sanitize; treat as satisfied to avoid deadlocks.
-                || !all_ids.contains(dep)
+            // Unknown deps shouldn't survive sanitize; treat as satisfied so
+            // a stale id doesn't deadlock the run.
+            terminal_ids.contains(dep) || !all_ids.contains(dep)
         });
         if ready {
             task.state = SwarmTaskState::Ready;
@@ -275,21 +285,38 @@ pub(super) fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Option<SwarmDeadlock
         return None;
     }
 
-    let pending_ids = pending.iter().map(|id| id.as_str()).collect::<HashSet<_>>();
     let pending_tasks = run
         .tasks
         .iter()
         .filter(|task| matches!(task.state, SwarmTaskState::Pending))
         .cloned()
         .collect::<Vec<_>>();
+    let message = build_deadlock_message(&pending, &pending_tasks);
 
-    let mut message = String::new();
-    message.push_str(&format!(
+    for task in run.tasks.iter_mut() {
+        if matches!(task.state, SwarmTaskState::Pending) {
+            task.state = SwarmTaskState::Skipped;
+            task.failed = true;
+            if task.output.is_none() {
+                task.output = Some("SKIPPED (unresolvable deps)".into());
+            }
+        }
+    }
+
+    Some(SwarmDeadlock {
+        skipped: pending,
+        message,
+    })
+}
+
+fn build_deadlock_message(pending: &[String], pending_tasks: &[SwarmTask]) -> String {
+    let pending_ids = pending.iter().map(|id| id.as_str()).collect::<HashSet<_>>();
+    let mut message = format!(
         "Swarm deadlock: skipping tasks with unresolvable deps: {}",
         pending.join(", ")
-    ));
+    );
 
-    if let Some(cycle) = find_swarm_cycle_path(pending_tasks.as_slice()) {
+    if let Some(cycle) = find_swarm_cycle_path(pending_tasks) {
         let mut cycle = cycle;
         if cycle.len() > 12 {
             cycle.truncate(12);
@@ -312,21 +339,7 @@ pub(super) fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Option<SwarmDeadlock
             message.push_str(&format!("\n- {} waits on: {}", task.id, deps.join(", ")));
         }
     }
-
-    for task in run.tasks.iter_mut() {
-        if matches!(task.state, SwarmTaskState::Pending) {
-            task.state = SwarmTaskState::Skipped;
-            task.failed = true;
-            if task.output.is_none() {
-                task.output = Some("SKIPPED (unresolvable deps)".into());
-            }
-        }
-    }
-
-    Some(SwarmDeadlock {
-        skipped: pending,
-        message,
-    })
+    message
 }
 
 pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
@@ -335,25 +348,7 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
     for idx in indices {
         let task = &run.tasks[idx];
         let deps_payload = collect_dependency_payload(run, task);
-        let prompt = if deps_payload.is_empty() {
-            wrap_task_prompt(
-                &run.root_prompt,
-                run.mission_kind,
-                task,
-                None,
-                &run.scope_files,
-                run.spawn_cwd.as_path(),
-            )
-        } else {
-            wrap_task_prompt(
-                &run.root_prompt,
-                run.mission_kind,
-                task,
-                Some(deps_payload.as_slice()),
-                &run.scope_files,
-                run.spawn_cwd.as_path(),
-            )
-        };
+        let prompt = build_task_prompt(run, task, &deps_payload);
         let agent_id = task.agent_id.clone();
         let task_role = task.role.clone();
         run.tasks[idx].state = SwarmTaskState::Dispatched;
@@ -367,14 +362,29 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
     dispatches
 }
 
+fn build_task_prompt(
+    run: &SwarmRun,
+    task: &SwarmTask,
+    deps_payload: &[(String, String)],
+) -> String {
+    let payload: Option<&[(String, String)]> = (!deps_payload.is_empty()).then_some(deps_payload);
+    wrap_task_prompt(
+        &run.root_prompt,
+        run.mission_kind,
+        task,
+        payload,
+        &run.scope_files,
+        run.spawn_cwd.as_path(),
+    )
+}
+
+// Lab and Bulk templates rely on a global single-writer invariant — only
+// one task with writes=true can be Dispatched/Running at a time, with
+// other writers queued behind it. Parallel allows write fan-out: multiple
+// integrate tasks can execute concurrently (their work regions are expected
+// to be disjoint per the planner prompt; conflicts surface via the
+// substrate's claim lattice → ClaimViolation signals + auto-retries).
 fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
-    // Lab and Bulk templates rely on a global single-writer invariant — only
-    // one task with writes=true can be Dispatched/Running at a time, with
-    // other writer tasks queued behind it. Parallel explicitly allows write
-    // fan-out: multiple integrate tasks can execute concurrently (their work
-    // regions are expected to be disjoint per the planner prompt, and the
-    // substrate's claim lattice surfaces any conflicts that do arise via
-    // ClaimViolation signals + auto-retries).
     let enforce_single_writer = !matches!(run.template, SwarmTemplate::Parallel);
     let mut writer_taken = enforce_single_writer
         && run.tasks.iter().any(|task| {
@@ -401,28 +411,18 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
     indices
 }
 
-/// Returns the per-dep character cap a task with the given role / writes /
-/// dep count would receive when its dependency payloads are collated. Same
-/// formula as `collect_dependency_payload` — extracted so the DAG dashboard
-/// can show the operator what budget each task is operating under at a
-/// glance, and so any future change to the budget rule lives in one place.
+// Same formula as `collect_dependency_payload` — extracted so the DAG
+// dashboard can show the operator what budget each task is operating
+// under, and so any future change to the rule lives in one place.
 pub(crate) fn per_dep_budget(role: Option<&str>, writes: bool, dep_count: usize) -> usize {
-    let needs_full = matches!(
-        role.and_then(normalize_role_label).as_deref(),
-        Some("judge" | "integrate")
-    ) || writes;
     let n = dep_count.max(1);
-    if needs_full {
+    if task_uses_full_output_budget(role, writes) {
         (SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL / n).min(SWARM_DEP_OUTPUT_MAX_CHARS_FULL)
     } else {
         SWARM_DEP_OUTPUT_MAX_CHARS
     }
 }
 
-/// Returns true when a task's role uses the full-output budget path. Used
-/// by the DAG dashboard to decide whether to show a per-dep budget hint
-/// at all (compact-artifact roles share the full ceiling regardless of
-/// fan-in, so the hint would just be noise for them).
 pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> bool {
     matches!(
         role.and_then(normalize_role_label).as_deref(),
@@ -430,13 +430,12 @@ pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> 
     ) || writes
 }
 
+// Tasks that must ACT on dependency outputs need the full raw text — compact
+// artifact summaries strip reasoning and implementation details, causing
+// agents to describe changes instead of executing them. Full output applies
+// to: judge (comparing proposals), integrate (implementing), and any task
+// with `writes: true` (custom write-role tasks from the planner).
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
-    // Tasks that must ACT on dependency outputs need the full raw text —
-    // compact artifact summaries strip reasoning and implementation details,
-    // causing agents to describe changes instead of executing them.
-    //
-    // Full output for: judge (comparing proposals), integrate (implementing),
-    // and any task with `writes: true` (custom write-role tasks from planner).
     let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
     let per_dep_cap = per_dep_budget(task.role.as_deref(), task.writes, task.deps.len());
 

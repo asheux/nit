@@ -4,22 +4,59 @@ use nit_core::AppState;
 #[cfg(test)]
 use nit_core::{AgentBusEvent, AgentStatus, MissionPhase};
 
+mod artifacts;
+mod bulk_plan;
+mod clones;
+mod command;
+mod config;
+mod constants;
+mod dag;
+mod dashboard;
+mod fallback;
+mod gate_retry;
+mod graph_exec;
+mod json;
+mod limits;
+mod mission;
+mod plan_parser;
+mod prompts;
+mod runtime;
+mod runtime_events;
+mod scope;
+mod signals;
+mod types;
+mod workers;
+
+#[cfg(test)]
+mod test_fixtures;
+
+#[cfg(test)]
+#[path = "../tests/swarm.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "../tests/prompts_leak_test.rs"]
+mod prompts_leak_test;
+
 #[derive(Default)]
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
 }
 
-/// Configuration from a previous swarm run, used to re-launch follow-up prompts
-/// with the same template, size, and planner.
+// Captured at swarm start so follow-up dispatches re-launch with the same
+// template, size, and planner.
 pub struct SwarmSessionConfig {
     pub template: String,
     pub size: usize,
     pub planner_agent_id: String,
 }
 
-/// Re-apply the original swarm's template, size, and planner for follow-up dispatches,
-/// returning the full list of agent IDs (planner + clones) ready for dispatch.
+// Returns the full list of agent IDs (planner + clones) ready for dispatch.
+// Re-applies parallel-template clone role coverage so follow-up dispatches
+// see the same role assignments as the original mission, and writes the
+// agent list back to `mission.assigned_agents` so broadcast targeting can
+// find them.
 pub fn ensure_swarm_agents_for_followup(
     state: &mut AppState,
     mission_id: &str,
@@ -36,10 +73,6 @@ pub fn ensure_swarm_agents_for_followup(
         &config.planner_agent_id,
         &mut agents,
     );
-    // Re-apply parallel-template clone role coverage so follow-up dispatches
-    // see the same role assignments as the original mission. No-op when the
-    // planner is `all`/unset or coverage is already satisfied (most common
-    // case for follow-ups since the original setup already assigned hints).
     let _ = assign_clone_roles_for_parallel_coverage(
         state,
         template,
@@ -47,7 +80,6 @@ pub fn ensure_swarm_agents_for_followup(
         None,
         &agents,
     );
-    // Update the mission's assigned_agents so broadcast_target_agents can find them.
     if let Some(mission) = state
         .agents
         .missions
@@ -59,27 +91,9 @@ pub fn ensure_swarm_agents_for_followup(
     agents
 }
 
-mod artifacts;
-mod bulk_plan;
-mod clones;
-mod command;
-mod config;
-mod constants;
-mod dag;
-mod dashboard;
-mod fallback;
-mod gate_retry;
-mod graph_exec;
-mod json;
-mod mission;
-mod plan_parser;
-mod prompts;
-mod runtime;
-mod runtime_events;
-mod scope;
-mod signals;
-mod types;
-mod workers;
+// `pub` so the `nit` binary can scale multipane concurrency without exposing
+// `limits` internals directly.
+pub use limits::effective_max_swarm_size;
 
 use artifacts::{
     dependency_payload_text, dependency_payload_text_full, merge_task_artifacts,
@@ -117,8 +131,6 @@ use constants::{
     SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL, SWARM_VERIFY_MAX_CHARS,
 };
-
-mod limits;
 use dag::{analyze_swarm_dag, ensure_deps_resolve, find_swarm_cycle_path, repair_swarm_dag};
 use dashboard::{
     blocked_on, dashboard_gate_rows, derive_cargo_packages, gate_bundle_label, run_effective_gates,
@@ -137,11 +149,16 @@ pub(crate) use limits::{
     current_fd_soft_limit, is_light_planner, large_swarm_warn_threshold, BULK_PRACTICAL_MAX,
     LIGHT_PLANNER_SWARM_THRESHOLD,
 };
-
-// pub for the `nit` binary to scale multipane concurrency without exposing `limits` internals.
-pub fn effective_max_swarm_size() -> usize {
-    limits::effective_max_swarm_size()
-}
+use mission::{
+    abort_swarm_plan_preflight, is_priority_agent, next_mission_id, swarm_mission_title,
+    tag_last_agent_message_kind, timestamp_label, update_mission_final, update_mission_phase,
+    update_mission_status,
+};
+pub use mission::{
+    is_agent_busy, is_agent_family_busy, push_system_alert_to_mission,
+    push_system_message_to_mission, resolve_base_agent_id, select_swarm_agents,
+    swarm_intended_size, SYSTEM_ALERT_KIND,
+};
 use plan_parser::{
     apply_role_dependency_ordering, assign_clone_roles_for_parallel_coverage,
     classify_swarm_mission_kind, deduplicate_inherited_role_hints, direct_role_hint_for_agent,
@@ -155,6 +172,11 @@ use prompts::{
 };
 pub(crate) use scope::enumerate_scope_files;
 use scope::sanitize_for_filename;
+#[cfg(test)]
+use scope::{
+    enumerate_scope_files_with_deadline, scope_walk_timeout, SCOPE_WALK_DEFAULT_TIMEOUT_MS,
+    SCOPE_WALK_MAX_DEPTH, SCOPE_WALK_MAX_FILES,
+};
 #[cfg(test)]
 use signals::collect_unresolved_deps;
 use signals::{emit_parallel_deps_auto_repair_signals, emit_unresolved_dep_signals};
@@ -176,20 +198,6 @@ pub use types::{
 };
 use workers::{maybe_spawn_genome_review, spawn_genome_gate_eval};
 
-use mission::{
-    abort_swarm_plan_preflight, is_priority_agent, next_mission_id, swarm_mission_title,
-    tag_last_agent_message_kind, timestamp_label, update_mission_final, update_mission_phase,
-    update_mission_status,
-};
-pub use mission::{
-    is_agent_busy, is_agent_family_busy, push_system_alert_to_mission,
-    push_system_message_to_mission, resolve_base_agent_id, select_swarm_agents,
-    swarm_intended_size, SYSTEM_ALERT_KIND,
-};
-
-#[cfg(test)]
-mod test_fixtures;
-
 #[cfg(test)]
 pub(crate) use test_fixtures::{
     merge_single_mission_runtime, test_runtime_with_running_and_queued_tasks,
@@ -199,9 +207,8 @@ pub(crate) use test_fixtures::{
 pub(crate) use types::SwarmTemplate as SwarmTemplateForTests;
 
 #[cfg(test)]
-#[path = "../tests/swarm.rs"]
-mod tests;
-
+use constants::CODE_HYGIENE_OPEN_MARKER;
 #[cfg(test)]
-#[path = "../tests/prompts_leak_test.rs"]
-mod prompts_leak_test;
+use limits::{
+    compute_effective_max_swarm_size, compute_large_swarm_warn_threshold, NIT_BASELINE_FDS,
+};

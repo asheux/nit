@@ -1,36 +1,38 @@
 pub(crate) const DEFAULT_SWARM_SIZE: usize = 4;
-/// Hard ceiling on roster size for a single swarm mission. Sized so the worst
-/// case (every agent spawning a Codex/Claude subprocess concurrently, each
-/// holding ~4 file descriptors) fits under typical OS ulimits — ~250 agents
-/// on Linux's 1024-fd default, comfortably within macOS's 10240. Beyond this,
-/// the FD ceiling is the real limit, not nit. Soft warning surfaces at
-/// `LARGE_SWARM_WARN_THRESHOLD`.
+
+// Sized so the worst case (every agent spawning a Codex/Claude subprocess
+// concurrently, each holding ~4 fds) fits under typical OS ulimits — ~250
+// agents on Linux's 1024-fd default. Beyond this, the FD ceiling is the
+// real limit; nit warns at `LARGE_SWARM_WARN_THRESHOLD`.
 pub(super) const MAX_SWARM_SIZE: usize = 256;
-/// At or above this roster size, push a one-line system message warning the
-/// operator to bump `ulimit -n` and confirm machine has enough RAM/CPU.
-/// Picked so the warning fires well before subprocess spawn starts failing
-/// from FD exhaustion on Linux defaults.
+
+// Warn well before subprocess spawn starts hitting `EMFILE` on Linux's
+// 1024-fd default.
 pub(crate) const LARGE_SWARM_WARN_THRESHOLD: usize = 64;
+
 pub(super) const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 pub(super) const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
-/// Per-dep ceiling for roles that need full dependency output (judge,
-/// integrate, any write-role task). A single comprehensive multi-file
-/// refactoring proposal can reach 20–30K chars; giving the downstream agent
-/// the full reasoning chain materially improves decisions. Biased toward
-/// preserving information.
+
+// Per-dep ceiling for full-output roles (judge, integrate, any write-role).
+// A multi-file refactor proposal can reach 20–30K chars; preserving the
+// reasoning chain materially improves downstream decisions.
 pub(crate) const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
 
-// Shared role-contract clauses.
-//
-// These constants keep three classes of rule single-source across the
-// propose/integrate/judge/review/test role contracts AND the retry prompts
-// (gate retry, genome retry). Previous drafts drifted — e.g. "NO REVERT"
-// wording differed between gate-retry and genome-retry, "don't pad small
-// files" was written three different ways. Route every copy through these.
+// Total budget across ALL deps for full-output roles. Sized against
+// Claude's 200K-token context (~800K chars) minus ~100K of system
+// scaffolding plus turn-time tool_use/tool_result accumulation (the
+// observed overflow path for clone-04/05). Only bites at fan-in 7+; for
+// 2–6-proposer swarms every dep gets its full 48K per-dep ceiling.
+pub(super) const SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL: usize = 240_000;
 
-/// Targeted-vs-workspace-wide test/verify command rule. Every copy must be
-/// byte-for-byte identical, so the role contracts reference this constant
-/// instead of inlining the text.
+pub(super) const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
+pub(super) const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
+
+// Role-contract clauses below keep three classes of rule single-source
+// across propose/integrate/judge/review/test contracts AND retry prompts.
+// Earlier drafts drifted (NO REVERT wording differed between gate-retry
+// and genome-retry; "don't pad small files" had three variants).
+
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
     "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands of any \
      toolchain — `cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
@@ -54,9 +56,6 @@ pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
      duplication the rule forbids. The post-execution gate verifier handles \
      workspace-wide gates as the next swarm stage.";
 
-/// Don't-pad-small-files + inline-test-module + comment-hygiene clause.
-/// Referenced by the integrate role contract and the genome-retry prompt
-/// so both say the same thing word-for-word.
 pub(crate) const NO_PADDING_CLAUSE: &str =
     "CODE SHAPE: Do NOT add inline test modules (e.g. Rust `#[cfg(test)] \
      mod tests { ... }`, Python `if __name__ == '__main__'` test blocks, \
@@ -72,38 +71,6 @@ pub(crate) const NO_PADDING_CLAUSE: &str =
      describe obvious behavior. Keep comments that explain WHY, document \
      non-obvious constraints, safety invariants, or algorithmic choices.";
 
-/// Marker that brackets the code-hygiene block when prepended at dispatch
-/// time. Used to detect double-prepend (e.g. when a swarm integrate
-/// dispatch already carries `NO_PADDING_CLAUSE` via its role contract,
-/// `code_hygiene_preamble` returns `None` to skip a redundant copy).
-pub(crate) const CODE_HYGIENE_OPEN_MARKER: &str = "[code hygiene]";
-
-/// Build the code-hygiene preamble that gets prepended to every dispatched
-/// agent prompt. Same intent as `NO_PADDING_CLAUSE` (no inline tests,
-/// no padding, comment hygiene) but always present so the operator never
-/// has to re-state it on every chat prompt — the writer agent already
-/// knows the workspace's defaults at turn-start.
-///
-/// Returns `None` when the prompt already contains the hygiene marker
-/// (e.g. it came through the swarm `integrate` role contract which
-/// inlines `NO_PADDING_CLAUSE` directly), so the same rules don't get
-/// duplicated word-for-word in the same prompt.
-pub(crate) fn code_hygiene_preamble(prompt: &str) -> Option<String> {
-    // Cheap dedup checks: the role-contract path inlines NO_PADDING_CLAUSE
-    // verbatim (no marker), so look for its leading literal too.
-    if prompt.contains(CODE_HYGIENE_OPEN_MARKER)
-        || prompt.contains("CODE SHAPE: Do NOT add inline test modules")
-    {
-        return None;
-    }
-    Some(format!(
-        "{CODE_HYGIENE_OPEN_MARKER}\n{NO_PADDING_CLAUSE}\n[/code hygiene]\n\n"
-    ))
-}
-
-/// Non-revert rule for any retry prompt (gate retry, per-agent genome
-/// retry). Reverting your own BROKEN code is fine — that's how you fix
-/// things. Rolling back WORKING real work to satisfy a metric is not.
 pub(crate) const NO_REVERT_CLAUSE: &str =
     "REVERT POLICY: reverting your own BROKEN code (compile errors, failing \
      tests, broken logic) is fine — that's how you fix things. Rolling back \
@@ -115,46 +82,20 @@ pub(crate) const NO_REVERT_CLAUSE: &str =
      the work intact. If you genuinely can't improve the metric further \
      through real edits, say so in your reply and STOP — leave the mission's \
      actual changes on disk.";
-/// Total budget across ALL deps for full-output roles. Sized against Claude's
-/// 200K-token context (~800K chars) minus ~100K chars of system scaffolding
-/// and a safety margin for turn-time tool_use/tool_result accumulation (which
-/// was the observed overflow path for clone-04/05). The cap only bites when
-/// fan-in is large (7+ deps); for typical 2–6-proposer swarms every dep still
-/// gets its full 48K per-dep ceiling.
-pub(super) const SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL: usize = 240_000;
-pub(super) const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
-pub(super) const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
-#[cfg(test)]
-mod hygiene_preamble_tests {
-    use super::*;
+pub(crate) const CODE_HYGIENE_OPEN_MARKER: &str = "[code hygiene]";
 
-    #[test]
-    fn fresh_prompt_gets_preamble_with_inline_test_rule() {
-        let preamble = code_hygiene_preamble("refactor crates/foo to extract helpers")
-            .expect("fresh prompt should get a preamble");
-        assert!(
-            preamble.contains("Do NOT add inline test modules"),
-            "preamble should carry the no-inline-tests rule:\n{preamble}",
-        );
-        assert!(preamble.starts_with(CODE_HYGIENE_OPEN_MARKER));
+// Same intent as `NO_PADDING_CLAUSE` but always prepended at dispatch time.
+// Returns `None` when the prompt already carries the marker OR inlines
+// `NO_PADDING_CLAUSE` verbatim via a role contract — so the same rules
+// never get duplicated in one prompt.
+pub(crate) fn code_hygiene_preamble(prompt: &str) -> Option<String> {
+    if prompt.contains(CODE_HYGIENE_OPEN_MARKER)
+        || prompt.contains("CODE SHAPE: Do NOT add inline test modules")
+    {
+        return None;
     }
-
-    #[test]
-    fn prompt_with_existing_marker_skips_preamble() {
-        // E.g. a re-dispatch that already ran through the leaf and was
-        // requeued; never double-prepend.
-        let already_prefixed =
-            format!("{CODE_HYGIENE_OPEN_MARKER}\nfoo\n[/code hygiene]\n\nrun the task");
-        assert!(code_hygiene_preamble(&already_prefixed).is_none());
-    }
-
-    #[test]
-    fn prompt_with_inline_no_padding_clause_skips_preamble() {
-        // The swarm `integrate` role contract inlines NO_PADDING_CLAUSE
-        // verbatim (no marker). Preamble dedup must catch this so the
-        // operator doesn't see the rule duplicated word-for-word.
-        let role_contract = format!("Operator request:\n...\n\n{NO_PADDING_CLAUSE}\n");
-        assert!(code_hygiene_preamble(&role_contract).is_none());
-    }
+    Some(format!(
+        "{CODE_HYGIENE_OPEN_MARKER}\n{NO_PADDING_CLAUSE}\n[/code hygiene]\n\n"
+    ))
 }

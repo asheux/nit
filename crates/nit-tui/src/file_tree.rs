@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use nit_core::{AppState, FileTreeKind, FileTreeRow};
@@ -28,15 +27,9 @@ pub fn needed_dirs(state: &AppState) -> Vec<PathBuf> {
         .collect();
     expanded.sort();
 
-    let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out = Vec::with_capacity(expanded.len() + 1);
     out.push(root.clone());
-    seen.insert(root.clone());
-    for dir in expanded {
-        if seen.insert(dir.clone()) {
-            out.push(dir);
-        }
-    }
+    out.extend(expanded);
     out
 }
 

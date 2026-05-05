@@ -1,73 +1,18 @@
-#![allow(unused_imports)]
 #![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
-use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
+use crossterm::event::MouseEvent;
+use nit_core::{AgentOpsTab, AppKind, AppState, PaneId, CONSOLE_SCROLL_BOTTOM};
+use ratatui::layout::Rect;
+use ratatui::widgets::{Block, Borders};
+
+use crate::layout;
+use crate::swarm::SwarmRuntime;
+use crate::theme::Theme;
+use crate::widgets::{
+    agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup,
+    games_analysis_popup, games_ca_sim_popup, games_match_history_popup, games_replay_popup,
+    games_run_browser_popup, games_strategy_popup, games_tm_sim_popup, games_visualizer_view,
+    gate_monitor_view, help_overlay,
 };
 
 use super::*;
@@ -1097,77 +1042,5 @@ pub(super) fn char_idx_for_display_col(line: &str, target_col: usize, tab_width:
 }
 
 #[cfg(test)]
-mod drag_auto_scroll_tests {
-    use super::drag_auto_scroll;
-
-    // Inside the area: nothing happens.
-    #[test]
-    fn no_change_when_inside_area() {
-        let mut scroll = 5;
-        // area: y=10, height=20 → bottom = 30. Cursor at 15 is inside.
-        assert!(!drag_auto_scroll(15, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 5);
-    }
-
-    // Above the top edge: scroll up by the distance.
-    #[test]
-    fn scrolls_up_when_above_top() {
-        let mut scroll = 50;
-        // Cursor at row 5, area starts at 10 → 5 rows above. Scroll
-        // should drop by 5.
-        assert!(drag_auto_scroll(5, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 45);
-    }
-
-    // Below the bottom edge: scroll down by the distance + 1 (so even
-    // a single-row overshoot still scrolls one row).
-    #[test]
-    fn scrolls_down_when_below_bottom() {
-        let mut scroll = 50;
-        // area: y=10, height=20 → bottom row index 29 (inclusive).
-        // Cursor at 30 is one past the bottom → scroll bumps by 1.
-        assert!(drag_auto_scroll(30, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 51);
-    }
-
-    // Big overshoot scales the scroll delta — operator slamming the
-    // cursor 50 rows past the bottom shouldn't have to wiggle to scroll
-    // each row.
-    #[test]
-    fn scales_with_overshoot_distance() {
-        let mut scroll = 0;
-        // Bottom = 30. Cursor at 80 → 51 rows past.
-        assert!(drag_auto_scroll(80, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 51);
-    }
-
-    // Already at min: no underflow, no change reported.
-    #[test]
-    fn no_change_when_already_at_top() {
-        let mut scroll = 0;
-        assert!(!drag_auto_scroll(0, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 0);
-    }
-
-    // Already at max: no overflow past max_scroll.
-    #[test]
-    fn clamps_to_max_scroll() {
-        let mut scroll = 99;
-        assert!(drag_auto_scroll(40, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 100);
-        // Subsequent drag past bottom does not move further.
-        assert!(!drag_auto_scroll(40, 10, 20, &mut scroll, 100));
-        assert_eq!(scroll, 100);
-    }
-
-    // Zero-height area never reports a change (defensive — divisor-zero
-    // analog for the bottom calculation).
-    #[test]
-    fn no_change_when_area_height_zero() {
-        let mut scroll = 5;
-        assert!(!drag_auto_scroll(0, 10, 0, &mut scroll, 100));
-        assert_eq!(scroll, 5);
-        assert!(!drag_auto_scroll(50, 10, 0, &mut scroll, 100));
-        assert_eq!(scroll, 5);
-    }
-}
+#[path = "../tests/mouse_mappers.rs"]
+mod drag_auto_scroll_tests;

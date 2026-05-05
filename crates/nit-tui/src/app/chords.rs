@@ -1,74 +1,7 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
-use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use nit_core::{actions::Action, AppState, PaneId};
 
 use super::*;
 
@@ -78,12 +11,12 @@ pub(super) fn handle_normal_chords(
     input: &mut InputState,
 ) -> Option<Action> {
     if !is_motion_mode(state) {
-        input.reset_normal();
+        input.normal_last_char = None;
         return None;
     }
 
     if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
-        input.reset_normal();
+        input.normal_last_char = None;
         return None;
     }
 
@@ -111,7 +44,7 @@ pub(super) fn handle_normal_chords(
             }
         }
         _ => {
-            input.reset_normal();
+            input.normal_last_char = None;
             None
         }
     }
@@ -126,14 +59,14 @@ pub(super) fn handle_editor_pending_op(
     input: &mut InputState,
 ) -> Option<Action> {
     if !is_motion_mode(state) {
-        input.clear_pending_editor_op();
+        input.pending_editor_op = None;
         return None;
     }
     let op = input.pending_editor_op?;
 
     if matches!(key.code, KeyCode::Esc) {
         // Cancel the pending op silently; stay in normal/visual mode.
-        input.clear_pending_editor_op();
+        input.pending_editor_op = None;
         return None;
     }
 
@@ -141,43 +74,43 @@ pub(super) fn handle_editor_pending_op(
 
     match (op, key.code) {
         (PendingEditorOp::Replace, KeyCode::Char(c)) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             Some(Action::ReplaceChar(c))
         }
         (PendingEditorOp::FindForward, KeyCode::Char(c)) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             input.last_find = Some((c, true, false));
             Some(Action::FindChar(c, true, false))
         }
         (PendingEditorOp::FindBack, KeyCode::Char(c)) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             input.last_find = Some((c, false, false));
             Some(Action::FindChar(c, false, false))
         }
         (PendingEditorOp::TillForward, KeyCode::Char(c)) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             input.last_find = Some((c, true, true));
             Some(Action::FindChar(c, true, true))
         }
         (PendingEditorOp::TillBack, KeyCode::Char(c)) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             input.last_find = Some((c, false, true));
             Some(Action::FindChar(c, false, true))
         }
         (PendingEditorOp::ZMotion, KeyCode::Char('z')) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             Some(Action::CenterViewportOnCursor)
         }
         (PendingEditorOp::ZMotion, KeyCode::Char('t')) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             Some(Action::ViewportTopOnCursor)
         }
         (PendingEditorOp::ZMotion, KeyCode::Char('b')) if plain_or_shift => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             Some(Action::ViewportBottomOnCursor)
         }
         _ => {
-            input.clear_pending_editor_op();
+            input.pending_editor_op = None;
             None
         }
     }
@@ -189,23 +122,23 @@ pub(super) fn handle_insert_chords(
     input: &mut InputState,
 ) -> Option<Action> {
     if !is_insert_editing(state) || state.focus != PaneId::Editor {
-        input.reset_insert();
+        input.pending_insert = None;
         return None;
     }
 
     if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
-        input.reset_insert();
+        input.pending_insert = None;
         return None;
     }
 
     if let Some((pending, _)) = input.pending_insert {
         match key.code {
             KeyCode::Char('j') => {
-                input.reset_insert();
+                input.pending_insert = None;
                 return Some(Action::SaveAndNormal);
             }
             _ => {
-                input.defer_key(*key);
+                input.deferred_key = Some(*key);
                 let c = input.take_pending_insert().unwrap_or(pending);
                 return Some(Action::InsertChar(c));
             }
@@ -214,7 +147,7 @@ pub(super) fn handle_insert_chords(
 
     match key.code {
         KeyCode::Char('j') => {
-            input.set_pending_insert('j', Instant::now());
+            input.pending_insert = Some(('j', Instant::now()));
             None
         }
         _ => None,
@@ -259,7 +192,7 @@ pub(super) fn visualizer_inspector_action(
     state: &AppState,
     input: &mut InputState,
 ) -> Option<Action> {
-    if input.visualizer_jump_active() {
+    if input.visualizer_jump.is_some() {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
                 input.push_visualizer_digit(c as u8 - b'0');
@@ -270,16 +203,16 @@ pub(super) fn visualizer_inspector_action(
                 return None;
             }
             KeyCode::Enter => {
-                let value = input.visualizer_jump_value().unwrap_or(0);
-                input.clear_visualizer_jump();
+                let value = input
+                    .visualizer_jump
+                    .as_ref()
+                    .map(|jump| jump.value)
+                    .unwrap_or(0);
+                input.visualizer_jump = None;
                 return Some(Action::VisualizerInspectJump(value));
             }
-            KeyCode::Esc => {
-                input.clear_visualizer_jump();
-                return None;
-            }
             _ => {
-                input.clear_visualizer_jump();
+                input.visualizer_jump = None;
                 return None;
             }
         }

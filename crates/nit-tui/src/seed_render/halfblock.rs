@@ -35,7 +35,7 @@ impl SeedRenderer for HalfBlockSeedRenderer {
             for x in 0..cell_w {
                 let top = sample_row(x, top_y, grid_w, grid_h, seed, cfg, cache, palette);
                 let bot = sample_row(x, bot_y, grid_w, grid_h, seed, cfg, cache, palette);
-                let (ch, fg, bg) = compose(top, bot, palette.bg);
+                let (ch, fg, bg) = compose_halfblock_glyph(top, bot, palette.bg);
                 write_glyph(
                     buf,
                     area.x + x as u16,
@@ -84,7 +84,11 @@ fn sample_row(
     RowSample { alive: false, bg }
 }
 
-fn compose(top: RowSample, bot: RowSample, empty_bg: Color) -> (char, Color, Color) {
+fn compose_halfblock_glyph(
+    top: RowSample,
+    bot: RowSample,
+    empty_bg: Color,
+) -> (char, Color, Color) {
     match (top.alive, bot.alive) {
         (true, true) if top.bg == bot.bg => ('█', top.bg, top.bg),
         (true, true) | (true, false) => ('▀', top.bg, bot.bg),

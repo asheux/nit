@@ -730,6 +730,46 @@ pub(super) fn apply_role_dependency_ordering(
         .map(str::trim)
         .filter(|id| !id.is_empty());
 
+    validate_explicit_roles(
+        tasks,
+        mission_kind,
+        integrator_agent_id,
+        multi_integrator,
+        &mut warnings,
+    );
+    let inferred_roles = infer_missing_roles(
+        tasks,
+        role_hints_by_agent_id,
+        mission_kind,
+        integrator_agent_id,
+        multi_integrator,
+        &mut warnings,
+    );
+
+    let (role_deps, source) = match read_workspace_role_deps(workspace_root) {
+        Ok(Some(map)) => (map, "config"),
+        Ok(None) => (default_role_deps(), "built-in"),
+        Err(err) => {
+            warnings.push(format!("Role ordering: {err}; using built-in role deps."));
+            (default_role_deps(), "built-in")
+        }
+    };
+
+    let stats = apply_role_deps(tasks, &role_deps);
+    if stats.added > 0 || stats.skipped_cycle > 0 {
+        warnings.push(format_role_ordering_summary(source, inferred_roles, stats));
+    }
+
+    warnings
+}
+
+fn validate_explicit_roles(
+    tasks: &mut [SwarmTask],
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+    multi_integrator: bool,
+    warnings: &mut Vec<String>,
+) {
     for task in tasks.iter_mut() {
         let Some(role) = task.role.as_deref().and_then(normalize_role_label) else {
             task.role = None;
@@ -758,19 +798,28 @@ pub(super) fn apply_role_dependency_ordering(
         }
         task.role = Some(role);
     }
+}
 
-    let mut inferred_roles = 0usize;
+fn infer_missing_roles(
+    tasks: &mut [SwarmTask],
+    role_hints_by_agent_id: &HashMap<String, String>,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+    multi_integrator: bool,
+    warnings: &mut Vec<String>,
+) -> usize {
+    let mut inferred = 0usize;
     for task in tasks.iter_mut() {
         if task.role.is_some() {
             continue;
         }
         if task.writes {
             task.role = Some("integrate".into());
-            inferred_roles = inferred_roles.saturating_add(1);
+            inferred = inferred.saturating_add(1);
             continue;
         }
-        if let Some(inferred) = infer_role_from_task_id(task.id.as_str()) {
-            if inferred == "integrate"
+        if let Some(role) = infer_role_from_task_id(task.id.as_str()) {
+            if role == "integrate"
                 && !multi_integrator
                 && integrator_agent_id.is_some_and(|integrator| task.agent_id != integrator)
             {
@@ -780,8 +829,8 @@ pub(super) fn apply_role_dependency_ordering(
                 ));
                 continue;
             }
-            task.role = Some(inferred.to_string());
-            inferred_roles = inferred_roles.saturating_add(1);
+            task.role = Some(role.to_string());
+            inferred = inferred.saturating_add(1);
             continue;
         }
         let Some(hint) = inferred_role_hint_for_agent(
@@ -793,37 +842,30 @@ pub(super) fn apply_role_dependency_ordering(
             continue;
         };
         task.role = Some(hint);
-        inferred_roles = inferred_roles.saturating_add(1);
+        inferred = inferred.saturating_add(1);
     }
+    inferred
+}
 
-    let (role_deps, source) = match read_workspace_role_deps(workspace_root) {
-        Ok(Some(map)) => (map, "config"),
-        Ok(None) => (default_role_deps(), "built-in"),
-        Err(err) => {
-            warnings.push(format!("Role ordering: {err}; using built-in role deps."));
-            (default_role_deps(), "built-in")
-        }
-    };
-
-    let stats = apply_role_deps(tasks, &role_deps);
-    if stats.added > 0 || stats.skipped_cycle > 0 {
-        let mut parts = Vec::new();
-        if inferred_roles > 0 {
-            parts.push(format!("inferred {inferred_roles} role(s)"));
-        }
-        if stats.added > 0 {
-            parts.push(format!("added {} dep(s)", stats.added));
-        }
-        if stats.skipped_cycle > 0 {
-            parts.push(format!("skipped {} dep(s) (cycle)", stats.skipped_cycle));
-        }
-        if parts.is_empty() {
-            parts.push("no changes".into());
-        }
-        warnings.push(format!("Role ordering ({source}): {}.", parts.join(", ")));
+fn format_role_ordering_summary(
+    source: &str,
+    inferred_roles: usize,
+    stats: RoleDepStats,
+) -> String {
+    let mut parts = Vec::new();
+    if inferred_roles > 0 {
+        parts.push(format!("inferred {inferred_roles} role(s)"));
     }
-
-    warnings
+    if stats.added > 0 {
+        parts.push(format!("added {} dep(s)", stats.added));
+    }
+    if stats.skipped_cycle > 0 {
+        parts.push(format!("skipped {} dep(s) (cycle)", stats.skipped_cycle));
+    }
+    if parts.is_empty() {
+        parts.push("no changes".into());
+    }
+    format!("Role ordering ({source}): {}.", parts.join(", "))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -925,10 +967,37 @@ pub(super) fn parse_plan_from_planner(
             integrator_hint,
         );
     };
+    let tasks = parse_v1_tasks(plan.tasks, available_agents);
+
+    if tasks.is_empty() {
+        return fallback_tasks(
+            template,
+            mission_kind,
+            root_prompt,
+            available_agents,
+            None,
+            integrator_hint,
+        );
+    }
+    let mut tasks = tasks;
+    tasks.truncate(available_agents.len());
+
+    ParsedSwarmPlan {
+        tasks,
+        synthesis_prompt: plan.synthesis_prompt,
+        integrator_agent_id: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn parse_v1_tasks(
+    plan_tasks: Vec<super::bulk_plan::SwarmPlanTaskV1>,
+    available_agents: &[String],
+) -> Vec<SwarmTask> {
     let mut tasks = Vec::new();
     let mut idx = 0usize;
     let mut seen_agents = HashSet::new();
-    for task in plan.tasks.into_iter() {
+    for task in plan_tasks.into_iter() {
         let agent_id = task.agent_id.trim().to_string();
         if agent_id.is_empty() {
             continue;
@@ -964,25 +1033,7 @@ pub(super) fn parse_plan_from_planner(
             retries: 0,
         });
     }
-
-    if tasks.is_empty() {
-        return fallback_tasks(
-            template,
-            mission_kind,
-            root_prompt,
-            available_agents,
-            None,
-            integrator_hint,
-        );
-    }
-    tasks.truncate(available_agents.len());
-
-    ParsedSwarmPlan {
-        tasks,
-        synthesis_prompt: plan.synthesis_prompt,
-        integrator_agent_id: None,
-        warnings: Vec::new(),
-    }
+    tasks
 }
 
 fn parse_v2_plan(
@@ -1002,153 +1053,31 @@ fn parse_v2_plan(
         }
     }
 
-    let integrator_plan = plan
-        .integrator_agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty());
-    let integrator_hint = integrator_hint.map(str::trim).filter(|id| !id.is_empty());
-    let integrator_locked = integrator_locked && integrator_hint.is_some();
-
     let mut warnings = Vec::new();
-    if integrator_locked {
-        if let (Some(plan_id), Some(hint_id)) = (integrator_plan, integrator_hint) {
-            if !plan_id.eq_ignore_ascii_case(hint_id) {
-                warnings.push(format!(
-                    "Planner returned integrator_agent_id '{plan_id}' but integrator is locked to '{hint_id}'; ignoring planner override."
-                ));
-            }
-        }
-    }
-    let inferred_integrator = if integrator_locked || integrator_plan.is_some() {
-        None
-    } else {
-        infer_integrator_agent_id_from_v2_tasks(plan.tasks.as_slice(), available_agents)
-    };
-    if let Some((agent_id, reason)) = inferred_integrator.as_ref() {
-        warnings.push(format!(
-            "Planner omitted integrator_agent_id; inferred integrator '{agent_id}' from {reason}."
-        ));
-    }
+    let integrator = resolve_v2_integrator(
+        plan.integrator_agent_id.as_deref(),
+        plan.tasks.as_slice(),
+        available_agents,
+        integrator_hint,
+        integrator_locked,
+        &mut warnings,
+    );
+    note_template_mismatch(plan.template.as_deref(), template, &mut warnings);
 
-    let integrator_candidate = if integrator_locked {
-        integrator_hint
-    } else {
-        integrator_plan
-            .or(inferred_integrator
-                .as_ref()
-                .map(|(agent_id, _)| agent_id.as_str()))
-            .or(integrator_hint)
-    };
-    let integrator = integrator_candidate.and_then(|id| {
-        available_agents
-            .iter()
-            .find(|candidate| candidate.as_str() == id)
-            .map(|id| id.to_string())
-    });
-    if let Some(plan_template) = plan
-        .template
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let plan_template = parse_swarm_template(Some(plan_template));
-        if plan_template != template {
-            warnings.push(format!(
-                "Planner returned template '{}' but swarm is running template '{}'; continuing with the swarm template.",
-                plan_template.label(),
-                template.label()
-            ));
-        }
-    }
     let mut tasks = Vec::new();
     let mut seen_ids = HashSet::new();
     for (idx, task) in plan.tasks.into_iter().enumerate() {
-        let agent_id = task.agent_id.trim().to_string();
-        if agent_id.is_empty() {
-            continue;
+        if let Some(parsed) = parse_v2_task(
+            task,
+            idx,
+            available_agents,
+            integrator.as_deref(),
+            multi_integrator,
+            &mut seen_ids,
+            &mut warnings,
+        ) {
+            tasks.push(parsed);
         }
-        if available_agents.iter().all(|id| id != &agent_id) {
-            continue;
-        }
-
-        let title = task.title.trim().to_string();
-        let prompt = task.prompt.trim().to_string();
-        if title.is_empty() || prompt.is_empty() {
-            continue;
-        }
-
-        let id = task
-            .id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("task-{:02}", idx + 1));
-        if !seen_ids.insert(id.clone()) {
-            warnings.push(format!(
-                "Duplicate task id '{id}' in planner output; skipping."
-            ));
-            continue;
-        }
-
-        let mut writes = task.writes;
-        if writes && !multi_integrator {
-            let allowed = integrator
-                .as_deref()
-                .is_some_and(|integrator| integrator == agent_id.as_str());
-            if !allowed {
-                writes = false;
-                warnings.push(format!(
-                    "Planner marked task '{id}' as writes=true but agent '{agent_id}' is not the integrator; forcing read-only."
-                ));
-            }
-        }
-
-        let deps = task
-            .deps
-            .into_iter()
-            .map(|dep| dep.trim().to_string())
-            .filter(|dep| !dep.is_empty() && dep != &id)
-            .collect::<Vec<_>>();
-        // Write-role tasks (integrate) produce file modifications as output —
-        // don't declare artifacts for them. Declaring artifacts injects a
-        // STRUCTURED ARTIFACTS section into the prompt that forces the agent to
-        // produce a JSON block instead of focusing on code edits, and when it
-        // doesn't, downstream tasks see a misleading "artifacts missing" error.
-        let artifacts = if writes {
-            Vec::new()
-        } else {
-            task.artifacts
-                .into_iter()
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty())
-                .collect::<Vec<_>>()
-        };
-
-        tasks.push(SwarmTask {
-            id,
-            agent_id,
-            role: task
-                .role
-                .map(|r| r.trim().to_string())
-                .filter(|r| !r.is_empty()),
-            title,
-            task_prompt: prompt,
-            deps,
-            writes,
-            artifacts,
-            done_when: task
-                .done_when
-                .map(|d| d.trim().to_string())
-                .filter(|d| !d.is_empty()),
-            state: SwarmTaskState::Pending,
-            output: None,
-            parsed_artifacts: None,
-            expected_artifacts_missing: false,
-            failed: false,
-            retries: 0,
-        });
     }
 
     if tasks.is_empty() {
@@ -1160,5 +1089,161 @@ fn parse_v2_plan(
         synthesis_prompt: plan.synthesis_prompt,
         integrator_agent_id: integrator,
         warnings,
+    })
+}
+
+fn resolve_v2_integrator(
+    plan_integrator: Option<&str>,
+    plan_tasks: &[SwarmPlanTaskV2],
+    available_agents: &[String],
+    integrator_hint: Option<&str>,
+    integrator_locked: bool,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    let integrator_plan = plan_integrator.map(str::trim).filter(|id| !id.is_empty());
+    let integrator_hint = integrator_hint.map(str::trim).filter(|id| !id.is_empty());
+    let integrator_locked = integrator_locked && integrator_hint.is_some();
+
+    if integrator_locked {
+        if let (Some(plan_id), Some(hint_id)) = (integrator_plan, integrator_hint) {
+            if !plan_id.eq_ignore_ascii_case(hint_id) {
+                warnings.push(format!(
+                    "Planner returned integrator_agent_id '{plan_id}' but integrator is locked to '{hint_id}'; ignoring planner override."
+                ));
+            }
+        }
+    }
+    let inferred = if integrator_locked || integrator_plan.is_some() {
+        None
+    } else {
+        infer_integrator_agent_id_from_v2_tasks(plan_tasks, available_agents)
+    };
+    if let Some((agent_id, reason)) = inferred.as_ref() {
+        warnings.push(format!(
+            "Planner omitted integrator_agent_id; inferred integrator '{agent_id}' from {reason}."
+        ));
+    }
+
+    let candidate = if integrator_locked {
+        integrator_hint
+    } else {
+        integrator_plan
+            .or(inferred.as_ref().map(|(agent_id, _)| agent_id.as_str()))
+            .or(integrator_hint)
+    };
+    candidate.and_then(|id| {
+        available_agents
+            .iter()
+            .find(|candidate| candidate.as_str() == id)
+            .map(|id| id.to_string())
+    })
+}
+
+fn note_template_mismatch(
+    plan_template: Option<&str>,
+    swarm_template: SwarmTemplate,
+    warnings: &mut Vec<String>,
+) {
+    let Some(label) = plan_template.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let parsed = parse_swarm_template(Some(label));
+    if parsed != swarm_template {
+        warnings.push(format!(
+            "Planner returned template '{}' but swarm is running template '{}'; continuing with the swarm template.",
+            parsed.label(),
+            swarm_template.label()
+        ));
+    }
+}
+
+fn parse_v2_task(
+    task: SwarmPlanTaskV2,
+    idx: usize,
+    available_agents: &[String],
+    integrator: Option<&str>,
+    multi_integrator: bool,
+    seen_ids: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> Option<SwarmTask> {
+    let agent_id = task.agent_id.trim().to_string();
+    if agent_id.is_empty() || available_agents.iter().all(|id| id != &agent_id) {
+        return None;
+    }
+
+    let title = task.title.trim().to_string();
+    let prompt = task.prompt.trim().to_string();
+    if title.is_empty() || prompt.is_empty() {
+        return None;
+    }
+
+    let id = task
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("task-{:02}", idx + 1));
+    if !seen_ids.insert(id.clone()) {
+        warnings.push(format!(
+            "Duplicate task id '{id}' in planner output; skipping."
+        ));
+        return None;
+    }
+
+    let mut writes = task.writes;
+    if writes && !multi_integrator {
+        let allowed = integrator.is_some_and(|integrator| integrator == agent_id.as_str());
+        if !allowed {
+            writes = false;
+            warnings.push(format!(
+                "Planner marked task '{id}' as writes=true but agent '{agent_id}' is not the integrator; forcing read-only."
+            ));
+        }
+    }
+
+    let deps = task
+        .deps
+        .into_iter()
+        .map(|dep| dep.trim().to_string())
+        .filter(|dep| !dep.is_empty() && dep != &id)
+        .collect::<Vec<_>>();
+    // Write-role (integrate) tasks produce file modifications as output —
+    // don't declare artifacts for them. Declaring artifacts injects a
+    // STRUCTURED ARTIFACTS section that forces the agent to produce a JSON
+    // block instead of focusing on code edits; when it doesn't, downstream
+    // tasks see a misleading "artifacts missing" error.
+    let artifacts = if writes {
+        Vec::new()
+    } else {
+        task.artifacts
+            .into_iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    Some(SwarmTask {
+        id,
+        agent_id,
+        role: task
+            .role
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty()),
+        title,
+        task_prompt: prompt,
+        deps,
+        writes,
+        artifacts,
+        done_when: task
+            .done_when
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty()),
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
     })
 }

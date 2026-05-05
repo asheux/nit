@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use nit_core::{AgentStatus, AppState};
 
@@ -241,53 +241,62 @@ pub(crate) fn drain_queued_turns_for_agent(state: &mut AppState, agent_id: &str)
 }
 
 pub(super) fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
-    let clone_ids = state
+    let clone_ids: HashSet<String> = state
         .agents
         .agents
         .iter()
         .filter(|lane| is_swarm_clone_for_mission(lane.id.as_str(), mission_id))
         .map(|lane| lane.id.clone())
-        .collect::<HashSet<_>>();
+        .collect();
     if clone_ids.is_empty() {
         return;
     }
 
-    // Decrement queue_len for each Codex turn that will be removed, while agents still exist.
-    let codex_decrements: Vec<String> = state
-        .agents
-        .queued_codex_turns
+    drain_codex_queue_for_clones(state, &clone_ids);
+    drain_claude_queue_for_clones(state, &clone_ids);
+    purge_per_clone_runtime_state(state, &clone_ids);
+    purge_per_mission_runtime_state(state, mission_id, &clone_ids);
+    remove_clones_and_restore_selection(state, &clone_ids);
+}
+
+fn drain_codex_queue_for_clones(state: &mut AppState, clone_ids: &HashSet<String>) {
+    drain_queue_for_clones(
+        state,
+        clone_ids,
+        |s| &mut s.agents.queued_codex_turns,
+        |turn| turn.agent_id.as_str(),
+    );
+}
+
+fn drain_claude_queue_for_clones(state: &mut AppState, clone_ids: &HashSet<String>) {
+    drain_queue_for_clones(
+        state,
+        clone_ids,
+        |s| &mut s.agents.queued_claude_turns,
+        |turn| turn.agent_id.as_str(),
+    );
+}
+
+fn drain_queue_for_clones<T>(
+    state: &mut AppState,
+    clone_ids: &HashSet<String>,
+    get_queue: impl Fn(&mut AppState) -> &mut VecDeque<T>,
+    turn_agent_id: impl Fn(&T) -> &str,
+) {
+    let decrements: Vec<String> = get_queue(state)
         .iter()
-        .filter(|turn| clone_ids.contains(turn.agent_id.as_str()))
-        .map(|turn| turn.agent_id.clone())
+        .filter(|turn| clone_ids.contains(turn_agent_id(turn)))
+        .map(|turn| turn_agent_id(turn).to_string())
         .collect();
-    for agent_id in codex_decrements {
+    for agent_id in decrements {
         if let Some(agent) = state.agents.agents_get_mut(&agent_id) {
             agent.queue_len = agent.queue_len.saturating_sub(1);
         }
     }
-    state
-        .agents
-        .queued_codex_turns
-        .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
+    get_queue(state).retain(|turn| !clone_ids.contains(turn_agent_id(turn)));
+}
 
-    // Decrement queue_len for each Claude turn that will be removed, while agents still exist.
-    let claude_decrements: Vec<String> = state
-        .agents
-        .queued_claude_turns
-        .iter()
-        .filter(|turn| clone_ids.contains(turn.agent_id.as_str()))
-        .map(|turn| turn.agent_id.clone())
-        .collect();
-    for agent_id in claude_decrements {
-        if let Some(agent) = state.agents.agents_get_mut(&agent_id) {
-            agent.queue_len = agent.queue_len.saturating_sub(1);
-        }
-    }
-    state
-        .agents
-        .queued_claude_turns
-        .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
-
+fn purge_per_clone_runtime_state(state: &mut AppState, clone_ids: &HashSet<String>) {
     for clone_id in clone_ids.iter() {
         state.agents.active_turns.remove(clone_id);
         state.agents.codex_thread_ids.remove(clone_id);
@@ -323,76 +332,62 @@ pub(super) fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id:
             .roster_tree_collapsed_agent_ids
             .remove(clone_id);
     }
+}
 
-    let mut remove_mission_thread_ids = false;
-    if let Some(map) = state.agents.codex_mission_thread_ids.get_mut(mission_id) {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_mission_thread_ids = map.is_empty();
-    }
-    if remove_mission_thread_ids {
-        state.agents.codex_mission_thread_ids.remove(mission_id);
-    }
+fn purge_per_mission_runtime_state(
+    state: &mut AppState,
+    mission_id: &str,
+    clone_ids: &HashSet<String>,
+) {
+    prune_mission_map(
+        &mut state.agents.codex_mission_thread_ids,
+        mission_id,
+        clone_ids,
+    );
+    prune_mission_map(
+        &mut state.agents.codex_mission_used_tokens,
+        mission_id,
+        clone_ids,
+    );
+    prune_mission_map(
+        &mut state.agents.codex_mission_context_remaining_pct,
+        mission_id,
+        clone_ids,
+    );
+    prune_mission_map(
+        &mut state.agents.claude_mission_session_ids,
+        mission_id,
+        clone_ids,
+    );
+    prune_mission_map(
+        &mut state.agents.claude_mission_used_tokens,
+        mission_id,
+        clone_ids,
+    );
+    prune_mission_map(
+        &mut state.agents.claude_mission_context_remaining_pct,
+        mission_id,
+        clone_ids,
+    );
+}
 
-    let mut remove_mission_used_tokens = false;
-    if let Some(map) = state.agents.codex_mission_used_tokens.get_mut(mission_id) {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_mission_used_tokens = map.is_empty();
+fn prune_mission_map<V>(
+    map: &mut HashMap<String, HashMap<String, V>>,
+    mission_id: &str,
+    clone_ids: &HashSet<String>,
+) {
+    let drop_outer = if let Some(inner) = map.get_mut(mission_id) {
+        inner.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        inner.is_empty()
+    } else {
+        false
+    };
+    if drop_outer {
+        map.remove(mission_id);
     }
-    if remove_mission_used_tokens {
-        state.agents.codex_mission_used_tokens.remove(mission_id);
-    }
+}
 
-    let mut remove_mission_context_remaining = false;
-    if let Some(map) = state
-        .agents
-        .codex_mission_context_remaining_pct
-        .get_mut(mission_id)
-    {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_mission_context_remaining = map.is_empty();
-    }
-    if remove_mission_context_remaining {
-        state
-            .agents
-            .codex_mission_context_remaining_pct
-            .remove(mission_id);
-    }
-
-    let mut remove_claude_mission_session_ids = false;
-    if let Some(map) = state.agents.claude_mission_session_ids.get_mut(mission_id) {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_claude_mission_session_ids = map.is_empty();
-    }
-    if remove_claude_mission_session_ids {
-        state.agents.claude_mission_session_ids.remove(mission_id);
-    }
-
-    let mut remove_claude_mission_used_tokens = false;
-    if let Some(map) = state.agents.claude_mission_used_tokens.get_mut(mission_id) {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_claude_mission_used_tokens = map.is_empty();
-    }
-    if remove_claude_mission_used_tokens {
-        state.agents.claude_mission_used_tokens.remove(mission_id);
-    }
-
-    let mut remove_claude_mission_context_remaining = false;
-    if let Some(map) = state
-        .agents
-        .claude_mission_context_remaining_pct
-        .get_mut(mission_id)
-    {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_claude_mission_context_remaining = map.is_empty();
-    }
-    if remove_claude_mission_context_remaining {
-        state
-            .agents
-            .claude_mission_context_remaining_pct
-            .remove(mission_id);
-    }
-
-    // Remove clones from the roster now that the mission is done.
+fn remove_clones_and_restore_selection(state: &mut AppState, clone_ids: &HashSet<String>) {
     let selected_was_clone = state
         .agents
         .selected_agent

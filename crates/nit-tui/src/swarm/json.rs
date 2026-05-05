@@ -3,7 +3,8 @@ pub(super) fn extract_json_code_block(text: &str) -> Option<String> {
         return Some(first);
     }
 
-    // Fallback: attempt to parse the first JSON object we can find.
+    // Fallback: scan for the outer-most `{ ... }` span so we can recover JSON
+    // even when the agent forgot the ```json fence.
     let trimmed = text.trim();
     let start = trimmed.find('{')?;
     let end = trimmed.rfind('}')?;

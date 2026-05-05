@@ -4,45 +4,67 @@ fn has_arg(args: &[String], expected: &str) -> bool {
     args.iter().any(|a| a == expected)
 }
 
-// Pins propose-03 important #3: when the runner-internal queue is
-// non-empty (`max_parallel_turns` clamped) and the operator triggers a
-// `CancelAll` / `CancelTurn`, today's `runner_loop` calls `queue.clear()`
-// or `queue.retain(...)` without emitting `TurnFailed` for the dropped
-// queued commands. State-side `queue_len` was incremented by
-// `enqueue_claude_turn` at dispatch time; without a matching
-// `TurnFailed`, the bus-side decrement at `agent_bus.rs:482` never
-// runs and the roster carries ghost queue rows until the agent is
-// reaped. The fix lives in `claude_runner.rs`'s `CancelAll` /
-// `CancelTurn` arms — once they emit `TurnFailed { message:
-// OPERATOR_CANCEL_TURN_MESSAGE, ... }` per dropped queued turn, this
-// test passes and `#[ignore]` should be removed.
+fn line_with_terminator(prefix: u8, body_len: usize) -> Vec<u8> {
+    let mut v = vec![prefix; body_len];
+    v.push(b'\n');
+    v
+}
+
+fn fill_buffer_to_cap(line: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
+    while buf.len() + line.len() <= STDOUT_TAIL_CAP_BYTES {
+        buf.extend_from_slice(line);
+    }
+    buf
+}
+
+fn lane_with_queue(
+    id: &str,
+    kind: nit_core::state::AgentLaneKind,
+    queue_len: usize,
+) -> nit_core::state::AgentLane {
+    use nit_core::state::{AgentLane, AgentStatus};
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: match kind {
+            nit_core::state::AgentLaneKind::Claude => "Claude".into(),
+            nit_core::state::AgentLaneKind::Codex => "Codex".into(),
+            _ => "Lane".into(),
+        },
+        kind,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    }
+}
+
+// Pins propose-03 important #3: when the runner-internal queue is non-empty
+// and the operator triggers CancelAll/CancelTurn, today's runner_loop calls
+// queue.clear() / queue.retain() without emitting TurnFailed for the dropped
+// queued commands. Without that emit, the bus-side queue_len decrement at
+// agent_bus.rs:482 never runs and the roster carries ghost queue rows.
 #[test]
 #[ignore = "fails until claude_runner::CancelAll emits TurnFailed for dropped queued items"]
 fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
-    use nit_core::state::{AgentLane, AgentLaneKind, AgentStatus, AppState};
+    use nit_core::state::{AgentLaneKind, AppState};
     use nit_core::{AgentBusEvent, OPERATOR_CANCEL_TURN_MESSAGE};
 
     let editor = nit_core::Buffer::from_str("editor", "", None);
     let notes = nit_core::Buffer::from_str("notes", "", None);
     let mut state = AppState::new(std::path::PathBuf::from("."), editor, notes);
-    state.agents.agents.push(AgentLane {
-        id: "claude-opus".into(),
-        role: "claude-opus".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        // 3 queue increments from dispatch: 1 active + 2 in the
-        // runner-internal queue (assuming max_parallel_turns = 1).
-        queue_len: 3,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    // 3 queue increments from dispatch: 1 active + 2 in the runner-internal
+    // queue (assuming max_parallel_turns = 1).
+    state
+        .agents
+        .agents
+        .push(lane_with_queue("claude-opus", AgentLaneKind::Claude, 3));
     state.agents.rebuild_agents_index();
 
-    // Today CancelAll only kills the active turn → exactly one
-    // TurnFailed is emitted. Simulate that single event:
+    // Today CancelAll only kills the active turn → exactly one TurnFailed.
     AgentBusEvent::TurnFailed {
         agent_id: "claude-opus".into(),
         mission_id: None,
@@ -69,14 +91,12 @@ fn test_claude_model_slug_for_agent_id() {
         ("claude-sonnet-4-6#chat-clone-02", "claude-sonnet-4-6"),
         ("claude-opus-4-6#shadow-01-propose-a", "claude-opus-4-6"),
         ("claude-sonnet-4-6#shadow-07-judge", "claude-sonnet-4-6"),
-        // Regression: the original suffix table missed `#mp-pane-`.
-        // Multipane turns ran out with the full agent_id as the CLI
-        // model name, and Claude rejected ("selected model (…) does
-        // not exist"). The slug stripper now splits on the FIRST `#`.
+        // Regression: the original suffix table missed `#mp-pane-` so multipane
+        // turns went out with the full id and Claude rejected them. The slug
+        // stripper now splits on the FIRST `#`.
         ("claude-haiku-4-5#mp-pane-00", "claude-haiku-4-5"),
         ("claude-opus-4-7#mp-pane-12", "claude-opus-4-7"),
-        // Nested: multipane lane spawns a swarm. Pane suffix
-        // prepended, swarm suffix appended; both peel on first `#`.
+        // Nested multipane → swarm: pane prefix + swarm suffix both peel.
         (
             "claude-opus-4-7#mp-pane-01#swarm-mis-001-clone-01",
             "claude-opus-4-7",
@@ -137,7 +157,6 @@ fn test_token_count_from_result_event() {
 
 #[test]
 fn test_token_count_from_assistant_event() {
-    // Assistant events have usage nested under "message"
     let value: serde_json::Value = serde_json::json!({
         "type": "assistant",
         "message": {
@@ -149,10 +168,9 @@ fn test_token_count_from_assistant_event() {
     assert_eq!(count.context_window, 0);
 }
 
-/// Pin the Lens-E spawn-site invariant: `prepare_claude_command` must
-/// bind `current_dir` to the per-pane cwd. Without it, `--add-dir`
-/// updates only the allow-list and the subprocess inherits nit's parent
-/// cwd — the silent regression the multipane fix exists to prevent.
+// Pin the Lens-E spawn-site invariant: prepare_claude_command must bind
+// current_dir to the per-pane cwd. Without it, --add-dir updates only the
+// allow-list and the subprocess inherits nit's parent cwd.
 #[test]
 fn prepare_claude_command_binds_cwd_to_subprocess_working_directory() {
     let config = ClaudeRunnerConfig::default();
@@ -171,9 +189,8 @@ fn prepare_claude_command_binds_cwd_to_subprocess_working_directory() {
     assert_eq!(cmd.get_current_dir(), Some(cwd));
 }
 
-/// Resume turns must spawn with the SAME cwd as fresh turns. Pre-fix the
-/// resume branch dropped `-C`, which combined with the missing
-/// `current_dir` left resumed sessions anchored at the workspace root.
+// Resume turns must spawn with the SAME cwd as fresh turns. Pre-fix the
+// resume branch dropped `-C`, leaving resumed sessions at the workspace root.
 #[test]
 fn prepare_claude_command_binds_cwd_for_resume_turns() {
     let config = ClaudeRunnerConfig::default();
@@ -250,7 +267,6 @@ fn test_build_claude_args_read_only_for_shadow_turns() {
         None,
         &config,
     );
-    // Read-only turns get a narrow tool allow-list with no Write/Edit/Bash.
     assert!(args.contains(&"Read,Glob,Grep".to_string()));
     assert!(!args
         .iter()
@@ -263,10 +279,9 @@ fn test_shorten_id() {
     assert_eq!(shorten_id("short"), "short");
 }
 
-// --- append_stdout_line_capped ---------------------------------------------
+// --- append_stdout_line_capped --------------------------------------------
 //
-// Mirrors codex_runner cap tests; the helper has its own copy in this
-// module and runs in the spawn_turn_worker stdout reader thread.
+// Mirrors codex_runner cap tests; runs in spawn_turn_worker stdout reader.
 
 #[test]
 fn cap_is_noop_when_under_threshold() {
@@ -288,15 +303,8 @@ fn cap_handles_empty_input_safely() {
 
 #[test]
 fn cap_drains_at_newline_boundary_on_overflow() {
-    let line: Vec<u8> = {
-        let mut v = vec![b'x'; 1023];
-        v.push(b'\n');
-        v
-    };
-    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
-    while buf.len() + line.len() <= STDOUT_TAIL_CAP_BYTES {
-        buf.extend_from_slice(&line);
-    }
+    let line = line_with_terminator(b'x', 1023);
+    let mut buf = fill_buffer_to_cap(&line);
     append_stdout_line_capped(&mut buf, &line);
     assert!(buf.len() <= STDOUT_TAIL_CAP_BYTES);
     assert_eq!(buf.last().copied(), Some(b'\n'));
@@ -313,11 +321,7 @@ fn cap_truncates_single_mega_line_with_no_newline() {
 
 #[test]
 fn cap_stays_bounded_under_repeated_overflow() {
-    let line: Vec<u8> = {
-        let mut v = vec![b'y'; 4095];
-        v.push(b'\n');
-        v
-    };
+    let line = line_with_terminator(b'y', 4095);
     let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
     let target = STDOUT_TAIL_CAP_BYTES * 4;
     let mut written = 0usize;
@@ -342,7 +346,7 @@ fn json_errors_cap_keeps_size_bounded() {
     );
 }
 
-// --- idle-output reaper helpers --------------------------------------------
+// --- idle-output reaper helpers -------------------------------------------
 
 #[test]
 fn is_stream_result_event_matches_only_result_type() {
@@ -356,11 +360,9 @@ fn is_stream_result_event_matches_only_result_type() {
     assert!(!is_stream_result_event(&wrong_kind));
 }
 
-// `claude_turn_idle_timeout` reads a process-wide env var, so these tests
-// must run serially (cargo runs `#[test]` items in parallel by default).
-// Bracketing the env var with set-then-remove around each assertion keeps
-// the polluted state contained; the `_lock` mutex serializes against
-// concurrent invocations of this single test entry.
+// `claude_turn_idle_timeout` reads a process-wide env var, so this test
+// must serialize against any other test that touches the same var. The
+// LOCK mutex pairs with Drop-restore at the bottom.
 #[test]
 fn claude_turn_idle_timeout_env_parsing() {
     use std::sync::Mutex;
@@ -368,17 +370,15 @@ fn claude_turn_idle_timeout_env_parsing() {
     let _guard = LOCK.lock().unwrap();
     const VAR: &str = "NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS";
 
-    // Snapshot whatever the caller had set so we can restore it.
     let prior = std::env::var(VAR).ok();
 
-    // Unset → default-on at 15 min.
+    // Unset / empty → default-on at 15 min.
     std::env::remove_var(VAR);
     assert_eq!(
         claude_turn_idle_timeout(),
         Some(std::time::Duration::from_secs(15 * 60))
     );
 
-    // Empty / whitespace → default.
     std::env::set_var(VAR, "   ");
     assert_eq!(
         claude_turn_idle_timeout(),
@@ -403,7 +403,6 @@ fn claude_turn_idle_timeout_env_parsing() {
         Some(std::time::Duration::from_secs(15 * 60))
     );
 
-    // Restore caller's environment.
     match prior {
         Some(value) => std::env::set_var(VAR, value),
         None => std::env::remove_var(VAR),

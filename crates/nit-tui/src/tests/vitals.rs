@@ -1,8 +1,7 @@
 use super::*;
 
-#[test]
-fn criticality_boundaries_match_spec_thresholds() {
-    let base = CriticalityInput {
+fn baseline_input() -> CriticalityInput {
+    CriticalityInput {
         job_running: true,
         hb_age: Some(Duration::from_millis(1900)),
         agent_enabled: false,
@@ -11,7 +10,16 @@ fn criticality_boundaries_match_spec_thresholds() {
         ag_age: None,
         recent_errors: 0,
         fatal_error: false,
-    };
+    }
+}
+
+fn last_ecg_sample(snap: &LabVitalsSnapshot) -> u64 {
+    *snap.ecg_samples.last().unwrap_or(&0)
+}
+
+#[test]
+fn criticality_boundaries_match_spec_thresholds() {
+    let base = baseline_input();
     assert_eq!(LabCriticality::classify(base), LabCriticality::Ok);
     assert_eq!(
         LabCriticality::classify(CriticalityInput {
@@ -54,7 +62,7 @@ fn sampler_flatlines_then_spikes_on_real_event() {
     for _ in 0..30 {
         now += dt;
         let snap = vitals.tick(now, dt, false, AgentVitalsState::disabled());
-        idle_last = *snap.ecg_samples.last().unwrap_or(&0);
+        idle_last = last_ecg_sample(&snap);
     }
     assert!(
         idle_last <= 20,
@@ -63,13 +71,11 @@ fn sampler_flatlines_then_spikes_on_real_event() {
 
     vitals.record_job_event(now);
     now += dt;
-    let spike_snap = vitals.tick(now, dt, true, AgentVitalsState::disabled());
-    let spike = *spike_snap.ecg_samples.last().unwrap_or(&0);
+    let spike = last_ecg_sample(&vitals.tick(now, dt, true, AgentVitalsState::disabled()));
     assert!(spike > idle_last + 35, "expected spike above idle");
 
     now += dt;
-    let decay_snap = vitals.tick(now, dt, true, AgentVitalsState::disabled());
-    let decay = *decay_snap.ecg_samples.last().unwrap_or(&0);
+    let decay = last_ecg_sample(&vitals.tick(now, dt, true, AgentVitalsState::disabled()));
     assert!(decay < spike, "signal should decay after spike");
 }
 
@@ -85,7 +91,7 @@ fn sampler_does_not_pin_full_scale_under_continuous_events() {
         vitals.record_job_event(now);
         let snap = vitals.tick(now, dt, true, AgentVitalsState::disabled());
         if i >= 90 {
-            tail.push(*snap.ecg_samples.last().unwrap_or(&0));
+            tail.push(last_ecg_sample(&snap));
         }
     }
 

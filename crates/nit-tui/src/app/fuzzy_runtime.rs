@@ -1,73 +1,11 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
+use nit_core::{AppState, SearchMode};
+
 use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
+    fuzzy_preview_runner::{PreviewModel, PreviewRunner},
+    fuzzy_search_runner::{ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyMatcherRunner},
     theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
-use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
 };
 
 use super::*;
@@ -132,42 +70,39 @@ impl FuzzySearchRuntime {
     }
 
     pub(super) fn tick_open(&mut self, state: &mut AppState) {
-        if state.fuzzy_search.open {
-            if !self.last_open {
-                self.last_open = true;
-                self.preview_model = None;
-                self.last_preview_key = None;
-                self.preview_scroll_delta = 0;
-                self.ensure_index(state);
-                self.run_search_for_mode(state);
-                self.request_preview_for_selection(state);
-            }
+        let open_now = state.fuzzy_search.open;
+        if open_now == self.last_open {
             return;
         }
-        if self.last_open {
-            self.last_open = false;
-            self.preview_model = None;
-            self.last_preview_key = None;
-            self.preview_scroll_delta = 0;
-            self.file_gen = self.file_gen.wrapping_add(1);
-            self.preview_gen = self.preview_gen.wrapping_add(1);
-            self.fuzzy.send(FuzzyCommand::Query {
-                generation: 0,
-                query: String::new(),
-            });
-            state.fuzzy_search.status_msg.clear();
-            state.fuzzy_search.indexing = false;
-            state.fuzzy_search.searching = false;
-            // Cancel any in-flight content search quickly.
-            self.content_gen = self.content_gen.wrapping_add(1);
-            self.content.search(
-                self.content_gen,
-                state.workspace_root.clone(),
-                String::new(),
-                state.fuzzy_search.show_hidden,
-                state.fuzzy_search.show_ignored,
-            );
+        self.last_open = open_now;
+        self.preview_model = None;
+        self.last_preview_key = None;
+        self.preview_scroll_delta = 0;
+        if open_now {
+            self.ensure_index(state);
+            self.run_search_for_mode(state);
+            self.request_preview_for_selection(state);
+            return;
         }
+        // Closing: bump generation counters so any in-flight responses are
+        // ignored, drain status flags, and quickly cancel content search.
+        self.file_gen = self.file_gen.wrapping_add(1);
+        self.preview_gen = self.preview_gen.wrapping_add(1);
+        self.fuzzy.send(FuzzyCommand::Query {
+            generation: 0,
+            query: String::new(),
+        });
+        state.fuzzy_search.status_msg.clear();
+        state.fuzzy_search.indexing = false;
+        state.fuzzy_search.searching = false;
+        self.content_gen = self.content_gen.wrapping_add(1);
+        self.content.search(
+            self.content_gen,
+            state.workspace_root.clone(),
+            String::new(),
+            state.fuzzy_search.show_hidden,
+            state.fuzzy_search.show_ignored,
+        );
     }
 
     pub(super) fn ensure_index(&mut self, state: &mut AppState) {

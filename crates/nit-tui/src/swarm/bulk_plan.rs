@@ -64,6 +64,14 @@ fn task_role_is(task: &SwarmTask, role: &str) -> bool {
         .is_some_and(|r| r.trim().eq_ignore_ascii_case(role))
 }
 
+fn task_normalized_role_is(task: &SwarmTask, want: &str) -> bool {
+    task.role
+        .as_deref()
+        .and_then(normalize_role_label)
+        .as_deref()
+        == Some(want)
+}
+
 fn bulk_is_proposer(task: &SwarmTask) -> bool {
     task_role_is(task, "propose") || task.id.to_ascii_lowercase().starts_with("propose-")
 }
@@ -109,7 +117,6 @@ pub(super) fn normalize_lab_plan(tasks: &mut [SwarmTask]) -> Vec<String> {
             continue;
         }
         let my_id = task.id.clone();
-        let before = task.deps.len();
         task.deps.retain(|dep| {
             let drop = proposer_ids.contains(dep) && dep != &my_id;
             if drop {
@@ -119,10 +126,6 @@ pub(super) fn normalize_lab_plan(tasks: &mut [SwarmTask]) -> Vec<String> {
             }
             !drop
         });
-        // `retain` emits one warning per dropped dep via the closure
-        // side-effect above; nothing else to do here, but reference
-        // `before` to quiet dead-store warnings.
-        let _ = before;
     }
 
     warnings
@@ -347,23 +350,6 @@ pub(super) fn ensure_integrate_task(
     warnings
 }
 
-/// Safety net for parallel template + general mission: if the planner
-/// produced multiple integrate tasks but no read-only proposer/recon lane,
-/// demote one of the integrate tasks (preferring one not on the designated
-/// integrator agent) to a `propose` role and wire it as a dependency of the
-/// remaining integrate tasks. This preserves parallel's write fan-out while
-/// guaranteeing that at least one agent surveys the module before edits begin.
-///
-/// Mirrors `ensure_integrate_task` for the read-only side. Only acts when:
-/// - template == Parallel (lab/bulk already enforce single-writer or
-///   propose-then-judge-then-integrate via the planner prompt)
-/// - mission_kind == General (research missions already lean read-only)
-/// - no existing read-only role lane (propose / research / computational-research / review)
-/// - at least 2 integrate tasks (so demoting one still leaves a writer)
-///
-/// Mutates tasks in place — never pushes or removes — so the slice is passed
-/// as `&mut [SwarmTask]`, distinct from `ensure_integrate_task` which may
-/// inject a new task.
 /// Insert a judge-role task for parallel missions that have ≥2 proposers
 /// but no judge. Without a judge, every integrator receives every proposer
 /// output concatenated and must silently reconcile potentially contradictory
@@ -384,41 +370,33 @@ pub(super) fn ensure_judge_task_for_multi_proposer(
     if !matches!(template, SwarmTemplate::Parallel) {
         return warnings;
     }
-
-    let is_role = |task: &SwarmTask, want: &str| -> bool {
-        task.role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some(want)
-    };
-
-    // If a judge already exists, nothing to do.
-    if tasks.iter().any(|t| is_role(t, "judge")) {
+    if tasks.iter().any(|t| task_normalized_role_is(t, "judge")) {
         return warnings;
     }
 
     let proposer_ids: Vec<String> = tasks
         .iter()
-        .filter(|t| is_role(t, "propose"))
+        .filter(|t| task_normalized_role_is(t, "propose"))
         .map(|t| t.id.clone())
         .collect();
     if proposer_ids.len() < 2 {
         return warnings;
     }
 
-    // Pick an agent not already tied to a propose/integrate task. Fall back
-    // to the integrator, then to any roster agent that isn't a proposer.
-    let busy: std::collections::HashSet<&str> = tasks
+    // Prefer an agent not already tied to a propose/integrate task; fall back
+    // to the integrator, then any roster agent.
+    let busy: HashSet<&str> = tasks
         .iter()
-        .filter(|t| is_role(t, "propose") || is_role(t, "integrate"))
+        .filter(|t| {
+            task_normalized_role_is(t, "propose") || task_normalized_role_is(t, "integrate")
+        })
         .map(|t| t.agent_id.as_str())
         .collect();
     let judge_agent = available_agents
         .iter()
         .find(|id| !busy.contains(id.as_str()))
         .cloned()
-        .or_else(|| integrator_agent_id.map(|s| s.to_string()))
+        .or_else(|| integrator_agent_id.map(str::to_string))
         .or_else(|| available_agents.first().cloned());
     let Some(judge_agent) = judge_agent else {
         return warnings;
@@ -460,6 +438,23 @@ pub(super) fn ensure_judge_task_for_multi_proposer(
     warnings
 }
 
+/// Safety net for parallel template + general mission: if the planner
+/// produced multiple integrate tasks but no read-only proposer/recon lane,
+/// demote one of the integrate tasks (preferring one not on the designated
+/// integrator agent) to a `propose` role and wire it as a dependency of the
+/// remaining integrate tasks. This preserves parallel's write fan-out while
+/// guaranteeing that at least one agent surveys the module before edits begin.
+///
+/// Mirrors `ensure_integrate_task` for the read-only side. Only acts when:
+/// - template == Parallel (lab/bulk already enforce single-writer or
+///   propose-then-judge-then-integrate via the planner prompt)
+/// - mission_kind == General (research missions already lean read-only)
+/// - no existing read-only role lane (propose / research / computational-research / review)
+/// - at least 2 integrate tasks (so demoting one still leaves a writer)
+///
+/// Mutates tasks in place — never pushes or removes — so the slice is passed
+/// as `&mut [SwarmTask]`, distinct from `ensure_integrate_task` which may
+/// inject a new task.
 pub(super) fn ensure_proposer_task(
     tasks: &mut [SwarmTask],
     template: SwarmTemplate,
@@ -491,26 +486,30 @@ pub(super) fn ensure_proposer_task(
         return warnings;
     }
 
-    let is_integrate = |task: &SwarmTask| -> bool {
-        task.role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some("integrate")
-    };
-
     // Need at least 2 integrate tasks: demoting one must still leave a writer.
-    if tasks.iter().filter(|t| is_integrate(t)).count() < 2 {
+    if tasks
+        .iter()
+        .filter(|t| task_normalized_role_is(t, "integrate"))
+        .count()
+        < 2
+    {
         return warnings;
     }
 
-    // Pick the demote target: prefer an integrate task whose agent is NOT
-    // the designated integrator (so the integrator stays a writer). Fall back
-    // to the first integrate task if every integrate is on the integrator.
+    // Prefer an integrate task whose agent is NOT the designated integrator
+    // (so the integrator stays a writer); fall back to the first integrate
+    // task if every integrate is already on the integrator.
     let demote_idx = tasks
         .iter()
-        .position(|t| is_integrate(t) && Some(t.agent_id.as_str()) != integrator_agent_id)
-        .or_else(|| tasks.iter().position(is_integrate));
+        .position(|t| {
+            task_normalized_role_is(t, "integrate")
+                && Some(t.agent_id.as_str()) != integrator_agent_id
+        })
+        .or_else(|| {
+            tasks
+                .iter()
+                .position(|t| task_normalized_role_is(t, "integrate"))
+        });
     let Some(idx) = demote_idx else {
         return warnings;
     };
@@ -538,7 +537,7 @@ pub(super) fn ensure_proposer_task(
         if task.id == demoted_id {
             continue;
         }
-        if is_integrate(task) && !task.deps.contains(&demoted_id) {
+        if task_normalized_role_is(task, "integrate") && !task.deps.contains(&demoted_id) {
             task.deps.push(demoted_id.clone());
         }
     }

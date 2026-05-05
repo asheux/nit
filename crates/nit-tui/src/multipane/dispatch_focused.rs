@@ -80,9 +80,6 @@ pub(crate) fn submit_focused_pane_input(
     capture_pane_mission_ids(state);
 }
 
-/// Wrapper around `with_pane_aliased` for the focused pane. Single
-/// call site for chat-input editing and history nav so we don't
-/// duplicate the focus lookup at every keystroke.
 pub(super) fn with_focused_pane_aliased<R>(
     state: &mut AppState,
     body: impl FnOnce(&mut AppState) -> R,
@@ -91,12 +88,11 @@ pub(super) fn with_focused_pane_aliased<R>(
     with_pane_aliased(state, pane_idx, body)
 }
 
-/// Pin the focused lane's `current_mission` to the pane's synthetic chat
-/// id when no real swarm overlay exists. Locks the breather-filter
-/// invariant `agent.current_mission == Some(mission_ctx)` for the render
-/// alias even before `dispatch_agent_prompt` rewrites it on dispatch —
-/// without this, a stale id from a prior swarm could survive long enough
-/// to leak into another pane's render.
+/// Locks the breather-filter invariant
+/// `agent.current_mission == Some(mission_ctx)` for the render alias
+/// even before `dispatch_agent_prompt` rewrites it on dispatch — without
+/// this, a stale id from a prior swarm can survive long enough to leak
+/// into another pane's render.
 pub(super) fn pin_pane_chat_mission_on_lane(state: &mut AppState, pane_idx: usize) {
     let synthetic = state
         .multipane

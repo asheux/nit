@@ -451,36 +451,12 @@ pub(super) fn merge_task_artifacts(dst: &mut SwarmTaskArtifacts, src: SwarmTaskA
         dst.summary = Some(summary.to_string());
     }
 
-    let mut seen_files = dst
-        .files
-        .iter()
-        .map(|entry| entry.path.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    for entry in src.files {
-        let key = entry.path.to_ascii_lowercase();
-        if key.is_empty() || !seen_files.insert(key) {
-            continue;
-        }
-        dst.files.push(entry);
-    }
+    dedup_extend(&mut dst.files, src.files, |entry| {
+        entry.path.to_ascii_lowercase()
+    });
 
-    let mut seen_diffs = dst
-        .diffs
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}|{}",
-                entry
-                    .path
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase(),
-                entry.summary.to_ascii_lowercase()
-            )
-        })
-        .collect::<HashSet<_>>();
-    for entry in src.diffs {
-        let key = format!(
+    let diff_key = |entry: &SwarmArtifactDiff| {
+        format!(
             "{}|{}",
             entry
                 .path
@@ -488,49 +464,33 @@ pub(super) fn merge_task_artifacts(dst: &mut SwarmTaskArtifacts, src: SwarmTaskA
                 .unwrap_or_default()
                 .to_ascii_lowercase(),
             entry.summary.to_ascii_lowercase()
-        );
+        )
+    };
+    let mut seen_diffs = dst.diffs.iter().map(diff_key).collect::<HashSet<_>>();
+    for entry in src.diffs {
+        let key = diff_key(&entry);
         if key == "|" || !seen_diffs.insert(key) {
             continue;
         }
         dst.diffs.push(entry);
     }
 
-    let mut seen_commands = dst
-        .commands
-        .iter()
-        .map(|entry| entry.cmd.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    for entry in src.commands {
-        let key = entry.cmd.to_ascii_lowercase();
-        if key.is_empty() || !seen_commands.insert(key) {
-            continue;
-        }
-        dst.commands.push(entry);
-    }
+    dedup_extend(&mut dst.commands, src.commands, |entry| {
+        entry.cmd.to_ascii_lowercase()
+    });
+    dedup_extend(&mut dst.risks, src.risks, |entry| {
+        entry.item.to_ascii_lowercase()
+    });
+    dedup_extend(&mut dst.notes, src.notes, |note| note.to_ascii_lowercase());
+}
 
-    let mut seen_risks = dst
-        .risks
-        .iter()
-        .map(|entry| entry.item.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    for entry in src.risks {
-        let key = entry.item.to_ascii_lowercase();
-        if key.is_empty() || !seen_risks.insert(key) {
+fn dedup_extend<T>(dst: &mut Vec<T>, src: Vec<T>, key: impl Fn(&T) -> String) {
+    let mut seen: HashSet<String> = dst.iter().map(&key).collect();
+    for item in src {
+        let k = key(&item);
+        if k.is_empty() || !seen.insert(k) {
             continue;
         }
-        dst.risks.push(entry);
-    }
-
-    let mut seen_notes = dst
-        .notes
-        .iter()
-        .map(|note| note.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    for note in src.notes {
-        let key = note.to_ascii_lowercase();
-        if key.is_empty() || !seen_notes.insert(key) {
-            continue;
-        }
-        dst.notes.push(note);
+        dst.push(item);
     }
 }

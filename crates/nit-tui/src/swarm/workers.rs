@@ -12,9 +12,6 @@ struct GenomeReviewInput {
     baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport>,
 }
 
-/// If the genome gate is enabled and a verifier agent exists, kick off the
-/// background prompt build for the genome reviewer. Stores the receiver on
-/// the run so `poll_genome_reviews` can pick up the result on a later tick.
 pub(super) fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
     if !state.settings.genome.genome_gate_enabled {
         return;
@@ -28,14 +25,8 @@ pub(super) fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
     });
 }
 
-/// Spawn the genome review prompt build on a background thread and return a
-/// receiver that delivers the prompt string. The main thread polls this with
-/// `try_recv` so the UI never blocks while running multiple
-/// `compute_genome_report` calls (each one is a 3000-generation GoL sim).
-///
-/// An empty string in the channel means the worker had nothing to evaluate
-/// (no modified files) — the poller skips dispatching the reviewer in that
-/// case.
+// Empty channel value = worker had nothing to evaluate (no modified files).
+// The poller skips dispatching the reviewer in that case.
 fn spawn_genome_review_prompt(
     state: &AppState,
     mission_id: &str,
@@ -43,33 +34,12 @@ fn spawn_genome_review_prompt(
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 
-    // Prefer the mission-scoped accumulator so files from earlier turns of
-    // the same mission aren't lost when an agent runs multiple sequential
-    // tasks (each TurnStarted clears `genome_turn_modified[agent]`).
-    // Fall back to unioning `genome_turn_modified` for defence-in-depth if
-    // the mission key is somehow empty.
-    let mut files_to_eval: Vec<std::path::PathBuf> =
-        match state.genome_mission_modified.get(mission_id) {
-            Some(set) if !set.is_empty() => set.iter().cloned().collect(),
-            _ => state
-                .genome_turn_modified
-                .values()
-                .flat_map(|s| s.iter().cloned())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect(),
-        };
-    if let Some(editor_path) = state.editor_buffer().path().cloned() {
-        if !files_to_eval.contains(&editor_path) {
-            files_to_eval.push(editor_path);
-        }
-    }
-    files_to_eval.sort();
+    let files_to_eval = collect_files_to_eval(state, mission_id);
 
-    // Use the mission-scoped snapshot (frozen at swarm start) as the "before".
+    // Use the mission-scoped snapshot (frozen at swarm start) as "before".
     // `state.genome_baselines` is per-turn and gets cleared/re-captured
-    // between agents, so by the time the review runs it equals current state
-    // and `compute_genome_diff` returns +0.00 for every encoder.
+    // between agents, so by the time the review runs it equals current
+    // state and `compute_genome_diff` returns +0.00 for every encoder.
     let baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport> = files_to_eval
         .iter()
         .filter_map(|p| mission_baselines.get(p).map(|r| (p.clone(), r.clone())))
@@ -91,10 +61,34 @@ fn spawn_genome_review_prompt(
     rx
 }
 
-/// Build the genome review prompt for the genome-reviewer role on a worker
-/// thread. Reads each modified file and computes a full genome report — this
-/// is the expensive work (tree-sitter + 3000-gen GoL + parsimony per file)
-/// that previously blocked the main loop for "Genome Quality Review".
+// Prefer the mission-scoped accumulator over per-turn `genome_turn_modified`
+// so files from earlier turns of the same mission aren't lost when an agent
+// runs multiple sequential tasks (each TurnStarted clears
+// `genome_turn_modified[agent]`). Fall back to unioning `genome_turn_modified`
+// for defence-in-depth if the mission key is somehow empty.
+fn collect_files_to_eval(state: &AppState, mission_id: &str) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = match state.genome_mission_modified.get(mission_id) {
+        Some(set) if !set.is_empty() => set.iter().cloned().collect(),
+        _ => state
+            .genome_turn_modified
+            .values()
+            .flat_map(|s| s.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect(),
+    };
+    if let Some(editor_path) = state.editor_buffer().path().cloned() {
+        if !files.contains(&editor_path) {
+            files.push(editor_path);
+        }
+    }
+    files.sort();
+    files
+}
+
+// Reads each modified file and computes a full genome report — expensive
+// (tree-sitter + 3000-gen GoL + parsimony per file) — that previously
+// blocked the main loop for "Genome Quality Review".
 fn build_genome_review_prompt_bg(input: &GenomeReviewInput) -> String {
     let mut prompt = String::from(
         "You are the genome reviewer in nit's coding lab. nit measures structural code \
@@ -106,9 +100,8 @@ fn build_genome_review_prompt_bg(input: &GenomeReviewInput) -> String {
 
     let mut has_content = false;
     for file_path in &input.files_to_eval {
-        let text = match std::fs::read_to_string(file_path) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(text) = std::fs::read_to_string(file_path) else {
+            continue;
         };
         let report = nit_core::compute_genome_report(&text, file_path);
         prompt.push_str(&format!("--- {} ---\n", file_path.display()));
@@ -139,7 +132,6 @@ fn build_genome_review_prompt_bg(input: &GenomeReviewInput) -> String {
     prompt
 }
 
-/// Snapshot of state needed by the genome gate evaluation thread.
 struct GenomeGateInput {
     config: nit_core::config::GenomeGateConfig,
     files_to_eval: Vec<std::path::PathBuf>,
@@ -147,9 +139,6 @@ struct GenomeGateInput {
     prev_tiers: HashMap<std::path::PathBuf, nit_core::GenomeTier>,
 }
 
-/// Spawn the genome gate evaluation on a background thread and return a
-/// receiver that will deliver the result string. The main thread should
-/// poll this with `try_recv` so the UI never blocks.
 pub(super) fn spawn_genome_gate_eval(
     state: &AppState,
     mission_id: &str,
@@ -157,34 +146,10 @@ pub(super) fn spawn_genome_gate_eval(
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 
-    // Prefer the mission-scoped accumulator for the same reason as the
-    // reviewer path: `genome_turn_modified` is cleared on each TurnStarted,
-    // so an agent running multiple sequential tasks within a mission would
-    // lose files from earlier turns without this.
-    let mut files_to_eval: Vec<std::path::PathBuf> =
-        match state.genome_mission_modified.get(mission_id) {
-            Some(set) if !set.is_empty() => set.iter().cloned().collect(),
-            _ => state
-                .genome_turn_modified
-                .values()
-                .flat_map(|s| s.iter().cloned())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect(),
-        };
-    if let Some(editor_path) = state.editor_buffer().path().cloned() {
-        if !files_to_eval.contains(&editor_path) {
-            files_to_eval.push(editor_path);
-        }
-    }
-    files_to_eval.sort();
+    let files_to_eval = collect_files_to_eval(state, mission_id);
 
-    // Use the mission-scoped snapshot (frozen at swarm start) for regression
-    // comparison. `state.genome_baselines` is per-turn and gets cleared
-    // between agents, so by the time the gate runs it's empty and falling
-    // back to `state.genome_reports` (post-change state) silently masks real
-    // regressions. For files not in the mission snapshot (created during the
-    // swarm), fall back to current state — "new file not regressed" is the
+    // Fall back to current state when the mission snapshot is missing the
+    // file (created during the swarm) — "new file not regressed" is the
     // correct semantics there.
     let prev_tiers: HashMap<std::path::PathBuf, nit_core::GenomeTier> = files_to_eval
         .iter()
@@ -213,111 +178,140 @@ pub(super) fn spawn_genome_gate_eval(
     rx
 }
 
-/// Evaluate genome quality on ALL modified files and produce a gate result
-/// string.  Runs on a background thread — all data is passed via `input`.
-fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
-    let genome_config = &input.config;
-    let min_tier = nit_core::GenomeTier::from_generations(match genome_config.min_tier {
+fn min_tier_from_config(config: &nit_core::config::GenomeGateConfig) -> nit_core::GenomeTier {
+    let generations = match config.min_tier {
         0 => 0,
         1 => 51,
         2 => 201,
         3 => 501,
         _ => 2001,
-    });
+    };
+    nit_core::GenomeTier::from_generations(generations)
+}
 
+fn collect_file_failures(
+    file_path: &std::path::Path,
+    report: &nit_core::GenomeReport,
+    config: &nit_core::config::GenomeGateConfig,
+    min_tier: nit_core::GenomeTier,
+    prev_tier: Option<&nit_core::GenomeTier>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    if report.tier < min_tier {
+        failures.push(format!(
+            "Genome FAIL: {} tier {} ({}) below minimum {} ({})",
+            file_path.display(),
+            report.tier.numeral(),
+            report.tier.name(),
+            min_tier.numeral(),
+            min_tier.name(),
+        ));
+    }
+
+    for score in &report.encoder_scores {
+        let is_ast_encoder = matches!(
+            score.encoder,
+            nit_core::SeedEncoderId::TokenSpectrum
+                | nit_core::SeedEncoderId::AstStructure
+                | nit_core::SeedEncoderId::ComplexityField
+        );
+        if is_ast_encoder && score.density > config.max_density {
+            failures.push(format!(
+                "Genome FAIL: {} density {:.2} on {} exceeds {:.2}",
+                file_path.display(),
+                score.density,
+                score.encoder.label(),
+                config.max_density,
+            ));
+        }
+    }
+
+    if let Some(s) = report
+        .encoder_scores
+        .iter()
+        .find(|s| s.encoder == nit_core::SeedEncoderId::AstStructure)
+    {
+        if s.components < config.min_components {
+            failures.push(format!(
+                "Genome FAIL: {} has {} components (min: {})",
+                file_path.display(),
+                s.components,
+                config.min_components,
+            ));
+        }
+    }
+
+    if report.cross_encoder_consistency < config.min_consistency {
+        failures.push(format!(
+            "Genome FAIL: {} consistency {:.2} below {:.2}",
+            file_path.display(),
+            report.cross_encoder_consistency,
+            config.min_consistency,
+        ));
+    }
+
+    // Parsimony bloat is intentionally not a swarm-gate failure: only the
+    // writer (integrator) can fix it, and the per-agent genome retry path
+    // already routes bloat fixes back to the writer. Surfacing it here
+    // would fail the verifier/synthesizer roles for an issue they have no
+    // way to address.
+
+    if config.require_no_regression {
+        if let Some(prev) = prev_tier {
+            if report.tier < *prev {
+                failures.push(format!(
+                    "Genome FAIL: {} regressed from {} ({}) to {} ({})",
+                    file_path.display(),
+                    prev.numeral(),
+                    prev.name(),
+                    report.tier.numeral(),
+                    report.tier.name(),
+                ));
+            }
+        }
+    }
+
+    for rec in &report.recommendations {
+        if matches!(rec.severity, nit_core::RecommendationSeverity::Critical) {
+            failures.push(format!("  Recommendation: {}", rec.message));
+        }
+    }
+
+    failures
+}
+
+fn append_summary(out: &mut String, file_count: u32, pass_count: u32, failure_count: usize) {
+    if file_count == 0 {
+        out.push_str("Genome gate: SKIP (no files to evaluate)\n");
+    } else if failure_count == 0 {
+        out.push_str(&format!(
+            "Genome gate: PASS ({pass_count}/{file_count} files passed)\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "Genome gate: FAIL ({pass_count}/{file_count} files passed, {failure_count} failures)\n"
+        ));
+    }
+}
+
+fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
+    let min_tier = min_tier_from_config(&input.config);
     let mut out = String::new();
-    let mut all_failures: Vec<String> = Vec::new();
+    let mut total_failures = 0usize;
     let mut file_count = 0u32;
     let mut pass_count = 0u32;
 
     for file_path in &input.files_to_eval {
-        let text = match std::fs::read_to_string(file_path) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(text) = std::fs::read_to_string(file_path) else {
+            continue;
         };
         let report = nit_core::compute_genome_report(&text, file_path);
-        let mut failures = Vec::new();
         file_count += 1;
 
-        if report.tier < min_tier {
-            failures.push(format!(
-                "Genome FAIL: {} tier {} ({}) below minimum {} ({})",
-                file_path.display(),
-                report.tier.numeral(),
-                report.tier.name(),
-                min_tier.numeral(),
-                min_tier.name(),
-            ));
-        }
-
-        for score in &report.encoder_scores {
-            if matches!(
-                score.encoder,
-                nit_core::SeedEncoderId::TokenSpectrum
-                    | nit_core::SeedEncoderId::AstStructure
-                    | nit_core::SeedEncoderId::ComplexityField
-            ) && score.density > genome_config.max_density
-            {
-                failures.push(format!(
-                    "Genome FAIL: {} density {:.2} on {} exceeds {:.2}",
-                    file_path.display(),
-                    score.density,
-                    score.encoder.label(),
-                    genome_config.max_density,
-                ));
-            }
-        }
-
-        if let Some(s) = report
-            .encoder_scores
-            .iter()
-            .find(|s| s.encoder == nit_core::SeedEncoderId::AstStructure)
-        {
-            if s.components < genome_config.min_components {
-                failures.push(format!(
-                    "Genome FAIL: {} has {} components (min: {})",
-                    file_path.display(),
-                    s.components,
-                    genome_config.min_components,
-                ));
-            }
-        }
-
-        if report.cross_encoder_consistency < genome_config.min_consistency {
-            failures.push(format!(
-                "Genome FAIL: {} consistency {:.2} below {:.2}",
-                file_path.display(),
-                report.cross_encoder_consistency,
-                genome_config.min_consistency,
-            ));
-        }
-
-        // Parsimony bloat is intentionally not a swarm-gate failure: only the
-        // writer (integrator) can fix it, and the per-agent genome retry path
-        // (build_genome_retry_prompt) already routes bloat fixes back to the
-        // writer. Surfacing it here would fail the verifier/synthesizer roles
-        // for an issue they have no way to address.
-
-        if genome_config.require_no_regression {
-            if let Some(prev_tier) = input.prev_tiers.get(file_path) {
-                if report.tier < *prev_tier {
-                    failures.push(format!(
-                        "Genome FAIL: {} regressed from {} ({}) to {} ({})",
-                        file_path.display(),
-                        prev_tier.numeral(),
-                        prev_tier.name(),
-                        report.tier.numeral(),
-                        report.tier.name(),
-                    ));
-                }
-            }
-        }
-
-        for rec in &report.recommendations {
-            if matches!(rec.severity, nit_core::RecommendationSeverity::Critical) {
-                failures.push(format!("  Recommendation: {}", rec.message));
-            }
-        }
+        let prev_tier = input.prev_tiers.get(file_path);
+        let failures =
+            collect_file_failures(file_path, &report, &input.config, min_tier, prev_tier);
 
         out.push_str(&format!("--- {} ---\n", file_path.display()));
         out.push_str(&nit_core::format_genome_report(&report));
@@ -330,22 +324,10 @@ fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
                 out.push_str(&format!("  {f}\n"));
             }
             out.push('\n');
-            all_failures.extend(failures);
+            total_failures += failures.len();
         }
     }
 
-    // Summary.
-    if file_count == 0 {
-        out.push_str("Genome gate: SKIP (no files to evaluate)\n");
-    } else if all_failures.is_empty() {
-        out.push_str(&format!(
-            "Genome gate: PASS ({pass_count}/{file_count} files passed)\n"
-        ));
-    } else {
-        out.push_str(&format!(
-            "Genome gate: FAIL ({pass_count}/{file_count} files passed, {} failures)\n",
-            all_failures.len(),
-        ));
-    }
+    append_summary(&mut out, file_count, pass_count, total_failures);
     out
 }

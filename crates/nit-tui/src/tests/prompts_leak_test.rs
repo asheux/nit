@@ -73,6 +73,59 @@ fn assert_no_leak(prompt: &str, surface: &str) {
     }
 }
 
+fn codex_test_lane() -> AgentLane {
+    AgentLane {
+        id: "codex-test".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    }
+}
+
+fn idle_turn_state() -> AgentTurnState {
+    let now = Instant::now();
+    AgentTurnState {
+        started_at: now,
+        last_heartbeat_at: now,
+        last_output_at: now,
+        stage: None,
+    }
+}
+
+/// Build a state with a single busy `codex-test` lane so the dispatcher takes
+/// the enqueue path and a real (in-memory) runner keeps the queue walker from
+/// draining as orphaned.
+fn busy_codex_state(cwd: PathBuf, set_selected: bool) -> AppState {
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(cwd, editor, notes);
+    state.agents.messages.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(codex_test_lane());
+    if set_selected {
+        state.agents.selected_agent = Some("codex-test".into());
+    }
+    state
+        .agents
+        .active_turns
+        .insert("codex-test".into(), idle_turn_state());
+    state
+}
+
+fn spawn_codex_runner() -> crate::codex_runner::CodexRunner {
+    crate::codex_runner::CodexRunner::spawn(
+        crate::codex_runner::CodexRuntimeMode::Exec,
+        crate::codex_runner::CodexRunnerConfig::default(),
+        None,
+    )
+}
+
 fn integrate_task() -> SwarmTask {
     SwarmTask {
         id: "integrate".into(),
@@ -307,44 +360,13 @@ fn nit_on_nit_keeps_cargo_required_commands_block() {
 
 // BUG 2 regression: chat dispatch must hand the operator's prompt to the
 // runner verbatim. Pre-fix, `augment_with_module_file_checklist` appended
-// "FILE CHECKLIST (non-negotiable) … task NOT complete until every file has
-// been modified" to any prompt that named a directory token (or any prompt
-// at all when the workspace had git-changed files). That block contradicted
-// read-only operator requests like "Read this project and report".
+// "FILE CHECKLIST (non-negotiable) …" to any prompt that named a directory
+// token (or any prompt at all in a dirty workspace), contradicting read-only
+// requests like "Read this project and report".
 #[test]
 fn chat_dispatch_does_not_augment_with_file_checklist() {
     let cwd = cargo_workspace("chat_dispatch_no_augment");
-
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some("codex-test".into());
-    // Mark the agent as busy so the dispatcher routes through `enqueue`
-    // rather than `maybe_dispatch` — the latter requires a real runner.
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), true);
 
     let raw = "Read the project at crates/foo and report what you find";
     state.agents.chat_input = raw.into();
@@ -352,15 +374,7 @@ fn chat_dispatch_does_not_augment_with_file_checklist() {
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    // A real (in-memory) CodexRunner keeps the post-dispatch queue
-    // walker from draining the orphaned queue. The agent stays busy
-    // (active_turns contains its id), so the dequeue defers and pushes
-    // the turn back, leaving it inspectable.
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     let _ = crate::app::submit_chat_input_and_dispatch(
         &mut state,
@@ -401,59 +415,26 @@ fn chat_dispatch_does_not_augment_with_file_checklist() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
-// After the intake-agent migration, the chat-dispatch heuristic
-// (`is_real_work` + `augment_with_module_file_checklist`) is gone.
-// With `intake_enabled` defaulting to `false`, every chat dispatch —
-// including writer-verb prompts naming on-disk directories — must
-// hand the operator's prompt to the runner verbatim. This locks the
-// "no chat-dispatch augmentation when intake is off" invariant.
+// After the intake-agent migration, the chat-dispatch heuristic is gone.
+// With `intake_enabled` defaulting to false, every chat dispatch — including
+// writer-verb prompts naming on-disk directories — must hand the operator's
+// prompt to the runner verbatim.
 #[test]
 fn chat_dispatch_attaches_checklist_for_real_work() {
     let cwd = cargo_workspace("chat_dispatch_real_work");
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some("codex-test".into());
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), true);
 
-    // Use a writer verb (`update`) that is NOT one of the auto-shadow
-    // keywords (refactor / migrate / rewrite / implement / overhaul /
-    // restructure) so the prompt stays on the main dispatch path
-    // instead of being hijacked into the shadow pipeline.
+    // Writer verb that is NOT an auto-shadow keyword (refactor / migrate /
+    // rewrite / implement / overhaul / restructure) so the prompt stays on
+    // the main dispatch path instead of being hijacked into the shadow
+    // pipeline.
     let raw = "Update crates/foo to extract the iterator helper";
     state.agents.chat_input = raw.into();
 
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     let _ = crate::app::submit_chat_input_and_dispatch(
         &mut state,
@@ -513,34 +494,7 @@ fn chat_dispatch_does_not_augment_short_prompt_in_dirty_workspace() {
     run_git(&["commit", "-q", "-m", "init"]);
     fs::write(cwd.join("crates/foo/src/lib.rs"), "// foo edit\n").unwrap();
 
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some("codex-test".into());
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), true);
 
     let raw = "hi there";
     state.agents.chat_input = raw.into();
@@ -548,11 +502,7 @@ fn chat_dispatch_does_not_augment_short_prompt_in_dirty_workspace() {
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     let _ = crate::app::submit_chat_input_and_dispatch(
         &mut state,
@@ -582,34 +532,7 @@ fn chat_dispatch_does_not_augment_short_prompt_in_dirty_workspace() {
 #[test]
 fn chat_dispatch_does_not_augment_for_question_prefix() {
     let cwd = cargo_workspace("chat_dispatch_question_prefix");
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some("codex-test".into());
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), true);
 
     let raw = "what does the dispatcher do?";
     state.agents.chat_input = raw.into();
@@ -617,11 +540,7 @@ fn chat_dispatch_does_not_augment_for_question_prefix() {
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     let _ = crate::app::submit_chat_input_and_dispatch(
         &mut state,
@@ -723,44 +642,13 @@ fn gate_bundle_detect_does_not_escape_workspace() {
 // `@queue`, `@q`, `@swarm` (with no body), `@shadow` alone.
 fn assert_chat_dispatch_drops(state_label: &str, raw: &str) {
     let cwd = cargo_workspace(state_label);
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some("codex-test".into());
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), true);
     state.agents.chat_input = raw.into();
 
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     let result = crate::app::submit_chat_input_and_dispatch(
         &mut state,
@@ -859,47 +747,16 @@ fn at_shadow_alone_does_not_dispatch() {
 
 // `dispatch_agent_prompt` is the chokepoint every dispatch path funnels
 // through (chat, swarm, shadow, intake resume, genome retry, agent
-// follow-ups). A defensive empty-prompt guard there protects future
-// callers from silently spawning a no-op turn even if they skip the
-// upstream `is_empty()` check. This test invokes the chokepoint
-// directly to lock the guard in place.
+// follow-ups). The empty-prompt guard there protects future callers from
+// silently spawning a no-op turn even if they skip the upstream
+// `is_empty()` check.
 #[test]
 fn dispatch_agent_prompt_drops_empty_prompt() {
     let cwd = cargo_workspace("dispatch_agent_prompt_empty");
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "codex-test".into(),
-        role: "coder".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        "codex-test".into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
+    let mut state = busy_codex_state(cwd.clone(), false);
 
     let mut vitals = crate::vitals::VitalsState::default();
-    let codex = crate::codex_runner::CodexRunner::spawn(
-        crate::codex_runner::CodexRuntimeMode::Exec,
-        crate::codex_runner::CodexRunnerConfig::default(),
-        None,
-    );
+    let codex = spawn_codex_runner();
 
     for prompt in ["", "   ", "\n\t\n"] {
         crate::app::dispatch_agent_prompt(

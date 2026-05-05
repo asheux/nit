@@ -4,7 +4,6 @@ use std::thread::{self, JoinHandle};
 
 use nit_games::analysis::{analyze_history, AnalysisConfig, HistoryAnalysis};
 
-/// Parameters describing a single history-analysis job dispatched to the runner thread.
 #[derive(Clone, Debug)]
 pub struct AnalysisRequest {
     pub history_path: PathBuf,
@@ -24,7 +23,7 @@ pub enum AnalysisEvent {
     Error(String),
 }
 
-/// Background thread that serialises expensive history-analysis jobs off the UI loop.
+/// Serialises expensive history-analysis jobs off the UI loop.
 pub struct GamesAnalysisRunner {
     cmd_tx: Sender<AnalysisCommand>,
     pub events: Receiver<AnalysisEvent>,

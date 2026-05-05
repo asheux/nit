@@ -1,68 +1,131 @@
-//! Multipane integration tests (Phase 6.2).
+//! Multipane integration tests covering the invariants from
+//! `docs/MULTIPANE.md`: per-pane cwd dispatch, focused-pane abort
+//! isolation, the "no agent selected" notice when committing in roster
+//! mode, dir-search cwd commit, and persistence roundtrip.
 //!
-//! These exercise the high-level invariants the multipane spec calls
-//! out at `docs/MULTIPANE.md` — per-pane cwd dispatch, focused-pane
-//! abort isolation, the "no agent selected" notice when committing in
-//! roster mode, dir-search cwd commit, and persistence roundtrip.
-//!
-//! Tests run without real `CodexRunner` / `ClaudeRunner` instances;
-//! `dispatch_agent_prompt` accepts `None` for both, and the multipane
-//! integration points we care about (queue tracking, `mission_id`
-//! capture, pane-level state mutation) all happen in `nit-tui` and
-//! `nit-core` regardless of whether a runner is attached.
+//! `dispatch_agent_prompt` accepts `None` for both runners, so these
+//! tests run without spawning real `CodexRunner` / `ClaudeRunner`
+//! instances — queue tracking, `mission_id` capture, and pane-level
+//! state mutation all happen in `nit-tui` / `nit-core`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
+use nit_core::state::AgentTurnState;
 use nit_core::{
-    AgentLane, AgentLaneKind, AgentStatus, AgentsState, AppState, MissionPhase, MissionRecord,
-    MultipaneState, PaneSession,
+    AgentChannel, AgentConsoleRowKind, AgentLane, AgentLaneKind, AgentMessage, AgentStatus,
+    AgentsState, AppState, MissionPhase, MissionRecord, MultipaneState, PaneSession,
 };
 
 use super::dispatch::{dispatch_pane_prompt, with_pane_aliased, DispatchOutcome};
 use super::persistence::{is_fresh, merge_prior};
 use super::setup::materialise_pane_lane;
-use crate::app::{handle_abort, parse_abort_command, AbortScope};
+use crate::app::{broadcast_target_agents, handle_abort, parse_abort_command, AbortScope};
 use crate::swarm::SwarmRuntime;
 use crate::vitals::VitalsState;
+use crate::widgets::agent_console_view::build_pane_thread_rows_with_breathers_for_pane;
+
+const CLAUDE_BACKEND: &str = "claude-haiku-4-5";
+
+fn lane(id: &str, kind: AgentLaneKind, label: &str, status: AgentStatus) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: label.into(),
+        kind,
+        status,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    }
+}
+
+fn claude_idle_lane(id: &str) -> AgentLane {
+    lane(id, AgentLaneKind::Claude, "Claude", AgentStatus::Idle)
+}
+
+fn mission(id: &str, title: &str, agents: Vec<String>) -> MissionRecord {
+    MissionRecord {
+        id: id.into(),
+        title: title.into(),
+        phase: MissionPhase::Execute,
+        swarm: false,
+        assigned_agents: agents,
+        status: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn running_turn_state() -> AgentTurnState {
+    let now = Instant::now();
+    AgentTurnState {
+        started_at: now,
+        last_heartbeat_at: now,
+        last_output_at: now,
+        stage: Some("running".into()),
+    }
+}
+
+fn idle_turn_state() -> AgentTurnState {
+    let now = Instant::now();
+    AgentTurnState {
+        started_at: now,
+        last_heartbeat_at: now,
+        last_output_at: now,
+        stage: None,
+    }
+}
+
+fn agent_message(
+    channel: AgentChannel,
+    agent_id: Option<&str>,
+    mission_id: &str,
+    text: &str,
+) -> AgentMessage {
+    AgentMessage {
+        at: "t+0".into(),
+        channel,
+        agent_id: agent_id.map(Into::into),
+        mission_id: Some(mission_id.into()),
+        text: text.into(),
+        prompt_msg_idx: None,
+        kind: None,
+    }
+}
+
+fn pane_session(idx: usize, cwd: &str) -> PaneSession {
+    PaneSession {
+        pane_id: idx,
+        cwd: PathBuf::from(cwd),
+        ..PaneSession::default()
+    }
+}
 
 fn build_state(panes: &[(usize, &str)]) -> AppState {
     let buffer = nit_core::Buffer::empty("scratch", None);
     let notes = nit_core::Buffer::empty("notes", None);
     let mut state = AppState::new(PathBuf::from("/workspace"), buffer, notes);
     state.agents = AgentsState::default();
-    state.agents.agents.push(AgentLane {
-        id: "claude-haiku-4-5".into(),
-        role: "claude-haiku-4-5".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    state.agents.agents.push(claude_idle_lane(CLAUDE_BACKEND));
     let pane_sessions: Vec<PaneSession> = panes
         .iter()
-        .map(|(idx, cwd)| PaneSession {
-            pane_id: *idx,
-            cwd: PathBuf::from(*cwd),
-            ..PaneSession::default()
-        })
+        .map(|(idx, cwd)| pane_session(*idx, cwd))
         .collect();
     state.multipane = Some(MultipaneState {
-        backend_agent_id: "claude-haiku-4-5".into(),
+        backend_agent_id: CLAUDE_BACKEND.into(),
         panes: pane_sessions,
         focused: 0,
         grid_cols: panes.len(),
         grid_rows: 1,
-        backend_filter: Some("claude-haiku-4-5".into()),
+        backend_filter: Some(CLAUDE_BACKEND.into()),
         help_open: false,
     });
-    // Materialise per-pane lanes so cwd lookup keys land on the right
-    // pane id.
+    // Materialise per-pane lanes so cwd lookups land on the right pane.
     for idx in 0..panes.len() {
-        let _ = materialise_pane_lane(&mut state, idx, "claude-haiku-4-5");
+        let _ = materialise_pane_lane(&mut state, idx, CLAUDE_BACKEND);
     }
     state
 }
@@ -103,24 +166,14 @@ fn abort_in_focused_pane_only_kills_that_pane() {
     let pane_a = "claude-haiku-4-5#mp-pane-00".to_string();
     let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
 
-    state.agents.missions.push(MissionRecord {
-        id: "mission-a".into(),
-        title: "pane 0 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_a.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
-    state.agents.missions.push(MissionRecord {
-        id: "mission-b".into(),
-        title: "pane 1 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_b.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
+    state
+        .agents
+        .missions
+        .push(mission("mission-a", "pane 0 mission", vec![pane_a.clone()]));
+    state
+        .agents
+        .missions
+        .push(mission("mission-b", "pane 1 mission", vec![pane_b.clone()]));
 
     state
         .multipane
@@ -132,10 +185,9 @@ fn abort_in_focused_pane_only_kills_that_pane() {
         .for_each(|(pane, mid)| pane.mission_id = Some((*mid).into()));
 
     let mut swarm = SwarmRuntime::default();
-    // Aborting the focused pane (pane 1) drains pane B's queue. With no
-    // active swarm runs and Option<&Runner>=None, handle_abort posts a
-    // diagnostic via state.status and returns false — the assertion is
-    // that pane A's mission_id is unchanged regardless.
+    // No active swarm runs + Option<&Runner>=None: handle_abort posts a
+    // diagnostic and returns false. The assertion is that pane A's
+    // mission_id is unchanged regardless.
     let _ = with_pane_aliased(&mut state, 1, |state| {
         handle_abort(state, None, None, &mut swarm, AbortScope::Current)
     });
@@ -235,11 +287,6 @@ fn at_swarm_prefix_is_recognised_by_canonical_parser() {
 // Multipane independence regression suite (BLOCKER coverage)
 // ---------------------------------------------------------------------------
 
-use crate::app::broadcast_target_agents;
-use crate::widgets::agent_console_view::build_pane_thread_rows_with_breathers_for_pane;
-use nit_core::{AgentChannel, AgentMessage};
-use std::collections::HashSet;
-
 fn test_swarm_with_active_missions(missions: &[(&str, &str)]) -> SwarmRuntime {
     // Build a runtime where each mission has one running task assigned
     // to its agent — enough to make `is_active_mission` return true and
@@ -330,18 +377,10 @@ fn at_all_only_targets_agents_in_originating_pane() {
     // the focused pane's lanes when the synthetic mission has no entry
     // in state.agents.missions.
     let mut state = build_state_with_chat_missions(2);
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "claude-haiku-4-5#mp-pane-01".into(),
-        role: "claude-haiku-4-5#mp-pane-01".into(),
-        lane: "Claude".into(),
-        kind: nit_core::AgentLaneKind::Claude,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    state
+        .agents
+        .agents
+        .push(claude_idle_lane("claude-haiku-4-5#mp-pane-01"));
     state.agents.rebuild_agents_index();
     state.multipane.as_mut().unwrap().focused = 0;
 
@@ -366,15 +405,12 @@ fn at_all_in_pane_0_replies_only_render_in_pane_0() {
     // message somehow leaks across panes, the pane_id-aware filter
     // drops messages whose author belongs to another pane.
     let mut state = build_state_with_chat_missions(2);
-    state.agents.messages.push(AgentMessage {
-        at: "t+0".into(),
-        channel: AgentChannel::Agent,
-        agent_id: Some("claude-haiku-4-5#mp-pane-01".into()),
-        mission_id: Some("mp-pane-00-chat".into()),
-        text: "stray reply from pane 1's lane".into(),
-        prompt_msg_idx: None,
-        kind: None,
-    });
+    state.agents.messages.push(agent_message(
+        AgentChannel::Agent,
+        Some("claude-haiku-4-5#mp-pane-01"),
+        "mp-pane-00-chat",
+        "stray reply from pane 1's lane",
+    ));
 
     let pane0 = state.multipane.as_ref().unwrap().panes[0].clone();
     let rows = build_pane_thread_rows_with_breathers_for_pane(
@@ -401,24 +437,14 @@ fn chat_slash_abort_kills_focused_pane_only() {
 
     let pane_a = "claude-haiku-4-5#mp-pane-00".to_string();
     let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
-    state.agents.missions.push(MissionRecord {
-        id: "mission-a".into(),
-        title: "pane 0 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_a.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
-    state.agents.missions.push(MissionRecord {
-        id: "mission-b".into(),
-        title: "pane 1 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_b.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
+    state
+        .agents
+        .missions
+        .push(mission("mission-a", "pane 0 mission", vec![pane_a.clone()]));
+    state
+        .agents
+        .missions
+        .push(mission("mission-b", "pane 1 mission", vec![pane_b.clone()]));
     {
         let mp = state.multipane.as_mut().unwrap();
         mp.focused = 0;
@@ -442,23 +468,18 @@ fn chat_slash_abort_kills_focused_pane_only() {
     );
 }
 
+// BUG 3 leak vector: a synthetic-only pane firing /abort must not resolve
+// through the global active_mission_ids fallback into another pane's
+// mission.
 #[test]
 fn abort_when_focused_pane_has_no_mission_does_not_kill_others_mission() {
-    // BUG 3 leak vector: a synthetic-only pane firing /abort must not
-    // resolve through the global active_mission_ids fallback into
-    // another pane's mission.
     let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
 
     let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
-    state.agents.missions.push(MissionRecord {
-        id: "mission-b".into(),
-        title: "pane 1 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_b.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
+    state
+        .agents
+        .missions
+        .push(mission("mission-b", "pane 1 mission", vec![pane_b.clone()]));
     {
         let mp = state.multipane.as_mut().unwrap();
         mp.focused = 0;
@@ -487,24 +508,14 @@ fn chat_slash_abort_all_in_pane_only_kills_pane_missions() {
 
     let pane_a = "claude-haiku-4-5#mp-pane-00".to_string();
     let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
-    state.agents.missions.push(MissionRecord {
-        id: "mission-a".into(),
-        title: "pane 0 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_a.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
-    state.agents.missions.push(MissionRecord {
-        id: "mission-b".into(),
-        title: "pane 1 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_b.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
+    state
+        .agents
+        .missions
+        .push(mission("mission-a", "pane 0 mission", vec![pane_a.clone()]));
+    state
+        .agents
+        .missions
+        .push(mission("mission-b", "pane 1 mission", vec![pane_b.clone()]));
     state.multipane.as_mut().unwrap().focused = 0;
     let mut swarm =
         test_swarm_with_active_missions(&[("mission-a", &pane_a), ("mission-b", &pane_b)]);
@@ -516,22 +527,17 @@ fn chat_slash_abort_all_in_pane_only_kills_pane_missions() {
     assert!(swarm.is_active_mission("mission-b"));
 }
 
+// BLOCKER: surgical /abort <agent-id> must reject ids belonging to a
+// different pane, otherwise the operator has a backdoor to kill
+// sibling-pane work.
 #[test]
 fn abort_agent_id_rejected_when_cross_pane() {
-    // BLOCKER: surgical /abort <agent-id> must reject ids belonging to
-    // a different pane, otherwise the operator has a backdoor to kill
-    // sibling-pane work.
     let mut state = build_state(&[(0, "/p0"), (1, "/p1")]);
     let pane_b = "claude-haiku-4-5#mp-pane-01".to_string();
-    state.agents.missions.push(MissionRecord {
-        id: "mission-b".into(),
-        title: "pane 1 mission".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec![pane_b.clone()],
-        status: String::new(),
-        updated_at: String::new(),
-    });
+    state
+        .agents
+        .missions
+        .push(mission("mission-b", "pane 1 mission", vec![pane_b.clone()]));
     state.multipane.as_mut().unwrap().focused = 0;
     let mut swarm = test_swarm_with_active_missions(&[("mission-b", &pane_b)]);
 
@@ -631,15 +637,12 @@ fn single_pane_broadcast_still_renders_when_multipane_is_none() {
     assert!(state.multipane.is_none());
     // User-typed broadcast (no agent_id) carrying a different mission_id
     // — the single-pane Broadcast bypass clause is what surfaces it.
-    state.agents.messages.push(AgentMessage {
-        at: "t+0".into(),
-        channel: AgentChannel::Broadcast,
-        agent_id: None,
-        mission_id: Some("some-other-mission".into()),
-        text: "user broadcast in single-pane".into(),
-        prompt_msg_idx: None,
-        kind: None,
-    });
+    state.agents.messages.push(agent_message(
+        AgentChannel::Broadcast,
+        None,
+        "some-other-mission",
+        "user broadcast in single-pane",
+    ));
 
     let rows = build_pane_thread_rows_with_breathers_for_pane(
         &state,
@@ -666,15 +669,12 @@ fn at_all_message_authored_by_pane0_does_not_appear_in_pane1() {
     // 1's render. With the multipane Broadcast-bypass gate disabled,
     // strict mission_id matching keeps it out.
     let mut state = build_state_with_chat_missions(2);
-    state.agents.messages.push(AgentMessage {
-        at: "t+0".into(),
-        channel: AgentChannel::Broadcast,
-        agent_id: None,
-        mission_id: Some("mp-pane-00-chat".into()),
-        text: "broadcast from pane 0".into(),
-        prompt_msg_idx: None,
-        kind: None,
-    });
+    state.agents.messages.push(agent_message(
+        AgentChannel::Broadcast,
+        None,
+        "mp-pane-00-chat",
+        "broadcast from pane 0",
+    ));
 
     let pane1 = state.multipane.as_ref().unwrap().panes[1].clone();
     let rows = build_pane_thread_rows_with_breathers_for_pane(
@@ -720,8 +720,6 @@ fn merge_prior_re_derives_chat_mission_id_from_pane_id() {
 // BUG 1 / BUG 2 regression tests (multipane bug-batch integrate-01)
 // ---------------------------------------------------------------------------
 
-use nit_core::AgentConsoleRowKind;
-
 #[test]
 fn breather_rows_in_pane_k_only_contain_pane_k_agents() {
     // BUG 1: when single-agent dispatch is in flight on multiple panes,
@@ -747,24 +745,14 @@ fn breather_rows_in_pane_k_only_contain_pane_k_agents() {
         lane.current_mission = Some("mp-pane-01-chat".into());
         lane.status = nit_core::AgentStatus::Running;
     }
-    state.agents.active_turns.insert(
-        pane0_id.clone(),
-        nit_core::state::AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: Some("running".into()),
-        },
-    );
-    state.agents.active_turns.insert(
-        pane1_id.clone(),
-        nit_core::state::AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: Some("running".into()),
-        },
-    );
+    state
+        .agents
+        .active_turns
+        .insert(pane0_id.clone(), running_turn_state());
+    state
+        .agents
+        .active_turns
+        .insert(pane1_id.clone(), running_turn_state());
 
     // Render path aliases selected_mission to the pane's synthetic id —
     // mirror that here so breather_rows_for_user_prompt's filter sees
@@ -842,15 +830,10 @@ fn pane_active_turns_do_not_leak_breather_block_into_sibling_pane() {
             lane.current_mission = Some(mid.into());
             lane.status = nit_core::AgentStatus::Running;
         }
-        state.agents.active_turns.insert(
-            id.clone(),
-            nit_core::state::AgentTurnState {
-                started_at: std::time::Instant::now(),
-                last_heartbeat_at: std::time::Instant::now(),
-                last_output_at: std::time::Instant::now(),
-                stage: Some("running".into()),
-            },
-        );
+        state
+            .agents
+            .active_turns
+            .insert(id.clone(), running_turn_state());
     }
 
     state.agents.mission_selected = usize::MAX;
@@ -923,15 +906,10 @@ fn abort_via_typed_slash_in_pane_routes_to_agent_scope() {
     let mut state = build_state_with_chat_missions(2);
     let agent = "claude-haiku-4-5#mp-pane-00".to_string();
 
-    state.agents.active_turns.insert(
-        agent.clone(),
-        nit_core::state::AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: Some("running".into()),
-        },
-    );
+    state
+        .agents
+        .active_turns
+        .insert(agent.clone(), running_turn_state());
     if let Some(lane) = state.agents.agents_get_mut(&agent) {
         lane.current_mission = Some("mp-pane-00-chat".into());
         lane.status = nit_core::AgentStatus::Running;
@@ -966,15 +944,10 @@ fn abort_focused_pane_with_non_swarm_in_flight_uses_agent_scope() {
         lane.current_mission = Some("ad-hoc-001".into());
         lane.status = nit_core::AgentStatus::Running;
     }
-    state.agents.active_turns.insert(
-        agent.clone(),
-        nit_core::state::AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: Some("running".into()),
-        },
-    );
+    state
+        .agents
+        .active_turns
+        .insert(agent.clone(), running_turn_state());
     if let Some(mp) = state.multipane.as_mut() {
         mp.panes[0].mission_id = None;
     }
@@ -1147,20 +1120,9 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
     // `tests/intake.rs::intake_uses_per_pane_cwd_in_multipane`.
     state.settings.intake_enabled = false;
     state.agents = AgentsState::default();
-    state.agents.agents.push(AgentLane {
-        id: "claude-haiku-4-5".into(),
-        role: "claude-haiku-4-5".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    state.agents.agents.push(claude_idle_lane(CLAUDE_BACKEND));
     state.multipane = Some(MultipaneState {
-        backend_agent_id: "claude-haiku-4-5".into(),
+        backend_agent_id: CLAUDE_BACKEND.into(),
         panes: vec![
             PaneSession {
                 pane_id: 0,
@@ -1176,26 +1138,19 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
         focused: 0,
         grid_cols: 2,
         grid_rows: 1,
-        backend_filter: Some("claude-haiku-4-5".into()),
+        backend_filter: Some(CLAUDE_BACKEND.into()),
         help_open: false,
     });
-    let _ = materialise_pane_lane(&mut state, 0, "claude-haiku-4-5");
-    let _ = materialise_pane_lane(&mut state, 1, "claude-haiku-4-5");
+    let _ = materialise_pane_lane(&mut state, 0, CLAUDE_BACKEND);
+    let _ = materialise_pane_lane(&mut state, 1, CLAUDE_BACKEND);
 
-    // Mark each pane lane busy so the dispatcher takes the enqueue path
-    // (no real runner needed). active_turns.insert keys on the lane id.
-    let now = std::time::Instant::now();
+    // Mark each pane lane busy so the dispatcher takes the enqueue path.
     for idx in 0..2 {
         let lane_id = format!("claude-haiku-4-5#mp-pane-{idx:02}");
-        state.agents.active_turns.insert(
-            lane_id.clone(),
-            nit_core::state::AgentTurnState {
-                started_at: now,
-                last_heartbeat_at: now,
-                last_output_at: now,
-                stage: None,
-            },
-        );
+        state
+            .agents
+            .active_turns
+            .insert(lane_id.clone(), idle_turn_state());
         if let Some(lane) = state.agents.agents_get_mut(&lane_id) {
             lane.status = AgentStatus::Running;
         }

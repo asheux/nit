@@ -289,8 +289,7 @@ fn match_strip_handles_missing_halt_history() {
         Style::default(),
         Style::default(),
     );
-    let halt_line = line_text(&lines[3]);
-    assert!(halt_line.contains("--"));
+    assert!(line_text(&lines[3]).contains("--"));
 }
 
 #[test]

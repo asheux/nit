@@ -1,76 +1,9 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
 use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
-};
+use nit_core::{AppKind, AppState, UiSelection, UiSelectionPane, YankKind};
 
-use super::*;
+use super::chat_input::slice_by_char;
+use super::input_state::{InputState, MouseSelectAnchor, MouseSelectTarget, UiSelectionSignature};
+use super::key_predicates::games_petri_visible;
 
 pub(super) fn lines_to_strings(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
     lines
@@ -298,68 +231,8 @@ pub(super) fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) ->
     if state.rule_picker.open || state.protocol_picker.open {
         return false;
     }
-    if state.agents.artifacts_popup_open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup)
-                | MouseSelectTarget::PopupChatInput
-        );
-    }
-    if state.agents.global_archive_open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup)
-        );
-    }
-    if state.show_help {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::HelpPopup)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.analysis.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesAnalysisPopup)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.run_browser.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesRunBrowserPopup)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.replay.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesReplayPopup)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesStrategyPopup)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.tm_sim.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesTmSimPopupLeft)
-                | MouseSelectTarget::Ui(UiSelectionPane::GamesTmSimPopupRight)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.ca_sim.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupLeft)
-                | MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupRight)
-        );
-    }
-    if state.app_kind == AppKind::Games && state.games.match_history.open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::GamesMatchHistoryPopup)
-        );
+    if let Some(allowed) = drag_target_for_modal(state, anchor.target) {
+        return allowed;
     }
     if games_petri_visible(state) {
         return matches!(
@@ -368,4 +241,63 @@ pub(super) fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) ->
         );
     }
     true
+}
+
+fn drag_target_for_modal(state: &AppState, target: MouseSelectTarget) -> Option<bool> {
+    use UiSelectionPane::*;
+    if state.agents.artifacts_popup_open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(ArtifactsPopup) | MouseSelectTarget::PopupChatInput
+        ));
+    }
+    if state.agents.global_archive_open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(ArtifactsHistoryPopup)
+        ));
+    }
+    if state.show_help {
+        return Some(matches!(target, MouseSelectTarget::Ui(HelpPopup)));
+    }
+    if state.app_kind != AppKind::Games {
+        return None;
+    }
+    let games = &state.games;
+    if games.analysis.open {
+        return Some(matches!(target, MouseSelectTarget::Ui(GamesAnalysisPopup)));
+    }
+    if games.run_browser.open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(GamesRunBrowserPopup)
+        ));
+    }
+    if games.replay.open {
+        return Some(matches!(target, MouseSelectTarget::Ui(GamesReplayPopup)));
+    }
+    if games.strategy_inspect.open {
+        return Some(matches!(target, MouseSelectTarget::Ui(GamesStrategyPopup)));
+    }
+    if games.tm_sim.open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(GamesTmSimPopupLeft)
+                | MouseSelectTarget::Ui(GamesTmSimPopupRight)
+        ));
+    }
+    if games.ca_sim.open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(GamesCaSimPopupLeft)
+                | MouseSelectTarget::Ui(GamesCaSimPopupRight)
+        ));
+    }
+    if games.match_history.open {
+        return Some(matches!(
+            target,
+            MouseSelectTarget::Ui(GamesMatchHistoryPopup)
+        ));
+    }
+    None
 }

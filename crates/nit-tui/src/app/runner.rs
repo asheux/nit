@@ -1,74 +1,29 @@
-#![allow(unused_imports)]
 #![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, Sender},
-    Arc, Mutex, Weak,
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::swarm::{
-    chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
-};
-use crate::{
-    claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
-    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    file_watcher::FileWatcher,
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
-    widgets::{
-        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
-    },
-};
+use std::io::{self, Stdout};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
 use arboard::Clipboard;
-use crossterm::{
-    cursor::{SetCursorStyle, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ctrlc::Error as CtrlcError;
-use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
-    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
-};
-use nit_games::config::GamesConfig;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Terminal,
-};
+use crossterm::event::{self, Event, KeyEventKind, KeyboardEnhancementFlags};
+use nit_core::{actions::Action, AgentBusEvent, AppKind, AppState, Mode, PaneId};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+
+use crate::claude_runner::{ClaudeRunner, ClaudeRunnerConfig};
+use crate::codex_runner::{CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
+use crate::file_tree;
+use crate::file_tree_runner::{FileTreeEvent, FileTreeRunner};
+use crate::file_watcher::FileWatcher;
+use crate::games_petri_dish::GamesPetriDishRuntime;
+use crate::petri_dish::PetriDishRuntime;
+use crate::seed_runtime::SeedRuntime;
+use crate::swarm::SwarmRuntime;
+use crate::syntax::SyntaxRuntime;
+use crate::system_stats::SystemStats;
+use crate::theme::Theme;
+use crate::vitals::VitalsState;
+use crate::widgets::{protocol_picker, rule_picker};
 
 use super::*;
 
@@ -250,26 +205,8 @@ pub(super) fn run_loop(
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
-    let mut seed_runtime = if state.app_kind == AppKind::Gol {
-        Some(SeedRuntime::new(state))
-    } else {
-        None
-    };
-    let mut gol_petri = if state.app_kind == AppKind::Gol {
-        Some(PetriDishRuntime::new(state))
-    } else {
-        None
-    };
-    let mut games_petri = if state.app_kind == AppKind::Games {
-        Some(GamesPetriDishRuntime::new(state))
-    } else {
-        None
-    };
-    let mut games_config_preview = if state.app_kind == AppKind::Games {
-        Some(GamesConfigPreviewRuntime::spawn())
-    } else {
-        None
-    };
+    let (mut seed_runtime, mut gol_petri, mut games_petri, mut games_config_preview) =
+        spawn_app_runtimes(state);
     let mut vitals = VitalsState::default();
     let mut last_gol_generation = state.visualizer.generation;
     let mut last_gol_running = state.visualizer.running;
@@ -1141,4 +1078,28 @@ pub(super) fn settle_initial_terminal_size(
     }
     terminal.resize(size)?;
     Ok(size)
+}
+
+fn spawn_app_runtimes(
+    state: &AppState,
+) -> (
+    Option<SeedRuntime>,
+    Option<PetriDishRuntime>,
+    Option<GamesPetriDishRuntime>,
+    Option<GamesConfigPreviewRuntime>,
+) {
+    match state.app_kind {
+        AppKind::Gol => (
+            Some(SeedRuntime::new(state)),
+            Some(PetriDishRuntime::new(state)),
+            None,
+            None,
+        ),
+        AppKind::Games => (
+            None,
+            None,
+            Some(GamesPetriDishRuntime::new(state)),
+            Some(GamesConfigPreviewRuntime::spawn()),
+        ),
+    }
 }

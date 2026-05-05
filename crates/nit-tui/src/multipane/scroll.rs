@@ -52,11 +52,9 @@ pub(super) fn scroll_chat_thread(
     }
 }
 
-/// Translate the "follow bottom" sentinel into a concrete row offset
-/// for arithmetic. Other values pass through. Used by both the
-/// keyboard PgUp/PgDn path and the mouse wheel path so they stay in
-/// lockstep with each other and with the `min(max_scroll)` clamp the
-/// renderer applies.
+/// Both the keyboard PgUp/PgDn path and the mouse wheel path call this
+/// so they stay in lockstep with each other and with the
+/// `min(max_scroll)` clamp the renderer applies.
 pub(super) fn resolve_chat_scroll_sentinel(scroll: usize, max_scroll: usize) -> usize {
     if scroll == nit_core::CONSOLE_SCROLL_BOTTOM {
         max_scroll
@@ -65,10 +63,9 @@ pub(super) fn resolve_chat_scroll_sentinel(scroll: usize, max_scroll: usize) -> 
     }
 }
 
-/// Maximum legal `chat_thread_scroll` for the given pane. Mirrors the
-/// renderer's clamp at `agent_console_view::render_pane` so wheel /
-/// PgUp / PgDn never pin the stored scroll beyond the rendered window
-/// — which would otherwise force the operator to "drain" stale scroll
+/// Mirrors the renderer's clamp at `agent_console_view::render_pane`
+/// so wheel / PgUp / PgDn never pin the stored scroll beyond the
+/// rendered window — otherwise the operator has to "drain" stale scroll
 /// before any visible movement happens.
 pub(super) fn focused_pane_chat_thread_max_scroll(
     state: &AppState,

@@ -6,9 +6,8 @@ use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::CodexRunner;
 use crate::vitals::VitalsState;
 
-/// Outcome of `dispatch_pane_prompt`. The roster runtime turns
-/// `NoSelection` into a one-line system message in the pane's chat
-/// history rather than silently dropping the prompt.
+/// `NoSelection` lets the roster runtime turn an unselected dispatch
+/// into a one-line system message rather than silently dropping it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum DispatchOutcome {
@@ -17,20 +16,13 @@ pub(crate) enum DispatchOutcome {
     PaneMissing,
 }
 
-/// Dispatch the focused-pane prompt through the standard
-/// `dispatch_agent_prompt` path. The pane's `cwd` is read at the dispatch
-/// leaf via `app::dispatch::resolve_dispatch_cwd`, so this wrapper has no
-/// `cwd` parameter — queue dequeues stay correct because the leaf
-/// resolves at dispatch time, not enqueue time.
+/// `cwd` is intentionally absent: the pane's working directory is
+/// resolved at dispatch time inside `resolve_dispatch_cwd`, not at
+/// enqueue time, so a queue dequeue still picks up the correct cwd.
 ///
-/// When the pane has no committed selection (`selected_agent_id == None`
-/// and `agent_id` empty), returns `NoSelection` without dispatching so
-/// the caller can post a "no agent selected" notice.
-///
-/// Retained for tests and for callers that want to bypass
+/// Retained for tests and for callers that bypass
 /// `submit_chat_input_and_dispatch`'s parser. The runtime Enter handler
-/// goes through the canonical chat-input path via
-/// `with_pane_aliased`, not this function.
+/// uses the canonical chat-input path via `with_pane_aliased`.
 #[allow(dead_code)]
 pub(crate) fn dispatch_pane_prompt(
     state: &mut AppState,
@@ -57,10 +49,12 @@ pub(crate) fn dispatch_pane_prompt(
     let mission_id = pane.mission_id.clone();
     bridge_pane_effort_to_runner(state, pane_idx, &agent_id);
     dispatch_agent_prompt(state, vitals, codex, claude, agent_id, mission_id, prompt);
-    if let Some(mp) = state.multipane.as_mut() {
-        if let Some(pane) = mp.panes.get_mut(pane_idx) {
-            pane.has_run_mission = true;
-        }
+    if let Some(pane) = state
+        .multipane
+        .as_mut()
+        .and_then(|mp| mp.panes.get_mut(pane_idx))
+    {
+        pane.has_run_mission = true;
     }
     DispatchOutcome::Dispatched
 }
@@ -144,13 +138,12 @@ pub(crate) fn with_pane_aliased<R>(
     result
 }
 
-/// Snap aliased state back onto the pane after `body` returns. The
-/// mirror-back guard is load-bearing: a real swarm `mission_id` set by
-/// `@swarm` flows through to `pane.mission_id` so subsequent aborts
-/// target it, but the synthetic chat id (set by the alias source above)
-/// must NEVER be written back — that would conflate "real swarm
-/// overlay" with "default-chat fallback" and silently break the
-/// swarm-followup re-activation path.
+/// Mirror-back guard: a real swarm `mission_id` set by `@swarm` flows
+/// through to `pane.mission_id` so subsequent aborts target it, but the
+/// synthetic chat id (set by the alias source above) must NEVER be
+/// written back — that would conflate "real swarm overlay" with
+/// "default-chat fallback" and silently break swarm-followup
+/// re-activation.
 fn mirror_back_pane(state: &mut AppState, pane_idx: usize) {
     let new_selected = state.agents.selected_mission.clone();
     let Some(pane) = state
@@ -174,30 +167,28 @@ fn mirror_back_pane(state: &mut AppState, pane_idx: usize) {
     }
 }
 
-/// Bridge the focused pane's effort map to the global runner-side
-/// reasoning-effort map. Wrapper around `bridge_pane_effort_to_runner`
-/// that resolves the materialised id from the pane.
 pub(crate) fn bridge_pane_effort_to_runner_focused(state: &mut AppState, pane_idx: usize) {
-    let materialised_id = state
+    let Some(id) = state
         .multipane
         .as_ref()
         .and_then(|mp| mp.panes.get(pane_idx))
-        .and_then(|p| {
-            if !p.agent_id.is_empty() {
-                Some(p.agent_id.clone())
+        .and_then(|pane| {
+            if pane.agent_id.is_empty() {
+                pane.selected_agent_id.clone()
             } else {
-                p.selected_agent_id.clone()
+                Some(pane.agent_id.clone())
             }
-        });
-    let Some(id) = materialised_id else { return };
+        })
+    else {
+        return;
+    };
     bridge_pane_effort_to_runner(state, pane_idx, &id);
 }
 
-/// Mirror the focused pane's `selected_effort[base_id]` into the global
-/// per-clone effort map under the materialised lane id so the runner
-/// reads the pane-local choice without the dispatch contract changing.
-/// One-way: late operator size-clicks won't reach an in-flight turn,
-/// matching the pre-fix behavior.
+/// One-way mirror: late operator size-clicks won't reach an in-flight
+/// turn, matching the pre-fix behavior. The pane-local `selected_effort`
+/// is copied under the materialised lane id so the dispatch contract
+/// stays unchanged.
 fn bridge_pane_effort_to_runner(state: &mut AppState, pane_idx: usize, materialised_id: &str) {
     let base_id = match materialised_id.split_once(PANE_SEPARATOR) {
         Some((base, _)) => base.to_string(),
@@ -217,67 +208,16 @@ fn bridge_pane_effort_to_runner(state: &mut AppState, pane_idx: usize, materiali
         .find(|l| l.id == materialised_id || l.id == base_id)
         .map(|l| (l.is_codex(), l.kind));
     let Some((is_codex, kind)) = kind else { return };
-    if is_codex || matches!(kind, AgentLaneKind::Codex) {
-        state
-            .agents
-            .codex_selected_reasoning_effort
-            .insert(materialised_id.to_string(), effort);
+    let target = if is_codex || matches!(kind, AgentLaneKind::Codex) {
+        &mut state.agents.codex_selected_reasoning_effort
     } else if matches!(kind, AgentLaneKind::Claude) {
-        state
-            .agents
-            .claude_selected_effort
-            .insert(materialised_id.to_string(), effort);
-    }
+        &mut state.agents.claude_selected_effort
+    } else {
+        return;
+    };
+    target.insert(materialised_id.to_string(), effort);
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use nit_core::{MultipaneState, PaneSession};
-    use std::path::PathBuf;
-
-    fn fixture_state() -> AppState {
-        let buffer = nit_core::Buffer::empty("scratch", None);
-        let notes = nit_core::Buffer::empty("notes", None);
-        let mut state = AppState::new(PathBuf::from("/workspace"), buffer, notes);
-        state.multipane = Some(MultipaneState {
-            backend_agent_id: String::new(),
-            panes: vec![
-                PaneSession {
-                    pane_id: 0,
-                    cwd: PathBuf::from("/pane0"),
-                    ..PaneSession::default()
-                },
-                PaneSession {
-                    pane_id: 1,
-                    agent_id: "claude-haiku-4-5#mp-pane-01".into(),
-                    cwd: PathBuf::from("/pane1"),
-                    selected_agent_id: Some("claude-haiku-4-5#mp-pane-01".into()),
-                    ..PaneSession::default()
-                },
-            ],
-            focused: 0,
-            grid_cols: 2,
-            grid_rows: 1,
-            backend_filter: None,
-            help_open: false,
-        });
-        state
-    }
-
-    #[test]
-    fn dispatch_no_selection_returns_marker_when_pane_unselected() {
-        let mut state = fixture_state();
-        let mut vitals = VitalsState::default();
-        let outcome = dispatch_pane_prompt(&mut state, &mut vitals, None, None, 0, "hello".into());
-        assert_eq!(outcome, DispatchOutcome::NoSelection);
-    }
-
-    #[test]
-    fn dispatch_unknown_pane_returns_marker() {
-        let mut state = fixture_state();
-        let mut vitals = VitalsState::default();
-        let outcome = dispatch_pane_prompt(&mut state, &mut vitals, None, None, 99, "hello".into());
-        assert_eq!(outcome, DispatchOutcome::PaneMissing);
-    }
-}
+#[path = "../tests/multipane_dispatch.rs"]
+mod tests;

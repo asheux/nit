@@ -1,11 +1,11 @@
 //! Tests for the intake agent — the LLM-based pre-dispatch classifier
-//! that replaces the deleted `is_real_work` heuristic.
+//! that replaced the deleted `is_real_work` heuristic.
 //!
 //! The fixtures mirror `prompts_leak_test.rs`: a real (in-memory)
-//! `ClaudeRunner` keeps the post-dispatch queue walker from draining
-//! the orphaned queue, so the intake turn AND the resumed operator
-//! turn stay inspectable. Mocked JSON is injected via
-//! `intake::install_test_response` so no real LLM is invoked.
+//! `ClaudeRunner` keeps the post-dispatch queue walker from draining the
+//! orphaned queue, so the intake turn AND the resumed operator turn stay
+//! inspectable. Mocked JSON is injected via `intake::install_test_response`
+//! so no real LLM is invoked.
 
 use std::fs;
 use std::path::PathBuf;
@@ -30,15 +30,19 @@ const RAW_REAL_WORK: &str = "Update crates/foo to extract the iterator helper";
 const RAW_QUESTION: &str = "what does the dispatcher do?";
 const RAW_GREETING: &str = "hi there friend";
 
-fn fresh_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "nit-intake-{label}-{}-{}",
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default(),
-    ));
+    )
+}
+
+fn fresh_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("nit-intake-{label}-{}", unique_suffix()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -52,29 +56,35 @@ fn cargo_workspace(label: &str) -> PathBuf {
     dir
 }
 
-fn make_state(cwd: PathBuf, intake_on: bool) -> AppState {
+fn fresh_state(cwd: PathBuf, intake_on: bool) -> AppState {
     let editor = Buffer::empty("editor", None);
     let notes = Buffer::empty("notes", None);
     let mut state = AppState::new(cwd, editor, notes);
     state.settings.intake_enabled = intake_on;
     state.agents.messages.clear();
     state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "claude-haiku-4-5".into(),
-        role: "claude-haiku-4-5".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
+    state
+}
+
+fn lane(id: &str, kind: AgentLaneKind, label: &str) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: label.into(),
+        kind,
         status: AgentStatus::Idle,
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
         last_message: String::new(),
         shadow: false,
-    });
-    state.agents.selected_agent = Some("claude-haiku-4-5".into());
+    }
+}
+
+fn install_active_turn(state: &mut AppState, lane_id: &str) {
     let now = Instant::now();
     state.agents.active_turns.insert(
-        "claude-haiku-4-5".into(),
+        lane_id.into(),
         AgentTurnState {
             started_at: now,
             last_heartbeat_at: now,
@@ -82,6 +92,32 @@ fn make_state(cwd: PathBuf, intake_on: bool) -> AppState {
             stage: None,
         },
     );
+}
+
+fn make_state(cwd: PathBuf, intake_on: bool) -> AppState {
+    make_state_with_lane(
+        cwd,
+        intake_on,
+        "claude-haiku-4-5",
+        AgentLaneKind::Claude,
+        "Claude",
+    )
+}
+
+fn make_state_with_lane(
+    cwd: PathBuf,
+    intake_on: bool,
+    lane_id: &str,
+    lane_kind: AgentLaneKind,
+    lane_label: &str,
+) -> AppState {
+    let mut state = fresh_state(cwd, intake_on);
+    state
+        .agents
+        .agents
+        .push(lane(lane_id, lane_kind, lane_label));
+    state.agents.selected_agent = Some(lane_id.into());
+    install_active_turn(&mut state, lane_id);
     state
 }
 
@@ -94,29 +130,28 @@ fn intake_lane_id_in_state(state: &AppState) -> Option<String> {
         .map(|l| l.id.clone())
 }
 
+fn ctx_for(state: &AppState) -> IntakeStartContext {
+    IntakeStartContext {
+        mission_id: None,
+        prompt_msg_idx: 0,
+        channel: nit_core::AgentChannel::Agent,
+        force_new: false,
+        target_agent_id: state.agents.selected_agent.clone().expect("selected agent"),
+    }
+}
+
 /// Drive the intake decision pipeline end-to-end without going through
-/// `submit_chat_input_and_dispatch` — production wiring is covered by
-/// the `chat_dispatch_*` tests in `prompts_leak_test.rs`. This helper
-/// exercises only the intake module's contract: start → install mock →
-/// synthesize `TurnCompleted` → return the resume.
+/// `submit_chat_input_and_dispatch` — production wiring is covered by the
+/// `chat_dispatch_*` tests in `prompts_leak_test.rs`. This exercises only
+/// the intake module's contract: start → install mock → synthesize
+/// `TurnCompleted` → return the resume.
 fn drive_intake_decision(
     state: &mut AppState,
     raw_prompt: &str,
     mock_json: &str,
 ) -> Option<IntakeResume> {
-    let target_agent_id = state
-        .agents
-        .selected_agent
-        .clone()
-        .expect("selected agent exists");
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id,
-    };
+    let ctx = ctx_for(state);
     let dispatch = intake::start(state, raw_prompt, target_cwd.as_path(), &ctx)
         .expect("intake start succeeded");
     let intake_lane = dispatch.agent_id.clone();
@@ -139,19 +174,8 @@ fn drive_intake_decision(
 }
 
 fn drive_intake_failed_decision(state: &mut AppState, raw_prompt: &str) -> Option<IntakeResume> {
-    let target_agent_id = state
-        .agents
-        .selected_agent
-        .clone()
-        .expect("selected agent exists");
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id,
-    };
+    let ctx = ctx_for(state);
     let dispatch = intake::start(state, raw_prompt, target_cwd.as_path(), &ctx)
         .expect("intake start succeeded");
     let intake_lane = dispatch.agent_id.clone();
@@ -192,6 +216,20 @@ fn json_response(intent: &str, augmented: &str, augmentation_applied: bool) -> S
     format!("```json\n{json}\n```")
 }
 
+fn diag_with_prefix<'a>(
+    state: &'a AppState,
+    after: usize,
+    prefix: &str,
+) -> &'a nit_core::state::AgentDiagnosticEvent {
+    state
+        .agents
+        .diag_events
+        .iter()
+        .skip(after)
+        .find(|d| d.message.starts_with(prefix))
+        .unwrap_or_else(|| panic!("expected diag with prefix `{prefix}`"))
+}
+
 // --------------------------------------------------------------------
 // Test 1 — each intent class produces the correct resume prompt
 // --------------------------------------------------------------------
@@ -199,13 +237,13 @@ fn json_response(intent: &str, augmented: &str, augmentation_applied: bool) -> S
 fn intake_classifies_each_intent_class_lands_correct_prompt_in_queue() {
     let cwd = cargo_workspace("intent_class");
 
-    // 1a — read intent → passthrough (raw prompt resumed).
+    // 1a — read intent → passthrough.
     {
         let mut state = make_state(cwd.clone(), true);
         let mock = json_response("read", RAW_QUESTION, false);
         let resume = drive_intake_decision(&mut state, RAW_QUESTION, &mock).expect("resume");
-        assert_eq!(resume.prompt, RAW_QUESTION, "read intent → raw prompt");
-        assert!(state.agents.pending_intake.is_none(), "pending cleared");
+        assert_eq!(resume.prompt, RAW_QUESTION);
+        assert!(state.agents.pending_intake.is_none());
     }
 
     // 1b — write intent → augmented prompt with FILE CHECKLIST.
@@ -214,14 +252,8 @@ fn intake_classifies_each_intent_class_lands_correct_prompt_in_queue() {
         let augmented = build_augmented(RAW_REAL_WORK, &["crates/foo/src/lib.rs"]);
         let mock = json_response("write", &augmented, true);
         let resume = drive_intake_decision(&mut state, RAW_REAL_WORK, &mock).expect("resume");
-        assert!(
-            resume.prompt.starts_with(RAW_REAL_WORK),
-            "augmented prompt must start with raw"
-        );
-        assert!(
-            resume.prompt.contains("## FILE CHECKLIST (non-negotiable)"),
-            "augmented prompt must contain marker"
-        );
+        assert!(resume.prompt.starts_with(RAW_REAL_WORK));
+        assert!(resume.prompt.contains("## FILE CHECKLIST (non-negotiable)"));
     }
 
     // 1c — mixed intent → also augmented.
@@ -251,18 +283,12 @@ fn intake_classifies_each_intent_class_lands_correct_prompt_in_queue() {
 fn intake_parse_failure_falls_back_to_raw_prompt() {
     let cwd = cargo_workspace("parse_fail");
     let mut state = make_state(cwd.clone(), true);
-    let initial_diag_count = state.agents.diag_events.len();
+    let initial = state.agents.diag_events.len();
 
     let resume = drive_intake_decision(&mut state, RAW_REAL_WORK, "this is not JSON at all")
         .expect("resume");
-    assert_eq!(resume.prompt, RAW_REAL_WORK, "parse failure → raw prompt");
-    let diag = state
-        .agents
-        .diag_events
-        .iter()
-        .skip(initial_diag_count)
-        .find(|d| d.message.starts_with("intake.parse_failed"))
-        .expect("intake.parse_failed Info diag");
+    assert_eq!(resume.prompt, RAW_REAL_WORK);
+    let diag = diag_with_prefix(&state, initial, "intake.parse_failed");
     assert_eq!(diag.severity, nit_core::AgentAlertSeverity::Info);
 
     let _ = fs::remove_dir_all(&cwd);
@@ -275,19 +301,13 @@ fn intake_parse_failure_falls_back_to_raw_prompt() {
 fn intake_timeout_falls_back_to_raw_prompt() {
     let cwd = cargo_workspace("timeout");
     let mut state = make_state(cwd.clone(), true);
-    let initial_diag_count = state.agents.diag_events.len();
+    let initial = state.agents.diag_events.len();
 
     let resume = drive_intake_failed_decision(&mut state, RAW_REAL_WORK).expect("resume");
-    assert_eq!(resume.prompt, RAW_REAL_WORK, "timeout → raw prompt");
-    let diag = state
-        .agents
-        .diag_events
-        .iter()
-        .skip(initial_diag_count)
-        .find(|d| d.message.starts_with("intake.turn_failed"))
-        .expect("intake.turn_failed Warn diag");
-    // Promoted Info → Warn: the deferred dispatch is wedged on this
-    // event and the chat console suppresses Info by default.
+    assert_eq!(resume.prompt, RAW_REAL_WORK);
+    // Promoted Info → Warn: deferred dispatch is wedged on this event and
+    // the chat console suppresses Info by default.
+    let diag = diag_with_prefix(&state, initial, "intake.turn_failed");
     assert_eq!(diag.severity, nit_core::AgentAlertSeverity::Warn);
 
     let _ = fs::remove_dir_all(&cwd);
@@ -300,15 +320,8 @@ fn intake_timeout_falls_back_to_raw_prompt() {
 fn intake_tick_timeout_kills_pending_after_deadline() {
     let cwd = cargo_workspace("tick_timeout");
     let mut state = make_state(cwd.clone(), true);
-    let target_agent_id = state.agents.selected_agent.clone().unwrap();
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id,
-    };
+    let ctx = ctx_for(&state);
     let dispatch =
         intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx).expect("intake start");
     let intake_lane = dispatch.agent_id.clone();
@@ -340,22 +353,16 @@ fn intake_tick_timeout_kills_pending_after_deadline() {
 fn intake_prefix_violation_falls_back_to_raw_prompt_with_warn() {
     let cwd = cargo_workspace("prefix_violation");
     let mut state = make_state(cwd.clone(), true);
-    let initial_diag_count = state.agents.diag_events.len();
-    // Augmented prompt rewrites operator's words by prefixing "Hi! " —
-    // strict prefix check must reject this and fall back to raw.
+    let initial = state.agents.diag_events.len();
+    // Augmented prompt rewrites operator's words by prefixing "Hi! ".
+    // Strict prefix check must reject this and fall back to raw.
     let bad_augmented = format!(
         "Hi! {RAW_REAL_WORK}\n\n## FILE CHECKLIST (non-negotiable)\n1. crates/foo/src/lib.rs\n"
     );
     let mock = json_response("write", &bad_augmented, true);
     let resume = drive_intake_decision(&mut state, RAW_REAL_WORK, &mock).expect("resume");
-    assert_eq!(resume.prompt, RAW_REAL_WORK, "prefix violation → raw");
-    let diag = state
-        .agents
-        .diag_events
-        .iter()
-        .skip(initial_diag_count)
-        .find(|d| d.message.starts_with("intake.prefix_violation"))
-        .expect("intake.prefix_violation Warn diag");
+    assert_eq!(resume.prompt, RAW_REAL_WORK);
+    let diag = diag_with_prefix(&state, initial, "intake.prefix_violation");
     assert_eq!(diag.severity, nit_core::AgentAlertSeverity::Warn);
 
     let _ = fs::remove_dir_all(&cwd);
@@ -384,18 +391,12 @@ fn intake_disabled_skips_intake_turn() {
         &mut shadow,
     );
 
-    // No intake lane should have been spawned.
     assert!(intake_lane_id_in_state(&state).is_none());
-    // No pending_intake.
     assert!(state.agents.pending_intake.is_none());
-    // The operator's prompt landed in the queue verbatim (single-pane
-    // dispatch path, raw prompt — heuristic is gone).
+    // Operator's prompt landed in the queue verbatim.
     let queued: Vec<_> = state.agents.queued_claude_turns.iter().collect();
-    assert_eq!(queued.len(), 1, "operator prompt enqueued directly");
-    assert_eq!(
-        queued[0].prompt, RAW_REAL_WORK,
-        "intake disabled → raw prompt verbatim"
-    );
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].prompt, RAW_REAL_WORK);
 
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -408,14 +409,7 @@ fn intake_uses_per_pane_cwd_in_multipane() {
     use crate::multipane::setup::materialise_pane_lane;
 
     clear_test_responses();
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default(),
-    );
+    let unique = unique_suffix();
     let cwd0 = std::env::temp_dir().join(format!("nit-intake-mp-cwd0-{unique}"));
     let cwd1 = std::env::temp_dir().join(format!("nit-intake-mp-cwd1-{unique}"));
     let _ = fs::remove_dir_all(&cwd0);
@@ -425,23 +419,11 @@ fn intake_uses_per_pane_cwd_in_multipane() {
     fs::write(cwd0.join("crates/foo/src/lib.rs"), "// foo\n").unwrap();
     fs::write(cwd1.join("crates/bar/src/lib.rs"), "// bar\n").unwrap();
 
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(PathBuf::from("/workspace"), editor, notes);
-    state.settings.intake_enabled = true;
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "claude-haiku-4-5".into(),
-        role: "claude-haiku-4-5".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    let mut state = fresh_state(PathBuf::from("/workspace"), true);
+    state
+        .agents
+        .agents
+        .push(lane("claude-haiku-4-5", AgentLaneKind::Claude, "Claude"));
     state.multipane = Some(MultipaneState {
         backend_agent_id: "claude-haiku-4-5".into(),
         panes: vec![
@@ -465,19 +447,13 @@ fn intake_uses_per_pane_cwd_in_multipane() {
     let _ = materialise_pane_lane(&mut state, 0, "claude-haiku-4-5");
     let _ = materialise_pane_lane(&mut state, 1, "claude-haiku-4-5");
 
-    // Drive `intake::start` directly with the pane-1 lane as target. The
-    // pane-aware caller in `chat_input::try_dispatch_intake` resolves
-    // `target_cwd` via `resolve_dispatch_cwd(state, target_agent_id)`,
-    // which we mirror here. End-to-end coverage of the chat path lives
-    // in tests 1-5; this test pins the per-pane cwd plumbing
-    // independent of busy-state tricks needed to keep dispatch in queue.
+    // The pane-aware caller resolves target_cwd via resolve_dispatch_cwd;
+    // mirror that here. End-to-end coverage of the chat path lives in
+    // tests 1–5; this pins the per-pane cwd plumbing in isolation.
     let pane1_target = "claude-haiku-4-5#mp-pane-01".to_string();
     let target_cwd = crate::app::resolve_dispatch_cwd(&state, &pane1_target);
-    assert_eq!(
-        target_cwd, cwd1,
-        "resolve_dispatch_cwd must return pane 1's cwd"
-    );
-    let ctx = crate::intake::IntakeStartContext {
+    assert_eq!(target_cwd, cwd1);
+    let ctx = IntakeStartContext {
         mission_id: None,
         prompt_msg_idx: 0,
         channel: nit_core::AgentChannel::Agent,
@@ -504,7 +480,6 @@ fn intake_uses_per_pane_cwd_in_multipane() {
         "intake input must NOT carry pane 0's cwd:\n{}",
         dispatch.prompt
     );
-    // Lane id encodes the pane lane as base.
     assert!(
         dispatch
             .agent_id
@@ -524,15 +499,8 @@ fn intake_uses_per_pane_cwd_in_multipane() {
 fn intake_abort_drops_pending_and_does_not_resume() {
     let cwd = cargo_workspace("abort");
     let mut state = make_state(cwd.clone(), true);
-    let target_agent_id = state.agents.selected_agent.clone().unwrap();
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id,
-    };
+    let ctx = ctx_for(&state);
     let dispatch =
         intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx).expect("intake start");
     let intake_lane = dispatch.agent_id.clone();
@@ -563,50 +531,10 @@ fn intake_abort_drops_pending_and_does_not_resume() {
 }
 
 // --------------------------------------------------------------------
-// Backend guard tests — the intake system prompt and 30s timeout are
-// claude-tuned, so a codex / gemini / mock target with no override
-// must skip intake (and surface a diag operators can grep) instead of
-// silently routing through a misfit classifier.
+// Backend guard tests — intake's system prompt and 30s timeout are
+// claude-tuned, so a codex/gemini/mock target with no override must skip
+// intake and surface a diag instead of routing through a misfit classifier.
 // --------------------------------------------------------------------
-
-fn make_state_with_lane(
-    cwd: PathBuf,
-    intake_on: bool,
-    lane_id: &str,
-    lane_kind: AgentLaneKind,
-    lane_label: &str,
-) -> AppState {
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd, editor, notes);
-    state.settings.intake_enabled = intake_on;
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: lane_id.into(),
-        role: lane_id.into(),
-        lane: lane_label.into(),
-        kind: lane_kind,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.selected_agent = Some(lane_id.into());
-    let now = Instant::now();
-    state.agents.active_turns.insert(
-        lane_id.into(),
-        AgentTurnState {
-            started_at: now,
-            last_heartbeat_at: now,
-            last_output_at: now,
-            stage: None,
-        },
-    );
-    state
-}
 
 fn intake_skip_diag(state: &AppState, after: usize) -> Option<&str> {
     state
@@ -621,127 +549,68 @@ fn intake_skip_diag(state: &AppState, after: usize) -> Option<&str> {
         .map(|d| d.message.as_str())
 }
 
-#[test]
-fn intake_silent_skip_for_codex_target_emits_diag() {
-    let cwd = cargo_workspace("codex_skip");
-    let mut state = make_state_with_lane(
-        cwd.clone(),
-        true,
-        "gpt-5-codex",
-        AgentLaneKind::Codex,
-        "Codex",
-    );
+fn assert_skipped_for_backend(label: &str, lane_id: &str, kind: AgentLaneKind, lane_label: &str) {
+    let cwd = cargo_workspace(label);
+    let mut state = make_state_with_lane(cwd.clone(), true, lane_id, kind, lane_label);
     let initial = state.agents.diag_events.len();
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id: "gpt-5-codex".into(),
-    };
+    let ctx = ctx_for(&state);
     let dispatch = intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx);
     assert!(
         dispatch.is_none(),
-        "intake must skip codex target without an override"
+        "intake must skip {lane_label} target without an override"
     );
+    assert!(state.agents.pending_intake.is_none());
+    let msg = intake_skip_diag(&state, initial).expect("intake.skipped Info diag");
+    let backend_label = lane_label.to_lowercase();
     assert!(
-        state.agents.pending_intake.is_none(),
-        "no pending_intake on skipped backend"
-    );
-    let msg = intake_skip_diag(&state, initial).expect("intake.skipped Info diag for codex target");
-    assert!(
-        msg.contains("backend=codex"),
+        msg.contains(&format!("backend={backend_label}")),
         "diag should encode backend label: {msg}"
     );
     assert!(
-        msg.contains("target=gpt-5-codex"),
+        msg.contains(&format!("target={lane_id}")),
         "diag should name the target: {msg}"
     );
-    assert!(
-        intake_lane_id_in_state(&state).is_none(),
-        "no intake lane spawned on skipped backend"
-    );
+    assert!(intake_lane_id_in_state(&state).is_none());
     let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn intake_silent_skip_for_codex_target_emits_diag() {
+    assert_skipped_for_backend("codex_skip", "gpt-5-codex", AgentLaneKind::Codex, "Codex");
 }
 
 #[test]
 fn intake_silent_skip_for_gemini_target_emits_diag() {
-    let cwd = cargo_workspace("gemini_skip");
-    let mut state = make_state_with_lane(
-        cwd.clone(),
-        true,
+    assert_skipped_for_backend(
+        "gemini_skip",
         "gemini-flash",
         AgentLaneKind::Gemini,
         "Gemini",
     );
-    let initial = state.agents.diag_events.len();
-    let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id: "gemini-flash".into(),
-    };
-    let dispatch = intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx);
-    assert!(dispatch.is_none(), "intake must skip gemini target");
-    let msg = intake_skip_diag(&state, initial).expect("intake.skipped diag for gemini");
-    assert!(
-        msg.contains("backend=gemini"),
-        "diag should encode gemini backend: {msg}"
-    );
-    let _ = fs::remove_dir_all(&cwd);
 }
 
+// Operator pinned a claude lane as the intake source; targeting a codex lane
+// for the actual write must still fire intake (override path bypasses the
+// backend guard so a future setup can run a cheap claude preprocessor in
+// front of a codex writer).
 #[test]
 fn intake_override_lets_claude_lane_run_for_codex_target() {
-    // Operator pinned a claude lane as the intake source; targeting a
-    // codex lane for the actual write must still fire intake (override
-    // path bypasses the backend guard so a future setup can run a
-    // cheap claude preprocessor in front of a codex writer).
     let cwd = cargo_workspace("override_path");
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(cwd.clone(), editor, notes);
-    state.settings.intake_enabled = true;
-    state.agents.messages.clear();
-    state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "claude-haiku-4-5".into(),
-        role: "claude-haiku-4-5".into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.agents.push(AgentLane {
-        id: "gpt-5-codex".into(),
-        role: "gpt-5-codex".into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
+    let mut state = fresh_state(cwd.clone(), true);
+    state
+        .agents
+        .agents
+        .push(lane("claude-haiku-4-5", AgentLaneKind::Claude, "Claude"));
+    state
+        .agents
+        .agents
+        .push(lane("gpt-5-codex", AgentLaneKind::Codex, "Codex"));
     state.agents.selected_agent = Some("gpt-5-codex".into());
     state.agents.intake_agent_id = Some("claude-haiku-4-5".into());
 
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id: "gpt-5-codex".into(),
-    };
+    let ctx = ctx_for(&state);
     let dispatch = intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx)
         .expect("override path: intake must fire on codex target with claude override");
     assert!(
@@ -752,12 +621,12 @@ fn intake_override_lets_claude_lane_run_for_codex_target() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
+// `NIT_INTAKE_DISABLED` is a process-wide env var that every `intake::start`
+// call reads. The static LOCK serializes against any other test that might
+// race on it (today none — but the lock is cheap insurance).
 #[test]
 fn intake_kill_switch_takes_precedence() {
     use std::sync::Mutex;
-    // `NIT_INTAKE_DISABLED` is read by every `intake::start` call across
-    // the test suite. Serialize against any other test that might race
-    // on it (today none — but the lock is cheap insurance).
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap();
     const VAR: &str = "NIT_INTAKE_DISABLED";
@@ -766,13 +635,7 @@ fn intake_kill_switch_takes_precedence() {
     let cwd = cargo_workspace("kill_switch");
     let mut state = make_state(cwd.clone(), true);
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id: state.agents.selected_agent.clone().unwrap(),
-    };
+    let ctx = ctx_for(&state);
 
     // Sanity: intake fires when the kill switch is unset.
     std::env::remove_var(VAR);
@@ -797,22 +660,17 @@ fn intake_kill_switch_takes_precedence() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
+// The dispatch helpers tie `read_only` to `parse_shadow_lane_id ||
+// parse_intake_lane_id`. Asserting the parser recognises an intake lane id
+// pins the safety contract: the runner-config code path branches on this
+// exact predicate.
 #[test]
 fn intake_lane_is_read_only_via_parse() {
-    // The dispatch helpers (`dispatch_codex_prompt`, `dispatch_claude_prompt`)
-    // tie `read_only` to `parse_shadow_lane_id || parse_intake_lane_id`.
-    // Asserting that the parser recognises an intake lane id pins the
-    // safety contract: the runner-config code path branches on this
-    // exact predicate. A unit-level assertion is sufficient because the
-    // dispatch path is exercised end-to-end by the existing claude
-    // tests (which produce stream-json output through the read-only
-    // wire path) and would fail loudly if `read_only` semantics broke.
     let lane_id = intake::intake_lane_id("claude-haiku-4-5", "01");
     assert_eq!(
         intake::parse_intake_lane_id(&lane_id),
         Some(("claude-haiku-4-5", "01")),
     );
-    // Multipane variant carrying a `#mp-pane-NN` suffix on the base.
     let mp_lane = intake::intake_lane_id("claude-haiku-4-5#mp-pane-01", "07");
     assert_eq!(
         intake::parse_intake_lane_id(&mp_lane),
@@ -820,37 +678,21 @@ fn intake_lane_is_read_only_via_parse() {
     );
 }
 
+// Simulates the chat-input path's recovery when `dispatch_agent_prompt`
+// fails to enqueue (dead runner channel): the synthetic intake lane was
+// inserted by `ensure_intake_lane` but `pending_intake` is not yet stashed.
+// The cleanup helper removes the lane so it doesn't surface as a phantom row.
 #[test]
 fn intake_failed_dispatch_cleanup_removes_phantom_lane() {
-    // Simulates the chat-input path's recovery when
-    // `dispatch_agent_prompt` fails to enqueue (dead runner channel):
-    // the synthetic intake lane was inserted by `ensure_intake_lane`
-    // but `pending_intake` is not yet stashed. The cleanup helper
-    // removes the lane so it doesn't surface as a phantom row.
     let cwd = cargo_workspace("phantom_lane");
     let mut state = make_state(cwd.clone(), true);
     let target_cwd = state.workspace_root.clone();
-    let ctx = IntakeStartContext {
-        mission_id: None,
-        prompt_msg_idx: 0,
-        channel: nit_core::AgentChannel::Agent,
-        force_new: false,
-        target_agent_id: state.agents.selected_agent.clone().unwrap(),
-    };
+    let ctx = ctx_for(&state);
     let dispatch = intake::start(&mut state, RAW_REAL_WORK, target_cwd.as_path(), &ctx)
         .expect("intake start succeeds");
-    assert!(
-        intake_lane_id_in_state(&state).is_some(),
-        "synthetic lane present after start"
-    );
+    assert!(intake_lane_id_in_state(&state).is_some());
     intake::cleanup_intake_lane_after_failed_dispatch(&mut state, &dispatch.agent_id);
-    assert!(
-        intake_lane_id_in_state(&state).is_none(),
-        "lane removed by cleanup"
-    );
-    assert!(
-        state.agents.pending_intake.is_none(),
-        "pending_intake unaffected (was never set)"
-    );
+    assert!(intake_lane_id_in_state(&state).is_none());
+    assert!(state.agents.pending_intake.is_none());
     let _ = fs::remove_dir_all(&cwd);
 }

@@ -794,11 +794,7 @@ fn run_content_worker(
 
     let needle = query.trim().to_string();
     if needle.is_empty() {
-        let _ = event_tx.send(ContentEvent::Done {
-            generation,
-            total_matches: 0,
-            duration_ms: start.elapsed().as_millis(),
-        });
+        emit_done(&event_tx, generation, 0, start);
         return;
     }
 
@@ -823,50 +819,16 @@ fn run_content_worker(
         if file_is_skippable(&path) {
             continue;
         }
-        let Ok(file) = fs::File::open(&path) else {
-            continue;
-        };
-        let mut reader = std::io::BufReader::new(file);
-        let mut line = String::new();
-        let mut line_no = 0usize;
-        loop {
-            if active_generation.load(Ordering::Relaxed) != generation {
-                break;
-            }
-            line.clear();
-            match std::io::BufRead::read_line(&mut reader, &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            line_no += 1;
-            strip_trailing_newline(&mut line);
-            let Some(byte_idx) = line.find(&needle) else {
-                continue;
-            };
-            let start_char = line[..byte_idx].chars().count();
-            let match_len = needle.chars().count().max(1);
-            let (snippet, match_start) = build_snippet(&line, start_char, match_len);
-            batch.push(SearchResultMatch {
-                rel_path: rel_path.clone(),
-                abs_path: path.clone(),
-                line: line_no,
-                col: start_char + 1,
-                snippet,
-                match_start,
-                match_len,
-            });
-            total_matches += 1;
-            if total_matches >= MAX_MATCH_RESULTS {
-                break;
-            }
-            if batch.len() >= MATCH_BATCH_SIZE {
-                let _ = event_tx.send(ContentEvent::MatchBatch {
-                    generation,
-                    results: std::mem::take(&mut batch),
-                });
-                batch.reserve(MATCH_BATCH_SIZE);
-            }
-        }
+        scan_file_for_matches(
+            &path,
+            &rel_path,
+            &needle,
+            generation,
+            &active_generation,
+            &mut batch,
+            &mut total_matches,
+            &event_tx,
+        );
         if total_matches >= MAX_MATCH_RESULTS {
             break;
         }
@@ -878,6 +840,72 @@ fn run_content_worker(
             results: batch,
         });
     }
+    emit_done(&event_tx, generation, total_matches, start);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_file_for_matches(
+    path: &Path,
+    rel_path: &str,
+    needle: &str,
+    generation: u64,
+    active_generation: &Arc<AtomicU64>,
+    batch: &mut Vec<SearchResultMatch>,
+    total_matches: &mut usize,
+    event_tx: &Sender<ContentEvent>,
+) {
+    let Ok(file) = fs::File::open(path) else {
+        return;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    loop {
+        if active_generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        line.clear();
+        match std::io::BufRead::read_line(&mut reader, &mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        line_no += 1;
+        strip_trailing_newline(&mut line);
+        let Some(byte_idx) = line.find(needle) else {
+            continue;
+        };
+        let start_char = line[..byte_idx].chars().count();
+        let match_len = needle.chars().count().max(1);
+        let (snippet, match_start) = build_snippet(&line, start_char, match_len);
+        batch.push(SearchResultMatch {
+            rel_path: rel_path.to_string(),
+            abs_path: path.to_path_buf(),
+            line: line_no,
+            col: start_char + 1,
+            snippet,
+            match_start,
+            match_len,
+        });
+        *total_matches += 1;
+        if *total_matches >= MAX_MATCH_RESULTS {
+            return;
+        }
+        if batch.len() >= MATCH_BATCH_SIZE {
+            let _ = event_tx.send(ContentEvent::MatchBatch {
+                generation,
+                results: std::mem::take(batch),
+            });
+            batch.reserve(MATCH_BATCH_SIZE);
+        }
+    }
+}
+
+fn emit_done(
+    event_tx: &Sender<ContentEvent>,
+    generation: u64,
+    total_matches: usize,
+    start: Instant,
+) {
     let _ = event_tx.send(ContentEvent::Done {
         generation,
         total_matches,

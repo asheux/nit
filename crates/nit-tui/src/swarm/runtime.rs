@@ -9,25 +9,21 @@ use super::{
     enumerate_scope_files, gate_bundle_label, is_priority_agent, next_mission_id,
     planner_role_hint_for_agent, push_system_message_to_mission, read_workspace_custom_gates,
     run_gates_label, stage_label, swarm_mission_title, task_state_dashboard_label, timestamp_label,
-    GateBundle, SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView,
+    Gate, GateBundle, SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView,
     SwarmRun, SwarmRuntime, SwarmSessionConfig, SwarmSize, SwarmStage, SwarmTaskDashboardRow,
     SwarmTaskPersistenceView, SwarmTaskState, SwarmTemplate,
 };
 
 impl SwarmRuntime {
-    /// Look up the scope files for a running mission. Used by the TUI
-    /// dispatch layer to inject role-specific context (e.g. the genome
-    /// landscape appended to propose-role prompts) without threading the
-    /// scope through every SwarmDispatch.
+    /// Used by the dispatch layer to inject role-specific context (e.g.
+    /// the genome landscape appended to propose-role prompts) without
+    /// threading scope through every dispatch.
     pub fn scope_files_for_mission(&self, mission_id: &str) -> Option<&[String]> {
         self.runs
             .get(mission_id)
             .map(|run| run.scope_files.as_slice())
     }
 
-    /// Test-only helper: overwrite the `scope_files` of an active run so
-    /// landscape-augmentation tests don't have to drive the full planner
-    /// flow. No-op when the mission id is unknown.
     #[cfg(test)]
     pub(crate) fn set_scope_files_for_test(&mut self, mission_id: &str, scope: Vec<String>) {
         if let Some(run) = self.runs.get_mut(mission_id) {
@@ -35,15 +31,14 @@ impl SwarmRuntime {
         }
     }
 
-    /// Poll all pending genome gate evaluations.  When a background thread
-    /// finishes, store the result in the run and return a `SwarmDispatch` so
-    /// the main loop can kick off the verifier agent — without ever blocking.
+    /// Polls pending genome gate evaluations. When a background thread
+    /// finishes, stores the result and returns dispatches that the main
+    /// loop kicks off — without ever blocking.
     pub fn poll_genome_gates(&mut self, state: &mut AppState) -> Vec<SwarmDispatch> {
         let mut dispatches = Vec::new();
         for run in self.runs.values_mut() {
-            let pending = match run.genome_gate_pending.take() {
-                Some(p) => p,
-                None => continue,
+            let Some(pending) = run.genome_gate_pending.take() else {
+                continue;
             };
             match pending.rx.try_recv() {
                 Ok(result) => {
@@ -56,21 +51,19 @@ impl SwarmRuntime {
                             pending.label, pending.verifier,
                         ),
                     );
-                    let prompt = build_verify_prompt(run);
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
-                        prompt,
+                        prompt: build_verify_prompt(run),
                         task_role: None,
                     });
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    // Still computing — put it back.
                     run.genome_gate_pending = Some(pending);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // Thread panicked or was dropped — dispatch verifier
-                    // without genome gate results so the swarm doesn't stall.
+                    // Worker dropped — dispatch verifier without genome
+                    // results so the swarm doesn't stall.
                     push_system_message_to_mission(
                         state,
                         &run.mission_id,
@@ -79,11 +72,10 @@ impl SwarmRuntime {
                             pending.label, pending.verifier,
                         ),
                     );
-                    let prompt = build_verify_prompt(run);
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
-                        prompt,
+                        prompt: build_verify_prompt(run),
                         task_role: None,
                     });
                 }
@@ -92,17 +84,15 @@ impl SwarmRuntime {
         dispatches
     }
 
-    /// Poll all pending genome review prompt builds.  When a background
-    /// thread finishes, dispatch the reviewer agent.  An empty result means
-    /// the worker had nothing to evaluate (no modified files) — the reviewer
-    /// is silently skipped.  Disconnected channels (worker panic / drop) are
-    /// also skipped silently so the swarm never stalls.
+    /// Polls pending genome review prompt builds. Empty prompt = nothing
+    /// to evaluate; reviewer is silently skipped. Disconnected channels
+    /// (worker panic / drop) are also skipped silently so the swarm never
+    /// stalls.
     pub fn poll_genome_reviews(&mut self, state: &mut AppState) -> Vec<SwarmDispatch> {
         let mut dispatches = Vec::new();
         for run in self.runs.values_mut() {
-            let pending = match run.genome_review_pending.take() {
-                Some(p) => p,
-                None => continue,
+            let Some(pending) = run.genome_review_pending.take() else {
+                continue;
             };
             match pending.rx.try_recv() {
                 Ok(prompt) => {
@@ -122,12 +112,9 @@ impl SwarmRuntime {
                     });
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    // Still computing — put it back.
                     run.genome_review_pending = Some(pending);
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker died — skip silently, don't stall the swarm.
-                }
+                Err(mpsc::TryRecvError::Disconnected) => {}
             }
         }
         dispatches
@@ -139,45 +126,34 @@ impl SwarmRuntime {
 
     /// Mission ids of every still-running swarm, in insertion order. Used
     /// by the abort orchestrator to find a fallback target when the
-    /// operator's "current" mission has already terminated — e.g. after
-    /// they aborted once, started a new swarm, then triggered abort
-    /// again. Without this fallback, `selected_mission` keeps pointing
-    /// at the *first* aborted mission and `/abort` keeps replying "not
-    /// active" instead of killing the actual running work.
+    /// operator's "current" mission has already terminated.
     pub fn active_mission_ids(&self) -> Vec<String> {
         self.runs.keys().cloned().collect()
     }
 
-    /// True once the planner's synthesis step has moved the run into
-    /// `completed_runs`. Use this as the source of truth for "is the swarm
-    /// done" — per-agent message scans can miss clones whose tasks were
-    /// skipped or never dispatched.
+    /// Source of truth for "is the swarm done" — per-agent message scans
+    /// can miss clones whose tasks were skipped or never dispatched.
     pub fn mission_is_complete(&self, mission_id: &str) -> bool {
         self.completed_runs.contains_key(mission_id)
     }
 
-    /// True when the mission was terminated by an explicit operator
-    /// abort (`/abort`, Ctrl+C, Esc-Esc, Mission-tab `x`) rather than
-    /// finishing naturally. Used by the chat-console breather to show
-    /// "Aborted" instead of "Done", so the operator can tell at a
-    /// glance whether the run completed or was cancelled.
+    /// True when terminated by an explicit operator abort rather than
+    /// finishing naturally. Lets the breather show "Aborted" vs "Done".
     pub fn mission_was_aborted(&self, mission_id: &str) -> bool {
         self.completed_runs
             .get(mission_id)
             .is_some_and(|run| run.report_status.as_deref() == Some("ABORTED"))
     }
 
-    /// Returns the current swarm stage label (e.g. "VERIFY", "SYNTH") for a mission.
     pub fn swarm_stage_label(&self, mission_id: &str) -> Option<&'static str> {
         self.run_for_mission(mission_id)
             .map(|run| stage_label(run.stage))
     }
 
-    /// Optional hint describing what background work is blocking the current
-    /// stage, e.g. `"genome gate"` while the pre-verify genome evaluation is
-    /// running or `"genome review"` while the post-verify reviewer prompt is
-    /// being built. Returning `Some` lets the UI explain why `Verifying …` or
-    /// `Synthesizing …` appears to hang with no visible agent activity.
+    /// Hint describing background work blocking the current stage (e.g.
+    /// `"genome gate"` while the pre-verify evaluation is running). Lets
+    /// the UI explain why `Verifying …` appears to hang with no visible
+    /// agent activity.
     pub fn swarm_stage_hint(&self, mission_id: &str) -> Option<&'static str> {
         let run = self.run_for_mission(mission_id)?;
         if run.genome_gate_pending.is_some() {
@@ -189,8 +165,6 @@ impl SwarmRuntime {
         None
     }
 
-    /// Returns the swarm configuration for a mission (active or completed)
-    /// so follow-up prompts can reuse the same template and agent count.
     pub fn session_config(&self, mission_id: &str) -> Option<SwarmSessionConfig> {
         let run = self.run_for_mission(mission_id)?;
         Some(SwarmSessionConfig {
@@ -200,8 +174,6 @@ impl SwarmRuntime {
         })
     }
 
-    /// Build a planner prompt for a follow-up, wrapping the user's raw text
-    /// with the same planning instructions used for the initial `@swarm`.
     pub fn build_followup_planner_prompt(
         &self,
         state: &AppState,
@@ -209,52 +181,12 @@ impl SwarmRuntime {
         user_prompt: &str,
     ) -> Option<String> {
         let run = self.run_for_mission(mission_id)?;
-        let mut role_hints: Vec<(String, String)> = Vec::new();
-        if matches!(run.template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-            for id in run
-                .agent_ids
-                .iter()
-                .filter(|id| id.as_str() != run.planner_agent_id.as_str())
-            {
-                role_hints.push((
-                    id.clone(),
-                    planner_role_hint_for_agent(
-                        &state.agents.swarm_role_by_agent_id,
-                        id.as_str(),
-                        run.integrator_agent_id.as_deref(),
-                        run.mission_kind,
-                    ),
-                ));
-            }
-            deduplicate_inherited_role_hints(&mut role_hints, &state.agents.swarm_role_by_agent_id);
-        }
-        let mut priority_agent_ids: Vec<String> = Vec::new();
-        if matches!(run.template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-            for id in run
-                .agent_ids
-                .iter()
-                .filter(|id| id.as_str() != run.planner_agent_id.as_str())
-            {
-                if is_priority_agent(state, id.as_str()) {
-                    priority_agent_ids.push(id.clone());
-                }
-            }
-        }
-        // Phase 8: also inject cross-mission memory into follow-up prompts.
-        // Reuse the mission's spawn cwd (set at run creation) so a multipane
-        // followup keeps its pane's workspace, not the harness's.
+        let role_hints = role_hints_for_followup(state, run);
+        let priority_agent_ids = priority_agents_for_followup(state, run);
+        // Phase 8: cross-mission memory. Reuse the mission's spawn cwd so a
+        // multipane followup keeps its pane's workspace.
         let spawn_cwd = run.spawn_cwd.as_path();
-        let memory_scope_files = enumerate_scope_files(spawn_cwd, user_prompt);
-        let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index = nit_core::mission_memory::load_or_build(spawn_cwd);
-        let memory_exclude: Vec<&str> = vec![mission_id];
-        let memory_hits = nit_core::mission_memory::retrieve_similar(
-            &memory_index,
-            user_prompt,
-            &memory_scope_tokens,
-            &memory_exclude,
-            3,
-        );
+        let memory_hits = load_memory_hits(spawn_cwd, user_prompt, &[mission_id]);
         Some(build_planner_prompt(
             user_prompt,
             run.template,
@@ -269,16 +201,14 @@ impl SwarmRuntime {
         ))
     }
 
-    /// Re-activate a completed swarm run so the planner can generate a new
-    /// plan for a follow-up prompt.  Clears previous tasks/outputs while
+    /// Re-activates a completed swarm so the planner can produce a new
+    /// plan for a follow-up prompt. Clears prior tasks/outputs while
     /// keeping agent assignments and gate config intact.
     pub fn reactivate_for_followup(&mut self, state: &mut AppState, mission_id: &str) -> bool {
         let Some(mut run) = self.completed_runs.remove(mission_id) else {
-            // Already active or doesn't exist.
             return self.runs.contains_key(mission_id);
         };
 
-        // Push the swarm meta message so the footer shows Mission/Gates.
         push_system_message_to_mission(
             state,
             mission_id,
@@ -300,12 +230,10 @@ impl SwarmRuntime {
         run.report_status = None;
         run.report_output = None;
         run.gate_retry_count = 0;
-        // Re-anchor mission baselines to the current state so the follow-up's
-        // genome review and gate measure deltas from THIS follow-up's work —
-        // not cumulative deltas from the original swarm's starting point.
+        // Re-anchor baselines so the follow-up's genome review and gate
+        // measure deltas from THIS follow-up's work — not cumulative
+        // deltas from the original swarm's starting point.
         run.initial_genome_baselines = state.genome_reports.clone();
-        // Drop files accumulated from the prior run; the follow-up should
-        // only report on files it actually touches.
         state.genome_mission_modified.remove(mission_id);
         self.runs.insert(mission_id.to_string(), run);
         true
@@ -330,33 +258,18 @@ impl SwarmRuntime {
             })
             .collect::<Vec<_>>();
 
-        let mut done = 0usize;
-        let mut failed = 0usize;
-        let mut skipped = 0usize;
-        let mut running = 0usize;
-        let mut queued = 0usize;
-        let mut pending = 0usize;
-        for task in run.tasks.iter() {
-            match task.state {
-                SwarmTaskState::Done => done += 1,
-                SwarmTaskState::Failed => failed += 1,
-                SwarmTaskState::Skipped => skipped += 1,
-                SwarmTaskState::Running => running += 1,
-                SwarmTaskState::Ready | SwarmTaskState::Dispatched => queued += 1,
-                SwarmTaskState::Pending => pending += 1,
-            }
-        }
+        let counts = TaskStateCounts::from_tasks(&run.tasks);
 
         Some(SwarmDashboardView {
             mission_id: run.mission_id.clone(),
             template: run.template.label().into(),
             phase: stage_label(run.stage).into(),
-            done,
-            failed,
-            skipped,
-            running,
-            queued,
-            pending,
+            done: counts.done,
+            failed: counts.failed,
+            skipped: counts.skipped,
+            running: counts.running,
+            queued: counts.queued,
+            pending: counts.pending,
             tasks,
             gate_bundle: run_gates_label(run),
             gates: dashboard_gate_rows(run),
@@ -414,213 +327,65 @@ impl SwarmRuntime {
         mission_kind: Option<SwarmMissionKind>,
         root_prompt: String,
     ) -> Option<(String, Vec<SwarmDispatch>)> {
-        let mut agents = Vec::new();
-        for agent_id in agent_ids {
-            if agents.iter().any(|id: &String| id == &agent_id) {
-                continue;
-            }
-            let is_codex = state
-                .agents
-                .agents
-                .iter()
-                .find(|lane| lane.id == agent_id)
-                .is_some_and(|lane| lane.is_codex() || lane.is_claude());
-            if is_codex {
-                agents.push(agent_id);
-            }
-        }
-        if !agents.iter().any(|id| id == &planner_agent_id) {
-            agents.insert(0, planner_agent_id.clone());
-        }
+        let mut agents = filter_dispatchable_agents(state, &planner_agent_id, agent_ids);
 
         let template_kind = super::parse_swarm_template(template.as_deref());
         let mission_kind = classify_swarm_mission_kind(&root_prompt, mission_kind);
         let mission_id = next_mission_id(state);
 
-        let restore_roster_selected = state
-            .agents
-            .agents
-            .get(state.agents.roster_selected)
-            .map(|lane| lane.id.clone());
-
-        ensure_size_clones(
+        scale_clones_preserving_roster(
             state,
             &mission_id,
             template_kind,
             size,
-            planner_agent_id.as_str(),
+            &planner_agent_id,
             &mut agents,
         );
 
-        if let Some(selected_id) = restore_roster_selected {
-            if let Some(idx) = state
-                .agents
-                .agents
-                .iter()
-                .position(|lane| lane.id == selected_id)
-            {
-                state.agents.roster_selected = idx;
-            }
-        }
         if agents.len() < 2 {
             return None;
         }
 
-        let title = swarm_mission_title(&root_prompt, &mission_id, template_kind, mission_kind);
-        let at = timestamp_label(state);
-        state.agents.missions.push(MissionRecord {
-            id: mission_id.clone(),
-            title,
-            phase: MissionPhase::Plan,
-            swarm: true,
-            assigned_agents: agents.clone(),
-            status: "PLAN".into(),
-            updated_at: at.clone(),
-        });
-        state.agents.mission_selected = state.agents.missions.len().saturating_sub(1);
-        state.agents.selected_mission = Some(mission_id.clone());
-
-        state.agents.alerts.push(nit_core::AgentAlert {
-            severity: nit_core::AgentAlertSeverity::Info,
-            source: "swarm".into(),
-            message: format!(
-                "Created swarm mission {mission_id} with agents: {}",
-                agents.join(", ")
-            ),
-            at,
-        });
-
-        let mut integrator_locked = false;
-        let mut integrator_agent_id: Option<String> = None;
-        if matches!(template_kind, SwarmTemplate::Parallel) {
-            integrator_agent_id = agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-                .find(|id| {
-                    direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
-                        .as_deref()
-                        == Some("integrate")
-                })
-                .cloned();
-        }
-        if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk)
-            || (matches!(template_kind, SwarmTemplate::Parallel) && integrator_agent_id.is_none())
-        {
-            let eligible = agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-                .cloned()
-                .collect::<Vec<_>>();
-            let priority_eligible = eligible
-                .iter()
-                .filter(|id| is_priority_agent(state, id.as_str()))
-                .cloned()
-                .collect::<Vec<_>>();
-            let candidates = if !priority_eligible.is_empty() {
-                priority_eligible
-            } else {
-                eligible
-            };
-
-            integrator_agent_id = candidates.first().cloned();
-
-            if matches!(template_kind, SwarmTemplate::Bulk) {
-                if let Some(integrator) = candidates
-                    .iter()
-                    .find(|id| {
-                        state
-                            .agents
-                            .swarm_role_by_agent_id
-                            .get(*id)
-                            .map(|role| role.trim())
-                            .filter(|role| !role.is_empty())
-                            .is_some_and(|role| role.eq_ignore_ascii_case("integrate"))
-                    })
-                    .cloned()
-                {
-                    integrator_agent_id = Some(integrator);
-                    integrator_locked = true;
-                }
-            }
-        }
-
-        // Parallel-template only: ensure clones cover propose + review/test
-        // when the planner has a deliberate role hint. No-op when planner is
-        // `all`/unset, so the existing "let the LLM decide" path is preserved.
-        let coverage_assignments = assign_clone_roles_for_parallel_coverage(
+        record_mission_in_state(
             state,
+            &mission_id,
+            &root_prompt,
             template_kind,
-            planner_agent_id.as_str(),
-            integrator_agent_id.as_deref(),
+            mission_kind,
             &agents,
         );
-        if !coverage_assignments.is_empty() {
-            let summary = coverage_assignments
-                .iter()
-                .map(|(id, role)| format!("{id}={role}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            push_system_message_to_mission(
-                state,
-                &mission_id,
-                format!(
-                    "Parallel role coverage: assigned clone roles to satisfy propose + review/test ({summary})"
-                ),
-            );
-        }
 
-        let mut role_hints: Vec<(String, String)> = Vec::new();
-        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-            for id in agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-            {
-                role_hints.push((
-                    id.clone(),
-                    planner_role_hint_for_agent(
-                        &state.agents.swarm_role_by_agent_id,
-                        id.as_str(),
-                        integrator_agent_id.as_deref(),
-                        mission_kind,
-                    ),
-                ));
-            }
-            deduplicate_inherited_role_hints(&mut role_hints, &state.agents.swarm_role_by_agent_id);
-        }
-        let mut priority_agent_ids: Vec<String> = Vec::new();
-        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-            for id in agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-            {
-                if is_priority_agent(state, id.as_str()) {
-                    priority_agent_ids.push(id.clone());
-                }
-            }
-        }
+        let (integrator_agent_id, integrator_locked) =
+            select_integrator(state, template_kind, &planner_agent_id, &agents);
 
-        // Resolve the spawn cwd once per mission. In single-pane this is
-        // `state.workspace_root`; in multipane it's the dispatching pane's
-        // cwd (per `app::dispatch::resolve_dispatch_cwd`). Every prompt
-        // builder, scope walk, gate detector and mission-memory load below
-        // is keyed off this — never `state.workspace_root` directly — so
-        // the pane that's working in a non-Rust workspace doesn't inherit
-        // paths or gates from the harness's repo.
-        let spawn_cwd = crate::app::resolve_dispatch_cwd(state, &planner_agent_id);
-
-        // Phase 8: cross-mission structural memory — retrieve top-K
-        // precedents to inject into the planner prompt.
-        let memory_scope_files = enumerate_scope_files(spawn_cwd.as_path(), &root_prompt);
-        let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index = nit_core::mission_memory::load_or_build(spawn_cwd.as_path());
-        let memory_exclude: Vec<&str> = vec![mission_id.as_str()];
-        let memory_hits = nit_core::mission_memory::retrieve_similar(
-            &memory_index,
-            &root_prompt,
-            &memory_scope_tokens,
-            &memory_exclude,
-            3,
+        announce_parallel_coverage(
+            state,
+            template_kind,
+            &planner_agent_id,
+            integrator_agent_id.as_deref(),
+            &agents,
+            &mission_id,
         );
+
+        let role_hints = compute_role_hints(
+            state,
+            template_kind,
+            &planner_agent_id,
+            &agents,
+            integrator_agent_id.as_deref(),
+            mission_kind,
+        );
+        let priority_agent_ids =
+            compute_priority_agent_ids(state, template_kind, &planner_agent_id, &agents);
+
+        // Resolve the spawn cwd once per mission. Single-pane:
+        // `state.workspace_root`; multipane: the dispatching pane's cwd.
+        // Every prompt builder, scope walk, gate detector and mission-memory
+        // load is keyed off this — never `state.workspace_root` directly —
+        // so a non-Rust pane doesn't inherit Rust gates from the harness.
+        let spawn_cwd = crate::app::resolve_dispatch_cwd(state, &planner_agent_id);
+        let memory_hits =
+            load_memory_hits(spawn_cwd.as_path(), &root_prompt, &[mission_id.as_str()]);
 
         let plan_prompt = build_planner_prompt(
             &root_prompt,
@@ -636,50 +401,14 @@ impl SwarmRuntime {
         );
 
         let scope_files = enumerate_scope_files(spawn_cwd.as_path(), &root_prompt);
-
-        // Load project-specific custom gates first; if defined, they fully
-        // override the auto-detected language bundle.
-        let custom_gates_result = read_workspace_custom_gates(spawn_cwd.as_path());
-        let gate_custom = match custom_gates_result.as_ref() {
-            Ok(gates) => gates.clone(),
-            Err(_) => None,
-        };
-        let gate_selection = GateBundle::detect(spawn_cwd.as_path());
-        let gate_bundle = gate_selection.bundle.clone();
-        let gate_selection_source = match (custom_gates_result.as_ref(), gate_custom.as_ref()) {
-            (Err(err), _) => format!("config-error:{err}|{}", gate_selection.source),
-            (_, Some(gates)) => format!("custom({} gates)|{}", gates.len(), gate_selection.source),
-            _ => gate_selection.source.clone(),
-        };
-        // Verifier is needed when we have either a bundle or custom gates.
-        let has_gates = gate_custom.is_some() || gate_bundle.is_some();
-        let verifier_agent_id = has_gates.then_some(()).and_then(|_| {
-            let eligible = agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-                .cloned()
-                .collect::<Vec<_>>();
-            let priority_eligible = eligible
-                .iter()
-                .filter(|id| is_priority_agent(state, id.as_str()))
-                .cloned()
-                .collect::<Vec<_>>();
-            let candidates = if !priority_eligible.is_empty() {
-                priority_eligible
-            } else {
-                eligible
-            };
-
-            if let Some(integrator) = integrator_agent_id.as_deref() {
-                candidates
-                    .iter()
-                    .find(|id| id.as_str() != integrator)
-                    .cloned()
-                    .or_else(|| candidates.first().cloned())
-            } else {
-                candidates.first().cloned()
-            }
-        });
+        let gate_setup = resolve_gates(spawn_cwd.as_path());
+        let verifier_agent_id = select_verifier(
+            state,
+            &planner_agent_id,
+            integrator_agent_id.as_deref(),
+            &agents,
+            gate_setup.has_gates(),
+        );
 
         push_system_message_to_mission(
             state,
@@ -690,7 +419,7 @@ impl SwarmRuntime {
                 mission_kind.label(),
                 integrator_agent_id.as_deref().unwrap_or("(none)"),
                 verifier_agent_id.as_deref().unwrap_or("(none)"),
-                gate_bundle_label(gate_bundle.as_ref(), &gate_selection_source)
+                gate_bundle_label(gate_setup.bundle.as_ref(), &gate_setup.selection_source)
             ),
         );
 
@@ -708,9 +437,9 @@ impl SwarmRuntime {
                 integrator_agent_id: integrator_agent_id.clone(),
                 integrator_locked,
                 verifier_agent_id,
-                gate_bundle,
-                gate_custom,
-                gate_selection: gate_selection_source,
+                gate_bundle: gate_setup.bundle,
+                gate_custom: gate_setup.custom,
+                gate_selection: gate_setup.selection_source,
                 agent_ids: agents,
                 stage: SwarmStage::Planning,
                 tasks: Vec::new(),
@@ -745,27 +474,21 @@ impl SwarmRuntime {
             .or_else(|| self.completed_runs.get(mission_id))
     }
 
-    /// Abort a single in-flight swarm mission. Marks the run as cancelled
-    /// (moving it from `runs` to `completed_runs` with a synthetic
-    /// "ABORTED" status), drains the state-side queued turns for every
-    /// agent in the run, pushes a `SYSTEM_ALERT_KIND` message to the
-    /// mission console, and returns the list of agent ids whose
-    /// in-flight subprocess turns the caller still needs to kill via
-    /// the runner-level `CancelTurn` commands.
+    /// Aborts a single in-flight swarm. Marks the run cancelled (moves it
+    /// from `runs` to `completed_runs` with a synthetic "ABORTED" status),
+    /// drains queued turns for every agent in the run, pushes a
+    /// `SYSTEM_ALERT_KIND` message, and returns agent ids whose in-flight
+    /// subprocess turns the caller still needs to kill via `CancelTurn`.
     ///
-    /// Idempotent: returns an empty Vec when the mission is unknown or
-    /// already complete. Doesn't tear down clones — keep them around so
-    /// the operator can inspect what happened. The next swarm dispatch
-    /// or `cleanup_swarm_clones_for_mission` call (already triggered on
-    /// natural completion) handles teardown.
+    /// Idempotent — empty Vec when the mission is unknown or already
+    /// complete. Doesn't tear down clones; keeps them around so the
+    /// operator can inspect what happened.
     pub fn abort_mission(&mut self, state: &mut AppState, mission_id: &str) -> Vec<String> {
         let Some(mut run) = self.runs.remove(mission_id) else {
             return Vec::new();
         };
         let agent_ids: Vec<String> = run.agent_ids.clone();
         run.report_status = Some("ABORTED".into());
-        // Mark every non-terminal task as Skipped so the dashboard reflects
-        // the abort instead of leaving them in Running/Pending.
         for task in run.tasks.iter_mut() {
             if !task.state.is_terminal() {
                 task.state = SwarmTaskState::Skipped;
@@ -773,14 +496,12 @@ impl SwarmRuntime {
         }
         self.completed_runs.insert(mission_id.to_string(), run);
 
-        // Drop every queued turn for this mission's agents and bring
-        // their queue_len counters back to zero — otherwise the UI shows
-        // ghost queues for cancelled agents.
+        // Drop queued turns for this mission's agents and bring queue_len
+        // back to zero — otherwise the UI shows ghost queues.
         super::clones::drain_queued_turns_for_mission_agents(state, &agent_ids);
 
-        // Update the mission record in state for the UI. Compute the
-        // timestamp first to release the &mut state borrow before
-        // grabbing the mission record.
+        // Compute the timestamp first to release the &mut state borrow
+        // before grabbing the mission record.
         let now = timestamp_label(state);
         if let Some(mission) = state
             .agents
@@ -804,9 +525,9 @@ impl SwarmRuntime {
         agent_ids
     }
 
-    /// Abort every active swarm mission. Returns the union of agent ids
-    /// across all aborted runs so the caller can dispatch a single
-    /// `CancelAll` per runner instead of N CancelTurn calls.
+    /// Aborts every active swarm. Returns the union of agent ids across
+    /// runs so the caller can dispatch a single `CancelAll` per runner
+    /// instead of N CancelTurn calls.
     pub fn abort_all(&mut self, state: &mut AppState) -> Vec<String> {
         let mission_ids: Vec<String> = self.runs.keys().cloned().collect();
         let mut all_agents: Vec<String> = Vec::new();
@@ -818,5 +539,353 @@ impl SwarmRuntime {
             }
         }
         all_agents
+    }
+}
+
+#[derive(Default)]
+struct TaskStateCounts {
+    done: usize,
+    failed: usize,
+    skipped: usize,
+    running: usize,
+    queued: usize,
+    pending: usize,
+}
+
+impl TaskStateCounts {
+    fn from_tasks(tasks: &[super::SwarmTask]) -> Self {
+        let mut counts = Self::default();
+        for task in tasks.iter() {
+            match task.state {
+                SwarmTaskState::Done => counts.done += 1,
+                SwarmTaskState::Failed => counts.failed += 1,
+                SwarmTaskState::Skipped => counts.skipped += 1,
+                SwarmTaskState::Running => counts.running += 1,
+                SwarmTaskState::Ready | SwarmTaskState::Dispatched => counts.queued += 1,
+                SwarmTaskState::Pending => counts.pending += 1,
+            }
+        }
+        counts
+    }
+}
+
+struct GateSetup {
+    bundle: Option<GateBundle>,
+    custom: Option<Vec<Gate>>,
+    selection_source: String,
+}
+
+impl GateSetup {
+    fn has_gates(&self) -> bool {
+        self.bundle.is_some() || self.custom.is_some()
+    }
+}
+
+fn filter_dispatchable_agents(
+    state: &AppState,
+    planner_agent_id: &str,
+    agent_ids: Vec<String>,
+) -> Vec<String> {
+    let mut agents = Vec::new();
+    for agent_id in agent_ids {
+        if agents.iter().any(|id: &String| id == &agent_id) {
+            continue;
+        }
+        let is_codex_or_claude = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == agent_id)
+            .is_some_and(|lane| lane.is_codex() || lane.is_claude());
+        if is_codex_or_claude {
+            agents.push(agent_id);
+        }
+    }
+    if !agents.iter().any(|id| id == planner_agent_id) {
+        agents.insert(0, planner_agent_id.to_string());
+    }
+    agents
+}
+
+fn scale_clones_preserving_roster(
+    state: &mut AppState,
+    mission_id: &str,
+    template: SwarmTemplate,
+    size: SwarmSize,
+    planner_agent_id: &str,
+    agents: &mut Vec<String>,
+) {
+    let restore_id = state
+        .agents
+        .agents
+        .get(state.agents.roster_selected)
+        .map(|lane| lane.id.clone());
+
+    ensure_size_clones(state, mission_id, template, size, planner_agent_id, agents);
+
+    if let Some(selected_id) = restore_id {
+        if let Some(idx) = state
+            .agents
+            .agents
+            .iter()
+            .position(|lane| lane.id == selected_id)
+        {
+            state.agents.roster_selected = idx;
+        }
+    }
+}
+
+fn record_mission_in_state(
+    state: &mut AppState,
+    mission_id: &str,
+    root_prompt: &str,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    agents: &[String],
+) {
+    let title = swarm_mission_title(root_prompt, mission_id, template, mission_kind);
+    let at = timestamp_label(state);
+    state.agents.missions.push(MissionRecord {
+        id: mission_id.to_string(),
+        title,
+        phase: MissionPhase::Plan,
+        swarm: true,
+        assigned_agents: agents.to_vec(),
+        status: "PLAN".into(),
+        updated_at: at.clone(),
+    });
+    state.agents.mission_selected = state.agents.missions.len().saturating_sub(1);
+    state.agents.selected_mission = Some(mission_id.to_string());
+
+    state.agents.alerts.push(nit_core::AgentAlert {
+        severity: nit_core::AgentAlertSeverity::Info,
+        source: "swarm".into(),
+        message: format!(
+            "Created swarm mission {mission_id} with agents: {}",
+            agents.join(", ")
+        ),
+        at,
+    });
+}
+
+fn select_integrator(
+    state: &AppState,
+    template: SwarmTemplate,
+    planner_agent_id: &str,
+    agents: &[String],
+) -> (Option<String>, bool) {
+    let mut integrator_locked = false;
+    let mut integrator: Option<String> = None;
+
+    if matches!(template, SwarmTemplate::Parallel) {
+        integrator = agents
+            .iter()
+            .filter(|id| id.as_str() != planner_agent_id)
+            .find(|id| {
+                direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
+                    .as_deref()
+                    == Some("integrate")
+            })
+            .cloned();
+    }
+
+    let needs_fallback_pick = matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk)
+        || (matches!(template, SwarmTemplate::Parallel) && integrator.is_none());
+
+    if needs_fallback_pick {
+        let candidates = candidate_pool(state, planner_agent_id, agents);
+        integrator = candidates.first().cloned();
+
+        if matches!(template, SwarmTemplate::Bulk) {
+            if let Some(forced) = candidates
+                .iter()
+                .find(|id| {
+                    state
+                        .agents
+                        .swarm_role_by_agent_id
+                        .get(*id)
+                        .map(|role| role.trim())
+                        .filter(|role| !role.is_empty())
+                        .is_some_and(|role| role.eq_ignore_ascii_case("integrate"))
+                })
+                .cloned()
+            {
+                integrator = Some(forced);
+                integrator_locked = true;
+            }
+        }
+    }
+
+    (integrator, integrator_locked)
+}
+
+fn candidate_pool(state: &AppState, planner_agent_id: &str, agents: &[String]) -> Vec<String> {
+    let eligible: Vec<String> = agents
+        .iter()
+        .filter(|id| id.as_str() != planner_agent_id)
+        .cloned()
+        .collect();
+    let priority_eligible: Vec<String> = eligible
+        .iter()
+        .filter(|id| is_priority_agent(state, id.as_str()))
+        .cloned()
+        .collect();
+    if !priority_eligible.is_empty() {
+        priority_eligible
+    } else {
+        eligible
+    }
+}
+
+fn announce_parallel_coverage(
+    state: &mut AppState,
+    template: SwarmTemplate,
+    planner_agent_id: &str,
+    integrator_agent_id: Option<&str>,
+    agents: &[String],
+    mission_id: &str,
+) {
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        state,
+        template,
+        planner_agent_id,
+        integrator_agent_id,
+        agents,
+    );
+    if assignments.is_empty() {
+        return;
+    }
+    let summary = assignments
+        .iter()
+        .map(|(id, role)| format!("{id}={role}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_system_message_to_mission(
+        state,
+        mission_id,
+        format!(
+            "Parallel role coverage: assigned clone roles to satisfy propose + review/test ({summary})"
+        ),
+    );
+}
+
+fn compute_role_hints(
+    state: &AppState,
+    template: SwarmTemplate,
+    planner_agent_id: &str,
+    agents: &[String],
+    integrator_agent_id: Option<&str>,
+    mission_kind: SwarmMissionKind,
+) -> Vec<(String, String)> {
+    if !matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        return Vec::new();
+    }
+    let mut role_hints: Vec<(String, String)> = agents
+        .iter()
+        .filter(|id| id.as_str() != planner_agent_id)
+        .map(|id| {
+            (
+                id.clone(),
+                planner_role_hint_for_agent(
+                    &state.agents.swarm_role_by_agent_id,
+                    id.as_str(),
+                    integrator_agent_id,
+                    mission_kind,
+                ),
+            )
+        })
+        .collect();
+    deduplicate_inherited_role_hints(&mut role_hints, &state.agents.swarm_role_by_agent_id);
+    role_hints
+}
+
+fn compute_priority_agent_ids(
+    state: &AppState,
+    template: SwarmTemplate,
+    planner_agent_id: &str,
+    agents: &[String],
+) -> Vec<String> {
+    if !matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        return Vec::new();
+    }
+    agents
+        .iter()
+        .filter(|id| id.as_str() != planner_agent_id)
+        .filter(|id| is_priority_agent(state, id.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn role_hints_for_followup(state: &AppState, run: &SwarmRun) -> Vec<(String, String)> {
+    compute_role_hints(
+        state,
+        run.template,
+        &run.planner_agent_id,
+        &run.agent_ids,
+        run.integrator_agent_id.as_deref(),
+        run.mission_kind,
+    )
+}
+
+fn priority_agents_for_followup(state: &AppState, run: &SwarmRun) -> Vec<String> {
+    compute_priority_agent_ids(state, run.template, &run.planner_agent_id, &run.agent_ids)
+}
+
+fn load_memory_hits(
+    spawn_cwd: &std::path::Path,
+    prompt: &str,
+    exclude_mission_ids: &[&str],
+) -> Vec<nit_core::MissionHit> {
+    let scope_files = enumerate_scope_files(spawn_cwd, prompt);
+    let scope_tokens = nit_core::mission_memory::path_tokens(&scope_files);
+    let index = nit_core::mission_memory::load_or_build(spawn_cwd);
+    nit_core::mission_memory::retrieve_similar(
+        &index,
+        prompt,
+        &scope_tokens,
+        exclude_mission_ids,
+        3,
+    )
+}
+
+fn resolve_gates(spawn_cwd: &std::path::Path) -> GateSetup {
+    let custom_gates_result = read_workspace_custom_gates(spawn_cwd);
+    let custom = match custom_gates_result.as_ref() {
+        Ok(gates) => gates.clone(),
+        Err(_) => None,
+    };
+    let gate_selection = GateBundle::detect(spawn_cwd);
+    let bundle = gate_selection.bundle.clone();
+    let selection_source = match (custom_gates_result.as_ref(), custom.as_ref()) {
+        (Err(err), _) => format!("config-error:{err}|{}", gate_selection.source),
+        (_, Some(gates)) => format!("custom({} gates)|{}", gates.len(), gate_selection.source),
+        _ => gate_selection.source.clone(),
+    };
+    GateSetup {
+        bundle,
+        custom,
+        selection_source,
+    }
+}
+
+fn select_verifier(
+    state: &AppState,
+    planner_agent_id: &str,
+    integrator_agent_id: Option<&str>,
+    agents: &[String],
+    has_gates: bool,
+) -> Option<String> {
+    if !has_gates {
+        return None;
+    }
+    let candidates = candidate_pool(state, planner_agent_id, agents);
+    if let Some(integrator) = integrator_agent_id {
+        candidates
+            .iter()
+            .find(|id| id.as_str() != integrator)
+            .cloned()
+            .or_else(|| candidates.first().cloned())
+    } else {
+        candidates.first().cloned()
     }
 }
