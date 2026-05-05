@@ -159,12 +159,17 @@ pub use mission::{
     push_system_message_to_mission, resolve_base_agent_id, select_swarm_agents,
     swarm_intended_size, SYSTEM_ALERT_KIND,
 };
+#[cfg(test)]
+use plan_parser::recommended_writer_count;
 use plan_parser::{
     apply_role_dependency_ordering, assign_clone_roles_for_parallel_coverage,
     classify_swarm_mission_kind, deduplicate_inherited_role_hints, direct_role_hint_for_agent,
-    parse_plan_from_planner, planner_role_hint_for_agent,
+    parse_plan_from_planner, partition_files_for_shard, planner_role_hint_for_agent,
+    shard_integrate_for_large_scope,
 };
 pub(crate) use plan_parser::{detect_swarm_mission_kind_from_prompt, normalize_role_label};
+#[cfg(test)]
+use prompts::append_task_continuation_preamble;
 pub(crate) use prompts::role_contract_lines;
 use prompts::{
     build_planner_prompt, build_synthesis_prompt, detect_incomplete_signoff,

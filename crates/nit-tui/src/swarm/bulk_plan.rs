@@ -344,6 +344,8 @@ pub(super) fn ensure_integrate_task(
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     });
     warnings
         .push("Plan safety net: injected integrate task because the planner omitted one.".into());
@@ -427,6 +429,8 @@ pub(super) fn ensure_judge_task_for_multi_proposer(
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
     tasks.push(judge_task);
     warnings.push(format!(
@@ -637,6 +641,8 @@ pub(super) fn ensure_agent_coverage(
             expected_artifacts_missing: false,
             failed: false,
             retries: 0,
+            compliance_missing_files: Vec::new(),
+            shard_index: None,
         });
     }
 

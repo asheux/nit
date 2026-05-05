@@ -713,6 +713,153 @@ fn apply_role_deps(
     stats
 }
 
+// Picks a writer count so the per-writer scope stays under the empirical
+// "single-writer defers" threshold. ~12 files per writer is the largest
+// scope the integrator role tolerates without self-classifying chunks as
+// out-of-scope, so the formula trends toward that bucket size.
+pub(super) fn recommended_writer_count(scope_file_count: usize) -> usize {
+    const TARGET_FILES_PER_WRITER: usize = 12;
+    const MIN_WRITERS: usize = 2;
+    const MAX_WRITERS: usize = 8;
+    if scope_file_count <= 15 {
+        return 1;
+    }
+    let raw = scope_file_count.div_ceil(TARGET_FILES_PER_WRITER);
+    raw.clamp(MIN_WRITERS, MAX_WRITERS)
+}
+
+// Stable partition: sort the file list, then chunk contiguously, distributing
+// remainder across the first shards. Used at dispatch time (to inject the
+// shard's file slice) and at compliance-check time (to scope coverage to
+// the shard) so both views agree on which files a shard owns.
+pub(super) fn partition_files_for_shard(
+    files: &[String],
+    shard_index: u8,
+    shard_total: u8,
+) -> Vec<String> {
+    if shard_total == 0 || shard_index == 0 || shard_index > shard_total {
+        return Vec::new();
+    }
+    let mut sorted: Vec<String> = files
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+    let n = shard_total as usize;
+    let i = (shard_index - 1) as usize;
+    let total = sorted.len();
+    let base = total / n;
+    let rem = total % n;
+    let start = i * base + i.min(rem);
+    let len = base + if i < rem { 1 } else { 0 };
+    let end = (start + len).min(total);
+    sorted[start..end].to_vec()
+}
+
+// Runtime invariant: when a Parallel-template plan covers a large scope but
+// the planner produced a single integrate task, fan it into N sequential
+// shards on the same writer agent. Each shard owns a deterministic slice of
+// the file list (computed from `partition_files_for_shard` at dispatch and
+// compliance-check time). Reviewers/testers that depended on the original
+// integrate task are rewired to wait for the LAST shard so they see the
+// final state. Idempotent: a plan that already has multiple integrate tasks
+// (planner sharded itself) is left alone.
+pub(super) fn shard_integrate_for_large_scope(
+    tasks: &mut Vec<SwarmTask>,
+    template: SwarmTemplate,
+    scope_file_count: usize,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return warnings;
+    }
+    let writer_count = recommended_writer_count(scope_file_count);
+    if writer_count <= 1 {
+        return warnings;
+    }
+
+    let integrate_indices: Vec<usize> = tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            t.role.as_deref().and_then(normalize_role_label).as_deref() == Some("integrate")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if integrate_indices.len() != 1 {
+        return warnings;
+    }
+
+    let original_idx = integrate_indices[0];
+    if tasks[original_idx].shard_index.is_some() {
+        return warnings;
+    }
+
+    let original_id = tasks[original_idx].id.clone();
+    let original_title = tasks[original_idx].title.clone();
+    let original_clone = tasks[original_idx].clone();
+
+    let shard_ids: Vec<String> = (0..writer_count)
+        .map(|i| format!("{original_id}-shard-{}", i + 1))
+        .collect();
+
+    for shard_i in 0..writer_count {
+        let mut shard = original_clone.clone();
+        shard.id = shard_ids[shard_i].clone();
+        shard.title = format!(
+            "{} (shard {}/{})",
+            original_title.trim(),
+            shard_i + 1,
+            writer_count
+        );
+        shard.shard_index = Some(((shard_i + 1) as u8, writer_count as u8));
+        if shard_i > 0 {
+            shard.deps.push(shard_ids[shard_i - 1].clone());
+        }
+        if shard_i == 0 {
+            tasks[original_idx] = shard;
+        } else {
+            tasks.push(shard);
+        }
+    }
+
+    // `writer_count > 1` (checked above) guarantees shard_ids has ≥ 2 entries.
+    let last_shard_id = shard_ids
+        .last()
+        .cloned()
+        .expect("writer_count > 1 guarantees a final shard");
+    for task in tasks.iter_mut() {
+        if shard_ids.iter().any(|sid| sid == &task.id) {
+            continue;
+        }
+        // Replace ALL occurrences (a defensive task could in theory dep on
+        // the original twice via role-dep auto-wiring; rare but cheap to be
+        // correct about).
+        let mut changed = false;
+        for dep in task.deps.iter_mut() {
+            if dep == &original_id {
+                *dep = last_shard_id.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            task.deps.sort();
+            task.deps.dedup();
+        }
+    }
+
+    warnings.push(format!(
+        "Plan safety net: large-scope integrate task '{original_id}' fanned into {writer_count} sequential shards (scope={scope_file_count} files; ~{} files per shard). Reviewers/testers wait for the last shard.",
+        scope_file_count.div_ceil(writer_count).max(1),
+    ));
+    warnings
+}
+
 pub(super) fn apply_role_dependency_ordering(
     workspace_root: &Path,
     role_hints_by_agent_id: &HashMap<String, String>,
@@ -1031,6 +1178,8 @@ fn parse_v1_tasks(
             expected_artifacts_missing: false,
             failed: false,
             retries: 0,
+            compliance_missing_files: Vec::new(),
+            shard_index: None,
         });
     }
     tasks
@@ -1245,5 +1394,7 @@ fn parse_v2_task(
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     })
 }

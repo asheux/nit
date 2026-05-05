@@ -194,15 +194,9 @@ fn append_planner_constraints(
     );
     append_mission_kind_lines(out, mission_kind);
     if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        if large_scope {
-            out.push_str(
-                "- Treat `judge` as a singleton role. The `integrate` role may be split across MULTIPLE tasks when the scope is large — assign disjoint file subsets to each integrate task so every file is covered.\n",
-            );
-        } else {
-            out.push_str(
-                "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
-            );
-        }
+        out.push_str(
+            "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
+        );
     }
     append_integrator_constraints(
         out,
@@ -258,34 +252,21 @@ fn append_integrator_constraints(
     out: &mut String,
     mission_kind: SwarmMissionKind,
     integrator_agent_id: Option<&str>,
-    scope_files: &[String],
-    large_scope: bool,
+    _scope_files: &[String],
+    _large_scope: bool,
 ) {
     let Some(integrator_agent_id) = integrator_agent_id else {
         return;
     };
-    if large_scope {
-        out.push_str(&format!(
-            "- Code changes: assign `writes=true` and `role=integrate` to tasks. The scope has {} files — split integrate work across multiple agents with disjoint file subsets. Each integrate task prompt MUST list the exact files it is responsible for. Any agent may receive `role=integrate` and `writes=true` when the scope is large.\n",
-            scope_files.len()
-        ));
-    } else {
-        out.push_str(&format!(
-            "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
-        ));
-    }
+    out.push_str(&format!(
+        "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
+    ));
     if !matches!(mission_kind, SwarmMissionKind::General) {
         return;
     }
-    if large_scope {
-        out.push_str(
-            "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include at least one task with `role=integrate` and `writes=true`. Split across multiple integrate tasks so every file in the scope is covered. Without integrate tasks, no workspace edits will be made.\n"
-        );
-    } else {
-        out.push_str(&format!(
-            "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
-        ));
-    }
+    out.push_str(&format!(
+        "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+    ));
 }
 
 fn append_template_specific_constraints(out: &mut String, template: SwarmTemplate) {
@@ -486,6 +467,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Implement the chosen plan and convert it into concrete edits.",
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
+            "DEFERRAL = TASK FAILURE: \"applied the non-structural portion\", \"deferred the directory splits\", \"out of time so I'll stop at 70%\", \"would risk breaking the workspace\" are all task failures, not graceful stopping points. The orchestrator detects the gap from `git diff` against the proposer's declared file list and re-dispatches you with the specific files you missed — you cannot finish by self-classifying part of the plan as out-of-scope. If a single file genuinely cannot be modified (compile error blocks the change after best-effort attempts, missing toolchain feature, etc.), emit a per-file `risks` entry in the structured artifacts JSON naming the file and the technical blocker. Do not aggregate skipped work into a prose paragraph at the end.",
             "Report exact files changed and validation results.",
             "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is genuinely technically impossible — meaning it names a non-existent type, breaks a hard compile invariant, or requires a feature the toolchain doesn't support. \"It might break tests\", \"it's risky\", \"it's too ambitious for one turn\", \"I'll do a safer subset\", \"full splits are too aggressive\", \"aggressive splits would almost certainly break imports\" are NOT valid deviations — they're excuses for doing less work. The correct response to a risky split is to execute it in atomic compilation-preserving steps (move one submodule at a time, re-run the build after each, fix imports as you go), NOT to substitute cosmetic cleanups (trim comments, flatten nesting, extract a helper) for the declared structural plan. If you genuinely cannot execute the plan after attempting it, STOP, leave partial progress on disk, and in your final message list exactly which files you moved, which remain, and the specific compile/test failure blocking further progress. Substituting your own smaller-scoped refactor for the declared structural plan is a task failure — the proposer, not you, decided what this task is. \"Do not break functionality\" is a constraint on HOW you execute the plan (atomic steps), not a license to SKIP the plan.",
             TEST_DISCIPLINE_CLAUSE,
@@ -580,6 +562,7 @@ pub(super) fn wrap_task_prompt(
     deps: Option<&[(String, String)]>,
     scope_files: &[String],
     spawn_cwd: &Path,
+    shard_files: Option<&[String]>,
 ) -> String {
     let mut out = String::new();
     append_task_continuation_preamble(&mut out, task);
@@ -597,6 +580,7 @@ pub(super) fn wrap_task_prompt(
     // the full file checklist first, then the task instructions. Prevents
     // the agent from forming a plan that ignores files.
     append_task_scope_section(&mut out, task, scope_files, spawn_cwd);
+    append_task_shard_section(&mut out, task, shard_files);
 
     out.push_str("\nYour task:\n");
     out.push_str(task.task_prompt.trim());
@@ -627,19 +611,40 @@ pub(super) fn wrap_task_prompt(
     out
 }
 
-fn append_task_continuation_preamble(out: &mut String, task: &SwarmTask) {
+pub(super) fn append_task_continuation_preamble(out: &mut String, task: &SwarmTask) {
     if task.retries == 0 {
         return;
     }
-    out.push_str(&format!(
-        "## CONTINUATION (attempt {})\n\
-         Your previous attempt on this task did NOT complete the sign-off check — either the {TASK_COMPLETE_SENTINEL} sentinel was missing, or your output ended by asking for approval / offering options. That is a task failure, not a valid stopping point.\n\
-         - Treat this turn as a CONTINUATION of your prior work, not a fresh start.\n\
-         - Pick up where you left off and finish the ENTIRE scope.\n\
-         - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just do the remaining work.\n\
-         - End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
-        task.retries + 1
-    ));
+    let structural_gap = !task.compliance_missing_files.is_empty();
+    if structural_gap {
+        out.push_str(&format!(
+            "## CONTINUATION (attempt {}) — STRUCTURAL COMPLIANCE FAILURE\n\
+             Your previous turn finished but did NOT modify these blueprint files (declared by the proposers/judge as in-scope):\n",
+            task.retries + 1
+        ));
+        for file in task.compliance_missing_files.iter() {
+            out.push_str(&format!("- {file}\n"));
+        }
+        out.push_str(
+            "\n- Deferring any of these files as out-of-scope is a TASK FAILURE, not a graceful stopping point.\n\
+             - Open each listed file and apply the blueprint's edits. If the blueprint marks a file `audit only` / `no changes`, you may skip it but say so explicitly per file in your final summary.\n\
+             - If a specific file genuinely cannot be modified (compile error blocks the change, missing dep, etc.), emit a per-file blocker entry in your structured artifacts JSON `risks` field with the exact file path and the technical reason — do not silently skip.\n\
+             - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just finish the listed files.\n",
+        );
+        out.push_str(&format!(
+            "- End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
+        ));
+    } else {
+        out.push_str(&format!(
+            "## CONTINUATION (attempt {})\n\
+             Your previous attempt on this task did NOT complete the sign-off check — either the {TASK_COMPLETE_SENTINEL} sentinel was missing, or your output ended by asking for approval / offering options. That is a task failure, not a valid stopping point.\n\
+             - Treat this turn as a CONTINUATION of your prior work, not a fresh start.\n\
+             - Pick up where you left off and finish the ENTIRE scope.\n\
+             - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just do the remaining work.\n\
+             - End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
+            task.retries + 1
+        ));
+    }
     if let Some(prior) = task.output.as_deref() {
         let prior = prior.trim();
         if !prior.is_empty() {
@@ -751,6 +756,38 @@ fn append_task_scope_section(
         append_task_propose_scope(out, scope_files);
     } else if matches!(role_kind, Some("test") | Some("review")) && is_cargo_workspace(spawn_cwd) {
         append_task_cargo_scope(out, scope_files, role_kind == Some("test"));
+    }
+}
+
+// When a task carries a shard_index, override the agent's view of "what to
+// do" with the shard's own slice of the file list. Comes AFTER the full
+// scope checklist so the agent still sees the broader context but is
+// unambiguous that only the shard subset is its responsibility for this
+// turn.
+fn append_task_shard_section(out: &mut String, task: &SwarmTask, shard_files: Option<&[String]>) {
+    let Some((idx, total)) = task.shard_index else {
+        return;
+    };
+    let Some(files) = shard_files else {
+        return;
+    };
+    out.push_str(&format!(
+        "\n## YOUR SHARD ({idx}/{total}) — non-negotiable\n"
+    ));
+    out.push_str("The runtime split this large-scope refactor into sequential shards on the same writer agent. ");
+    out.push_str("You are responsible for the file slice below. The earlier FILE CHECKLIST shows the full scope for context, but for THIS turn you must:\n");
+    out.push_str("- Modify ONLY the files in the shard list below.\n");
+    out.push_str("- Modify EVERY file in the shard list. \"Deferred\" / \"out of scope\" are task failures (orchestrator re-dispatches with the gap as a continuation).\n");
+    if files.is_empty() {
+        out.push_str("\n(Empty shard — propose/judge dependencies have not yet declared files. Pull from the FILE CHECKLIST above using your shard index, sorted alphabetically.)\n");
+        return;
+    }
+    out.push_str(&format!(
+        "\nShard files ({} total in this shard):\n",
+        files.len()
+    ));
+    for (i, path) in files.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
     }
 }
 

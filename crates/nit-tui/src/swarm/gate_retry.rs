@@ -207,6 +207,8 @@ fn enqueue_retry_task(
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     });
     run.gate_retry_count = attempt;
     run.gate_output = None;

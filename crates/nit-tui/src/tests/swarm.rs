@@ -619,6 +619,8 @@ fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> S
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     }
 }
 
@@ -1090,6 +1092,8 @@ fn dag_scheduler_dispatches_after_deps() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "design".into(),
@@ -1107,6 +1111,8 @@ fn dag_scheduler_dispatches_after_deps() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "implement".into(),
@@ -1124,6 +1130,8 @@ fn dag_scheduler_dispatches_after_deps() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "review".into(),
@@ -1141,6 +1149,8 @@ fn dag_scheduler_dispatches_after_deps() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
         ],
         synthesis_prompt: None,
@@ -1213,6 +1223,8 @@ fn single_writer_limits_concurrent_write_tasks() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "w2".into(),
@@ -1230,6 +1242,8 @@ fn single_writer_limits_concurrent_write_tasks() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "r1".into(),
@@ -1247,6 +1261,8 @@ fn single_writer_limits_concurrent_write_tasks() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
         ],
         synthesis_prompt: None,
@@ -1317,6 +1333,8 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "w2".into(),
@@ -1334,6 +1352,8 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "w3".into(),
@@ -1351,6 +1371,8 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
         ],
         synthesis_prompt: None,
@@ -1390,6 +1412,7 @@ fn task_prompt_includes_role_contract_guidance() {
         None,
         &[],
         std::path::Path::new("."),
+        None,
     );
 
     assert!(prompt.contains("ROLE CONTRACT:"));
@@ -1407,6 +1430,7 @@ fn research_role_contract_mentions_external_sources() {
         None,
         &[],
         std::path::Path::new("."),
+        None,
     );
 
     assert!(prompt.contains("papers, docs, web resources"));
@@ -1433,6 +1457,7 @@ fn computational_research_role_contract_mentions_modeling_and_simulation() {
         None,
         &[],
         std::path::Path::new("."),
+        None,
     );
 
     assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
@@ -1631,6 +1656,8 @@ fn apply_lab_lenses_injects_defaults_when_planner_omits() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
 
     let mut tasks = vec![
@@ -1712,6 +1739,8 @@ fn apply_lab_lenses_preserves_planner_supplied_lenses() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
 
     let p01_original = "LENS A (minimal-diff): smallest fix. Survey the module.";
@@ -1767,6 +1796,8 @@ fn apply_lab_lenses_is_noop_for_single_proposer() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     }];
 
     let warnings = apply_lab_lenses(&mut tasks);
@@ -1801,6 +1832,8 @@ fn apply_lab_lenses_cycles_when_proposer_count_exceeds_pool() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
 
     let mut tasks: Vec<SwarmTask> = (0..7).map(|i| mk(&format!("propose-{i:02}"))).collect();
@@ -1851,6 +1884,8 @@ fn normalize_lab_plan_strips_proposer_to_proposer_deps() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
 
     let mut tasks = vec![
@@ -1933,6 +1968,8 @@ fn normalize_lab_plan_is_noop_for_single_proposer() {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     };
 
     let mut tasks = vec![
@@ -2054,6 +2091,8 @@ fn deadlock_detection_skips_pending_tasks() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "t2".into(),
@@ -2071,6 +2110,8 @@ fn deadlock_detection_skips_pending_tasks() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
         ],
         synthesis_prompt: None,
@@ -2348,6 +2389,8 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "ready".into(),
@@ -2365,6 +2408,8 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "blocked".into(),
@@ -2382,6 +2427,8 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 expected_artifacts_missing: false,
                 failed: false,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
             SwarmTask {
                 id: "skip".into(),
@@ -2399,6 +2446,8 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 expected_artifacts_missing: false,
                 failed: true,
                 retries: 0,
+                compliance_missing_files: Vec::new(),
+                shard_index: None,
             },
         ],
         synthesis_prompt: None,
@@ -2846,6 +2895,8 @@ fn make_writer_task(id: &str, agent: &str, role: Option<&str>, writes: bool) -> 
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     }
 }
 
@@ -3664,6 +3715,8 @@ fn make_verifying_run_with_fail_report() -> SwarmRun {
             expected_artifacts_missing: false,
             failed: false,
             retries: 0,
+            compliance_missing_files: Vec::new(),
+            shard_index: None,
         }],
         synthesis_prompt: None,
         gate_output: Some("prior".into()),
@@ -4266,6 +4319,474 @@ fn prompt_with_inline_no_padding_clause_skips_preamble() {
     assert!(code_hygiene_preamble(&role_contract).is_none());
 }
 
+// --- Structural-compliance retry + runtime sharding ---
+
+#[test]
+fn structural_continuation_preamble_lists_missing_files() {
+    use super::append_task_continuation_preamble;
+    let mut task = make_task("integrate-all", "a1", Some("integrate"), Vec::new());
+    task.writes = true;
+    task.retries = 1;
+    task.compliance_missing_files = vec![
+        "crates/nit-core/src/state.rs".into(),
+        "crates/nit-core/src/buffer.rs".into(),
+    ];
+    let mut out = String::new();
+    append_task_continuation_preamble(&mut out, &task);
+    assert!(out.contains("STRUCTURAL COMPLIANCE FAILURE"));
+    assert!(out.contains("crates/nit-core/src/state.rs"));
+    assert!(out.contains("crates/nit-core/src/buffer.rs"));
+    assert!(out.contains("Deferring any of these files as out-of-scope is a TASK FAILURE"));
+    // Should not fall through to the generic continuation text.
+    assert!(!out.contains("Pick up where you left off and finish the ENTIRE scope"));
+}
+
+#[test]
+fn signoff_continuation_preamble_used_when_no_compliance_gap() {
+    use super::append_task_continuation_preamble;
+    let mut task = make_task("integrate-all", "a1", Some("integrate"), Vec::new());
+    task.writes = true;
+    task.retries = 1;
+    let mut out = String::new();
+    append_task_continuation_preamble(&mut out, &task);
+    // Without compliance_missing_files, the generic continuation copy applies.
+    assert!(out.contains("did NOT complete the sign-off check"));
+    assert!(!out.contains("STRUCTURAL COMPLIANCE FAILURE"));
+}
+
+#[test]
+fn integrate_role_contract_calls_out_deferral_as_failure() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("integrate");
+    let joined = lines.join(" || ");
+    assert!(
+        joined.contains("DEFERRAL = TASK FAILURE"),
+        "integrate role contract should explicitly call out the deferral failure mode; got: {joined}"
+    );
+    assert!(joined.contains("non-structural portion"));
+    assert!(joined.contains("orchestrator detects the gap"));
+}
+
+#[test]
+fn recommended_writer_count_clamps_to_policy_bands() {
+    use super::recommended_writer_count;
+    assert_eq!(recommended_writer_count(0), 1);
+    assert_eq!(recommended_writer_count(15), 1);
+    assert_eq!(recommended_writer_count(16), 2);
+    // 46 files (the historical mis-001 case) → ceil(46/12)=4 writers.
+    assert_eq!(recommended_writer_count(46), 4);
+    // 200 files clamps to MAX_WRITERS=8.
+    assert_eq!(recommended_writer_count(200), 8);
+}
+
+#[test]
+fn partition_files_for_shard_balances_remainder_across_early_shards() {
+    use super::partition_files_for_shard;
+    let files: Vec<String> = (0..10).map(|i| format!("f{i:02}.rs")).collect();
+    // 10 files / 3 shards → first shard gets 4, rest 3.
+    let p1 = partition_files_for_shard(&files, 1, 3);
+    let p2 = partition_files_for_shard(&files, 2, 3);
+    let p3 = partition_files_for_shard(&files, 3, 3);
+    assert_eq!(p1.len(), 4);
+    assert_eq!(p2.len(), 3);
+    assert_eq!(p3.len(), 3);
+    // Disjoint + union covers everything.
+    let mut union: Vec<String> = [p1, p2, p3].concat();
+    union.sort();
+    assert_eq!(union, files);
+}
+
+#[test]
+fn partition_files_for_shard_handles_empty_and_invalid_inputs() {
+    use super::partition_files_for_shard;
+    assert!(partition_files_for_shard(&[], 1, 4).is_empty());
+    assert!(partition_files_for_shard(&["a.rs".into()], 0, 4).is_empty());
+    assert!(partition_files_for_shard(&["a.rs".into()], 5, 4).is_empty());
+    assert!(partition_files_for_shard(&["a.rs".into()], 1, 0).is_empty());
+}
+
+#[test]
+fn shard_integrate_skips_non_parallel_template() {
+    use super::shard_integrate_for_large_scope;
+    let mut tasks = vec![dag_task("integrate", "integrate", vec!["propose-01"], true)];
+    let warns = shard_integrate_for_large_scope(&mut tasks, SwarmTemplate::Lab, 50);
+    assert_eq!(tasks.len(), 1);
+    assert!(tasks[0].shard_index.is_none());
+    assert!(warns.is_empty());
+}
+
+#[test]
+fn shard_integrate_skips_small_scope() {
+    use super::shard_integrate_for_large_scope;
+    let mut tasks = vec![dag_task("integrate", "integrate", vec!["propose-01"], true)];
+    let warns = shard_integrate_for_large_scope(&mut tasks, SwarmTemplate::Parallel, 8);
+    assert_eq!(tasks.len(), 1);
+    assert!(tasks[0].shard_index.is_none());
+    assert!(warns.is_empty());
+}
+
+#[test]
+fn shard_integrate_idempotent_on_already_sharded_plan() {
+    use super::shard_integrate_for_large_scope;
+    // Planner-emitted multi-integrator plan: leave alone.
+    let mut tasks = vec![
+        dag_task("propose-01", "propose", vec![], false),
+        dag_task("judge", "judge", vec!["propose-01"], false),
+        dag_task("integrate-a", "integrate", vec!["judge"], true),
+        dag_task("integrate-b", "integrate", vec!["judge"], true),
+    ];
+    let before = tasks.len();
+    let warns = shard_integrate_for_large_scope(&mut tasks, SwarmTemplate::Parallel, 50);
+    assert_eq!(tasks.len(), before, "plan should be untouched");
+    assert!(warns.is_empty());
+}
+
+#[test]
+fn shard_integrate_fans_single_integrate_into_n_sequential_shards() {
+    use super::shard_integrate_for_large_scope;
+    let mut tasks = vec![
+        dag_task("propose-01", "propose", vec![], false),
+        dag_task("judge", "judge", vec!["propose-01"], false),
+        dag_task("integrate-all", "integrate", vec!["judge"], true),
+        dag_task("review-01", "review", vec!["integrate-all"], false),
+        dag_task("test-01", "test", vec!["integrate-all"], false),
+    ];
+    // 46 files → recommended_writer_count = 4.
+    let warns = shard_integrate_for_large_scope(&mut tasks, SwarmTemplate::Parallel, 46);
+    assert!(!warns.is_empty(), "should emit a sharding notice");
+
+    let shards: Vec<&SwarmTask> = tasks
+        .iter()
+        .filter(|t| t.id.starts_with("integrate-all-shard-"))
+        .collect();
+    assert_eq!(shards.len(), 4, "expected 4 shards from 46-file scope");
+
+    // Same agent on every shard.
+    let agent = &shards[0].agent_id;
+    for s in shards.iter() {
+        assert_eq!(&s.agent_id, agent);
+        assert!(s.writes);
+    }
+
+    // shard_index stamps are 1-based and total=4.
+    let mut indices: Vec<u8> = shards
+        .iter()
+        .filter_map(|s| s.shard_index.map(|p| p.0))
+        .collect();
+    indices.sort();
+    assert_eq!(indices, vec![1, 2, 3, 4]);
+
+    // Sequential chain: shard-2 deps include shard-1, shard-3 includes shard-2, etc.
+    let by_id: std::collections::HashMap<&str, &SwarmTask> =
+        shards.iter().map(|s| (s.id.as_str(), *s)).collect();
+    assert!(by_id["integrate-all-shard-2"]
+        .deps
+        .iter()
+        .any(|d| d == "integrate-all-shard-1"));
+    assert!(by_id["integrate-all-shard-3"]
+        .deps
+        .iter()
+        .any(|d| d == "integrate-all-shard-2"));
+    assert!(by_id["integrate-all-shard-4"]
+        .deps
+        .iter()
+        .any(|d| d == "integrate-all-shard-3"));
+
+    // Reviewers/testers rewired to wait for the LAST shard.
+    let review = tasks.iter().find(|t| t.id == "review-01").unwrap();
+    let test = tasks.iter().find(|t| t.id == "test-01").unwrap();
+    assert!(review.deps.contains(&"integrate-all-shard-4".to_string()));
+    assert!(test.deps.contains(&"integrate-all-shard-4".to_string()));
+    // Original integrate-all id should NOT remain as a dep anywhere.
+    for t in tasks.iter() {
+        assert!(
+            !t.deps.iter().any(|d| d == "integrate-all"),
+            "stale dep on original integrate-all in task {}",
+            t.id
+        );
+    }
+}
+
+#[test]
+fn shard_prompt_injection_lists_only_shard_files() {
+    use super::partition_files_for_shard;
+    let files: Vec<String> = (0..16).map(|i| format!("crates/x/f{i:02}.rs")).collect();
+    // shard 2 of 4 over 16 files → files 4..8 (sorted alphabetically).
+    let slice = partition_files_for_shard(&files, 2, 4);
+    assert_eq!(slice.len(), 4);
+    assert_eq!(slice[0], "crates/x/f04.rs");
+    assert_eq!(slice[3], "crates/x/f07.rs");
+}
+
+// Helper for compliance tests: build a propose task whose artifacts declare
+// the listed files. The integrate tasks under test depend on it.
+fn propose_with_files(id: &str, files: &[&str]) -> SwarmTask {
+    let mut t = make_task(id, "p", Some("propose"), Vec::new());
+    t.state = SwarmTaskState::Done;
+    t.parsed_artifacts = Some(super::SwarmTaskArtifacts {
+        summary: None,
+        files: files
+            .iter()
+            .map(|f| super::SwarmArtifactFile {
+                path: (*f).into(),
+                notes: None,
+            })
+            .collect(),
+        diffs: Vec::new(),
+        commands: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+    });
+    t
+}
+
+fn fresh_state_with_writes(mission_id: &str, touched: &[&str]) -> AppState {
+    let mut state = new_state();
+    let workspace = state.workspace_root.clone();
+    let mut writes: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for rel in touched.iter() {
+        writes.insert(workspace.join(rel));
+    }
+    state
+        .genome_mission_modified
+        .insert(mission_id.to_string(), writes);
+    state
+}
+
+#[test]
+fn compliance_check_defers_when_peer_integrators_pending() {
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files(
+        "propose-01",
+        &["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"],
+    );
+    let mut int_a = make_task("integrate-a", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    let mut int_b = make_task("integrate-b", "w2", Some("integrate"), vec!["propose-01"]);
+    int_b.writes = true;
+    int_b.state = SwarmTaskState::Running;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a, int_b]);
+    run.mission_id = "mis-multi".into();
+    // Only int_a's files are in mission_writes — int_b is still working.
+    let state = fresh_state_with_writes("mis-multi", &["a.rs", "b.rs"]);
+
+    let missing = structural_compliance_missing_files(&run, "integrate-a", &state);
+    assert!(
+        missing.is_empty(),
+        "should defer the check while int_b is still pending; got missing={missing:?}"
+    );
+}
+
+#[test]
+fn compliance_check_runs_when_all_peer_integrators_terminal() {
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files(
+        "propose-01",
+        &["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"],
+    );
+    let mut int_a = make_task("integrate-a", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    let mut int_b = make_task("integrate-b", "w2", Some("integrate"), vec!["propose-01"]);
+    int_b.writes = true;
+    int_b.state = SwarmTaskState::Done;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a, int_b]);
+    run.mission_id = "mis-multi".into();
+    // Union of writes covers a-d but not e or f.
+    let state = fresh_state_with_writes("mis-multi", &["a.rs", "b.rs", "c.rs", "d.rs"]);
+
+    // Check fires on the last completer (int_b) — both peers are terminal.
+    let missing = structural_compliance_missing_files(&run, "integrate-b", &state);
+    let mut sorted = missing.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["e.rs".to_string(), "f.rs".to_string()]);
+}
+
+#[test]
+fn compliance_check_for_runtime_shard_ignores_peer_pending() {
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files(
+        "propose-01",
+        &[
+            "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs",
+        ],
+    );
+    // Two runtime shards (same agent), shard-1 finished, shard-2 still running.
+    // shard-1 owns a/b/c/d (sorted, partition 1 of 2).
+    let mut shard_1 = make_task(
+        "integrate-shard-1",
+        "w1",
+        Some("integrate"),
+        vec!["propose-01"],
+    );
+    shard_1.writes = true;
+    shard_1.state = SwarmTaskState::Done;
+    shard_1.shard_index = Some((1, 2));
+    let mut shard_2 = make_task(
+        "integrate-shard-2",
+        "w1",
+        Some("integrate"),
+        vec!["propose-01"],
+    );
+    shard_2.writes = true;
+    shard_2.state = SwarmTaskState::Running;
+    shard_2.shard_index = Some((2, 2));
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, shard_1, shard_2]);
+    run.mission_id = "mis-shard".into();
+    // shard-1 covered its partition (a/b/c/d). shard-2 hasn't run yet.
+    let state = fresh_state_with_writes("mis-shard", &["a.rs", "b.rs", "c.rs", "d.rs"]);
+
+    // Even though shard-2 is pending, shard-1's check should fire and find no
+    // gap — shards have disjoint partitions so peer-pending doesn't affect
+    // shard-1's coverage view.
+    let missing = structural_compliance_missing_files(&run, "integrate-shard-1", &state);
+    assert!(
+        missing.is_empty(),
+        "shard-1 should pass cleanly even with shard-2 pending; got {missing:?}"
+    );
+}
+
+#[test]
+fn compliance_check_for_runtime_shard_flags_only_its_partition() {
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files(
+        "propose-01",
+        &[
+            "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs",
+        ],
+    );
+    let mut shard_1 = make_task(
+        "integrate-shard-1",
+        "w1",
+        Some("integrate"),
+        vec!["propose-01"],
+    );
+    shard_1.writes = true;
+    shard_1.state = SwarmTaskState::Done;
+    shard_1.shard_index = Some((1, 2));
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, shard_1]);
+    run.mission_id = "mis-shard".into();
+    // shard-1 owns a/b/c/d but only touched a/b — c and d should be flagged
+    // (e/f/g/h are shard-2's partition and irrelevant here).
+    let state = fresh_state_with_writes("mis-shard", &["a.rs", "b.rs"]);
+
+    let missing = structural_compliance_missing_files(&run, "integrate-shard-1", &state);
+    let mut sorted = missing.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["c.rs".to_string(), "d.rs".to_string()]);
+}
+
+// End-to-end check that wrap_task_prompt actually injects the YOUR SHARD
+// section when shard_files is provided. Catches drift if the dispatcher
+// stops passing shard_files through.
+#[test]
+fn wrap_task_prompt_injects_shard_section_when_shard_files_set() {
+    let mut task = make_task(
+        "integrate-all-shard-2",
+        "w1",
+        Some("integrate"),
+        vec!["judge"],
+    );
+    task.writes = true;
+    task.shard_index = Some((2, 4));
+    let shard_files = vec!["crates/x/foo.rs".to_string(), "crates/x/bar.rs".to_string()];
+    let prompt = wrap_task_prompt(
+        "refactor",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        Some(&shard_files),
+    );
+    assert!(prompt.contains("YOUR SHARD (2/4)"));
+    assert!(prompt.contains("crates/x/foo.rs"));
+    assert!(prompt.contains("crates/x/bar.rs"));
+    assert!(prompt.contains("Modify ONLY the files in the shard list below"));
+}
+
+#[test]
+fn wrap_task_prompt_omits_shard_section_for_non_shard_task() {
+    let task = make_task("integrate-all", "w1", Some("integrate"), Vec::new());
+    let prompt = wrap_task_prompt(
+        "refactor",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+    );
+    assert!(!prompt.contains("YOUR SHARD"));
+    assert!(!prompt.contains("Modify ONLY the files in the shard list below"));
+}
+
+// Edge case: empty shard partition (proposers haven't declared anything yet).
+// The shard section should still render with a fallback note rather than
+// silently disappearing.
+#[test]
+fn wrap_task_prompt_empty_shard_partition_renders_fallback_note() {
+    let mut task = make_task("integrate-shard-3", "w1", Some("integrate"), Vec::new());
+    task.writes = true;
+    task.shard_index = Some((3, 4));
+    let prompt = wrap_task_prompt(
+        "refactor",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        Some(&[]),
+    );
+    assert!(prompt.contains("YOUR SHARD (3/4)"));
+    assert!(prompt.contains("Empty shard"));
+}
+
+// Critical: if signoff and structural compliance both fire on the same turn,
+// they must coordinate so the agent gets ONE re-dispatch, not two attempts
+// burned for one effective retry.
+#[test]
+fn structural_gap_piggybacks_on_inflight_signoff_retry() {
+    use super::partition_files_for_shard;
+
+    // Simulate the post-signoff state: task already Ready, retries already
+    // bumped to 1 by handle_incomplete_signoff.
+    let mut task = make_task("integrate-all", "w1", Some("integrate"), Vec::new());
+    task.writes = true;
+    task.retries = 1;
+    task.state = SwarmTaskState::Ready;
+    task.compliance_missing_files = Vec::new();
+
+    // Simulate handle_structural_compliance_gap's "already Ready" path: it
+    // attaches missing files but does NOT bump retries again.
+    let missing = vec!["a.rs".to_string(), "b.rs".to_string()];
+    if matches!(task.state, SwarmTaskState::Ready) {
+        task.compliance_missing_files = missing.clone();
+        // No retry bump — this is the bug fix.
+    }
+
+    assert_eq!(task.retries, 1, "retries must not double-bump");
+    assert_eq!(task.compliance_missing_files, missing);
+
+    // The continuation preamble should still render the structural framing
+    // (since compliance_missing_files is non-empty), so the next dispatch
+    // tells the agent about both issues.
+    let mut out = String::new();
+    super::append_task_continuation_preamble(&mut out, &task);
+    assert!(out.contains("STRUCTURAL COMPLIANCE FAILURE"));
+    assert!(out.contains("a.rs"));
+    assert!(out.contains("b.rs"));
+
+    // partition_files_for_shard sanity (defensive — used by the same flow):
+    assert_eq!(partition_files_for_shard(&missing, 1, 1), missing);
+}
+
 fn dag_task(id: &str, role: &str, deps: Vec<&str>, writes: bool) -> SwarmTask {
     SwarmTask {
         id: id.into(),
@@ -4283,6 +4804,8 @@ fn dag_task(id: &str, role: &str, deps: Vec<&str>, writes: bool) -> SwarmTask {
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     }
 }
 

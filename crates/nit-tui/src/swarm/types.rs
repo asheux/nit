@@ -655,6 +655,16 @@ pub(super) struct SwarmTask {
     pub(super) expected_artifacts_missing: bool,
     pub(super) failed: bool,
     pub(super) retries: u8,
+    /// Files declared in proposer/judge artifacts that the previous turn
+    /// failed to modify. Populated by the structural-compliance retry path
+    /// so the continuation preamble can list them back to the integrator.
+    /// Empty on first dispatch and after a turn that closed the gap.
+    pub(super) compliance_missing_files: Vec<String>,
+    /// `(shard_index_1based, shard_total)` when the runtime sharded a
+    /// large-scope integrate task into N sequential pieces. None for normal
+    /// non-sharded tasks. Used by dispatch to inject the shard's file slice
+    /// and by the structural-compliance check to scope coverage per shard.
+    pub(super) shard_index: Option<(u8, u8)>,
 }
 
 // `label` is the display string ("rust-ci", "custom", ...) used in system

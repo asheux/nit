@@ -10,11 +10,12 @@ use super::{
     is_chat_clone_agent_id, is_provider_rate_limit_failure, mark_task_finished, mark_task_running,
     maybe_resolve_deadlock, maybe_spawn_genome_review, parse_gate_report, parse_plan_from_planner,
     push_system_message_to_mission, read_workspace_dag_validation_mode, refresh_task_readiness,
-    repair_swarm_dag, run_gates_label, spawn_genome_gate_eval, structural_compliance_missing_files,
-    tag_last_agent_message_kind, tasks_terminal_count, try_dispatch_gate_retry,
-    update_mission_final, update_mission_phase, update_mission_status, GenomeGatePending,
-    ParsedSwarmPlan, SwarmArtifactFocus, SwarmDagValidationMode, SwarmDispatch, SwarmEventOutcome,
-    SwarmRun, SwarmRuntime, SwarmStage, SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
+    repair_swarm_dag, run_gates_label, shard_integrate_for_large_scope, spawn_genome_gate_eval,
+    structural_compliance_missing_files, tag_last_agent_message_kind, tasks_terminal_count,
+    try_dispatch_gate_retry, update_mission_final, update_mission_phase, update_mission_status,
+    GenomeGatePending, ParsedSwarmPlan, SwarmArtifactFocus, SwarmDagValidationMode, SwarmDispatch,
+    SwarmEventOutcome, SwarmRun, SwarmRuntime, SwarmStage, SwarmTaskState,
+    DEFAULT_DAG_VALIDATION_MODE,
 };
 
 // Cap on re-dispatches when an output fails the sign-off check. Past this
@@ -285,6 +286,15 @@ fn enrich_plan_with_required_tasks(
             .as_deref()
             .or(parsed.integrator_agent_id.as_deref()),
     ));
+    // Runtime invariant: large-scope Parallel runs with a single integrate
+    // task get fanned into N sequential shards (one writer agent, smaller
+    // per-shard scope). Decision is workload-driven — the planner is not
+    // told to shard, the runtime makes the call after the plan lands.
+    parsed.warnings.extend(shard_integrate_for_large_scope(
+        &mut parsed.tasks,
+        run.template,
+        run.scope_files.len(),
+    ));
     parsed.warnings.extend(apply_role_dependency_ordering(
         state.workspace_root.as_path(),
         &state.agents.swarm_role_by_agent_id,
@@ -488,6 +498,7 @@ fn handle_completed_executing(
         if let Some(reason) = detect_incomplete_signoff(message) {
             handle_incomplete_signoff(state, run, &completed.task_id, reason);
         }
+        handle_structural_compliance_gap(state, run, &completed.task_id);
     }
     refresh_task_readiness(run);
     emit_unresolved_dep_signals(state, run);
@@ -501,27 +512,15 @@ fn handle_completed_executing(
     RunFate::Active
 }
 
+// Emits a substrate signal for cross-mission observability when an
+// integrator's coverage falls short. Chat-side messaging is owned by
+// `handle_structural_compliance_gap` so the operator sees a single message
+// per gap, framed by what the runtime is doing about it (retry / accept).
 fn report_structural_compliance(state: &mut AppState, run: &SwarmRun, task_id: &str) {
     let missing = structural_compliance_missing_files(run, task_id, state);
     if missing.is_empty() {
         return;
     }
-    let preview: Vec<String> = missing.iter().take(8).cloned().collect();
-    let more = if missing.len() > preview.len() {
-        format!(" (+{} more)", missing.len() - preview.len())
-    } else {
-        String::new()
-    };
-    push_system_message_to_mission(
-        state,
-        &run.mission_id,
-        format!(
-            "STRUCTURAL COMPLIANCE: task '{task_id}' finished but {} proposer-declared file(s) were not modified: {}{more}. \
-             Silent divergence — integrator skipped part of the plan.",
-            missing.len(),
-            preview.join(", "),
-        ),
-    );
     let id = state.substrate.next_signal_id(task_id);
     let posted_at_gen = state.substrate.current_generation();
     state.substrate.emit_signal(nit_core::substrate::Signal {
@@ -538,6 +537,77 @@ fn report_structural_compliance(state: &mut AppState, run: &SwarmRun, task_id: &
             "mission_id": run.mission_id,
         }),
     });
+}
+
+// Re-readies an integrate task whose previous turn left blueprint files
+// untouched. Reuses the same `retries` budget as sign-off retries — sharing
+// the budget caps total re-dispatches and prevents runaway loops if both
+// failure modes fire on the same turn.
+//
+// Coordinates with `handle_incomplete_signoff`: if signoff already re-readied
+// the task on this turn (state == Ready), we attach the missing files to the
+// existing retry slot instead of bumping `retries` again. Without this, two
+// failure modes firing on the same turn would consume two attempts for a
+// single re-dispatch.
+fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, task_id: &str) {
+    let missing = structural_compliance_missing_files(run, task_id, state);
+    if missing.is_empty() {
+        return;
+    }
+    let Some(task) = run.tasks.iter_mut().find(|t| t.id == task_id) else {
+        return;
+    };
+    if !task.writes {
+        return;
+    }
+    // Signoff just re-readied us → piggyback on its retry slot.
+    if matches!(task.state, SwarmTaskState::Ready) {
+        task.compliance_missing_files = missing.clone();
+        let task_id_owned = task.id.clone();
+        push_system_message_to_mission(
+            state,
+            &run.mission_id,
+            format!(
+                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' missed {} blueprint file(s); attaching to in-flight sign-off retry.",
+                missing.len(),
+            ),
+        );
+        return;
+    }
+    if task.retries < MAX_CONTINUATION_RETRIES {
+        task.retries = task.retries.saturating_add(1);
+        task.state = SwarmTaskState::Ready;
+        task.failed = false;
+        task.expected_artifacts_missing = false;
+        task.compliance_missing_files = missing.clone();
+        let attempt = task.retries;
+        let task_id_owned = task.id.clone();
+        let preview: Vec<String> = missing.iter().take(5).cloned().collect();
+        let more = if missing.len() > preview.len() {
+            format!(" (+{} more)", missing.len() - preview.len())
+        } else {
+            String::new()
+        };
+        push_system_message_to_mission(
+            state,
+            &run.mission_id,
+            format!(
+                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' missed {} blueprint file(s): {}{more}. Re-dispatching as continuation (attempt {attempt}/{MAX_CONTINUATION_RETRIES}).",
+                missing.len(),
+                preview.join(", "),
+            ),
+        );
+    } else {
+        task.compliance_missing_files = missing.clone();
+        push_system_message_to_mission(
+            state,
+            &run.mission_id,
+            format!(
+                "STRUCTURAL COMPLIANCE: task '{task_id}' still missing {} blueprint file(s) after {MAX_CONTINUATION_RETRIES} continuation attempt(s) — accepting partial result and letting the verifier flag the gap.",
+                missing.len(),
+            ),
+        );
+    }
 }
 
 fn handle_incomplete_signoff(

@@ -118,5 +118,7 @@ fn make_task(idx: usize, agent_id: &str, role: &str, state: SwarmTaskState) -> S
         expected_artifacts_missing: false,
         failed: false,
         retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
     }
 }

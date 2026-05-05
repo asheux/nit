@@ -4,9 +4,9 @@ use nit_core::AppState;
 
 use super::{
     dependency_payload_text, dependency_payload_text_full, find_swarm_cycle_path,
-    merge_task_artifacts, normalize_role_label, parse_task_artifacts, truncate_chars,
-    wrap_task_prompt, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState,
-    SwarmTemplate, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
+    merge_task_artifacts, normalize_role_label, parse_task_artifacts, partition_files_for_shard,
+    truncate_chars, wrap_task_prompt, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask,
+    SwarmTaskState, SwarmTemplate, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL,
 };
 
@@ -66,6 +66,18 @@ pub(super) struct TaskCompletion {
 // paths from their parsed artifacts, and returns any that the integrator did
 // not actually touch (not on disk, or not in `genome_mission_modified`).
 // Empty return means the integrator honored the declared file outputs.
+//
+// Shard-aware: when the task has a `shard_index`, the declared file set is
+// partitioned via `partition_files_for_shard` (deterministic sort + chunk),
+// and only the shard's slice is checked. Same partition function is used at
+// dispatch time so the prompt and the compliance check agree on which files
+// the shard owns.
+//
+// Deferred for planner-emitted multi-integrator plans: when this task has no
+// shard_index AND peer integrate tasks are still pending, return empty — the
+// peers' writes will land into `mission_writes` shortly. Without this, the
+// first integrator to finish would be flagged for files its peers will
+// write momentarily.
 pub(super) fn structural_compliance_missing_files(
     run: &SwarmRun,
     integrator_task_id: &str,
@@ -80,8 +92,8 @@ pub(super) fn structural_compliance_missing_files(
     let mission_writes: Option<&HashSet<std::path::PathBuf>> =
         state.genome_mission_modified.get(&run.mission_id);
     let workspace = state.workspace_root.as_path();
-    let mut missing: Vec<String> = Vec::new();
-    let mut declared_count = 0usize;
+
+    let mut declared: Vec<String> = Vec::new();
     for dep_id in task.deps.iter() {
         let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
             continue;
@@ -95,29 +107,56 @@ pub(super) fn structural_compliance_missing_files(
         };
         for entry in artifacts.files.iter() {
             let rel = entry.path.trim();
-            if rel.is_empty() {
-                continue;
-            }
-            declared_count += 1;
-            let abs = if std::path::Path::new(rel).is_absolute() {
-                std::path::PathBuf::from(rel)
-            } else {
-                workspace.join(rel)
-            };
-            let touched = mission_writes
-                .map(|set| set.contains(&abs))
-                .unwrap_or(false);
-            if !touched {
-                missing.push(rel.to_string());
+            if !rel.is_empty() {
+                declared.push(rel.to_string());
             }
         }
     }
-    // Proposers aren't required to enumerate every file they recommend
-    // (it's stronger when they do), so absence isn't non-compliance.
-    if declared_count == 0 {
+
+    if declared.is_empty() {
         return Vec::new();
     }
+
+    let scope = if let Some((shard_idx, shard_total)) = task.shard_index {
+        partition_files_for_shard(&declared, shard_idx, shard_total)
+    } else {
+        if has_pending_integrate_peers(run, integrator_task_id) {
+            return Vec::new();
+        }
+        let mut deduped = declared;
+        deduped.sort();
+        deduped.dedup();
+        deduped
+    };
+
+    let mut missing: Vec<String> = Vec::new();
+    for rel in scope.iter() {
+        let abs = if std::path::Path::new(rel).is_absolute() {
+            std::path::PathBuf::from(rel)
+        } else {
+            workspace.join(rel)
+        };
+        let touched = mission_writes
+            .map(|set| set.contains(&abs))
+            .unwrap_or(false);
+        if !touched {
+            missing.push(rel.clone());
+        }
+    }
     missing
+}
+
+// True when at least one OTHER integrate task in the run is not yet terminal.
+// Used to defer the compliance check for non-shard integrators in
+// planner-emitted multi-integrator plans — see
+// `structural_compliance_missing_files` for context.
+fn has_pending_integrate_peers(run: &SwarmRun, current_task_id: &str) -> bool {
+    run.tasks.iter().any(|t| {
+        t.id != current_task_id
+            && t.writes
+            && t.role.as_deref().and_then(normalize_role_label).as_deref() == Some("integrate")
+            && !t.state.is_terminal()
+    })
 }
 
 pub(super) fn mark_task_finished(
@@ -368,6 +407,8 @@ fn build_task_prompt(
     deps_payload: &[(String, String)],
 ) -> String {
     let payload: Option<&[(String, String)]> = (!deps_payload.is_empty()).then_some(deps_payload);
+    let shard_files = collect_shard_files(run, task);
+    let shard_slice: Option<&[String]> = shard_files.as_deref();
     wrap_task_prompt(
         &run.root_prompt,
         run.mission_kind,
@@ -375,7 +416,42 @@ fn build_task_prompt(
         payload,
         &run.scope_files,
         run.spawn_cwd.as_path(),
+        shard_slice,
     )
+}
+
+// Computes the file slice this shard is responsible for. Pulls declared
+// files from the task's propose/judge dep artifacts (the integrator's
+// canonical scope), falling back to `run.scope_files` if those haven't
+// been published yet. Same partition function as the compliance check so
+// the prompt and the post-turn check agree on which files the shard owns.
+fn collect_shard_files(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
+    let (idx, total) = task.shard_index?;
+    let mut declared: Vec<String> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if !rel.is_empty() {
+                declared.push(rel.to_string());
+            }
+        }
+    }
+    let source = if declared.is_empty() {
+        run.scope_files.clone()
+    } else {
+        declared
+    };
+    Some(partition_files_for_shard(&source, idx, total))
 }
 
 // Lab and Bulk templates rely on a global single-writer invariant — only
