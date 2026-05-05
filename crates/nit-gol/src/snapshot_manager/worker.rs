@@ -13,7 +13,9 @@ use tracing::{info, warn};
 use super::manager::SnapshotManagerInner;
 use super::rule_log::{self, RuleLogEntry};
 use super::types::{SnapshotRequest, IO_THREAD_STACK_BYTES, SNAPSHOT_FILENAME_PREFIX};
-use crate::snapshot::{self, ensure_dir, write_metadata_atomic, write_rle_bits_atomic};
+use crate::snapshot::{
+    self, ensure_dir, write_metadata_atomic, write_rle_bits_atomic, SnapshotPaths,
+};
 
 const WORKER_THREAD_NAME: &str = "nit-gol-io";
 
@@ -23,8 +25,8 @@ pub(super) enum IoCommand {
     Shutdown,
 }
 
-/// Spawn the background I/O worker. Pre-creates the snapshot directory
-/// so the first write doesn't race against directory creation.
+/// Pre-create the snapshot directory before spawning so the first write
+/// doesn't race against directory creation.
 pub(super) fn spawn_worker(
     rx: Receiver<IoCommand>,
     inner: Arc<SnapshotManagerInner>,
@@ -52,7 +54,7 @@ fn worker_loop(rx: Receiver<IoCommand>, inner: Arc<SnapshotManagerInner>) {
     }
 }
 
-/// Dispatch one command. Returns `false` on `Shutdown` so the loop exits.
+/// Returns `false` only on `Shutdown` so the loop exits.
 fn handle_command(cmd: IoCommand, inner: &SnapshotManagerInner) -> bool {
     match cmd {
         IoCommand::Snapshot(req) => report("Snapshot", handle_snapshot(*req, inner)),
@@ -78,16 +80,21 @@ fn handle_snapshot(req: SnapshotRequest, inner: &SnapshotManagerInner) -> io::Re
 
 fn write_snapshot_files(dir: &Path, req: &SnapshotRequest) -> io::Result<PathBuf> {
     let stem = build_filename_stem(req);
-    let rle_path = dir.join(format!("{stem}.rle"));
-    let json_path = dir.join(format!("{stem}.json"));
-    write_rle_bits_atomic(&rle_path, req.width, req.height, &req.rule, &req.grid_bits)?;
-    write_metadata_atomic(&json_path, &req.meta)?;
-    Ok(rle_path)
+    let paths = SnapshotPaths::for_stem(dir, &stem);
+    write_rle_bits_atomic(
+        &paths.rle_path,
+        req.width,
+        req.height,
+        &req.rule,
+        &req.grid_bits,
+    )?;
+    write_metadata_atomic(&paths.json_path, &req.meta)?;
+    Ok(paths.rle_path)
 }
 
-/// The legacy stem embeds only the low 32 bits of the grid hash; widen
-/// before calling the shared formatter so `:08x` produces the same 8-char
-/// output that existing on-disk snapshots already use.
+/// Widen the low 32 bits of the grid hash before formatting so the stem
+/// keeps the legacy 8-char `:08x` suffix that existing on-disk snapshots
+/// already use.
 fn build_filename_stem(req: &SnapshotRequest) -> String {
     let hash_low32 = u64::from(req.grid_hash[0] as u32);
     snapshot::format_name_stem(

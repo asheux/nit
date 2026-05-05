@@ -5,10 +5,9 @@ use std::time::{Duration, Instant};
 use super::types::{SnapshotEventKind, SnapshotRequest};
 use crate::hash::blake3_u64;
 
-/// Content signature of a snapshot request. Two requests that produce
-/// the same key are considered duplicates and collapse to a single
-/// write. Fields must stay in-line with the `from_request` mapping;
-/// their `Hash`/`Eq` derivation is load-bearing for the dedup gate.
+/// Two requests producing the same key collapse to a single write.
+/// The `Hash`/`Eq` derivation is load-bearing for the dedup gate; field
+/// changes here invalidate the equivalence used by saved sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SnapshotKey {
     pub(super) event_kind: SnapshotEventKind,
@@ -22,7 +21,7 @@ impl SnapshotKey {
     pub(super) fn from_request(req: &SnapshotRequest) -> Self {
         Self {
             event_kind: req.event,
-            rule_hash: rule_hash(&req.rule),
+            rule_hash: blake3_u64(&blake3::hash(req.rule.as_bytes())),
             seed_hash: req.seed_hash,
             grid_hash: req.grid_hash,
             period: req.period,
@@ -30,18 +29,14 @@ impl SnapshotKey {
     }
 }
 
-/// The most recently admitted key, plus the instant it was admitted.
 pub(super) struct LastSnapshotKey {
     pub(super) key: Option<SnapshotKey>,
     pub(super) last_at: Instant,
 }
 
 impl LastSnapshotKey {
-    /// Decide whether a new request should be admitted.
-    ///
-    /// Test-pinned ordering: the dedup check runs first, so Manual
-    /// events bypass the cooldown window but still collapse against
-    /// an identical most-recent key.
+    /// Test-pinned ordering: dedup runs first, so Manual events bypass
+    /// the cooldown window but still collapse against an identical key.
     pub(super) fn allows(
         &self,
         key: &SnapshotKey,
@@ -49,7 +44,7 @@ impl LastSnapshotKey {
         now: Instant,
         min_interval: Duration,
     ) -> bool {
-        if self.is_duplicate(key) {
+        if self.key.as_ref() == Some(key) {
             return false;
         }
         if matches!(event_kind, SnapshotEventKind::Manual) {
@@ -57,12 +52,4 @@ impl LastSnapshotKey {
         }
         now.duration_since(self.last_at) >= min_interval
     }
-
-    fn is_duplicate(&self, key: &SnapshotKey) -> bool {
-        self.key.as_ref() == Some(key)
-    }
-}
-
-fn rule_hash(rule: &str) -> u64 {
-    blake3_u64(&blake3::hash(rule.as_bytes()))
 }

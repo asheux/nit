@@ -35,9 +35,9 @@ struct SeenEntry {
 /// Stateful detector that tracks grid fingerprints across generations.
 ///
 /// Feed grids via [`seed`](Self::seed) and [`observe`](Self::observe);
-/// an [`AttractorEvent`] is returned when a fixed point or cycle is
-/// found. After emitting an event the detector latches into a
-/// `completed` state so callers can keep driving without double-firing.
+/// an [`AttractorEvent`] is returned the first time a fixed point or
+/// cycle is found. After emitting an event the detector latches into
+/// `completed` so callers can keep driving without double-firing.
 pub struct AttractorDetector {
     cfg: AttractorConfig,
     seen: HashMap<Fingerprint, Vec<SeenEntry>>,
@@ -82,10 +82,12 @@ impl AttractorDetector {
         self.completed = false;
     }
 
+    #[inline]
     pub fn seed(&mut self, grid: &Grid, gen: u64, rule: Rule, edge: EdgeMode) {
         self.seed_with_context(grid, gen, rule, edge, None);
     }
 
+    #[inline]
     pub fn observe(
         &mut self,
         current: &Grid,
@@ -214,9 +216,6 @@ impl AttractorDetector {
     }
 
     fn evict_if_needed(&mut self) {
-        if self.cfg.max_history == 0 {
-            return;
-        }
         while self.entry_count > self.cfg.max_history {
             let Some((fp, gen)) = self.order.pop_front() else {
                 break;

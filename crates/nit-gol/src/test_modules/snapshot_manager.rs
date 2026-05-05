@@ -1,6 +1,5 @@
 use super::*;
-use crate::snapshot::SnapshotMetadata;
-use crate::Rule;
+use crate::{snapshot::SnapshotMetadata, Rule};
 
 const FIXED_TIMESTAMP: &str = "2026-01-25T00:00:00Z";
 const FIXED_SEED_HASH: u64 = 42;

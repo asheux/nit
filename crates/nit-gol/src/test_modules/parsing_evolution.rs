@@ -6,9 +6,6 @@ use crate::{
     Grid, Rule,
 };
 
-// ── Fixture helpers ─────────────────────────────────────────────────
-
-/// Build a `width`x`height` grid with the listed coordinates turned on.
 #[track_caller]
 fn grid_with_cells(width: usize, height: usize, live_cells: &[(usize, usize)]) -> Grid {
     let mut grid = Grid::new(width, height);
@@ -36,7 +33,6 @@ fn make_repeat_detector(max_history: usize) -> AttractorDetector {
     })
 }
 
-/// Advance one generation under Conway's rules with a dead border.
 fn conway_step(grid: &Grid) -> Grid {
     step(grid, Rule::conway(), EdgeMode::Dead)
 }
@@ -50,7 +46,6 @@ mod parsing {
         assert_eq!(rule.to_string(), "B36/S23", "canonical round-trip");
     }
 
-    /// Individual bits of the birth and survival masks line up with the digits.
     #[test]
     fn parse_rule_masks() {
         let rule = Rule::parse("B3/S23").expect("parse B3/S23");
@@ -62,7 +57,6 @@ mod parsing {
         );
     }
 
-    /// An empty survive section parses with a zero survive mask.
     #[test]
     fn parse_rule_empty_survive() {
         let rule = Rule::parse("B2/S").expect("parse B2/S");
@@ -197,7 +191,6 @@ mod encoding {
 mod attractor_detection {
     use super::*;
 
-    /// Seed, advance one generation, and return the detector event.
     fn first_event_after_step(seed: &Grid, max_history: usize) -> Option<AttractorEvent> {
         let rule = Rule::conway();
         let edge = EdgeMode::Dead;

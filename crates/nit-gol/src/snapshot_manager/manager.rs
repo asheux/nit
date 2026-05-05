@@ -78,7 +78,11 @@ impl SnapshotManager {
 
     /// Enqueue a rule-log entry for append to the JSON-lines log.
     pub fn record_rule(&self, entry: RuleLogEntry) -> bool {
-        self.try_send(IoCommand::RecordRule(entry))
+        if let Err(err) = self.inner.tx.try_send(IoCommand::RecordRule(entry)) {
+            self.record_drop(matches!(err, TrySendError::Full(_)));
+            return false;
+        }
+        true
     }
 
     /// Read current cumulative statistics (non-blocking).
@@ -99,7 +103,6 @@ impl SnapshotManager {
         }
     }
 
-    /// Check dedup + cooldown rules; count and reject the request if denied.
     fn admit(&self, key: &SnapshotKey, event: SnapshotEventKind, now: Instant) -> bool {
         let guard = self.inner.last_enqueued.lock().unwrap();
         if guard.allows(key, event, now, self.inner.min_interval) {
@@ -109,7 +112,6 @@ impl SnapshotManager {
         false
     }
 
-    /// Send an admitted request and update the dedup key on success.
     fn dispatch_snapshot(&self, req: SnapshotRequest, key: SnapshotKey, now: Instant) -> bool {
         match self.inner.tx.try_send(IoCommand::Snapshot(Box::new(req))) {
             Ok(()) => {
@@ -125,19 +127,8 @@ impl SnapshotManager {
         }
     }
 
-    fn try_send(&self, cmd: IoCommand) -> bool {
-        match self.inner.tx.try_send(cmd) {
-            Ok(()) => true,
-            Err(err) => {
-                self.record_drop(matches!(err, TrySendError::Full(_)));
-                false
-            }
-        }
-    }
-
-    /// Increment the drop counter and (rate-limited) log a warning when
-    /// the queue is full. `queue_full=false` paths are disconnect errors
-    /// that would have already produced louder signals elsewhere.
+    /// `queue_full=false` paths are disconnect errors that would already
+    /// have produced louder signals elsewhere — log only on a true full.
     fn record_drop(&self, queue_full: bool) {
         self.inner.dropped.fetch_add(1, Ordering::Relaxed);
         if queue_full {
@@ -167,27 +158,25 @@ impl SnapshotManagerInner {
         let (tx, rx) = bounded(capacity);
         let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
         let now = Instant::now();
+        // Seed timers far enough in the past that the first request isn't
+        // throttled. `checked_sub` saturates at `now` when the platform
+        // Instant range cannot represent `now - back`.
+        let [cooldown_seed, drop_log_seed] =
+            [min_interval, DROP_LOG_INTERVAL].map(|back| now.checked_sub(back).unwrap_or(now));
         let inner = Arc::new(Self {
             tx,
             last_enqueued: Mutex::new(LastSnapshotKey {
                 key: None,
-                last_at: saturating_past(now, min_interval),
+                last_at: cooldown_seed,
             }),
             dropped: AtomicU64::new(0),
             written: AtomicU64::new(0),
             last_path: Mutex::new(None),
-            last_drop_log: Mutex::new(saturating_past(now, DROP_LOG_INTERVAL)),
+            last_drop_log: Mutex::new(drop_log_seed),
             min_interval,
             dir: config.dir.clone(),
             max_files: config.max_files,
         });
         (inner, rx)
     }
-}
-
-/// Shift `now` back by `back`, saturating at `now` when the subtraction
-/// would underflow — used to seed "initial" timers so the first request
-/// is not artificially throttled.
-fn saturating_past(now: Instant, back: Duration) -> Instant {
-    now.checked_sub(back).unwrap_or(now)
 }

@@ -21,12 +21,10 @@ pub use types::{
 use crate::hash::blake3_u64_pair;
 use crate::Grid;
 
-/// Blake3 domain tag for snapshot fingerprints. Part of the on-disk
-/// contract — changing this byte string invalidates every existing
+/// On-disk contract: changing this byte string invalidates every existing
 /// snapshot's dedup key and must be treated as a format migration.
 const SNAPSHOT_DOMAIN_TAG: &[u8] = b"nit-gol-snapshot-v1";
 
-/// Two-word blake3 fingerprint of a grid's dimensions and cells.
 pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(SNAPSHOT_DOMAIN_TAG);
@@ -36,11 +34,8 @@ pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
     blake3_u64_pair(&hasher.finalize())
 }
 
-/// Pack grid cells into a `u64` bitset for compact snapshot storage.
-///
-/// Bit `i` of word `i/64` corresponds to cell `i` in row-major order.
-/// The layout must agree with `crate::rle::write_rle_bits`, which
-/// consumes the packed output.
+/// Bit `i` of word `i/64` is cell `i` in row-major order; layout must
+/// agree with `crate::rle::write_rle_bits`, which consumes the output.
 pub fn pack_grid_bits(grid: &Grid) -> Vec<u64> {
     let total = grid.width().saturating_mul(grid.height());
     let mut bits = vec![0u64; total.div_ceil(64)];
@@ -52,19 +47,18 @@ pub fn pack_grid_bits(grid: &Grid) -> Vec<u64> {
     bits
 }
 
-// Test-only imports bridged into module scope for `use super::*;` inside
-// the out-of-tree test file. `LastSnapshotKey` / `SnapshotKey` are private
-// to `dedup`; tests construct struct literals to probe the gate directly.
+// Bridged into module scope so `use super::*;` in the out-of-tree test
+// file picks them up. `LastSnapshotKey` / `SnapshotKey` are dedup-private;
+// tests construct struct literals to probe the gate directly.
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::EdgeMode;
 #[cfg(test)]
 #[allow(unused_imports)]
 use dedup::{LastSnapshotKey, SnapshotKey};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::time::{Duration, Instant, SystemTime};
-
-#[cfg(test)]
-#[allow(unused_imports)]
-use crate::EdgeMode;
 
 #[cfg(test)]
 #[path = "../test_modules/snapshot_manager.rs"]

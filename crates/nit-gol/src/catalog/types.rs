@@ -70,8 +70,8 @@ impl RuleEntry {
 
 /// User's current rule selection plus optional catalog metadata.
 ///
-/// Field names (`rule`, `id`, `name`) are part of the on-disk config
-/// contract via serde — do not rename without a migration path.
+/// The field names (`rule`, `id`, `name`) are part of the on-disk
+/// config contract via serde — renaming requires a migration path.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SelectedRule {
     pub rule: Rule,
@@ -103,18 +103,16 @@ impl SelectedRule {
 
     /// Format as `rulestring (name)`.
     pub fn label(&self) -> String {
-        self.format_label(false)
+        match &self.name {
+            Some(name) => format!("{} ({})", self.rule, name),
+            None => self.rule.to_string(),
+        }
     }
 
     /// Format as `name (rulestring)`.
     pub fn name_first_label(&self) -> String {
-        self.format_label(true)
-    }
-
-    fn format_label(&self, name_first: bool) -> String {
         match &self.name {
-            Some(name) if name_first => format!("{} ({})", name, self.rule),
-            Some(name) => format!("{} ({})", self.rule, name),
+            Some(name) => format!("{} ({})", name, self.rule),
             None => self.rule.to_string(),
         }
     }

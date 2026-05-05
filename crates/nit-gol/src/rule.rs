@@ -52,16 +52,13 @@ impl Rule {
         self.survives_mask
     }
 
-    /// Returns `true` if a dead cell with `neighbors` live neighbors is born.
-    ///
-    /// The `<= 8` guard defends against callers using non-Moore
-    /// neighborhoods; inside this crate `step` always stays in range.
+    // The `<= 8` guard defends against callers using non-Moore neighborhoods;
+    // inside this crate `step` always stays in range.
     #[must_use]
     pub fn is_birth(&self, neighbors: u8) -> bool {
         neighbors <= MAX_NEIGHBORS && self.births_mask & (1u16 << neighbors) != 0
     }
 
-    /// Returns `true` if a live cell with `neighbors` live neighbors survives.
     #[must_use]
     pub fn is_survive(&self, neighbors: u8) -> bool {
         neighbors <= MAX_NEIGHBORS && self.survives_mask & (1u16 << neighbors) != 0
@@ -100,11 +97,9 @@ impl Rule {
     }
 }
 
-/// Fold a single `B...` or `S...` segment into the running masks.
-///
-/// Returns `true` if the segment carried a recognised prefix. An empty
-/// segment is valid (the parser tolerates a trailing slash) and returns
-/// `false` without touching the masks.
+// Returns `true` if the segment carried a recognised prefix. An empty
+// segment is valid (the parser tolerates a trailing slash) and returns
+// `false` without touching the masks.
 fn parse_segment(
     segment: &str,
     births: &mut u16,
@@ -113,17 +108,17 @@ fn parse_segment(
     if segment.is_empty() {
         return Ok(false);
     }
-    let mut chars = segment.chars();
-    let prefix = chars.next().expect("segment is non-empty");
-    let target: &mut u16 = match prefix {
+    let mut tail = segment.chars();
+    let letter = tail.next().expect("segment is non-empty");
+    let mask_ref: &mut u16 = match letter {
         'B' | 'b' => births,
         'S' | 's' => survives,
-        other => return Err(RuleParseError::InvalidChar(other)),
+        bad => return Err(RuleParseError::InvalidChar(bad)),
     };
-    for symbol in chars {
-        match symbol {
-            '0'..='8' => *target |= 1u16 << (symbol as u8 - b'0'),
-            other => return Err(RuleParseError::InvalidChar(other)),
+    for digit in tail {
+        match digit {
+            '0'..='8' => *mask_ref |= 1u16 << (digit as u8 - b'0'),
+            bad => return Err(RuleParseError::InvalidChar(bad)),
         }
     }
     Ok(true)
@@ -137,14 +132,11 @@ impl fmt::Display for Rule {
     }
 }
 
-/// Write `<prefix><digits>` where digits are the set bits of `mask` in
-/// ascending order (`0`..=`8`).
 fn write_digit_mask(f: &mut fmt::Formatter<'_>, prefix: char, mask: u16) -> fmt::Result {
     f.write_char(prefix)?;
-    for bit in 0..=MAX_NEIGHBORS {
-        if mask & (1u16 << bit) != 0 {
-            f.write_char((b'0' + bit) as char)?;
-        }
+    let set_bits = (0..=MAX_NEIGHBORS).filter(|bit| mask & (1u16 << bit) != 0);
+    for bit in set_bits {
+        f.write_char((b'0' + bit) as char)?;
     }
     Ok(())
 }

@@ -8,20 +8,14 @@ use crate::EdgeMode;
 
 pub(super) const DEFAULT_QUEUE_CAPACITY: usize = 64;
 pub(super) const MIN_QUEUE_CAPACITY: usize = 1;
-
-/// Filename prefix used for every background-manager snapshot.
 pub(super) const SNAPSHOT_FILENAME_PREFIX: &str = "sim";
-
-/// Generous I/O-thread stack — large grid bitsets and serde buffers can
-/// push past the default 2 MiB on debug builds. Shrinking this has
-/// produced overflows in past snapshot-stress runs; treat 8 MiB as a
-/// load-bearing floor.
+/// Large grid bitsets and serde buffers can push past the default 2 MiB
+/// stack on debug builds; past snapshot-stress runs overflowed when this
+/// shrank, so treat 8 MiB as a load-bearing floor.
 pub(super) const IO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
-/// Env var read by [`snapshot_queue_capacity`] to override the default.
 const QUEUE_CAPACITY_ENV: &str = "NIT_SNAPSHOT_QUEUE";
 
-/// The kind of event that triggered a snapshot.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SnapshotEventKind {
     FixedPoint,

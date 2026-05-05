@@ -18,28 +18,23 @@ pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
         for x in 0..width {
             let neighbors = neighborhood::count(grid, x, y, edge);
             let alive = grid.get(x, y);
-            next.set(x, y, next_cell(alive, neighbors, rule));
+            let next_alive = if alive {
+                rule.is_survive(neighbors)
+            } else {
+                rule.is_birth(neighbors)
+            };
+            next.set(x, y, next_alive);
         }
     }
     next
 }
 
-#[inline]
-fn next_cell(alive: bool, neighbors: u8, rule: Rule) -> bool {
-    if alive {
-        rule.is_survive(neighbors)
-    } else {
-        rule.is_birth(neighbors)
-    }
-}
-
 mod neighborhood {
     use crate::{grid::EdgeMode, Grid};
 
-    /// Moore neighborhood offsets, excluding the center cell.
-    ///
-    /// Fixed order keeps neighbor counting deterministic across builds so
-    /// regression tests comparing generation-by-generation output are stable.
+    // Fixed Moore neighborhood order keeps neighbor counting deterministic
+    // across builds so regression tests comparing generation-by-generation
+    // output stay stable.
     const MOORE_OFFSETS: [(isize, isize); 8] = [
         (-1, -1),
         (0, -1),

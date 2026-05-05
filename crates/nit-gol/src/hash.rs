@@ -1,16 +1,15 @@
-//! Hashing primitives for grid fingerprinting and deduplication.
+//! Hashing primitives for grid fingerprinting and snapshot dedup.
 //!
-//! Outputs are stability-critical: changing any constant, byte order,
+//! Outputs are stability-critical: any change to a constant, byte order,
 //! or the `edge_tag` mapping invalidates on-disk snapshots and
 //! in-memory attractor history.
 
 use crate::grid::EdgeMode;
 
-// Standard FNV-1a 64-bit basis and prime; frozen by design.
+// FNV-1a 64-bit basis and prime; frozen by spec.
 pub(crate) const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 pub(crate) const FNV_PRIME: u64 = 0x100000001b3;
 
-/// Fold `bytes` into `digest` using FNV-1a 64.
 #[inline]
 pub(crate) fn fnv1a(mut digest: u64, bytes: &[u8]) -> u64 {
     for &byte in bytes {
@@ -20,8 +19,8 @@ pub(crate) fn fnv1a(mut digest: u64, bytes: &[u8]) -> u64 {
     digest
 }
 
-/// Encode the edge-wrap policy as a single byte so it can be folded
-/// into a fingerprint without ambiguity between `Dead` and `Toroid`.
+/// Distinct bytes for `Dead`/`Toroid` so the edge policy folds into a
+/// fingerprint without ambiguity.
 #[inline]
 pub(crate) fn edge_tag(edge: EdgeMode) -> u8 {
     match edge {
@@ -30,23 +29,24 @@ pub(crate) fn edge_tag(edge: EdgeMode) -> u8 {
     }
 }
 
-/// Split a blake3 digest into two little-endian `u64` halves.
-///
-/// Used by the attractor detector to get both a primary identity hash
-/// and a secondary collision-guard hash from a single blake3 evaluation.
+/// Two little-endian `u64` halves of a blake3 digest — primary identity
+/// plus secondary collision-guard, both from a single blake3 evaluation.
 pub(crate) fn blake3_u64_pair(hash: &blake3::Hash) -> [u64; 2] {
     let bytes = hash.as_bytes();
-    [read_u64_le(bytes, 0), read_u64_le(bytes, 8)]
-}
-
-pub(crate) fn blake3_u64(hash: &blake3::Hash) -> u64 {
-    read_u64_le(hash.as_bytes(), 0)
+    let lo = u64::from_le_bytes(
+        bytes[0..8]
+            .try_into()
+            .expect("blake3 digest is 32 bytes wide"),
+    );
+    let hi = u64::from_le_bytes(
+        bytes[8..16]
+            .try_into()
+            .expect("blake3 digest is 32 bytes wide"),
+    );
+    [lo, hi]
 }
 
 #[inline]
-fn read_u64_le(bytes: &[u8; 32], offset: usize) -> u64 {
-    let chunk: [u8; 8] = bytes[offset..offset + 8]
-        .try_into()
-        .expect("offset + 8 within 32-byte hash");
-    u64::from_le_bytes(chunk)
+pub(crate) fn blake3_u64(hash: &blake3::Hash) -> u64 {
+    blake3_u64_pair(hash)[0]
 }

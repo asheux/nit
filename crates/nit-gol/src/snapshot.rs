@@ -22,10 +22,8 @@ const TEMP_FILE_EXT: &str = "tmp";
 const RLE_EXT: &str = "rle";
 const JSON_EXT: &str = "json";
 
-/// Metadata written alongside each snapshot as a JSON sidecar file.
-///
-/// Field order and serde attributes are part of the on-disk JSON
-/// sidecar contract — do not reorder or regroup.
+/// JSON sidecar written next to each snapshot. Field order and serde
+/// attributes are part of the on-disk contract — do not reorder.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SnapshotMetadata {
     pub timestamp: String,
@@ -65,7 +63,6 @@ pub struct SnapshotMetadata {
     pub seed_components: Option<usize>,
 }
 
-/// Paths to the RLE and JSON files produced by a snapshot write.
 #[derive(Clone, Debug)]
 pub struct SnapshotPaths {
     pub rle_path: PathBuf,
@@ -73,7 +70,7 @@ pub struct SnapshotPaths {
 }
 
 impl SnapshotPaths {
-    fn for_stem(dir: &Path, stem: &str) -> Self {
+    pub(crate) fn for_stem(dir: &Path, stem: &str) -> Self {
         Self {
             rle_path: dir.join(format!("{stem}.{RLE_EXT}")),
             json_path: dir.join(format!("{stem}.{JSON_EXT}")),
@@ -91,11 +88,33 @@ pub fn write_snapshot(
 ) -> io::Result<SnapshotPaths> {
     ensure_dir(dir)?;
     let paths = SnapshotPaths::for_stem(dir, name_base);
-    log_write_start(dir, name_base, grid, rule);
+    let debug = debug_enabled();
+    snapshot_trace(
+        debug,
+        format_args!(
+            "start name={name_base} dir={} geometry={}x{} rule={rule}",
+            dir.display(),
+            grid.width(),
+            grid.height(),
+        ),
+    );
     write_atomic(&paths.rle_path, |sink| write_rle(sink, grid, rule))?;
     write_metadata_atomic(&paths.json_path, meta)?;
-    log_write_done(&paths);
+    snapshot_trace(
+        debug,
+        format_args!(
+            "done rle={} json={}",
+            paths.rle_path.display(),
+            paths.json_path.display(),
+        ),
+    );
     Ok(paths)
+}
+
+fn snapshot_trace(debug: bool, args: std::fmt::Arguments<'_>) {
+    if debug {
+        eprintln!("[nit snapshot] {args}");
+    }
 }
 
 /// Build a default snapshot file-name stem (timestamp + rule + generation + hash).
@@ -187,8 +206,7 @@ pub(crate) fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io:
     })
 }
 
-/// Ensure `dir` exists; reject symlinks so a hostile or stale link
-/// cannot redirect snapshot writes outside the intended directory.
+/// Reject symlinks so a stale or hostile link cannot redirect writes outside `dir`.
 pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
     let Ok(existing) = fs::symlink_metadata(dir) else {
         return fs::create_dir_all(dir);
@@ -202,12 +220,8 @@ pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// Write to a `.tmp` sibling then rename into place.
-///
-/// The `flush` + `sync_all` + `rename` sequence is the durability
-/// contract — readers see either the prior file or the new one,
-/// never a partially written state. Concurrent writers targeting
-/// the same path race on the temp file; callers must serialize.
+/// `flush + sync_all + rename` so readers see either the prior or the new file, never partial state.
+/// Concurrent writers targeting the same path race on the temp file; callers must serialize.
 fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
@@ -220,28 +234,6 @@ where
     writer.get_ref().sync_all()?;
     fs::rename(tmp_path, path)?;
     Ok(())
-}
-
-fn log_write_start(dir: &Path, name_base: &str, grid: &Grid, rule: Rule) {
-    if !debug_enabled() {
-        return;
-    }
-    let (cols, rows) = (grid.width(), grid.height());
-    eprintln!(
-        "[nit snapshot] start name={name_base} dir={} geometry={cols}x{rows} rule={rule}",
-        dir.display()
-    );
-}
-
-fn log_write_done(paths: &SnapshotPaths) {
-    if !debug_enabled() {
-        return;
-    }
-    eprintln!(
-        "[nit snapshot] done rle={} json={}",
-        paths.rle_path.display(),
-        paths.json_path.display()
-    );
 }
 
 /// The env var is consulted only once per process — snapshots happen on

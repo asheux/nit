@@ -1,23 +1,16 @@
-//! Grid representation for cellular automata.
-//!
-//! A `Grid` is a two-dimensional byte array where each cell is `0` (dead)
-//! or `1` (alive). The grid supports boundary-checked access, population
-//! counting, and FNV-1a hashing for fast identity comparison.
+//! Two-dimensional grid of alive/dead cells with FNV-1a fingerprinting.
 
 use crate::hash;
 
-/// Boundary handling policy for the simulation grid.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeMode {
     /// Cells outside the grid are treated as dead.
     Dead,
-    /// Opposite edges are connected (torus topology).
+    /// Opposite edges connect (torus topology).
     Toroid,
 }
 
-/// A two-dimensional grid of alive/dead cells.
-///
-/// Storage is row-major: cell `(x, y)` lives at index `y * width + x`.
+/// Row-major: cell `(x, y)` lives at index `y * width + x`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grid {
     width: usize,
@@ -49,10 +42,8 @@ impl Grid {
         self.height
     }
 
-    /// Raw cell storage (row-major, one byte per cell, `0` dead / `1` alive).
-    ///
-    /// [`Grid::set`] normalizes writes to `0`/`1`, so [`Grid::hash`] is
-    /// stable for any two grids that compare equal under [`PartialEq`].
+    /// [`Grid::set`] normalises writes to `0`/`1`, so [`Grid::hash`] is
+    /// stable across any two grids that compare equal under [`PartialEq`].
     #[must_use]
     pub fn cells(&self) -> &[u8] {
         &self.cells
@@ -86,12 +77,10 @@ impl Grid {
         self.cells.iter().filter(|&&c| c != 0).count()
     }
 
-    /// 64-bit FNV-1a hash over dimensions and cell data.
-    ///
-    /// Deterministic across versions; used as a fast identity key for
-    /// attractor detection and snapshot deduplication. Width and height
-    /// are folded in first so two grids with the same cell pattern but
-    /// different shapes hash differently.
+    /// Width and height are folded in first so two grids with the same
+    /// cell pattern but different shapes hash differently. Used as the
+    /// fast identity key for attractor detection and snapshot dedup —
+    /// must remain stable across versions.
     #[must_use]
     pub fn hash(&self) -> u64 {
         let mut digest = hash::FNV_OFFSET;
@@ -100,13 +89,10 @@ impl Grid {
         hash::fnv1a(digest, &self.cells)
     }
 
-    /// Copy this grid into a new grid of different dimensions.
-    ///
-    /// Cells within the top-left overlapping region are preserved; cells
-    /// outside that region in the new grid are dead. Shrinking truncates
-    /// from the bottom-right; growing pads with dead cells. An early
-    /// return also guards against `chunks_exact(0)` when either the
-    /// source or destination width is zero.
+    /// Top-left overlap is preserved; the rest of the new grid is dead.
+    /// Shrinking truncates from the bottom-right; growing pads with dead
+    /// cells. The zero-overlap early return guards against `chunks_exact(0)`
+    /// panicking when either width is zero.
     #[must_use]
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
         let mut resized = Grid::new(width, height);

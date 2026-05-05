@@ -44,8 +44,6 @@ fn main() {
     }
 }
 
-/// Positional CLI arguments, preserved in the order documented in the
-/// crate-level docstring: `width height iterations dir max_files seed`.
 struct StressParams {
     width: usize,
     height: usize,
@@ -69,8 +67,6 @@ impl Default for StressParams {
 }
 
 impl StressParams {
-    /// Parse positional CLI arguments, falling back to default values
-    /// for any that are missing or fail to parse.
     fn from_args(argv: &[String]) -> Self {
         let fallback = Self::default();
         Self {
@@ -88,10 +84,8 @@ fn pos<T: std::str::FromStr>(argv: &[String], idx: usize) -> Option<T> {
     argv.get(idx).and_then(|raw| raw.parse().ok())
 }
 
-/// Predicate for `generate_seed_grid`: does cell `(col, row)` go live?
-///
-/// Uses a cheap multiplicative hash — not cryptographic, but
-/// reproducible across runs so stress snapshots stay byte-stable.
+/// Cheap reproducible hash — not cryptographic, but stable across runs so
+/// stress snapshots stay byte-identical.
 #[inline]
 fn alive_cell_at(col: usize, row: usize, seed: u64) -> bool {
     let mixed =
@@ -102,10 +96,11 @@ fn alive_cell_at(col: usize, row: usize, seed: u64) -> bool {
 #[must_use]
 fn generate_seed_grid(width: usize, height: usize, seed: u64) -> Grid {
     let mut grid = Grid::new(width, height);
-    for row in 0..height {
-        for col in 0..width {
-            grid.set(col, row, alive_cell_at(col, row, seed));
-        }
+    let cell_count = width.saturating_mul(height);
+    for idx in 0..cell_count {
+        let col = idx % width;
+        let row = idx / width;
+        grid.set(col, row, alive_cell_at(col, row, seed));
     }
     grid
 }
@@ -128,24 +123,21 @@ fn run_stress(params: &StressParams) -> std::io::Result<()> {
     std::fs::create_dir_all(&params.dir)?;
     let rule = Rule::conway();
     let grid = generate_seed_grid(params.width, params.height, params.seed);
+    let prune_cap = (params.max_files > 0).then_some(params.max_files);
 
     for iteration in 0..params.iterations {
         let stem = format!("stress-{iteration:05}");
         let meta = build_meta(rule, &grid, params.seed, iteration);
         write_snapshot(&params.dir, &stem, &grid, rule, &meta)?;
-        if params.max_files == 0 {
-            continue;
+        if let Some(cap) = prune_cap {
+            prune_oldest(&params.dir, cap)?;
         }
-        prune_oldest(&params.dir, params.max_files)?;
     }
     Ok(())
 }
 
-/// Resolve the worker thread stack size from environment.
-///
-/// Checks `NIT_GOL_IO_STACK_MB` first, falls back to `NIT_GOL_STACK_MB`,
-/// then defaults to 256 MiB with a 32 MiB floor so snapshot writes never
-/// starve for stack on large grids.
+/// `NIT_GOL_IO_STACK_MB` wins, falls back to `NIT_GOL_STACK_MB`, then 256 MiB
+/// with a 32 MiB floor so snapshot writes never starve for stack on large grids.
 fn resolve_stack_bytes() -> usize {
     let requested = env::var(STACK_ENV_PRIMARY)
         .or_else(|_| env::var(STACK_ENV_FALLBACK))

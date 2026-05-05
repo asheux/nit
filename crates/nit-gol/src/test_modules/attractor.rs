@@ -1,6 +1,5 @@
 use super::*;
-use crate::step::step;
-use crate::{EdgeMode, Grid, Rule};
+use crate::{step::step, EdgeMode, Grid, Rule};
 
 const PROTOCOL_HASH: u64 = 0xabcd;
 
@@ -28,8 +27,7 @@ fn repeat_detector() -> AttractorDetector {
     })
 }
 
-/// Evolve `seed` forward `steps` generations; returns the full chain
-/// `[seed, step¹, step², …]` of length `steps + 1`.
+/// Returns `[seed, step¹, …, stepⁿ]` of length `steps + 1`.
 fn evolve_chain(seed: Grid, steps: usize, rule: Rule, edge: EdgeMode) -> Vec<Grid> {
     let mut chain = Vec::with_capacity(steps + 1);
     chain.push(seed);

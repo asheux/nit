@@ -19,6 +19,7 @@ pub mod snapshot_manager;
 pub mod step;
 
 #[cfg(test)]
+#[path = "test_modules/parsing_evolution.rs"]
 mod tests;
 
 pub use grid::{EdgeMode, Grid};

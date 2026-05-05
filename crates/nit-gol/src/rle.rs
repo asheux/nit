@@ -46,7 +46,10 @@ pub fn write_rle_bits<W: Write>(
     let cols = width as usize;
     let rows = height as usize;
     ensure_bitset_fits(cols, rows, bits)?;
-    write_rle_document(writer, cols, rows, rule, |x, y| bit_at(bits, y * cols + x))
+    write_rle_document(writer, cols, rows, rule, |x, y| {
+        let idx = y * cols + x;
+        (bits[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD))) != 0
+    })
 }
 
 fn write_rle_document<W, F>(
@@ -73,6 +76,7 @@ where
     writer.write_all(TERMINATOR)
 }
 
+// Reject short bitsets early; downstream cell reads would index past the slice.
 fn ensure_bitset_fits(width: usize, height: usize, bits: &[u64]) -> io::Result<()> {
     let needed_words = width.saturating_mul(height).div_ceil(BITS_PER_WORD);
     if bits.len() >= needed_words {
@@ -92,10 +96,10 @@ where
     W: Write,
     F: FnMut(usize) -> bool,
 {
-    let mut run_tag = tag_for(cell_alive(0));
+    let mut run_tag = if cell_alive(0) { ALIVE_TAG } else { DEAD_TAG };
     let mut run_len: usize = 1;
     for x in 1..width {
-        let next_tag = tag_for(cell_alive(x));
+        let next_tag = if cell_alive(x) { ALIVE_TAG } else { DEAD_TAG };
         if next_tag == run_tag {
             run_len += 1;
             continue;
@@ -107,26 +111,10 @@ where
     write_run(writer, run_len, run_tag)
 }
 
-#[inline]
-const fn tag_for(alive: bool) -> u8 {
-    if alive {
-        ALIVE_TAG
-    } else {
-        DEAD_TAG
-    }
-}
-
-/// Emit a single `<count><tag>` run. The count is elided for singletons.
+// The count is elided for singletons; spec leaves a bare tag byte for runs of one.
 fn write_run<W: Write>(writer: &mut W, len: usize, tag: u8) -> io::Result<()> {
     if len > 1 {
         write!(writer, "{len}")?;
     }
     writer.write_all(&[tag])
-}
-
-#[inline]
-fn bit_at(bits: &[u64], idx: usize) -> bool {
-    let word = bits[idx / BITS_PER_WORD];
-    let mask = 1u64 << (idx % BITS_PER_WORD);
-    (word & mask) != 0
 }

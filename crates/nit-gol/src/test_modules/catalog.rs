@@ -43,7 +43,13 @@ fn catalog_from_toml(source: &str) -> RuleCatalog {
         .into_iter()
         .map(|raw| build_entry_from_file(raw, RuleSource::Builtin).expect("build entry"))
         .collect();
-    RuleCatalog::from_entries(entries)
+    RuleCatalog {
+        entries,
+        visible_indices: Vec::new(),
+        id_index: HashMap::new(),
+        rule_index: HashMap::new(),
+        alias_index: HashMap::new(),
+    }
 }
 
 fn merge_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Vec<String>) {
@@ -52,8 +58,8 @@ fn merge_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Ve
     catalog.rebuild_indices(warnings);
 }
 
-/// Panics when `value` was already present; `field` and `rule_id`
-/// make the failure pinpoint the duplicate entry.
+// `field` and `rule_id` are panic context — they pinpoint which builtin
+// row tripped the uniqueness check.
 fn insert_unique<T: std::hash::Hash + Eq + std::fmt::Debug>(
     seen: &mut HashSet<T>,
     value: T,
