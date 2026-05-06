@@ -27,10 +27,14 @@ pub(super) const PARSIMONY_TINY_FN_FRACTION_THRESHOLD: f32 = 0.50;
 /// in a single file suggests predicate over-extraction).
 pub(super) const PARSIMONY_TINY_FN_MIN_COUNT: usize = 12;
 
-/// Well-documented code typically sits at 15-25%. Above 40% suggests
-/// comments are being added to diversify the token stream for genome scores
-/// rather than to explain non-obvious logic.
-pub(super) const PARSIMONY_COMMENT_RATIO_THRESHOLD: f32 = 0.40;
+/// Well-documented code typically sits at 15-25%. Above 35% suggests the
+/// file has crossed from "well-documented" into "doc-comment heavy" — either
+/// padding for genome scores OR field-level comments that restate the field's
+/// purpose without adding non-obvious context. The 0.40 threshold used to
+/// miss files like state/multipane.rs (37.44%) where every field carried a
+/// doc comment but the structural shape was still bloated; 0.35 catches that
+/// pattern with a wide margin to the next-densest production file (~22%).
+pub(super) const PARSIMONY_COMMENT_RATIO_THRESHOLD: f32 = 0.35;
 
 /// Any occurrence of consecutive identical non-blank comment lines is a
 /// duplicate-doc accident (a merge artifact or a refactor that forgot to
