@@ -621,6 +621,7 @@ fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> S
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 
@@ -1094,6 +1095,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "design".into(),
@@ -1113,6 +1115,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "implement".into(),
@@ -1132,6 +1135,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "review".into(),
@@ -1151,6 +1155,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
         ],
         synthesis_prompt: None,
@@ -1225,6 +1230,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "w2".into(),
@@ -1244,6 +1250,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "r1".into(),
@@ -1263,6 +1270,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
         ],
         synthesis_prompt: None,
@@ -1335,6 +1343,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "w2".into(),
@@ -1354,6 +1363,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "w3".into(),
@@ -1373,6 +1383,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
         ],
         synthesis_prompt: None,
@@ -1658,6 +1669,7 @@ fn apply_lab_lenses_injects_defaults_when_planner_omits() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
 
     let mut tasks = vec![
@@ -1741,6 +1753,7 @@ fn apply_lab_lenses_preserves_planner_supplied_lenses() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
 
     let p01_original = "LENS A (minimal-diff): smallest fix. Survey the module.";
@@ -1798,6 +1811,7 @@ fn apply_lab_lenses_is_noop_for_single_proposer() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }];
 
     let warnings = apply_lab_lenses(&mut tasks);
@@ -1834,6 +1848,7 @@ fn apply_lab_lenses_cycles_when_proposer_count_exceeds_pool() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
 
     let mut tasks: Vec<SwarmTask> = (0..7).map(|i| mk(&format!("propose-{i:02}"))).collect();
@@ -1886,6 +1901,7 @@ fn normalize_lab_plan_strips_proposer_to_proposer_deps() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
 
     let mut tasks = vec![
@@ -1970,6 +1986,7 @@ fn normalize_lab_plan_is_noop_for_single_proposer() {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
 
     let mut tasks = vec![
@@ -2093,6 +2110,7 @@ fn deadlock_detection_skips_pending_tasks() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "t2".into(),
@@ -2112,6 +2130,7 @@ fn deadlock_detection_skips_pending_tasks() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
         ],
         synthesis_prompt: None,
@@ -2391,6 +2410,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "ready".into(),
@@ -2410,6 +2430,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "blocked".into(),
@@ -2429,6 +2450,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
             SwarmTask {
                 id: "skip".into(),
@@ -2448,6 +2470,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 retries: 0,
                 compliance_missing_files: Vec::new(),
                 shard_index: None,
+                pre_dispatch_file_state: std::collections::HashMap::new(),
             },
         ],
         synthesis_prompt: None,
@@ -2897,6 +2920,7 @@ fn make_writer_task(id: &str, agent: &str, role: Option<&str>, writes: bool) -> 
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 
@@ -3717,6 +3741,7 @@ fn make_verifying_run_with_fail_report() -> SwarmRun {
             retries: 0,
             compliance_missing_files: Vec::new(),
             shard_index: None,
+            pre_dispatch_file_state: std::collections::HashMap::new(),
         }],
         synthesis_prompt: None,
         gate_output: Some("prior".into()),
@@ -4748,6 +4773,164 @@ fn wrap_task_prompt_empty_shard_partition_renders_fallback_note() {
     assert!(prompt.contains("Empty shard"));
 }
 
+#[test]
+fn integrate_role_contract_calls_out_stub_files_as_failure() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("integrate");
+    let joined = lines.join(" || ");
+    assert!(joined.contains("STUB FILES = TASK FAILURE"));
+    assert!(joined.contains("snapshots every declared file's line count"));
+    assert!(joined.contains("performative splits"));
+}
+
+// Helper: build a temp workspace path that's unique per test run.
+fn make_temp_workspace(label: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut p = std::env::temp_dir();
+    p.push(format!("nit-test-{label}-{}-{nanos}", std::process::id()));
+    p.push("ws");
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+// Stub detection: a newly-created declared file with < 20 lines is a stub.
+#[test]
+fn structural_split_gaps_flags_newly_created_stub_file() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("stub");
+    std::fs::create_dir_all(workspace.join("state")).unwrap();
+    std::fs::write(
+        workspace.join("state/agents.rs"),
+        "//! `AgentsState`.\n//!\n//! Stub: still in state.rs.\n//! Deferred to a dedicated turn.\n",
+    )
+    .unwrap();
+
+    let propose = propose_with_files("propose-01", &["state/agents.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
+        "state/agents.rs".to_string(),
+        super::FilePreState { existed: false, line_count: 0 },
+    )]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-stub".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert_eq!(gaps.len(), 1);
+    assert!(gaps[0].contains("state/agents.rs"));
+    assert!(gaps[0].contains("stub"));
+}
+
+// Negative: a substantively populated new file (≥20 lines) does NOT trigger.
+#[test]
+fn structural_split_gaps_accepts_substantive_new_file() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("substantive");
+    std::fs::create_dir_all(workspace.join("state")).unwrap();
+    let real_content = (0..30)
+        .map(|i| format!("pub fn item_{i}() -> i32 {{ {i} }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(workspace.join("state/agents.rs"), real_content).unwrap();
+
+    let propose = propose_with_files("propose-01", &["state/agents.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
+        "state/agents.rs".to_string(),
+        super::FilePreState { existed: false, line_count: 0 },
+    )]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-ok".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(gaps.is_empty(), "30-line new file should not trigger; got {gaps:?}");
+}
+
+// Incomplete-split: huge source barely shrank + new sibling stubs.
+#[test]
+fn structural_split_gaps_flags_incomplete_split() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("incomplete");
+    std::fs::create_dir_all(workspace.join("state")).unwrap();
+    let big = (0..5800).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+    std::fs::write(workspace.join("state.rs"), big).unwrap();
+    std::fs::write(
+        workspace.join("state/agents.rs"),
+        "//! Stub.\n//!\n//! Still in state.rs.\n",
+    )
+    .unwrap();
+
+    let propose = propose_with_files("propose-01", &["state.rs", "state/agents.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([
+        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 5910 }),
+        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+    ]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-incomplete".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(gaps.iter().any(|g| g.contains("state.rs") && g.contains("incomplete split")),
+        "expected incomplete-split for state.rs; got {gaps:?}");
+    assert!(gaps.iter().any(|g| g.contains("state/agents.rs") && g.contains("stub")),
+        "expected stub entry for state/agents.rs; got {gaps:?}");
+}
+
+// Negative: real split (huge → small + substantive sibling) → no flag.
+#[test]
+fn structural_split_gaps_accepts_real_split() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("real-split");
+    std::fs::create_dir_all(workspace.join("state")).unwrap();
+    let shrunk = (0..100).map(|_| "pub use foo;").collect::<Vec<_>>().join("\n");
+    std::fs::write(workspace.join("state.rs"), shrunk).unwrap();
+    let big_sibling = (0..200).map(|i| format!("pub fn f{i}() {{}}")).collect::<Vec<_>>().join("\n");
+    std::fs::write(workspace.join("state/agents.rs"), big_sibling).unwrap();
+
+    let propose = propose_with_files("propose-01", &["state.rs", "state/agents.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([
+        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 5910 }),
+        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+    ]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-real-split".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(gaps.is_empty(), "real split should pass; got {gaps:?}");
+}
+
 // Critical: if signoff and structural compliance both fire on the same turn,
 // they must coordinate so the agent gets ONE re-dispatch, not two attempts
 // burned for one effective retry.
@@ -4806,6 +4989,7 @@ fn dag_task(id: &str, role: &str, deps: Vec<&str>, writes: bool) -> SwarmTask {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 

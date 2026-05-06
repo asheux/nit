@@ -145,6 +145,7 @@ fn integrate_task() -> SwarmTask {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 
@@ -167,6 +168,7 @@ fn read_only_task(role: &str) -> SwarmTask {
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 

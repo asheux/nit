@@ -5,10 +5,11 @@ use nit_core::AppState;
 use super::{
     dependency_payload_text, dependency_payload_text_full, find_swarm_cycle_path,
     merge_task_artifacts, normalize_role_label, parse_task_artifacts, partition_files_for_shard,
-    truncate_chars, wrap_task_prompt, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask,
+    truncate_chars, wrap_task_prompt, FilePreState, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask,
     SwarmTaskState, SwarmTemplate, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL,
 };
+use std::collections::HashMap;
 
 pub(super) fn initialize_task_graph(run: &mut SwarmRun) {
     let ids = run
@@ -89,10 +90,174 @@ pub(super) fn structural_compliance_missing_files(
     if !task.writes {
         return Vec::new();
     }
+    let Some(scope) = compute_integrator_scope(run, task, integrator_task_id) else {
+        return Vec::new();
+    };
+    if scope.is_empty() {
+        return Vec::new();
+    }
     let mission_writes: Option<&HashSet<std::path::PathBuf>> =
         state.genome_mission_modified.get(&run.mission_id);
     let workspace = state.workspace_root.as_path();
 
+    let mut missing: Vec<String> = Vec::new();
+    for rel in scope.iter() {
+        let abs = abs_path(rel, workspace);
+        let touched = mission_writes
+            .map(|set| set.contains(&abs))
+            .unwrap_or(false);
+        if !touched {
+            missing.push(rel.clone());
+        }
+    }
+    missing
+}
+
+// Detects performative compliance: declared files were "touched" so
+// `structural_compliance_missing_files` is silent, but the actual structural
+// work didn't happen. Two patterns:
+//   1. STUB — a newly-created declared file has < MIN_NON_STUB_LINES; the
+//      agent satisfied the existence check by writing a doc-comment shell.
+//   2. INCOMPLETE_SPLIT — a declared "huge" source file (>HUGE_FILE_THRESHOLD
+//      lines pre-edit) didn't shrink by ≥SHRINK_RATIO_REQUIRED, AND new
+//      same-stem-directory siblings were created. Classic split-into-
+//      submodule pattern gone wrong: stubs created, content not moved.
+//
+// Returns annotated descriptors (path + reason) so the retry continuation
+// preamble can show the agent the exact failure mode per file.
+pub(super) fn structural_split_gaps(
+    run: &SwarmRun,
+    integrator_task_id: &str,
+    state: &AppState,
+) -> Vec<String> {
+    const MIN_NON_STUB_LINES: usize = 20;
+    const HUGE_FILE_THRESHOLD: usize = 1500;
+    const SHRINK_RATIO_REQUIRED: f64 = 0.30;
+
+    let Some(task) = run.tasks.iter().find(|t| t.id == integrator_task_id) else {
+        return Vec::new();
+    };
+    if !task.writes {
+        return Vec::new();
+    }
+    let Some(scope) = compute_integrator_scope(run, task, integrator_task_id) else {
+        return Vec::new();
+    };
+    if scope.is_empty() {
+        return Vec::new();
+    }
+    let workspace = state.workspace_root.as_path();
+
+    // Snapshot post-edit state for every declared file in scope.
+    let mut current: HashMap<String, (bool, usize)> = HashMap::new();
+    for rel in scope.iter() {
+        let abs = abs_path(rel, workspace);
+        let entry = match std::fs::read_to_string(&abs) {
+            Ok(content) => (true, content.lines().count()),
+            Err(_) => (false, 0),
+        };
+        current.insert(rel.clone(), entry);
+    }
+
+    let mut gaps: Vec<String> = Vec::new();
+
+    // (1) Stub detection — newly created files that ended up trivial.
+    for rel in scope.iter() {
+        let pre = task.pre_dispatch_file_state.get(rel);
+        let pre_existed = pre.map(|p| p.existed).unwrap_or(false);
+        let pre_lines = pre.map(|p| p.line_count).unwrap_or(0);
+        let &(post_existed, post_lines) = current.get(rel).expect("just inserted");
+        if !post_existed || post_lines >= MIN_NON_STUB_LINES {
+            continue;
+        }
+        if !pre_existed {
+            gaps.push(format!(
+                "{rel} (stub: only {post_lines} lines on a newly-created file; expected ≥{MIN_NON_STUB_LINES})"
+            ));
+        } else if pre_lines >= MIN_NON_STUB_LINES {
+            gaps.push(format!(
+                "{rel} (suspicious shrink: {pre_lines} → {post_lines} lines; content removed without an obvious destination)"
+            ));
+        }
+    }
+
+    // (2) Incomplete-split detection — declared huge sources that didn't
+    // shrink commensurate with their newly-created same-stem-dir siblings.
+    let new_files: Vec<&String> = scope
+        .iter()
+        .filter(|rel| {
+            let pre_existed = task
+                .pre_dispatch_file_state
+                .get(*rel)
+                .map(|p| p.existed)
+                .unwrap_or(false);
+            let post_existed = current.get(*rel).map(|(e, _)| *e).unwrap_or(false);
+            !pre_existed && post_existed
+        })
+        .collect();
+
+    if !new_files.is_empty() {
+        for rel in scope.iter() {
+            let Some(pre) = task.pre_dispatch_file_state.get(rel) else {
+                continue;
+            };
+            if !pre.existed || pre.line_count <= HUGE_FILE_THRESHOLD {
+                continue;
+            }
+            let &(_, post_lines) = current.get(rel).expect("just inserted");
+            let pre_lines = pre.line_count;
+            #[allow(clippy::cast_precision_loss)]
+            let max_ok_post = (pre_lines as f64 * (1.0 - SHRINK_RATIO_REQUIRED)) as usize;
+            if post_lines <= max_ok_post {
+                continue;
+            }
+            // Check for new sibling files in <parent>/<stem>/...
+            let p = std::path::Path::new(rel);
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let parent = p
+                .parent()
+                .and_then(|pp| pp.to_str())
+                .filter(|s| !s.is_empty());
+            let split_dir = match parent {
+                Some(parent) => format!("{parent}/{stem}/"),
+                None => format!("{stem}/"),
+            };
+            let siblings: Vec<&str> = new_files
+                .iter()
+                .filter(|nf| nf.starts_with(&split_dir))
+                .map(|s| s.as_str())
+                .collect();
+            if siblings.is_empty() {
+                continue;
+            }
+            let pct_kept = (post_lines * 100) / pre_lines.max(1);
+            let preview: Vec<&str> = siblings.iter().take(3).copied().collect();
+            let more = if siblings.len() > preview.len() {
+                format!(" (+{} more)", siblings.len() - preview.len())
+            } else {
+                String::new()
+            };
+            gaps.push(format!(
+                "{rel} (incomplete split: {post_lines}/{pre_lines} lines retained = {pct_kept}%; new siblings under {split_dir}: {}{more})",
+                preview.join(", ")
+            ));
+        }
+    }
+
+    gaps
+}
+
+// Walks the integrator's propose/judge dep artifacts and returns the
+// scoped declared file list (shard-partitioned when applicable, full set
+// otherwise). Returns None when the check should be deferred (peer
+// integrators still pending in a planner-emitted multi-integrator plan).
+fn compute_integrator_scope(
+    run: &SwarmRun,
+    task: &SwarmTask,
+    integrator_task_id: &str,
+) -> Option<Vec<String>> {
     let mut declared: Vec<String> = Vec::new();
     for dep_id in task.deps.iter() {
         let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
@@ -112,38 +277,26 @@ pub(super) fn structural_compliance_missing_files(
             }
         }
     }
-
     if declared.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
+    if let Some((shard_idx, shard_total)) = task.shard_index {
+        return Some(partition_files_for_shard(&declared, shard_idx, shard_total));
+    }
+    if has_pending_integrate_peers(run, integrator_task_id) {
+        return None;
+    }
+    declared.sort();
+    declared.dedup();
+    Some(declared)
+}
 
-    let scope = if let Some((shard_idx, shard_total)) = task.shard_index {
-        partition_files_for_shard(&declared, shard_idx, shard_total)
+fn abs_path(rel: &str, workspace: &std::path::Path) -> std::path::PathBuf {
+    if std::path::Path::new(rel).is_absolute() {
+        std::path::PathBuf::from(rel)
     } else {
-        if has_pending_integrate_peers(run, integrator_task_id) {
-            return Vec::new();
-        }
-        let mut deduped = declared;
-        deduped.sort();
-        deduped.dedup();
-        deduped
-    };
-
-    let mut missing: Vec<String> = Vec::new();
-    for rel in scope.iter() {
-        let abs = if std::path::Path::new(rel).is_absolute() {
-            std::path::PathBuf::from(rel)
-        } else {
-            workspace.join(rel)
-        };
-        let touched = mission_writes
-            .map(|set| set.contains(&abs))
-            .unwrap_or(false);
-        if !touched {
-            missing.push(rel.clone());
-        }
+        workspace.join(rel)
     }
-    missing
 }
 
 // True when at least one OTHER integrate task in the run is not yet terminal.
@@ -390,6 +543,14 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
         let prompt = build_task_prompt(run, task, &deps_payload);
         let agent_id = task.agent_id.clone();
         let task_role = task.role.clone();
+        // Snapshot pre-edit file state for write-role tasks the FIRST time
+        // they're dispatched. Retries reuse the original snapshot so the
+        // post-turn check always compares against the workspace as it was
+        // before the agent started touching anything.
+        if run.tasks[idx].writes && run.tasks[idx].pre_dispatch_file_state.is_empty() {
+            let snapshot = capture_pre_dispatch_file_state(run, &run.tasks[idx]);
+            run.tasks[idx].pre_dispatch_file_state = snapshot;
+        }
         run.tasks[idx].state = SwarmTaskState::Dispatched;
         dispatches.push(SwarmDispatch {
             agent_id,
@@ -399,6 +560,43 @@ pub(super) fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
         });
     }
     dispatches
+}
+
+// Snapshots existence + line count for every file declared by the task's
+// propose/judge dependencies. Called once per write-role task at first
+// dispatch. The post-turn check compares current state against this baseline
+// to detect (a) stub-only file creations and (b) declared "huge" sources
+// that didn't shrink after the agent claimed to split them.
+fn capture_pre_dispatch_file_state(
+    run: &SwarmRun,
+    task: &SwarmTask,
+) -> HashMap<String, FilePreState> {
+    let mut out = HashMap::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if rel.is_empty() || out.contains_key(rel) {
+                continue;
+            }
+            let abs = abs_path(rel, run.spawn_cwd.as_path());
+            let (existed, line_count) = match std::fs::read_to_string(&abs) {
+                Ok(content) => (true, content.lines().count()),
+                Err(_) => (false, 0),
+            };
+            out.insert(rel.to_string(), FilePreState { existed, line_count });
+        }
+    }
+    out
 }
 
 fn build_task_prompt(

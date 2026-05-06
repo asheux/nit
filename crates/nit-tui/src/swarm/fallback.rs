@@ -64,6 +64,7 @@ fn pending_task(
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
 

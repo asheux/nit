@@ -141,7 +141,7 @@ use gate_retry::{build_verify_prompt, parse_gate_report, truncate_chars, try_dis
 use graph_exec::{
     dispatch_ready_tasks, initialize_task_graph, mark_task_finished, mark_task_running,
     maybe_resolve_deadlock, refresh_task_readiness, structural_compliance_missing_files,
-    tasks_terminal_count,
+    structural_split_gaps, tasks_terminal_count,
 };
 pub(crate) use graph_exec::{per_dep_budget, task_uses_full_output_budget};
 use json::{extract_json_code_block, extract_json_code_blocks};
@@ -191,7 +191,7 @@ pub(crate) use types::{
     SwarmEventOutcome,
 };
 use types::{
-    parse_swarm_template, Gate, GateBundle, GenomeGatePending, GenomeReviewPending,
+    parse_swarm_template, FilePreState, Gate, GateBundle, GenomeGatePending, GenomeReviewPending,
     SwarmDagValidationMode, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState, SwarmTemplate,
     DEFAULT_DAG_VALIDATION_MODE,
 };

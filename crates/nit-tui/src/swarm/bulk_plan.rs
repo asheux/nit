@@ -346,6 +346,7 @@ pub(super) fn ensure_integrate_task(
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     });
     warnings
         .push("Plan safety net: injected integrate task because the planner omitted one.".into());
@@ -431,6 +432,7 @@ pub(super) fn ensure_judge_task_for_multi_proposer(
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     };
     tasks.push(judge_task);
     warnings.push(format!(
@@ -643,6 +645,7 @@ pub(super) fn ensure_agent_coverage(
             retries: 0,
             compliance_missing_files: Vec::new(),
             shard_index: None,
+            pre_dispatch_file_state: std::collections::HashMap::new(),
         });
     }
 

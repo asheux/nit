@@ -1180,6 +1180,7 @@ fn parse_v1_tasks(
             retries: 0,
             compliance_missing_files: Vec::new(),
             shard_index: None,
+            pre_dispatch_file_state: std::collections::HashMap::new(),
         });
     }
     tasks
@@ -1396,5 +1397,6 @@ fn parse_v2_task(
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     })
 }

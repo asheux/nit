@@ -11,11 +11,11 @@ use super::{
     maybe_resolve_deadlock, maybe_spawn_genome_review, parse_gate_report, parse_plan_from_planner,
     push_system_message_to_mission, read_workspace_dag_validation_mode, refresh_task_readiness,
     repair_swarm_dag, run_gates_label, shard_integrate_for_large_scope, spawn_genome_gate_eval,
-    structural_compliance_missing_files, tag_last_agent_message_kind, tasks_terminal_count,
-    try_dispatch_gate_retry, update_mission_final, update_mission_phase, update_mission_status,
-    GenomeGatePending, ParsedSwarmPlan, SwarmArtifactFocus, SwarmDagValidationMode, SwarmDispatch,
-    SwarmEventOutcome, SwarmRun, SwarmRuntime, SwarmStage, SwarmTaskState,
-    DEFAULT_DAG_VALIDATION_MODE,
+    structural_compliance_missing_files, structural_split_gaps, tag_last_agent_message_kind,
+    tasks_terminal_count, try_dispatch_gate_retry, update_mission_final, update_mission_phase,
+    update_mission_status, GenomeGatePending, ParsedSwarmPlan, SwarmArtifactFocus,
+    SwarmDagValidationMode, SwarmDispatch, SwarmEventOutcome, SwarmRun, SwarmRuntime, SwarmStage,
+    SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
 };
 
 // Cap on re-dispatches when an output fails the sign-off check. Past this
@@ -550,8 +550,16 @@ fn report_structural_compliance(state: &mut AppState, run: &SwarmRun, task_id: &
 // failure modes firing on the same turn would consume two attempts for a
 // single re-dispatch.
 fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, task_id: &str) {
-    let missing = structural_compliance_missing_files(run, task_id, state);
-    if missing.is_empty() {
+    // Combine three failure modes:
+    //   1. files declared but never touched (mission_writes miss)
+    //   2. newly-created stub files (existence-only compliance)
+    //   3. declared "huge" sources whose split didn't actually move content
+    // All three feed into the same retry slot — the agent is told about
+    // every gap on the next dispatch.
+    let mut entries: Vec<String> = structural_compliance_missing_files(run, task_id, state);
+    let split_gaps = structural_split_gaps(run, task_id, state);
+    entries.extend(split_gaps);
+    if entries.is_empty() {
         return;
     }
     let Some(task) = run.tasks.iter_mut().find(|t| t.id == task_id) else {
@@ -562,14 +570,14 @@ fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, ta
     }
     // Signoff just re-readied us → piggyback on its retry slot.
     if matches!(task.state, SwarmTaskState::Ready) {
-        task.compliance_missing_files = missing.clone();
+        task.compliance_missing_files = entries.clone();
         let task_id_owned = task.id.clone();
         push_system_message_to_mission(
             state,
             &run.mission_id,
             format!(
-                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' missed {} blueprint file(s); attaching to in-flight sign-off retry.",
-                missing.len(),
+                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' has {} blueprint gap(s); attaching to in-flight sign-off retry.",
+                entries.len(),
             ),
         );
         return;
@@ -579,12 +587,12 @@ fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, ta
         task.state = SwarmTaskState::Ready;
         task.failed = false;
         task.expected_artifacts_missing = false;
-        task.compliance_missing_files = missing.clone();
+        task.compliance_missing_files = entries.clone();
         let attempt = task.retries;
         let task_id_owned = task.id.clone();
-        let preview: Vec<String> = missing.iter().take(5).cloned().collect();
-        let more = if missing.len() > preview.len() {
-            format!(" (+{} more)", missing.len() - preview.len())
+        let preview: Vec<String> = entries.iter().take(5).cloned().collect();
+        let more = if entries.len() > preview.len() {
+            format!(" (+{} more)", entries.len() - preview.len())
         } else {
             String::new()
         };
@@ -592,19 +600,19 @@ fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, ta
             state,
             &run.mission_id,
             format!(
-                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' missed {} blueprint file(s): {}{more}. Re-dispatching as continuation (attempt {attempt}/{MAX_CONTINUATION_RETRIES}).",
-                missing.len(),
-                preview.join(", "),
+                "STRUCTURAL COMPLIANCE: task '{task_id_owned}' has {} blueprint gap(s): {}{more}. Re-dispatching as continuation (attempt {attempt}/{MAX_CONTINUATION_RETRIES}).",
+                entries.len(),
+                preview.join("; "),
             ),
         );
     } else {
-        task.compliance_missing_files = missing.clone();
+        task.compliance_missing_files = entries.clone();
         push_system_message_to_mission(
             state,
             &run.mission_id,
             format!(
-                "STRUCTURAL COMPLIANCE: task '{task_id}' still missing {} blueprint file(s) after {MAX_CONTINUATION_RETRIES} continuation attempt(s) — accepting partial result and letting the verifier flag the gap.",
-                missing.len(),
+                "STRUCTURAL COMPLIANCE: task '{task_id}' still has {} blueprint gap(s) after {MAX_CONTINUATION_RETRIES} continuation attempt(s) — accepting partial result and letting the verifier flag the gap.",
+                entries.len(),
             ),
         );
     }

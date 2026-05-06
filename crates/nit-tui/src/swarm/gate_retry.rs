@@ -209,6 +209,7 @@ fn enqueue_retry_task(
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     });
     run.gate_retry_count = attempt;
     run.gate_output = None;

@@ -665,6 +665,23 @@ pub(super) struct SwarmTask {
     /// non-sharded tasks. Used by dispatch to inject the shard's file slice
     /// and by the structural-compliance check to scope coverage per shard.
     pub(super) shard_index: Option<(u8, u8)>,
+    /// Snapshot of (existed, line_count) for each declared file at the
+    /// moment this write-role task is first dispatched. Empty for read-only
+    /// tasks. Populated by `dispatch_ready_tasks`. Compared post-turn to
+    /// detect stub-only file creations and incomplete splits — the runtime
+    /// expects new declared files to be substantive (≥20 lines) and
+    /// declared "huge" source files (>1500 lines) to shrink meaningfully
+    /// when same-stem-dir siblings get created.
+    pub(super) pre_dispatch_file_state: HashMap<String, FilePreState>,
+}
+
+/// Snapshot of a file's state at integrate-task dispatch time. Used by the
+/// structural-compliance check to detect stub creations and incomplete
+/// splits after the agent's turn finishes.
+#[derive(Clone, Debug)]
+pub(super) struct FilePreState {
+    pub(super) existed: bool,
+    pub(super) line_count: usize,
 }
 
 // `label` is the display string ("rust-ci", "custom", ...) used in system

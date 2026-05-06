@@ -120,5 +120,6 @@ fn make_task(idx: usize, agent_id: &str, role: &str, state: SwarmTaskState) -> S
         retries: 0,
         compliance_missing_files: Vec::new(),
         shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
     }
 }
