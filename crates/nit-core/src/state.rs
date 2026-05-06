@@ -21,8 +21,28 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod action_apply;
+mod agent_types;
+mod agents_state;
+mod cmd_line;
+mod defaults;
+mod family_run;
+pub mod file_tree;
+mod games;
 pub mod multipane;
+mod text_input;
+mod visualizer;
+pub use file_tree::{
+    DirEntryModel, FileTreeKind, FileTreeRow, FileTreeState, ProtocolPickerState, RulePickerState,
+};
 pub use multipane::{DirSearchState, MultipaneState, PaneSelection, PaneSession};
+
+use defaults::{
+    artifacts_popup_last_max_scroll_default, chat_input_scroll_default,
+    claude_max_parallel_turns_default, codex_max_parallel_turns_default,
+    gate_monitor_max_scroll_default, scroll_cache_sentinel, swarm_default_mission_default,
+    swarm_default_template_default,
+};
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
 
@@ -196,14 +216,6 @@ impl Default for GamesCaSimState {
             last_max_scroll: usize::MAX,
         }
     }
-}
-
-fn scroll_cache_sentinel() -> usize {
-    usize::MAX
-}
-
-fn gate_monitor_max_scroll_default() -> usize {
-    usize::MAX
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -1118,30 +1130,6 @@ pub struct AgentsState {
     pub intake_agent_id: Option<String>,
 }
 
-fn chat_input_scroll_default() -> usize {
-    usize::MAX
-}
-
-fn artifacts_popup_last_max_scroll_default() -> usize {
-    usize::MAX
-}
-
-fn swarm_default_template_default() -> String {
-    "lab".into()
-}
-
-fn swarm_default_mission_default() -> String {
-    "auto".into()
-}
-
-fn codex_max_parallel_turns_default() -> usize {
-    2
-}
-
-fn claude_max_parallel_turns_default() -> usize {
-    2
-}
-
 impl AgentsState {
     pub fn default_with_mocks() -> Self {
         let agents = vec![
@@ -1918,90 +1906,6 @@ impl CommandLine {
 impl Default for CommandLine {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct RulePickerState {
-    pub open: bool,
-    pub query: String,
-    pub selected: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ProtocolPickerState {
-    pub open: bool,
-    pub selected: usize,
-    pub custom_input: String,
-    pub custom_error: Option<String>,
-    pub custom_preview: Option<String>,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum FileTreeKind {
-    File,
-    Dir,
-    Loading,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct DirEntryModel {
-    pub name: String,
-    pub path: PathBuf,
-    pub is_dir: bool,
-    pub is_symlink: bool,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FileTreeRow {
-    pub text: String,
-    pub path: PathBuf,
-    pub kind: FileTreeKind,
-    pub depth: usize,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FileTreeState {
-    pub open: bool,
-    pub root: PathBuf,
-
-    // UI state:
-    pub selected: usize,
-    pub scroll_offset: usize,
-
-    // Filtering:
-    pub show_hidden: bool,
-    pub show_ignored: bool,
-
-    // Computed view (UI model):
-    #[serde(skip)]
-    pub rows: Vec<FileTreeRow>,
-
-    // Expanded directories (maintained by the TUI runtime).
-    #[serde(skip)]
-    pub expanded_dirs: HashSet<PathBuf>,
-
-    // Async loading + cache (maintained by the TUI runtime):
-    #[serde(skip)]
-    pub loading_dirs: HashSet<PathBuf>,
-    #[serde(skip)]
-    pub cache: HashMap<PathBuf, Vec<DirEntryModel>>,
-}
-
-impl Default for FileTreeState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            root: PathBuf::new(),
-            selected: 0,
-            scroll_offset: 0,
-            show_hidden: false,
-            show_ignored: false,
-            rows: Vec::new(),
-            expanded_dirs: HashSet::new(),
-            loading_dirs: HashSet::new(),
-            cache: HashMap::new(),
-        }
     }
 }
 

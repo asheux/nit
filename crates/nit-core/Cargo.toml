@@ -17,16 +17,19 @@ blake3 = { workspace = true }
 nit-utils = { path = "../nit-utils" }
 nit-gol = { path = "../nit-gol" }
 nit-games = { path = "../nit-games" }
-tree-sitter = "0.20.10"
-tree-sitter-rust = "0.20.4"
-tree-sitter-python = "0.20.4"
-tree-sitter-javascript = "0.20.4"
-tree-sitter-typescript = "0.20.5"
-tree-sitter-markdown-fork = "0.7.3"
-tree-sitter-html = "0.19.0"
-tree-sitter-css = "0.20.0"
-tree-sitter-json = "0.20.2"
-tree-sitter-toml = "0.20.0"
-tree-sitter-yaml = "0.0.1"
-tree-sitter-bash = "0.20.3"
 toml = { workspace = true }
+
+# Tree-sitter parsers (used by the seed encoders + genome report AST analysis).
+# Versions pinned for reproducibility; CI uses --locked.
+tree-sitter = "0.20.10"
+tree-sitter-bash = "0.20.3"
+tree-sitter-css = "0.20.0"
+tree-sitter-html = "0.19.0"
+tree-sitter-javascript = "0.20.4"
+tree-sitter-json = "0.20.2"
+tree-sitter-markdown-fork = "0.7.3"
+tree-sitter-python = "0.20.4"
+tree-sitter-rust = "0.20.4"
+tree-sitter-toml = "0.20.0"
+tree-sitter-typescript = "0.20.5"
+tree-sitter-yaml = "0.0.1"

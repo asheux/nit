@@ -1,3 +1,6 @@
+//! Centralized tests for `AgentBusEvent::apply` — token accounting, turn
+//! lifecycle, soft-cancel routing, and substrate signal emission.
+
 use super::*;
 use crate::state::{
     AgentAlertSeverity, AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState,

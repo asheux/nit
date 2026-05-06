@@ -1,6 +1,7 @@
-//! RepeatFailureObserver — if an agent accumulates ≥2 Warning signals in
-//! the last 5 generations AND no recent observer-emitted HelpNeeded already
-//! targets them, emit HelpNeeded on that agent.
+//! HelpNeeded for an agent that accumulates ≥threshold Warning signals in
+//! the last WINDOW_GENS generations. Threshold is read from
+//! `state.substrate.mood.modulation().repeat_failure_threshold` so the policy
+//! tightens or relaxes with the system mood.
 
 use std::collections::HashMap;
 
@@ -14,46 +15,22 @@ pub const OBSERVER: Observer = Observer {
 };
 
 const WINDOW_GENS: u64 = 5;
-/// Consolidation-mood default for reference only; actual threshold is
-/// read from `state.substrate.mood.modulation().repeat_failure_threshold`.
-const THRESHOLD: usize = 2;
 
 fn observe(state: &AppState) -> Vec<ObservedEmission> {
     let sub = &state.substrate;
-    let current_gen = sub.current_generation();
-    let window_start = current_gen.saturating_sub(WINDOW_GENS);
+    let window_start = sub.current_generation().saturating_sub(WINDOW_GENS);
 
-    // Count recent Warnings per posted_by.
     let mut warnings_by_agent: HashMap<String, usize> = HashMap::new();
-    for s in sub.signals.values() {
-        if s.kind == SignalKind::Warning && s.posted_at_gen >= window_start {
-            *warnings_by_agent.entry(s.posted_by.clone()).or_insert(0) += 1;
-        }
+    for s in super::iter_recent_warnings(sub, window_start) {
+        *warnings_by_agent.entry(s.posted_by.clone()).or_insert(0) += 1;
     }
 
-    // Self-silencing: skip if a recent observer:repeat_failure HelpNeeded
-    // already targets this agent.
-    let mut recent_helps: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for s in sub.signals.values() {
-        if s.kind == SignalKind::HelpNeeded
-            && s.posted_by == "observer:repeat_failure"
-            && s.posted_at_gen >= window_start
-        {
-            if let SignalTarget::Agent { agent_id } = &s.target {
-                recent_helps.insert(agent_id.clone());
-            }
-        }
-    }
-
+    let recent_helps = super::recent_help_targets(sub, "observer:repeat_failure", window_start);
     let threshold = sub.mood.modulation().repeat_failure_threshold;
-    let _ = THRESHOLD; // retained for backward-compat reference only.
 
     let mut emissions = Vec::new();
     for (agent_id, count) in warnings_by_agent {
-        if count < threshold {
-            continue;
-        }
-        if recent_helps.contains(&agent_id) {
+        if count < threshold || recent_helps.contains(&agent_id) {
             continue;
         }
         emissions.push(ObservedEmission {

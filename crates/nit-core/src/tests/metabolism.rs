@@ -1,3 +1,6 @@
+//! Centralized tests for `metabolism::tick` — the per-tick decay,
+//! pruning, and observer→arbiter cascade with mood modulation.
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

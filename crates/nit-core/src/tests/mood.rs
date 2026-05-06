@@ -1,3 +1,6 @@
+//! Centralized tests for `Mood` and its modulation table — auto-transitions,
+//! pressure window, override lock, and the per-mood multiplier dials.
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

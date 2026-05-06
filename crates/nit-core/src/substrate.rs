@@ -1,3 +1,6 @@
+//! Substrate state — signals, claims, assumptions, mood, and on-disk
+//! `.nit/substrate/state.json` snapshots.
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};

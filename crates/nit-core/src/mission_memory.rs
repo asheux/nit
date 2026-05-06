@@ -171,95 +171,98 @@ pub fn build_index(workspace_root: &Path) -> MissionMemoryIndex {
 }
 
 fn index_one_mission(dir: &Path, mission_id: &str) -> Option<IndexedMission> {
-    // summary.json (task outputs) if present.
-    let summary_path = dir.join("summary.json");
-    let summary: Option<serde_json::Value> = fs::read(&summary_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
-
-    // run.json (title/template/tasks) if present.
-    let run_json_path = dir.join("run.json");
-    let run: Option<serde_json::Value> = fs::read(&run_json_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
-
     let mut m = IndexedMission {
         mission_id: mission_id.to_string(),
         ..Default::default()
     };
 
-    if let Some(r) = &run {
-        if let Some(t) = r.get("title").and_then(|v| v.as_str()) {
-            m.title = t.to_string();
-        }
-        if let Some(t) = r.get("template").and_then(|v| v.as_str()) {
-            m.template = t.to_string();
-        }
-        if let Some(t) = r.get("status").and_then(|v| v.as_str()) {
-            m.status = t.to_string();
-        }
-        if let Some(t) = r.get("updated_at").and_then(|v| v.as_str()) {
-            m.updated_at = t.to_string();
-        }
-        if let Some(arr) = r.get("tasks").and_then(|v| v.as_array()) {
-            for t in arr {
-                if let Some(id) = t.get("id").and_then(|v| v.as_str()) {
-                    m.task_ids.push(id.to_string());
-                }
-                if let Some(title) = t.get("title").and_then(|v| v.as_str()) {
-                    m.task_titles.push(title.to_string());
-                }
-            }
-        }
+    if let Some(run) = read_json(&dir.join("run.json")) {
+        merge_run_json(&run, &mut m);
     }
-
-    if let Some(s) = &summary {
-        if let Some(arr) = s.get("summaries").and_then(|v| v.as_array()) {
-            for t in arr {
-                if let Some(text) = t.get("summary").and_then(|v| v.as_str()) {
-                    m.task_summaries.push(text.to_string());
-                }
-            }
-        }
+    if let Some(summary) = read_json(&dir.join("summary.json")) {
+        merge_summary_json(&summary, &mut m);
     }
+    walk_tasks_dir(&dir.join("tasks"), &mut m);
 
-    // Walk tasks/<task-id>/artifacts.json for files_touched.
-    let tasks_dir = dir.join("tasks");
-    if let Ok(task_entries) = fs::read_dir(&tasks_dir) {
-        for tentry in task_entries.flatten() {
-            let art_path = tentry.path().join("artifacts.json");
-            if let Ok(b) = fs::read(&art_path) {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                    if let Some(files) = v.get("files").and_then(|v| v.as_array()) {
-                        for f in files {
-                            if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
-                                m.files_touched.push(p.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Skip entirely if we got nothing useful.
     if m.title.is_empty() && m.task_summaries.is_empty() && m.files_touched.is_empty() {
         return None;
     }
 
     m.files_touched.sort();
     m.files_touched.dedup();
+    m.tags = build_tag_set(&m);
 
+    Some(m)
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+fn merge_run_json(run: &serde_json::Value, m: &mut IndexedMission) {
+    let str_at = |key: &str| run.get(key).and_then(|v| v.as_str());
+    if let Some(t) = str_at("title") {
+        m.title = t.to_string();
+    }
+    if let Some(t) = str_at("template") {
+        m.template = t.to_string();
+    }
+    if let Some(t) = str_at("status") {
+        m.status = t.to_string();
+    }
+    if let Some(t) = str_at("updated_at") {
+        m.updated_at = t.to_string();
+    }
+    if let Some(arr) = run.get("tasks").and_then(|v| v.as_array()) {
+        for t in arr {
+            if let Some(id) = t.get("id").and_then(|v| v.as_str()) {
+                m.task_ids.push(id.to_string());
+            }
+            if let Some(title) = t.get("title").and_then(|v| v.as_str()) {
+                m.task_titles.push(title.to_string());
+            }
+        }
+    }
+}
+
+fn merge_summary_json(summary: &serde_json::Value, m: &mut IndexedMission) {
+    let Some(arr) = summary.get("summaries").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for t in arr {
+        if let Some(text) = t.get("summary").and_then(|v| v.as_str()) {
+            m.task_summaries.push(text.to_string());
+        }
+    }
+}
+
+fn walk_tasks_dir(tasks_dir: &Path, m: &mut IndexedMission) {
+    let Ok(entries) = fs::read_dir(tasks_dir) else {
+        return;
+    };
+    for tentry in entries.flatten() {
+        let Some(v) = read_json(&tentry.path().join("artifacts.json")) else {
+            continue;
+        };
+        let Some(files) = v.get("files").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for f in files {
+            if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
+                m.files_touched.push(p.to_string());
+            }
+        }
+    }
+}
+
+fn build_tag_set(m: &IndexedMission) -> Vec<String> {
     let mut tag_set: HashSet<String> = HashSet::new();
     for t in tokenize(&m.title) {
         tag_set.insert(t);
     }
-    for s in &m.task_titles {
-        for t in tokenize(s) {
-            tag_set.insert(t);
-        }
-    }
-    for s in &m.task_summaries {
+    for s in m.task_titles.iter().chain(m.task_summaries.iter()) {
         for t in tokenize(s) {
             tag_set.insert(t);
         }
@@ -269,9 +272,7 @@ fn index_one_mission(dir: &Path, mission_id: &str) -> Option<IndexedMission> {
     }
     let mut tags: Vec<String> = tag_set.into_iter().collect();
     tags.sort();
-    m.tags = tags;
-
-    Some(m)
+    tags
 }
 
 pub fn load_or_build(workspace_root: &Path) -> MissionMemoryIndex {

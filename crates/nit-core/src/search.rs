@@ -29,7 +29,7 @@ pub struct SearchResultMatch {
     pub match_len: usize,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct FuzzySearchState {
     pub open: bool,
     pub mode: SearchMode,
@@ -48,27 +48,6 @@ pub struct FuzzySearchState {
     pub file_results: Vec<SearchResultFile>,
     #[serde(skip)]
     pub match_results: Vec<SearchResultMatch>,
-}
-
-impl Default for FuzzySearchState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            mode: SearchMode::Files,
-            root: PathBuf::new(),
-            query: String::new(),
-            selected: 0,
-            scroll_offset: 0,
-            show_hidden: false,
-            show_ignored: false,
-            indexing: false,
-            searching: false,
-            status_msg: String::new(),
-            generation: 0,
-            file_results: Vec::new(),
-            match_results: Vec::new(),
-        }
-    }
 }
 
 impl FuzzySearchState {

@@ -15,20 +15,6 @@ pub struct LabSpec {
 }
 
 impl LabId {
-    pub fn label(self) -> &'static str {
-        match self {
-            LabId::Gol => "GOL",
-            LabId::Games => "GAMES",
-        }
-    }
-
-    pub fn namespace(self) -> &'static str {
-        match self {
-            LabId::Gol => "gol",
-            LabId::Games => "games",
-        }
-    }
-
     pub fn spec(self) -> LabSpec {
         match self {
             LabId::Gol => LabSpec {
@@ -45,18 +31,19 @@ impl LabId {
             },
         }
     }
+
+    pub fn label(self) -> &'static str {
+        self.spec().label
+    }
+
+    pub fn namespace(self) -> &'static str {
+        self.spec().namespace
+    }
 }
 
 impl std::fmt::Display for LabId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                LabId::Gol => "gol",
-                LabId::Games => "games",
-            }
-        )
+        f.write_str(self.namespace())
     }
 }
 

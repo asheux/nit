@@ -1,4 +1,6 @@
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Default, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,

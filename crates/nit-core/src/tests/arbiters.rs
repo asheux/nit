@@ -1,3 +1,6 @@
+//! Centralized tests for the arbiter framework — observer→arbiter ordering,
+//! retry-budget enforcement, and per-arbiter intervention shapes.
+
 use crate::agent_bus::AgentBusEvent;
 use crate::arbiters::{
     self, persistent_conflict, reduce_proposals, run_all, InterventionKind, InterventionProposal,

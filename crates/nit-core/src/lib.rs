@@ -9,6 +9,7 @@ pub mod buffer;
 pub mod config;
 pub mod cursor;
 pub mod genome_report;
+pub mod genome_storage;
 pub mod gol_rules;
 pub mod io;
 pub mod lab;
@@ -26,6 +27,11 @@ pub mod seed;
 pub mod state;
 pub mod substrate;
 pub mod viewport;
+
+mod agent_error_summary;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 pub use actions::Action;
 pub use agent_bus::{AgentBusEvent, AgentTokenCount, OPERATOR_CANCEL_TURN_MESSAGE};

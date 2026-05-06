@@ -1,9 +1,7 @@
-//! SparsePlanObserver — count `reason="unresolved_dep"` Warnings grouped by
-//! planner posted_by ("planner:{agent_id}") within a 10-generation window.
-//! When count ≥ 3, emit HelpNeeded targeting the planner. Self-silences if
-//! a recent `observer:sparse_plan` HelpNeeded already targets the planner.
+//! HelpNeeded for planners that emit ≥THRESHOLD `reason="unresolved_dep"`
+//! Warnings within WINDOW_GENS, with self-silencing on the planner agent.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH};
 use crate::state::AppState;
@@ -19,21 +17,14 @@ const THRESHOLD: usize = 3;
 
 fn observe(state: &AppState) -> Vec<ObservedEmission> {
     let sub = &state.substrate;
-    let current_gen = sub.current_generation();
-    let window_start = current_gen.saturating_sub(WINDOW_GENS);
+    let window_start = sub.current_generation().saturating_sub(WINDOW_GENS);
 
-    // Group unresolved-dep warnings by planner:agent_id posted_by.
     let mut by_planner: HashMap<String, (usize, Vec<String>)> = HashMap::new();
-    for signal in sub.signals.values() {
-        if signal.kind != SignalKind::Warning || signal.posted_at_gen < window_start {
-            continue;
-        }
+    for signal in super::iter_recent_warnings(sub, window_start) {
         if !signal.posted_by.starts_with("planner:") {
             continue;
         }
-        let is_unresolved =
-            signal.payload.get("reason").and_then(|v| v.as_str()) == Some("unresolved_dep");
-        if !is_unresolved {
+        if signal.payload.get("reason").and_then(|v| v.as_str()) != Some("unresolved_dep") {
             continue;
         }
         let missing = signal
@@ -51,19 +42,7 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
         }
     }
 
-    // Self-silencing: skip if a recent sparse_plan HelpNeeded already
-    // targets this planner.
-    let mut recent_helps: HashSet<String> = HashSet::new();
-    for signal in sub.signals.values() {
-        if signal.kind == SignalKind::HelpNeeded
-            && signal.posted_by == "observer:sparse_plan"
-            && signal.posted_at_gen >= window_start
-        {
-            if let SignalTarget::Agent { agent_id } = &signal.target {
-                recent_helps.insert(agent_id.clone());
-            }
-        }
-    }
+    let recent_helps = super::recent_help_targets(sub, "observer:sparse_plan", window_start);
 
     let mut out = Vec::new();
     for (planner_posted_by, (count, missing_deps)) in by_planner {

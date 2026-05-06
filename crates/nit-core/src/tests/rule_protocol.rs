@@ -1,3 +1,6 @@
+//! Centralized tests for `parse_protocol_spec` and `RuleProtocol` —
+//! phase progression, loop suffix, and canonical-string round-trip.
+
 use super::*;
 use crate::gol_rules::load_rule_catalog;
 

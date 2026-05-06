@@ -1802,10 +1802,6 @@ fn apply_structural_noise(
     }
 }
 
-#[cfg(test)]
-#[path = "tests/seed.rs"]
-mod tests;
-
 fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {
     let mut x = 0u32;
     let mut y = 0u32;
@@ -1833,3 +1829,7 @@ fn rot(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
     }
     (x, y)
 }
+
+#[cfg(test)]
+#[path = "tests/seed.rs"]
+mod tests;

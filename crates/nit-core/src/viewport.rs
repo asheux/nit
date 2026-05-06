@@ -1,3 +1,6 @@
+//! Editor viewport — line/col offsets and visible dimensions, plus the
+//! `ensure_visible` cursor-following invariant.
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Viewport {
     pub offset_line: usize,

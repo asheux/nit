@@ -156,14 +156,9 @@ pub enum Action {
     /// Clear the highlighted search term (vim's `:nohlsearch`).
     SearchClear,
     // --- `/` search prompt ---
-    /// Open the `/` search input; the user types a term and Enter confirms.
     SearchPromptOpen,
-    /// Cancel the search prompt without applying a term.
     SearchPromptCancel,
-    /// Execute the search (Enter in prompt): set the term and jump to next match.
     SearchPromptExecute,
-    /// Append a char into the search prompt input.
     SearchPromptInput(char),
-    /// Backspace inside the search prompt.
     SearchPromptBackspace,
 }

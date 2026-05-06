@@ -1,5 +1,5 @@
-//! GlobalHeatObserver — if total signal count exceeds threshold AND no
-//! recent observer:global_heat Warning already exists, emit a Global Warning.
+//! Global Warning when active-signal count exceeds THRESHOLD, with a
+//! COOLDOWN_GENS-generation suppression window.
 
 use super::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH};
 use crate::state::AppState;
@@ -19,17 +19,8 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
     if n <= THRESHOLD {
         return Vec::new();
     }
-    let current_gen = sub.current_generation();
-    let cooldown_start = current_gen.saturating_sub(COOLDOWN_GENS);
-
-    // Cooldown: skip if we emitted a Global Warning within COOLDOWN_GENS.
-    let recently_emitted = sub.signals.values().any(|s| {
-        s.kind == SignalKind::Warning
-            && s.posted_by == "observer:global_heat"
-            && matches!(s.target, SignalTarget::Global)
-            && s.posted_at_gen >= cooldown_start
-    });
-    if recently_emitted {
+    let cooldown_start = sub.current_generation().saturating_sub(COOLDOWN_GENS);
+    if super::recent_global_warning(sub, "observer:global_heat", cooldown_start) {
         return Vec::new();
     }
 

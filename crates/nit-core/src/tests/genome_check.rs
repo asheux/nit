@@ -1,3 +1,7 @@
+//! Smoke probe — runs the genome encoders over a couple real source
+//! files so the adaptive grid sizing exercises both the small and large
+//! input paths without burning CI seconds.
+
 #[test]
 fn genome_check_files() {
     use std::path::Path;

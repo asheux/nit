@@ -9,14 +9,15 @@
 //! same AppState snapshot observers just read, plus any signals observers
 //! emitted. No arbiter reads `InterventionEmitted` — prevents self-loops.
 
+use std::collections::HashSet;
+
 use crate::state::{AppState, Intervention};
-use crate::substrate::{SignalKind, SignalTarget};
+use crate::substrate::{Signal, SignalKind, SignalTarget};
 
 pub mod help_needed;
 pub mod persistent_conflict;
 pub mod sparse_plan_arbiter;
 
-pub const OBSERVER_INITIAL_STRENGTH: f32 = 1.5; // reference — same as observers
 pub const ARBITER_INITIAL_STRENGTH: f32 = 2.0;
 pub const ARBITER_COOLDOWN_GENS: u64 = 10;
 pub const ARBITER_MAX_PER_TICK: usize = 2;
@@ -202,6 +203,44 @@ pub fn apply_interventions(state: &mut AppState, interventions: Vec<Intervention
         });
         state.pending_interventions.push(iv);
     }
+}
+
+/// Scan recent `HelpNeeded` signals from a specific observer, deduped per
+/// agent, and let the caller build one `InterventionProposal` per agent.
+///
+/// Encapsulates the gen-window filter, kind/poster guard, agent-target
+/// extraction, and per-agent dedup that `help_needed` and `sparse_plan_arbiter`
+/// both need.
+pub(super) fn scan_help_needed_signals<F>(
+    state: &AppState,
+    observer_name: &str,
+    window_gens: u64,
+    mut build: F,
+) -> Vec<InterventionProposal>
+where
+    F: FnMut(&Signal, &str) -> InterventionProposal,
+{
+    let sub = &state.substrate;
+    let window_start = sub.current_generation().saturating_sub(window_gens);
+
+    let mut proposals = Vec::new();
+    let mut seen_agents: HashSet<String> = HashSet::new();
+    for signal in sub.signals.values() {
+        if signal.posted_at_gen < window_start {
+            continue;
+        }
+        if signal.kind != SignalKind::HelpNeeded || signal.posted_by != observer_name {
+            continue;
+        }
+        let SignalTarget::Agent { agent_id } = &signal.target else {
+            continue;
+        };
+        if !seen_agents.insert(agent_id.clone()) {
+            continue;
+        }
+        proposals.push(build(signal, agent_id));
+    }
+    proposals
 }
 
 #[cfg(test)]

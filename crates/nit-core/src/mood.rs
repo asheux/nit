@@ -67,15 +67,10 @@ impl Mood {
     }
 }
 
-/// Auto-transition decision. Returns `Some(new_mood)` if mood should change,
-/// else `None`. Caller applies the transition and emits a mood-shift signal.
-///
-/// Inputs:
-///   - `current`: current mood
-///   - `pressure`: count of ClaimViolation + Warning + HelpNeeded signals in the
-///     pressure window (10 gens by convention)
-///   - `quiet_streak`: consecutive ticks where pressure has been low;
-///     required to enter Exploration
+/// Auto-transition decision. Returns `Some(new_mood)` to apply, else `None`.
+/// `pressure` is recent ClaimViolation+Warning+HelpNeeded count;
+/// `quiet_streak` gates re-entering Exploration so a single low-pressure
+/// tick doesn't flip back from Consolidation.
 pub fn auto_transition(current: Mood, pressure: usize, quiet_streak: u32) -> Option<Mood> {
     match current {
         Mood::Consolidation => {

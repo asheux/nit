@@ -69,37 +69,35 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         state.substrate.mood_quiet_streak = 0;
     }
 
-    let mood_transitioned = if !override_active {
-        if let Some(new_mood) = crate::mood::auto_transition(
-            state.substrate.mood,
-            pressure,
-            state.substrate.mood_quiet_streak,
-        ) {
-            let from = state.substrate.mood;
-            state.substrate.mood = new_mood;
-            // Emit a mood-shift signal so operators can see the transition.
-            let posted_by = "mood".to_string();
-            let id = state.substrate.next_signal_id(&posted_by);
-            let posted_at_gen = state.substrate.current_generation();
-            state.substrate.emit_signal(crate::substrate::Signal {
-                id,
-                kind: crate::substrate::SignalKind::Warning,
-                posted_by,
-                posted_at_gen,
-                target: crate::substrate::SignalTarget::Global,
-                initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
-                payload: serde_json::json!({
-                    "reason": "mood_auto_transition",
-                    "from": format!("{from:?}").to_lowercase(),
-                    "to": format!("{new_mood:?}").to_lowercase(),
-                    "pressure": pressure,
-                    "source": "auto",
-                }),
-            });
-            true
-        } else {
-            false
-        }
+    let mood_transitioned = if override_active {
+        false
+    } else if let Some(new_mood) = crate::mood::auto_transition(
+        state.substrate.mood,
+        pressure,
+        state.substrate.mood_quiet_streak,
+    ) {
+        let from = state.substrate.mood;
+        state.substrate.mood = new_mood;
+        let payload = serde_json::json!({
+            "reason": "mood_auto_transition",
+            "from": format!("{from:?}").to_lowercase(),
+            "to": format!("{new_mood:?}").to_lowercase(),
+            "pressure": pressure,
+            "source": "auto",
+        });
+        let posted_by = "mood".to_string();
+        let id = state.substrate.next_signal_id(&posted_by);
+        let posted_at_gen = state.substrate.current_generation();
+        state.substrate.emit_signal(crate::substrate::Signal {
+            id,
+            kind: crate::substrate::SignalKind::Warning,
+            posted_by,
+            posted_at_gen,
+            target: crate::substrate::SignalTarget::Global,
+            initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+            payload,
+        });
+        true
     } else {
         false
     };

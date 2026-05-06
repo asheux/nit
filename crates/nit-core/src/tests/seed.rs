@@ -1,3 +1,6 @@
+//! Centralized tests for the seed encoders — invariants on empty input,
+//! tree-sitter fallback, and AST-driven encoder smoke probes.
+
 use super::*;
 
 #[test]

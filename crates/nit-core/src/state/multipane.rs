@@ -5,17 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::{AgentLaneKind, RosterTreeSelection};
 
-/// Per-pane chat session anchored at its own working directory. When a
-/// pane has a chosen agent (`selected_agent_id == Some`), the pane renders
-/// the chat thread for that lane and dispatch routes prompts to it. When
-/// the field is `None` the pane shows a roster picker; the operator
-/// commits a choice with Enter, which lazily allocates a per-pane lane
-/// `<base>#mp-pane-NN` and stores its id back into `selected_agent_id`.
-///
-/// `agent_id` retains the legacy "pre-pick" lane id used by the
-/// `--backend <specific-id>` flow (every pane lands in chat with that
-/// lane already cloned). When `--backend` is omitted or names a family,
-/// `agent_id` is empty until the operator commits a roster selection.
+/// Per-pane chat session anchored at its own working directory.
+/// `selected_agent_id` drives mode: `Some` ⇒ chat for that lane, `None` ⇒
+/// roster picker. `agent_id` retains the legacy `--backend <specific-id>`
+/// pre-picked lane and stays empty otherwise until the operator commits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaneSession {
     pub pane_id: usize,
@@ -27,27 +20,20 @@ pub struct PaneSession {
     pub chat_input_scroll: usize,
     pub chat_prompt_history: Vec<String>,
     pub chat_prompt_history_pos: Option<usize>,
-    /// In-flight draft preserved while the operator walks history with
-    /// Up/Down. Mirrors `AgentsState::chat_prompt_history_draft`. The
-    /// Lens-B aliasing wrapper snaps it to/from `state.agents` for each
-    /// keystroke so per-pane history nav matches single-pane semantics.
+    /// In-flight draft preserved while walking history with Up/Down.
+    /// Lens-B aliases it to/from `AgentsState::chat_prompt_history_draft`
+    /// per keystroke so per-pane history nav matches single-pane semantics.
     #[serde(default)]
     pub chat_prompt_history_draft: Option<String>,
     pub dir_search: Option<DirSearchState>,
     pub mission_id: Option<String>,
-    /// Stable per-pane synthetic chat mission id (`mp-pane-NN-chat`).
-    /// Tags every default-chat AgentMessage emitted from this pane so
-    /// render filters can isolate the thread and `@all` / abort helpers
-    /// can scope to the originating pane. Distinct from `mission_id`
-    /// (real swarm overlay, transient). Recomputed from `pane_id` on
-    /// load — never persisted directly.
+    /// Stable synthetic chat mission id (`mp-pane-NN-chat`) tagging this
+    /// pane's chat messages so render filters and `@all` / abort helpers
+    /// can scope per-pane. Recomputed from `pane_id` on load.
     #[serde(default, skip_serializing)]
     pub chat_mission_id: String,
-    /// Real swarm mission ids that have been bound to this pane during
-    /// the current session. Appended (deduped) when
-    /// `capture_pane_mission_ids` lifts a lane's `current_mission`. Used
-    /// by `/abort all` (multipane) to enumerate the missions owned by
-    /// the focused pane without scanning all of `state.agents.missions`.
+    /// Swarm mission ids bound to this pane this session — used by
+    /// `/abort all` to scope cancellation without scanning all missions.
     #[serde(default)]
     pub mission_ids: Vec<String>,
     /// Cursor row inside the per-pane roster while in roster mode. Survives
@@ -68,15 +54,10 @@ pub struct PaneSession {
     /// while the cursor is on a Backend or Agent row.
     #[serde(skip)]
     pub roster_tree_selected: Option<RosterTreeSelection>,
-    /// Vertical scroll offset for the chat thread, separate from
-    /// `chat_input_scroll` (which is reserved for input-box scrolling).
-    /// Defaults to `crate::state::CONSOLE_SCROLL_BOTTOM` (`usize::MAX`)
-    /// — the sentinel "stick to bottom". The renderer clamps to
-    /// `max_scroll` so the sentinel always shows the most recent rows
-    /// even as the thread grows. Wheel / PgUp / PgDn handlers must
-    /// resolve the sentinel to `max_scroll` BEFORE applying delta so
-    /// scrolling up from the bottom moves one page, not all the way
-    /// to row 0.
+    /// Chat-thread scroll offset (separate from `chat_input_scroll`).
+    /// Defaults to the `CONSOLE_SCROLL_BOTTOM` sentinel — wheel / PgUp /
+    /// PgDn handlers MUST resolve it to `max_scroll` before applying a
+    /// delta, otherwise scrolling up from bottom jumps to row 0.
     #[serde(default = "chat_thread_scroll_default")]
     pub chat_thread_scroll: usize,
     /// Lane id chosen for this pane. `None` ⇒ render roster picker; `Some`
@@ -108,12 +89,9 @@ pub struct PaneSession {
     /// `(see ARTIFACTS)` link before any mission has run.
     #[serde(default)]
     pub has_run_mission: bool,
-    /// Per-pane reasoning-effort overrides keyed by base agent id (e.g.
-    /// `gpt-5`). Roster checkbox reads here first; falls back to the
-    /// global `AgentsState` defaults so freshly-spawned panes still seed
-    /// a sensible value. Writing through the per-pane roster click
-    /// stores here only — the global maps are untouched until dispatch
-    /// time.
+    /// Per-pane reasoning-effort overrides keyed by base agent id, read
+    /// before falling back to `AgentsState` defaults. Roster click writes
+    /// here only — global maps stay untouched until dispatch.
     #[serde(default)]
     pub selected_effort: BTreeMap<String, String>,
     /// Active text selection inside the pane's chat thread. Coordinates
@@ -240,111 +218,5 @@ pub struct MultipaneState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn multipane_state_isolates_chat_inputs() {
-        let mut mp = MultipaneState {
-            backend_agent_id: "test-model".into(),
-            panes: (0..3)
-                .map(|i| PaneSession {
-                    pane_id: i,
-                    agent_id: format!("test-model#mp-pane-{i:02}"),
-                    cwd: PathBuf::from("/tmp"),
-                    ..PaneSession::default()
-                })
-                .collect(),
-            focused: 0,
-            grid_cols: 2,
-            grid_rows: 2,
-            backend_filter: Some("test-model".into()),
-            help_open: false,
-        };
-
-        mp.panes[1].chat_input = "hello pane 1".into();
-        mp.panes[1].chat_input_cursor = 5;
-
-        assert_eq!(mp.panes[0].chat_input, "");
-        assert_eq!(mp.panes[2].chat_input, "");
-        assert_eq!(mp.panes[1].chat_input, "hello pane 1");
-        assert_eq!(mp.panes[1].chat_input_cursor, 5);
-    }
-
-    #[test]
-    fn pane_session_default_has_no_dir_search() {
-        let pane = PaneSession::default();
-        assert!(pane.dir_search.is_none());
-        assert!(pane.mission_id.is_none());
-        assert!(pane.chat_prompt_history.is_empty());
-        assert!(pane.selected_agent_id.is_none());
-        assert_eq!(pane.roster_cursor, 0);
-        assert_eq!(pane.roster_scroll, 0);
-        assert!(pane.roster_collapsed_agent_ids.is_empty());
-        assert!(pane.roster_tree_selected.is_none());
-        // Default is the "stick to bottom" sentinel so newly created
-        // panes follow new chat content automatically.
-        assert_eq!(pane.chat_thread_scroll, crate::state::CONSOLE_SCROLL_BOTTOM);
-        assert!(pane.auto_expanded_backend.is_none());
-        assert!(pane.auto_expanded_agent.is_none());
-        assert!(!pane.has_run_mission);
-        assert!(pane.selected_effort.is_empty());
-        assert!(pane.selection.is_none());
-    }
-
-    #[test]
-    fn dir_search_state_default_zeroes_generation_and_hidden() {
-        let s = DirSearchState::default();
-        assert_eq!(s.generation, 0);
-        assert!(!s.show_hidden);
-        assert!(s.query.is_empty());
-        assert_eq!(s.selected, 0);
-        assert!(s.results.is_empty());
-        assert_eq!(s.view_offset, 0);
-        assert_eq!(s.last_visible, 0);
-        assert!(s.expanded.is_empty());
-    }
-
-    #[test]
-    fn dir_search_state_serde_skips_expanded_and_last_visible() {
-        let mut s = DirSearchState {
-            query: "foo".into(),
-            view_offset: 7,
-            last_visible: 12,
-            ..Default::default()
-        };
-        s.expanded.insert(PathBuf::from("/tmp/a"));
-        s.expanded.insert(PathBuf::from("/tmp/b"));
-        let json = serde_json::to_string(&s).expect("serialize");
-        assert!(!json.contains("expanded"), "expanded must be skipped");
-        assert!(
-            !json.contains("last_visible"),
-            "last_visible must be skipped"
-        );
-        assert!(json.contains("view_offset"), "view_offset must persist");
-        let round: DirSearchState = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(round.view_offset, 7);
-        assert_eq!(round.last_visible, 0, "last_visible defaults on load");
-        assert!(round.expanded.is_empty(), "expanded defaults on load");
-        assert_eq!(round.query, "foo");
-    }
-
-    #[test]
-    fn pane_session_default_template_is_lab() {
-        let pane = PaneSession::default();
-        assert_eq!(pane.swarm_template, "lab");
-    }
-
-    #[test]
-    fn pane_session_default_mission_is_auto() {
-        let pane = PaneSession::default();
-        assert_eq!(pane.swarm_mission, "auto");
-    }
-
-    #[test]
-    fn multipane_default_has_no_backend_filter() {
-        let mp = MultipaneState::default();
-        assert!(mp.backend_filter.is_none());
-        assert!(mp.panes.is_empty());
-    }
-}
+#[path = "../tests/multipane.rs"]
+mod tests;

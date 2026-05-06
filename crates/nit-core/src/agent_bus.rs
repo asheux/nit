@@ -1,9 +1,12 @@
+use crate::agent_error_summary::summarize_agent_error;
 use crate::state::{
     AgentAlert, AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
     AgentMessage, AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
     CONSOLE_SCROLL_BOTTOM,
 };
 use std::time::Instant;
+
+pub use crate::genome_storage::{delete_genome_report, load_genome_reports, persist_genome_report};
 
 /// Resolve the backend source label for an agent (used in alerts and diagnostics).
 fn backend_source_for_agent(state: &AppState, agent_id: &str) -> &'static str {
@@ -1156,114 +1159,6 @@ fn apply_token_count_claude(
             .claude_context_remaining_pct
             .insert(agent_id.to_string(), pct);
     }
-}
-
-fn summarize_agent_error(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return "unknown error".into();
-    }
-
-    if let Some(value) = parse_error_json(trimmed) {
-        if let Some(msg) = extract_error_message(&value) {
-            let msg = msg.trim();
-            if !msg.is_empty() {
-                return msg.to_string();
-            }
-        }
-    }
-
-    trimmed.lines().next().unwrap_or(trimmed).trim().to_string()
-}
-
-fn parse_error_json(text: &str) -> Option<serde_json::Value> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-    {
-        return serde_json::from_str::<serde_json::Value>(trimmed).ok();
-    }
-
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if start >= end {
-        return None;
-    }
-    serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]).ok()
-}
-
-fn extract_error_message(value: &serde_json::Value) -> Option<&str> {
-    value
-        .get("error")
-        .and_then(|err| err.get("message"))
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("message").and_then(|v| v.as_str()))
-}
-
-// ---------------------------------------------------------------------------
-// Genome report persistence
-// ---------------------------------------------------------------------------
-
-fn genome_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
-    workspace_root.join(".nit").join("genome")
-}
-
-fn genome_report_filename(file_path: &std::path::Path) -> String {
-    let s = file_path.to_string_lossy();
-    format!("{}.json", s.replace('/', "__"))
-}
-
-pub fn persist_genome_report(
-    workspace_root: &std::path::Path,
-    report: &crate::genome_report::GenomeReport,
-) {
-    let dir = genome_dir(workspace_root);
-    let _ = std::fs::create_dir_all(&dir);
-    let filename = genome_report_filename(&report.file_path);
-    let path = dir.join(filename);
-    if let Ok(json) = serde_json::to_string(report) {
-        let _ = std::fs::write(path, json);
-    }
-}
-
-/// Best-effort delete of the persisted genome report for `file_path`. Silent
-/// on missing file or I/O error — the caller is invalidating state that's
-/// already gone.
-pub fn delete_genome_report(workspace_root: &std::path::Path, file_path: &std::path::Path) {
-    let dir = genome_dir(workspace_root);
-    let filename = genome_report_filename(file_path);
-    let _ = std::fs::remove_file(dir.join(filename));
-}
-
-/// Load previously persisted genome reports from `.nit/genome/`.
-pub fn load_genome_reports(
-    workspace_root: &std::path::Path,
-) -> std::collections::HashMap<std::path::PathBuf, crate::genome_report::GenomeReport> {
-    let mut map = std::collections::HashMap::new();
-    let dir = genome_dir(workspace_root);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return map,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let data = match std::fs::read_to_string(&path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let report: crate::genome_report::GenomeReport = match serde_json::from_str(&data) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        map.insert(report.file_path.clone(), report);
-    }
-    map
 }
 
 #[cfg(test)]

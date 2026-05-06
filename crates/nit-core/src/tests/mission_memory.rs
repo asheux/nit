@@ -1,3 +1,6 @@
+//! Centralized tests for `MissionMemoryIndex` — tokenization,
+//! TF/IDF scoring, and on-disk index persistence.
+
 use super::*;
 use std::path::{Path, PathBuf};
 
