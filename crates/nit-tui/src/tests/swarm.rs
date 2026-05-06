@@ -4783,6 +4783,102 @@ fn integrate_role_contract_calls_out_stub_files_as_failure() {
     assert!(joined.contains("performative splits"));
 }
 
+#[test]
+fn propose_role_contract_calls_out_files_array_as_load_bearing() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("propose");
+    let joined = lines.join(" || ");
+    assert!(
+        joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"),
+        "propose contract should call out files array semantics; got: {joined}"
+    );
+    assert!(joined.contains("structural-compliance check"));
+    assert!(joined.contains("Files omitted"));
+}
+
+#[test]
+fn judge_role_contract_calls_out_files_array_as_load_bearing() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("judge");
+    let joined = lines.join(" || ");
+    assert!(
+        joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"),
+        "judge contract should call out files array semantics; got: {joined}"
+    );
+    assert!(joined.contains("every file path the integrator is expected to touch"));
+    assert!(joined.contains("Be exhaustive"));
+}
+
+#[test]
+fn integrate_role_contract_genome_obligation_names_metrics() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("integrate");
+    let joined = lines.join(" || ");
+    assert!(joined.contains("GENOME QUALITY OBLIGATION"));
+    assert!(
+        joined.contains("Cosmetic edits that don't move the underlying structural metrics"),
+        "genome obligation should explicitly mention cosmetic-edit detection; got: {joined}"
+    );
+    assert!(joined.contains("cyclomatic complexity"));
+    assert!(joined.contains("AST component fan-out"));
+}
+
+#[test]
+fn structured_artifacts_block_for_propose_explains_files_semantics() {
+    let mut task = make_task("propose-arbiters", "p1", Some("propose"), Vec::new());
+    task.artifacts = vec!["files".into(), "notes".into()];
+    let prompt = wrap_task_prompt(
+        "do a recon",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+    );
+    assert!(prompt.contains("STRUCTURED ARTIFACTS"));
+    assert!(prompt.contains("`files` array — load-bearing for compliance"));
+    assert!(prompt.contains("Existing files to MODIFY"));
+    assert!(prompt.contains("NEW files to CREATE"));
+    assert!(prompt.contains("trigger an automatic re-dispatch"));
+}
+
+#[test]
+fn structured_artifacts_block_for_judge_explains_files_semantics() {
+    let mut task = make_task("judge-synthesize", "j1", Some("judge"), Vec::new());
+    task.artifacts = vec!["files".into()];
+    let prompt = wrap_task_prompt(
+        "synthesize plan",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+    );
+    assert!(prompt.contains("STRUCTURED ARTIFACTS"));
+    assert!(prompt.contains("`files` array — load-bearing for compliance"));
+}
+
+#[test]
+fn structured_artifacts_block_for_review_skips_load_bearing_section() {
+    // Review tasks aren't writers, so the runtime doesn't compliance-check
+    // their files array. The load-bearing section should only render for
+    // propose/judge.
+    let mut task = make_task("review-code", "r1", Some("review"), Vec::new());
+    task.artifacts = vec!["notes".into()];
+    let prompt = wrap_task_prompt(
+        "review",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+    );
+    assert!(!prompt.contains("`files` array — load-bearing for compliance"));
+}
+
 // Helper: build a temp workspace path that's unique per test run.
 fn make_temp_workspace(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()

@@ -442,6 +442,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "GENOME-AWARE PROPOSAL — STRICT: a GENOME LANDSCAPE section may be attached below with current tier/consistency/generations/parsimony for every scope file. When it is present, you MUST ground your proposal in those numbers. For every recommendation, name the file, the current metric, the target metric, and the direction — e.g. \"split <mega-file>: current <N> lines / structural density <x> → aim <M> submodules each ≤1500 lines, density ≥0.25\", \"inline <bloated-file> trivial predicates: parsimony-bloat cap at tier IV → consolidate single-line fns into compound checks to unlock higher tier\", \"kill <file> lines A-B (entropy 0.0) → replace with a single templated helper\". Do NOT emit surface-level advice (\"rename x to y\", \"extract helper\") without tying it to a concrete encoder metric it is meant to move. If the landscape shows mega-files (>2000 lines), low structural density (≤0.10), zero-entropy blocks, parsimony bloat, or cross-encoder consistency spread >0.3, those are the highest-leverage fixes — name them explicitly.",
             "RECOMMENDATION COVERAGE: Do not stop at one suggestion per file. Scan the whole landscape and recommend every class of fix the integrator could apply: structural splits, entropy elimination, cyclomatic-complexity reduction (target ≤8 per fn), AST component fan-out (target ≥5), identifier uniqueness (≥65%), comment-to-code ratio, consolidation of parsimony-capped files. The integrator only writes what you surface — missing a whole category means it never gets fixed.",
             "MANDATORY STRUCTURAL SPLITS — STRICT: for EVERY scope file over 2000 lines, tier I/II, or with a density ≤0.10, your proposal MUST contain a concrete split plan: name the new submodule files you want created, assign specific functions/types to each, and list the files by path in your `swarm_artifacts.files` array so the integrator has an explicit target list. Same rule for any file with parsimony bloat (consolidation plan) or zero-entropy blocks (deduplication plan). Silence on a file that breaches these thresholds is a proposal failure, even if the rest of your proposal is excellent. If the landscape below includes a THRESHOLDS BREACHED section, every listed file must appear in your recommendations with a specific structural action.",
+            "FILES ARRAY = LOAD-BEARING HANDOFF: your `swarm_artifacts.files` is not just metadata — the runtime treats it as the canonical scope for the integrator's structural-compliance check. Every file you want the integrator to touch (existing modifications + new files to create + audit-only confirmations) MUST appear in the array. Files omitted are silently skippable; files included that don't get modified (or get modified only with stub doc-comment shells) trigger an automatic re-dispatch. If you describe a split in prose but only put the source file in `files`, the integrator can create stub submodules to game the existence check. Include EVERY new submodule path explicitly.",
         ],
         "research" => &[
             "Explore the topic through papers, docs, web resources, and related references when available.",
@@ -462,6 +463,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, formatters, or any verification commands — text analysis only, based on the proposals and (if present) the GENOME LANDSCAPE below. List any commands you'd recommend as suggestions for the integrator/reviewer, not actions you take yourself. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
             "LANDSCAPE-AWARE JUDGING: if a GENOME LANDSCAPE or THRESHOLDS BREACHED section is attached below, your decision MUST be grounded in it. Prefer proposals whose recommendations target the lowest-tier / highest-leverage files (mega-files, parsimony-capped, low-density). Reject or downgrade proposals that recommend changes uncorrelated with the landscape (e.g. cosmetic tweaks on tier-IV files while tier-I/II files go untouched). Name the specific landscape metrics in your verdict.",
             "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",
+            "FILES ARRAY = LOAD-BEARING HANDOFF: your `swarm_artifacts.files` is the canonical scope for the integrator's structural-compliance check. The unified plan you produce MUST list every file path the integrator is expected to touch — existing files to modify, NEW files to create (every submodule path the chosen split plan introduces), and any audit-only files. Files omitted from this array are files the integrator can silently skip without retry; files that get touched only as stub doc-comment shells get caught by the runtime's stub detector. If a proposer's split plan you accepted introduces 8 new submodule paths, all 8 MUST be in your `files` array — not just the original source path. Be exhaustive here even if it duplicates content from the proposers.",
         ],
         "integrate" => &[
             "Implement the chosen plan and convert it into concrete edits.",
@@ -473,7 +475,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is genuinely technically impossible — meaning it names a non-existent type, breaks a hard compile invariant, or requires a feature the toolchain doesn't support. \"It might break tests\", \"it's risky\", \"it's too ambitious for one turn\", \"I'll do a safer subset\", \"full splits are too aggressive\", \"aggressive splits would almost certainly break imports\" are NOT valid deviations — they're excuses for doing less work. The correct response to a risky split is to execute it in atomic compilation-preserving steps (move one submodule at a time, re-run the build after each, fix imports as you go), NOT to substitute cosmetic cleanups (trim comments, flatten nesting, extract a helper) for the declared structural plan. If you genuinely cannot execute the plan after attempting it, STOP, leave partial progress on disk, and in your final message list exactly which files you moved, which remain, and the specific compile/test failure blocking further progress. Substituting your own smaller-scoped refactor for the declared structural plan is a task failure — the proposer, not you, decided what this task is. \"Do not break functionality\" is a constraint on HOW you execute the plan (atomic steps), not a license to SKIP the plan.",
             TEST_DISCIPLINE_CLAUSE,
             NO_PADDING_CLAUSE,
-            "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
+            "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders (token_spectrum, ast_structure, complexity_field, structural). The runtime captures pre-edit genome scores per file, runs the encoders again post-edit, and feeds regressions back to you on retry. Cosmetic edits that don't move the underlying structural metrics — extracting a one-line helper, renaming a variable, trimming a comment — won't pass: the encoders measure cyclomatic complexity, AST component fan-out, identifier uniqueness, comment-to-code ratio, and structural cohesion. The proposer's plan was crafted to move those metrics; substituting a smaller refactor that doesn't move them is a task failure even if the file count looks right. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — the runtime evaluates automatically after your writes hit disk.",
         ],
         "review" => &[
             "Critique the current output or diff for correctness, UX, and maintainability.",
@@ -894,14 +896,10 @@ fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
     // substrate's structural-compliance check diffs this against on-disk
     // writes). Other read-only roles get the block only when the planner
     // explicitly requested it via task.artifacts.
-    let always_emit_for_role = matches!(
-        task.role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref(),
-        Some("propose") | Some("judge"),
-    );
-    if task.artifacts.is_empty() && !always_emit_for_role {
+    let role_kind = task.role.as_deref().and_then(normalize_role_label);
+    let role_kind = role_kind.as_deref();
+    let is_propose_or_judge = matches!(role_kind, Some("propose") | Some("judge"));
+    if task.artifacts.is_empty() && !is_propose_or_judge {
         return;
     }
     out.push_str("\n## STRUCTURED ARTIFACTS (REQUIRED)\n");
@@ -922,6 +920,16 @@ fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
     out.push_str("}\n");
     out.push_str("```\n");
     out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked.\n");
+    if is_propose_or_judge {
+        out.push_str(
+            "\n### `files` array — load-bearing for compliance\n\
+             Your `files` array is the canonical handoff to the integrator AND the source of truth for the runtime's structural-compliance check. List EVERY file path the integrator is expected to touch:\n\
+             - Existing files to MODIFY.\n\
+             - NEW files to CREATE (e.g., when the plan calls for splitting a large source into a directory of submodules, list each new submodule path).\n\
+             - Files marked `audit only` / `no changes needed` — include them so the integrator confirms each was inspected; the integrator's role contract requires them to say so explicitly per file in the final summary.\n\
+             Do NOT list files for context only (\"I read X to understand Y\") — the runtime treats this list as scope. Files omitted here are files the integrator can silently skip; files included here that don't get touched (or get touched only with stub doc-comment shells) trigger an automatic re-dispatch with the gap descriptor.\n",
+        );
+    }
 }
 
 pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
