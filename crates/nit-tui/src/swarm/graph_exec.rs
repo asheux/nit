@@ -106,7 +106,12 @@ pub(super) fn structural_compliance_missing_files(
         let touched = mission_writes
             .map(|set| set.contains(&abs))
             .unwrap_or(false);
-        if !touched {
+        // A file may be in mission_writes (was written this session) but
+        // since deleted by the same agent — for example, the agent created
+        // a temp scratch file then removed it, or accidentally deleted a
+        // file it had just edited. The integrator's contract is "every
+        // declared file must end up modified AND on disk", so verify both.
+        if !touched || !abs.exists() {
             missing.push(rel.clone());
         }
     }
@@ -159,6 +164,21 @@ pub(super) fn structural_split_gaps(
         current.insert(rel.clone(), entry);
     }
 
+    // Compute new-files set first so the stub check can ask "did this
+    // shrink coincide with a legitimate split into siblings?"
+    let new_files: Vec<&String> = scope
+        .iter()
+        .filter(|rel| {
+            let pre_existed = task
+                .pre_dispatch_file_state
+                .get(*rel)
+                .map(|p| p.existed)
+                .unwrap_or(false);
+            let post_existed = current.get(*rel).map(|(e, _)| *e).unwrap_or(false);
+            !pre_existed && post_existed
+        })
+        .collect();
+
     let mut gaps: Vec<String> = Vec::new();
 
     // (1) Stub detection — newly created files that ended up trivial.
@@ -175,6 +195,16 @@ pub(super) fn structural_split_gaps(
                 "{rel} (stub: only {post_lines} lines on a newly-created file; expected ≥{MIN_NON_STUB_LINES})"
             ));
         } else if pre_lines >= MIN_NON_STUB_LINES {
+            // Pre file was substantive, post is tiny. Two possibilities:
+            //   (a) legitimate split: content moved into new same-stem-dir
+            //       siblings, the original is now a thin re-export shell.
+            //   (b) gaming attempt: content removed without being moved.
+            // If new same-stem-dir siblings exist, accept (a) and skip the
+            // flag — the incomplete-split detector below will independently
+            // verify the siblings have substantive content.
+            if has_substantive_split_siblings(rel, &new_files, &current) {
+                continue;
+            }
             gaps.push(format!(
                 "{rel} (suspicious shrink: {pre_lines} → {post_lines} lines; content removed without an obvious destination)"
             ));
@@ -183,18 +213,6 @@ pub(super) fn structural_split_gaps(
 
     // (2) Incomplete-split detection — declared huge sources that didn't
     // shrink commensurate with their newly-created same-stem-dir siblings.
-    let new_files: Vec<&String> = scope
-        .iter()
-        .filter(|rel| {
-            let pre_existed = task
-                .pre_dispatch_file_state
-                .get(*rel)
-                .map(|p| p.existed)
-                .unwrap_or(false);
-            let post_existed = current.get(*rel).map(|(e, _)| *e).unwrap_or(false);
-            !pre_existed && post_existed
-        })
-        .collect();
 
     if !new_files.is_empty() {
         for rel in scope.iter() {
@@ -247,6 +265,39 @@ pub(super) fn structural_split_gaps(
     }
 
     gaps
+}
+
+// True when at least one new declared file lives under <parent>/<stem>/ and
+// has substantive content (≥ stub threshold). Used to suppress the
+// "suspicious shrink" flag on legitimate split-into-shell patterns where
+// the source file becomes a thin re-export wrapper and the actual content
+// moves into newly-created submodule files.
+fn has_substantive_split_siblings(
+    source_rel: &str,
+    new_files: &[&String],
+    current: &HashMap<String, (bool, usize)>,
+) -> bool {
+    let p = std::path::Path::new(source_rel);
+    let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let parent = p
+        .parent()
+        .and_then(|pp| pp.to_str())
+        .filter(|s| !s.is_empty());
+    let split_dir = match parent {
+        Some(parent) => format!("{parent}/{stem}/"),
+        None => format!("{stem}/"),
+    };
+    new_files.iter().any(|nf| {
+        if !nf.starts_with(&split_dir) {
+            return false;
+        }
+        current
+            .get(nf.as_str())
+            .map(|&(_, lines)| lines >= 20)
+            .unwrap_or(false)
+    })
 }
 
 // Walks the integrator's propose/judge dep artifacts and returns the
@@ -607,15 +658,59 @@ fn build_task_prompt(
     let payload: Option<&[(String, String)]> = (!deps_payload.is_empty()).then_some(deps_payload);
     let shard_files = collect_shard_files(run, task);
     let shard_slice: Option<&[String]> = shard_files.as_deref();
+    // For integrate tasks, prefer the propose/judge declared file list as
+    // the FILE CHECKLIST source — that's what the runtime's structural-
+    // compliance check actually enforces. Operator-prompt scope_files only
+    // applies for non-integrate roles or as a fallback when no propose/judge
+    // artifacts are available yet.
+    let role_kind = task.role.as_deref().and_then(normalize_role_label);
+    let effective_scope = if role_kind.as_deref() == Some("integrate") {
+        collect_integrate_scope(run, task).unwrap_or_else(|| run.scope_files.clone())
+    } else {
+        run.scope_files.clone()
+    };
     wrap_task_prompt(
         &run.root_prompt,
         run.mission_kind,
         task,
         payload,
-        &run.scope_files,
+        &effective_scope,
         run.spawn_cwd.as_path(),
         shard_slice,
     )
+}
+
+// Returns the propose/judge-declared files for an integrate task's FILE
+// CHECKLIST. Walks the task's deps' artifacts and gathers declared paths;
+// returns None when no propose/judge artifacts have produced files yet (the
+// caller falls back to operator scope). Sorted + deduped so the prompt is
+// stable across re-dispatches.
+fn collect_integrate_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
+    let mut declared: Vec<String> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if !rel.is_empty() {
+                declared.push(rel.to_string());
+            }
+        }
+    }
+    if declared.is_empty() {
+        return None;
+    }
+    declared.sort();
+    declared.dedup();
+    Some(declared)
 }
 
 // Computes the file slice this shard is responsible for. Pulls declared

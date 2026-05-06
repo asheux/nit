@@ -4566,12 +4566,34 @@ fn propose_with_files(id: &str, files: &[&str]) -> SwarmTask {
 }
 
 fn fresh_state_with_writes(mission_id: &str, touched: &[&str]) -> AppState {
+    // Use a unique temp workspace per test so files we create don't bleed
+    // across runs and don't pollute the real CARGO_MANIFEST_DIR. The
+    // structural-compliance check requires declared files to exist on
+    // disk, so we materialize each touched path with placeholder content.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "nit-test-fresh-{}-{}-{nanos}",
+        std::process::id(),
+        mission_id
+    ));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).unwrap();
     let mut state = new_state();
-    let workspace = state.workspace_root.clone();
+    state.workspace_root = workspace.clone();
     let mut writes: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
     for rel in touched.iter() {
-        writes.insert(workspace.join(rel));
+        let abs = workspace.join(rel);
+        if let Some(parent) = abs.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Placeholder content — tests that care about line counts use
+        // structural_split_gaps instead, which reads its own pre-state.
+        std::fs::write(&abs, "// touched\n").unwrap();
+        writes.insert(abs);
     }
     state
         .genome_mission_modified
@@ -4805,7 +4827,7 @@ fn judge_role_contract_calls_out_files_array_as_load_bearing() {
         joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"),
         "judge contract should call out files array semantics; got: {joined}"
     );
-    assert!(joined.contains("every file path the integrator is expected to touch"));
+    assert!(joined.contains("every file path the integrator is expected to MODIFY or CREATE"));
     assert!(joined.contains("Be exhaustive"));
 }
 
@@ -5025,6 +5047,285 @@ fn structural_split_gaps_accepts_real_split() {
     let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
 
     assert!(gaps.is_empty(), "real split should pass; got {gaps:?}");
+}
+
+// Legitimate split-into-shell pattern: source file goes from substantive
+// (>20 lines) to thin re-export shell (<20 lines), AND new same-stem-dir
+// siblings are created with substantive content. The "suspicious shrink"
+// branch should NOT fire — this is what a real split looks like.
+#[test]
+fn structural_split_gaps_accepts_thin_shell_with_substantive_siblings() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("thin-shell");
+    std::fs::create_dir_all(workspace.join("state")).unwrap();
+    // Source: shrunk to 5-line thin re-export shell.
+    std::fs::write(
+        workspace.join("state.rs"),
+        "pub use crate::state::agents::*;\npub use crate::state::games::*;\n",
+    )
+    .unwrap();
+    // New sibling: 30 lines of real content (above MIN_NON_STUB_LINES).
+    let real = (0..30).map(|i| format!("pub fn f{i}() {{}}")).collect::<Vec<_>>().join("\n");
+    std::fs::write(workspace.join("state/agents.rs"), real).unwrap();
+
+    let propose = propose_with_files("propose-01", &["state.rs", "state/agents.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([
+        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 200 }),
+        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+    ]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-thin-shell".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(
+        gaps.is_empty(),
+        "thin-shell + substantive sibling should pass; got {gaps:?}"
+    );
+}
+
+// Same shrink pattern, but WITHOUT new substantive siblings — flag fires.
+// (This is the "deleted content without moving it" failure mode.)
+#[test]
+fn structural_split_gaps_flags_thin_shell_without_substantive_siblings() {
+    use super::structural_split_gaps;
+    let workspace = make_temp_workspace("thin-no-sib");
+    // Source shrank to thin shell, but no new siblings.
+    std::fs::write(workspace.join("state.rs"), "pub fn nothing() {}\n").unwrap();
+
+    let propose = propose_with_files("propose-01", &["state.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+    int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
+        "state.rs".to_string(),
+        super::FilePreState { existed: true, line_count: 200 },
+    )]);
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-thin-no-sib".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+
+    let gaps = structural_split_gaps(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(
+        gaps.iter().any(|g| g.contains("suspicious shrink")),
+        "no siblings → suspicious-shrink should fire; got {gaps:?}"
+    );
+}
+
+// Compliance check now also requires the file to exist on disk after the
+// turn. Previously, a file in mission_writes that was later deleted would
+// silently pass the check.
+#[test]
+fn compliance_flags_declared_file_written_then_deleted() {
+    use super::structural_compliance_missing_files;
+    let workspace = make_temp_workspace("write-then-delete");
+    // Don't create state.rs — agent "wrote" it but it doesn't exist now
+    // (e.g., the agent created it then deleted it during the same turn).
+
+    let propose = propose_with_files("propose-01", &["state.rs"]);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Done;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.mission_id = "mis-deleted".into();
+    let mut state = new_state();
+    state.workspace_root = workspace.clone();
+    // mission_writes has the path (agent wrote at some point) but the file
+    // doesn't exist on disk now.
+    state.genome_mission_modified.insert(
+        "mis-deleted".to_string(),
+        std::collections::HashSet::from([workspace.join("state.rs")]),
+    );
+
+    let missing = structural_compliance_missing_files(&run, "integrate", &state);
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
+
+    assert!(
+        missing.iter().any(|m| m == "state.rs"),
+        "deleted-after-write should flag as missing; got {missing:?}"
+    );
+}
+
+#[test]
+fn propose_role_contract_excludes_audit_only_files_from_array() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("propose");
+    let joined = lines.join(" || ");
+    assert!(joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"));
+    assert!(
+        joined.contains("Do NOT include files where you concluded \"audit only / no changes needed\""),
+        "propose contract should explicitly exclude audit-only files; got: {joined}"
+    );
+    assert!(joined.contains("false-positive re-dispatch"));
+}
+
+#[test]
+fn judge_role_contract_excludes_audit_only_files_from_array() {
+    use super::role_contract_lines;
+    let lines = role_contract_lines("judge");
+    let joined = lines.join(" || ");
+    assert!(joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"));
+    assert!(
+        joined.contains("Do NOT include files you decided are audit-only"),
+        "judge contract should explicitly exclude audit-only files; got: {joined}"
+    );
+}
+
+// Helper: build a SwarmRun with a propose dep that has parsed_artifacts +
+// an integrate task depending on it. Used by the FILE CHECKLIST sourcing
+// tests below.
+fn make_run_with_integrate_and_propose(
+    template: SwarmTemplate,
+    propose_files: &[&str],
+    scope_files: &[&str],
+) -> SwarmRun {
+    let propose = propose_with_files("propose-01", propose_files);
+    let mut int_a = make_task("integrate", "w1", Some("integrate"), vec!["propose-01"]);
+    int_a.writes = true;
+    int_a.state = SwarmTaskState::Ready;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
+    run.template = template;
+    run.scope_files = scope_files.iter().map(|s| (*s).to_string()).collect();
+    run
+}
+
+// FILE CHECKLIST should reflect the propose/judge declared files (what the
+// runtime enforces), not the operator-prompt scope_files.
+#[test]
+fn integrate_file_checklist_sourced_from_propose_artifacts() {
+    let run = make_run_with_integrate_and_propose(
+        SwarmTemplate::Lab,
+        &["new/a.rs", "new/b.rs", "new/c.rs"],
+        &["operator/d.rs", "operator/e.rs"],
+    );
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test(&run, task);
+
+    // FILE CHECKLIST should list propose's files, not scope_files.
+    assert!(prompt.contains("FILE CHECKLIST"));
+    assert!(prompt.contains("new/a.rs"));
+    assert!(prompt.contains("new/b.rs"));
+    assert!(prompt.contains("new/c.rs"));
+    // Operator-prompt scope_files should NOT appear in the checklist.
+    assert!(
+        !prompt.contains("operator/d.rs"),
+        "operator-prompt files should not appear in integrate file checklist"
+    );
+    // Sourcing breadcrumb should be present.
+    assert!(prompt.contains("sourced from the propose/judge"));
+}
+
+#[test]
+fn integrate_file_checklist_falls_back_to_scope_files_when_no_artifacts() {
+    let run = make_run_with_integrate_and_propose(
+        SwarmTemplate::Lab,
+        &[], // no propose files
+        &["operator/d.rs", "operator/e.rs"],
+    );
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test(&run, task);
+
+    // Falls back to operator scope files.
+    assert!(prompt.contains("operator/d.rs"));
+    assert!(prompt.contains("operator/e.rs"));
+}
+
+#[test]
+fn propose_role_scope_unaffected_by_integrate_sourcing_change() {
+    // Propose tasks should still see operator scope_files (their context list).
+    let mut propose = propose_with_files("propose-01", &["new/a.rs"]);
+    propose.parsed_artifacts = None; // not yet completed
+    propose.state = SwarmTaskState::Ready;
+    let mut run = make_run_with_tasks(SwarmTemplate::Lab, vec![propose]);
+    run.scope_files = vec!["operator/d.rs".into()];
+    let task = run.tasks.iter().find(|t| t.id == "propose-01").unwrap();
+    let prompt = build_task_prompt_for_test(&run, task);
+
+    // Propose role should reference operator scope_files (its own behavior).
+    assert!(prompt.contains("operator/d.rs"));
+}
+
+// Test-only re-export of the private build_task_prompt for prompt-source
+// verification. Mirrors the production call path so tests exercise the same
+// scope-resolution logic.
+fn build_task_prompt_for_test(run: &SwarmRun, task: &SwarmTask) -> String {
+    use super::partition_files_for_shard;
+    let mut declared: Vec<String> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref();
+        if !matches!(role, Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if !rel.is_empty() {
+                declared.push(rel.to_string());
+            }
+        }
+    }
+    let role_kind = task.role.as_deref();
+    let effective_scope: Vec<String> = if role_kind == Some("integrate") && !declared.is_empty() {
+        let mut sorted = declared;
+        sorted.sort();
+        sorted.dedup();
+        sorted
+    } else {
+        run.scope_files.clone()
+    };
+    let shard_files: Option<Vec<String>> = task.shard_index.map(|(idx, total)| {
+        let source: Vec<String> = if !effective_scope.is_empty() {
+            effective_scope.clone()
+        } else {
+            run.scope_files.clone()
+        };
+        partition_files_for_shard(&source, idx, total)
+    });
+    wrap_task_prompt(
+        &run.root_prompt,
+        run.mission_kind,
+        task,
+        None,
+        &effective_scope,
+        run.spawn_cwd.as_path(),
+        shard_files.as_deref(),
+    )
+}
+
+#[test]
+fn structured_artifacts_block_excludes_audit_only_files_from_files_array() {
+    let mut task = make_task("propose-arbiters", "p1", Some("propose"), Vec::new());
+    task.artifacts = vec!["files".into()];
+    let prompt = wrap_task_prompt(
+        "do a recon",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+    );
+    assert!(prompt.contains("Do NOT include"));
+    assert!(prompt.contains("AUDIT-ONLY"));
+    assert!(prompt.contains("Mention these in your prose summary"));
 }
 
 // Critical: if signoff and structural compliance both fire on the same turn,
