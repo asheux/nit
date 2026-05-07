@@ -14,7 +14,18 @@ pub(super) const MAX_GENERATIONS: u32 = 3000;
 pub(super) const SOFT_BOTTLENECK_MAX_LIFT: u32 = 200;
 
 const GRID_MIN: usize = 32;
+const GRID_MID: usize = 48;
 const GRID_MAX: usize = 64;
+
+const SMALL_FILE_BYTES: usize = 2048;
+const MEDIUM_FILE_BYTES: usize = 10240;
+
+const EARLY_POP_FRACTION: u32 = 10;
+const LATE_POP_NUM: u32 = 4;
+const LATE_POP_DEN: u32 = 5;
+
+const EXPANDING_RATIO: f32 = 1.15;
+const COLLAPSING_RATIO: f32 = 0.85;
 
 /// AST-driven encoder IDs used for tier determination.
 pub(super) const AST_ENCODERS: [SeedEncoderId; 3] = [
@@ -34,13 +45,13 @@ pub(super) const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
     SeedEncoderId::Structural,
 ];
 
-/// Scales from 32x32 for small files up to 64x64 for large files,
-/// preserving structural fidelity without blowing up simulation cost.
 pub(super) fn adaptive_grid_size(file_bytes: usize) -> usize {
-    match file_bytes {
-        0..=2048 => GRID_MIN, // <= 2KB: 32x32 (1,024 cells)
-        2049..=10240 => 48,   // 2-10KB: 48x48 (2,304 cells)
-        _ => GRID_MAX,        // > 10KB: 64x64 (4,096 cells)
+    if file_bytes <= SMALL_FILE_BYTES {
+        GRID_MIN
+    } else if file_bytes <= MEDIUM_FILE_BYTES {
+        GRID_MID
+    } else {
+        GRID_MAX
     }
 }
 
@@ -70,10 +81,10 @@ pub(super) fn simulate_gol(
         if alive > peak_population {
             peak_population = alive;
         }
-        if gen == max_generations / 10 {
+        if gen == max_generations / EARLY_POP_FRACTION {
             early_pop = alive;
         }
-        if gen == max_generations * 4 / 5 {
+        if gen == max_generations * LATE_POP_NUM / LATE_POP_DEN {
             late_pop = alive;
         }
         if alive == 0 {
@@ -94,21 +105,6 @@ pub(super) fn simulate_gol(
         generations_survived = max_generations;
     }
 
-    let growth_class = if died {
-        GrowthClass::Extinct
-    } else if early_pop == 0 || late_pop == 0 {
-        GrowthClass::Stable
-    } else {
-        let ratio = late_pop as f32 / early_pop as f32;
-        if ratio > 1.15 {
-            GrowthClass::Expanding
-        } else if ratio < 0.85 {
-            GrowthClass::Collapsing
-        } else {
-            GrowthClass::Stable
-        }
-    };
-
     EncoderScore {
         encoder,
         density,
@@ -116,7 +112,24 @@ pub(super) fn simulate_gol(
         generations_survived,
         peak_population,
         cycle_period,
-        growth_class,
+        growth_class: classify_growth(early_pop, late_pop, died),
+    }
+}
+
+fn classify_growth(early_pop: u32, late_pop: u32, died: bool) -> GrowthClass {
+    if died {
+        return GrowthClass::Extinct;
+    }
+    if early_pop == 0 || late_pop == 0 {
+        return GrowthClass::Stable;
+    }
+    let ratio = late_pop as f32 / early_pop as f32;
+    if ratio > EXPANDING_RATIO {
+        GrowthClass::Expanding
+    } else if ratio < COLLAPSING_RATIO {
+        GrowthClass::Collapsing
+    } else {
+        GrowthClass::Stable
     }
 }
 

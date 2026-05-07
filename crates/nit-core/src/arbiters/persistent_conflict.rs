@@ -1,11 +1,12 @@
-//! PersistentConflictArbiter: detects mutual claim-conflict oscillation
-//! between agent pairs and escalates with a "permanently yield" prompt.
+//! Detect mutual claim-conflict oscillation between agent pairs and escalate
+//! with a "permanently yield" prompt aimed at the lexicographically-larger
+//! agent so the tiebreak is deterministic across re-runs.
 
 use std::collections::HashMap;
 
 use super::{Arbiter, InterventionKind, InterventionProposal, InterventionTarget};
 use crate::state::AppState;
-use crate::substrate::SignalKind;
+use crate::substrate::{Signal, SignalKind};
 
 pub const ARBITER: Arbiter = Arbiter {
     name: "persistent_conflict",
@@ -21,36 +22,15 @@ fn observe(state: &AppState) -> Vec<InterventionProposal> {
         .current_generation()
         .saturating_sub(CONFLICT_WINDOW_GENS);
 
-    // Key is normalized pair (alphabetically sorted) so A<->B is counted once.
     let mut pair_counts: HashMap<(String, String), (usize, Vec<String>)> = HashMap::new();
-
     for s in sub.signals.values() {
         if s.kind != SignalKind::ClaimViolation || s.posted_at_gen < window_start {
             continue;
         }
-        let violator = s.posted_by.clone();
-        let Some(holder) = s
-            .payload
-            .get("conflicting_holder")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        else {
+        let Some((violator, holder, path)) = extract_violation(s) else {
             continue;
         };
-        if violator == holder {
-            continue;
-        }
-        let path = s
-            .payload
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let pair = if violator < holder {
-            (violator, holder)
-        } else {
-            (holder, violator)
-        };
+        let pair = normalize_pair(violator, holder);
         let entry = pair_counts.entry(pair).or_insert((0, Vec::new()));
         entry.0 += 1;
         if !path.is_empty() && !entry.1.contains(&path) {
@@ -58,38 +38,63 @@ fn observe(state: &AppState) -> Vec<InterventionProposal> {
         }
     }
 
-    let mut proposals = Vec::new();
-    for ((a, b), (count, paths)) in pair_counts {
-        if count < CONFLICT_THRESHOLD {
-            continue;
-        }
-        // Lexicographically-larger agent receives the yield prompt — deterministic tiebreak.
-        let (target_agent, other) = if a > b {
-            (a.clone(), b.clone())
-        } else {
-            (b.clone(), a.clone())
-        };
-        proposals.push(InterventionProposal {
-            kind: InterventionKind::RedispatchWithEscalatedPrompt {
-                prompt: format_persistent_conflict_prompt(&other, &paths, count),
-            },
-            target: InterventionTarget::AgentPair {
-                a: a.clone(),
-                b: b.clone(),
-            },
-            rationale: format!(
-                "persistent-conflict: {a} and {b} ({count} violations in {CONFLICT_WINDOW_GENS}g)"
-            ),
-            payload: serde_json::json!({
-                "violator_pair": [a, b],
-                "chosen_recipient": target_agent,
-                "violation_count": count,
-                "window_gens": CONFLICT_WINDOW_GENS,
-                "contested_paths": paths,
-            }),
-        });
+    pair_counts
+        .into_iter()
+        .filter(|(_, (count, _))| *count >= CONFLICT_THRESHOLD)
+        .map(|((a, b), (count, paths))| build_proposal(a, b, count, paths))
+        .collect()
+}
+
+fn extract_violation(signal: &Signal) -> Option<(String, String, String)> {
+    let violator = signal.posted_by.clone();
+    let holder = signal
+        .payload
+        .get("conflicting_holder")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    if violator == holder {
+        return None;
     }
-    proposals
+    let path = signal
+        .payload
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some((violator, holder, path))
+}
+
+fn normalize_pair(a: String, b: String) -> (String, String) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn build_proposal(a: String, b: String, count: usize, paths: Vec<String>) -> InterventionProposal {
+    // pair is normalized (a < b) — the larger element receives the yield prompt.
+    let target_agent = b.clone();
+    let other = a.clone();
+    InterventionProposal {
+        kind: InterventionKind::RedispatchWithEscalatedPrompt {
+            prompt: format_persistent_conflict_prompt(&other, &paths, count),
+        },
+        target: InterventionTarget::AgentPair {
+            a: a.clone(),
+            b: b.clone(),
+        },
+        rationale: format!(
+            "persistent-conflict: {a} and {b} ({count} violations in {CONFLICT_WINDOW_GENS}g)"
+        ),
+        payload: serde_json::json!({
+            "violator_pair": [a, b],
+            "chosen_recipient": target_agent,
+            "violation_count": count,
+            "window_gens": CONFLICT_WINDOW_GENS,
+            "contested_paths": paths,
+        }),
+    }
 }
 
 fn format_persistent_conflict_prompt(other: &str, paths: &[String], count: usize) -> String {

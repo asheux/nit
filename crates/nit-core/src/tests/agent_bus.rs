@@ -2,64 +2,8 @@
 //! lifecycle, soft-cancel routing, and substrate signal emission.
 
 use super::*;
-use crate::state::{
-    AgentAlertSeverity, AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState,
-    MissionRecord,
-};
-
-fn test_state() -> AppState {
-    let editor = crate::Buffer::from_str("editor", "", None);
-    let notes = crate::Buffer::from_str("notes", "", None);
-    AppState::new(std::path::PathBuf::from("."), editor, notes)
-}
-
-fn add_codex_agent(state: &mut AppState, id: &str) {
-    state.agents.agents.push(AgentLane {
-        id: id.into(),
-        role: id.into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 1,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.active_turns.insert(
-        id.into(),
-        AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: None,
-        },
-    );
-}
-
-fn add_claude_agent(state: &mut AppState, id: &str) {
-    state.agents.agents.push(AgentLane {
-        id: id.into(),
-        role: id.into(),
-        lane: "Claude".into(),
-        kind: AgentLaneKind::Claude,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 1,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.active_turns.insert(
-        id.into(),
-        AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: None,
-        },
-    );
-}
+use crate::state::{AgentAlertSeverity, AgentStatus, MissionRecord};
+use crate::test_helpers::{add_claude_agent, add_codex_agent, test_state};
 
 #[test]
 fn token_count_routes_to_codex_maps_for_codex_agent() {

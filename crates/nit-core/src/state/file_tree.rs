@@ -1,22 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Default)]
-pub struct RulePickerState {
-    pub open: bool,
-    pub query: String,
-    pub selected: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ProtocolPickerState {
-    pub open: bool,
-    pub selected: usize,
-    pub custom_input: String,
-    pub custom_error: Option<String>,
-    pub custom_preview: Option<String>,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileTreeKind {
     File,

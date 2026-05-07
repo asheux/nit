@@ -58,7 +58,7 @@ pub struct PaneSession {
     /// Defaults to the `CONSOLE_SCROLL_BOTTOM` sentinel — wheel / PgUp /
     /// PgDn handlers MUST resolve it to `max_scroll` before applying a
     /// delta, otherwise scrolling up from bottom jumps to row 0.
-    #[serde(default = "chat_thread_scroll_default")]
+    #[serde(default = "super::defaults::chat_thread_scroll_default")]
     pub chat_thread_scroll: usize,
     /// Lane id chosen for this pane. `None` ⇒ render roster picker; `Some`
     /// ⇒ render chat for that lane (the lane is materialised lazily as
@@ -77,11 +77,11 @@ pub struct PaneSession {
     pub auto_expanded_agent: Option<String>,
     /// Per-pane swarm template selection. Defaults to `"lab"`; seeded
     /// from `AgentsState::swarm_default_template` at pane construction.
-    #[serde(default = "default_swarm_template")]
+    #[serde(default = "super::defaults::default_swarm_template")]
     pub swarm_template: String,
     /// Per-pane swarm mission selection. Defaults to `"auto"`; seeded
     /// from `AgentsState::swarm_default_mission` at pane construction.
-    #[serde(default = "default_swarm_mission")]
+    #[serde(default = "super::defaults::default_swarm_mission")]
     pub swarm_mission: String,
     /// Watermark flipped to `true` the first time this pane successfully
     /// dispatches a prompt. Gates the artifact-callout decoration in the
@@ -113,18 +113,6 @@ pub struct PaneSelection {
     pub end_col: usize,
 }
 
-fn chat_thread_scroll_default() -> usize {
-    crate::state::CONSOLE_SCROLL_BOTTOM
-}
-
-fn default_swarm_template() -> String {
-    "lab".into()
-}
-
-fn default_swarm_mission() -> String {
-    "auto".into()
-}
-
 impl Default for PaneSession {
     fn default() -> Self {
         Self {
@@ -146,12 +134,12 @@ impl Default for PaneSession {
             roster_scroll: 0,
             roster_collapsed_agent_ids: HashSet::new(),
             roster_tree_selected: None,
-            chat_thread_scroll: chat_thread_scroll_default(),
+            chat_thread_scroll: super::defaults::chat_thread_scroll_default(),
             selected_agent_id: None,
             auto_expanded_backend: None,
             auto_expanded_agent: None,
-            swarm_template: default_swarm_template(),
-            swarm_mission: default_swarm_mission(),
+            swarm_template: super::defaults::default_swarm_template(),
+            swarm_mission: super::defaults::default_swarm_mission(),
             has_run_mission: false,
             selected_effort: BTreeMap::new(),
             selection: None,

@@ -12,7 +12,19 @@ pub struct ProtocolPreset {
     pub mode: RuleMode,
 }
 
-struct LoopedDuo {
+struct RuleLookup {
+    id: &'static str,
+    fallback_rulestring: &'static str,
+    fallback_name: Option<&'static str>,
+}
+
+struct PhaseSpec {
+    lookup: &'static RuleLookup,
+    label: &'static str,
+    steps: u32,
+}
+
+struct LoopedDuoSpec {
     id: &'static str,
     name: &'static str,
     description: &'static str,
@@ -20,101 +32,119 @@ struct LoopedDuo {
     second: PhaseSpec,
 }
 
-struct PhaseSpec {
-    rule: RuleRef,
-    label: &'static str,
-    steps: u32,
-}
+const CONWAY: RuleLookup = RuleLookup {
+    id: "conway",
+    fallback_rulestring: "B3/S23",
+    fallback_name: None,
+};
+const HIGHLIFE: RuleLookup = RuleLookup {
+    id: "highlife",
+    fallback_rulestring: "B36/S23",
+    fallback_name: Some("HighLife"),
+};
+const VOTE: RuleLookup = RuleLookup {
+    id: "vote",
+    fallback_rulestring: "B5678/S45678",
+    fallback_name: Some("Vote"),
+};
+const CORAL: RuleLookup = RuleLookup {
+    id: "coral",
+    fallback_rulestring: "B3/S45678",
+    fallback_name: Some("Coral"),
+};
+const SEEDS: RuleLookup = RuleLookup {
+    id: "seeds",
+    fallback_rulestring: "B2/S",
+    fallback_name: Some("Seeds"),
+};
+
+const LOOPED_DUOS: &[LoopedDuoSpec] = &[
+    LoopedDuoSpec {
+        id: "incubate_replicators",
+        name: "Incubate Replicators",
+        description: "HighLife 16 then Conway 256 (loop)",
+        first: PhaseSpec {
+            lookup: &HIGHLIFE,
+            label: "Incubate",
+            steps: 16,
+        },
+        second: PhaseSpec {
+            lookup: &CONWAY,
+            label: "Stabilize",
+            steps: 256,
+        },
+    },
+    LoopedDuoSpec {
+        id: "anneal_set",
+        name: "Anneal & Set",
+        description: "Vote 1 then Conway 31 (loop)",
+        first: PhaseSpec {
+            lookup: &VOTE,
+            label: "Anneal",
+            steps: 1,
+        },
+        second: PhaseSpec {
+            lookup: &CONWAY,
+            label: "Set",
+            steps: 31,
+        },
+    },
+    LoopedDuoSpec {
+        id: "coral_growth",
+        name: "Coral Growth",
+        description: "Coral 32 then Conway 128 (loop)",
+        first: PhaseSpec {
+            lookup: &CORAL,
+            label: "Grow",
+            steps: 32,
+        },
+        second: PhaseSpec {
+            lookup: &CONWAY,
+            label: "Settle",
+            steps: 128,
+        },
+    },
+    LoopedDuoSpec {
+        id: "chaos_injection",
+        name: "Chaos Injection",
+        description: "Seeds 4 then Conway 128 (loop)",
+        first: PhaseSpec {
+            lookup: &SEEDS,
+            label: "Inject",
+            steps: 4,
+        },
+        second: PhaseSpec {
+            lookup: &CONWAY,
+            label: "Recover",
+            steps: 128,
+        },
+    },
+];
 
 pub fn builtin_protocols(catalog: &RuleCatalog) -> Vec<ProtocolPreset> {
-    let conway = fallback_rule_ref(catalog, "conway", "B3/S23", None);
-    let highlife = fallback_rule_ref(catalog, "highlife", "B36/S23", Some("HighLife"));
-    let vote = fallback_rule_ref(catalog, "vote", "B5678/S45678", Some("Vote"));
-    let coral = fallback_rule_ref(catalog, "coral", "B3/S45678", Some("Coral"));
-    let seeds = fallback_rule_ref(catalog, "seeds", "B2/S", Some("Seeds"));
-
-    let duos = [
-        LoopedDuo {
-            id: "incubate_replicators",
-            name: "Incubate Replicators",
-            description: "HighLife 16 then Conway 256 (loop)",
-            first: PhaseSpec {
-                rule: highlife,
-                label: "Incubate",
-                steps: 16,
-            },
-            second: PhaseSpec {
-                rule: conway.clone(),
-                label: "Stabilize",
-                steps: 256,
-            },
-        },
-        LoopedDuo {
-            id: "anneal_set",
-            name: "Anneal & Set",
-            description: "Vote 1 then Conway 31 (loop)",
-            first: PhaseSpec {
-                rule: vote,
-                label: "Anneal",
-                steps: 1,
-            },
-            second: PhaseSpec {
-                rule: conway.clone(),
-                label: "Set",
-                steps: 31,
-            },
-        },
-        LoopedDuo {
-            id: "coral_growth",
-            name: "Coral Growth",
-            description: "Coral 32 then Conway 128 (loop)",
-            first: PhaseSpec {
-                rule: coral,
-                label: "Grow",
-                steps: 32,
-            },
-            second: PhaseSpec {
-                rule: conway.clone(),
-                label: "Settle",
-                steps: 128,
-            },
-        },
-        LoopedDuo {
-            id: "chaos_injection",
-            name: "Chaos Injection",
-            description: "Seeds 4 then Conway 128 (loop)",
-            first: PhaseSpec {
-                rule: seeds,
-                label: "Inject",
-                steps: 4,
-            },
-            second: PhaseSpec {
-                rule: conway.clone(),
-                label: "Recover",
-                steps: 128,
-            },
-        },
-    ];
-
     let mut out = vec![ProtocolPreset {
         id: "fixed_conway".into(),
         name: "Fixed Conway".into(),
         description: "Single-rule Conway Life".into(),
-        mode: RuleMode::Fixed(conway),
+        mode: RuleMode::Fixed(resolve_lookup(catalog, &CONWAY)),
     }];
-    out.extend(duos.into_iter().map(looped_two_phase));
+    out.extend(
+        LOOPED_DUOS
+            .iter()
+            .map(|spec| looped_two_phase(catalog, spec)),
+    );
     out
 }
 
-fn looped_two_phase(spec: LoopedDuo) -> ProtocolPreset {
+fn looped_two_phase(catalog: &RuleCatalog, spec: &LoopedDuoSpec) -> ProtocolPreset {
     let phases = vec![
         RulePhase {
-            rule: spec.first.rule,
+            rule: resolve_lookup(catalog, spec.first.lookup),
             steps: spec.first.steps,
             label: Some(spec.first.label.into()),
         },
         RulePhase {
-            rule: spec.second.rule,
+            rule: resolve_lookup(catalog, spec.second.lookup),
             steps: spec.second.steps,
             label: Some(spec.second.label.into()),
         },
@@ -127,18 +157,13 @@ fn looped_two_phase(spec: LoopedDuo) -> ProtocolPreset {
     }
 }
 
-fn fallback_rule_ref(
-    catalog: &RuleCatalog,
-    lookup_id: &str,
-    fallback_rulestring: &str,
-    fallback_name: Option<&str>,
-) -> RuleRef {
-    if let Some(named) = catalog.find_by_id(lookup_id) {
+fn resolve_lookup(catalog: &RuleCatalog, lookup: &RuleLookup) -> RuleRef {
+    if let Some(named) = catalog.find_by_id(lookup.id) {
         return RuleRef::from_catalog(named);
     }
     RuleRef {
         id: None,
-        rule: Rule::parse(fallback_rulestring).unwrap_or_else(|_| Rule::conway()),
-        name: fallback_name.map(|s| s.into()),
+        rule: Rule::parse(lookup.fallback_rulestring).unwrap_or_else(|_| Rule::conway()),
+        name: lookup.fallback_name.map(|s| s.into()),
     }
 }

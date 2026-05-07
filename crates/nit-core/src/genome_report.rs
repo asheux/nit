@@ -19,8 +19,13 @@ mod outlier;
 mod parsimony;
 mod recommendations;
 mod simulation;
+mod source_scan;
 
 pub use recommendations::generate_recommendations;
+
+/// Percentage of the gap between the worst and second-worst AST encoder used
+/// to lift the soft bottleneck. Capped by `simulation::SOFT_BOTTLENECK_MAX_LIFT`.
+const SOFT_BOTTLENECK_LIFT_PCT: u32 = 15;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenomeReport {
@@ -30,7 +35,7 @@ pub struct GenomeReport {
     pub tier: GenomeTier,
     pub recommendations: Vec<GenomeRecommendation>,
     pub timestamp_ms: u64,
-    /// Grid dimension used for this report (adaptive: 32, 48, or 64).
+    /// Adaptive grid dimension chosen by `simulation::adaptive_grid_size`.
     pub grid_size: usize,
     /// Parsimony analysis — detects over-engineered code that games genome scores.
     #[serde(default)]
@@ -149,32 +154,37 @@ impl fmt::Display for GenomeTier {
     }
 }
 
+/// Per-tier minimum cross-encoder consistency required for the next quality
+/// label up. Driven by `quality_level` / `quality_reason`. StillLife has no
+/// entry — it always falls through to the "low tier" reason.
+const QUALITY_THRESHOLDS: &[(GenomeTier, f32, &str)] = &[
+    (GenomeTier::Replicator, 0.85, "Exceptional"),
+    (GenomeTier::Methuselah, 0.70, "Excellent"),
+    (GenomeTier::Spaceship, 0.50, "Standard"),
+    (GenomeTier::Oscillator, 0.25, "Minimum"),
+];
+
 impl GenomeReport {
     pub fn quality_level(&self) -> &'static str {
-        match (self.tier, self.cross_encoder_consistency) {
-            (GenomeTier::Replicator, c) if c >= 0.85 => "Exceptional",
-            (GenomeTier::Methuselah, c) if c >= 0.70 => "Excellent",
-            (GenomeTier::Spaceship, c) if c >= 0.50 => "Standard",
-            (GenomeTier::Oscillator, c) if c >= 0.25 => "Minimum",
-            _ => "Failing",
+        for &(tier, threshold, label) in QUALITY_THRESHOLDS {
+            if self.tier == tier && self.cross_encoder_consistency >= threshold {
+                return label;
+            }
         }
+        "Failing"
     }
 
     /// Short reason why quality is at its current level. Returns `None` if
     /// quality meets the tier's consistency threshold.
     pub fn quality_reason(&self) -> Option<&'static str> {
-        let needed_c = match self.tier {
-            GenomeTier::Replicator => 0.85,
-            GenomeTier::Methuselah => 0.70,
-            GenomeTier::Spaceship => 0.50,
-            GenomeTier::Oscillator => 0.25,
-            GenomeTier::StillLife => return Some("low tier"),
-        };
-        if self.cross_encoder_consistency < needed_c {
-            Some("low cons")
-        } else {
-            None
+        if self.tier == GenomeTier::StillLife {
+            return Some("low tier");
         }
+        let threshold = QUALITY_THRESHOLDS
+            .iter()
+            .find(|(tier, _, _)| *tier == self.tier)
+            .map(|(_, t, _)| *t)?;
+        (self.cross_encoder_consistency < threshold).then_some("low cons")
     }
 }
 
@@ -332,7 +342,7 @@ fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u3
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !trimmed.is_empty() && !parsimony::is_comment_line(trimmed)
+            !trimmed.is_empty() && !source_scan::is_comment_line(trimmed)
         })
         .count();
 
@@ -384,7 +394,7 @@ fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u3
     let raw_min = ast_gens.first().copied().unwrap_or(0);
     let effective_min = if ast_gens.len() >= 2 {
         let gap = ast_gens[1].saturating_sub(raw_min);
-        let lift = (gap * 15 / 100).min(simulation::SOFT_BOTTLENECK_MAX_LIFT);
+        let lift = (gap * SOFT_BOTTLENECK_LIFT_PCT / 100).min(simulation::SOFT_BOTTLENECK_MAX_LIFT);
         raw_min + lift
     } else {
         raw_min

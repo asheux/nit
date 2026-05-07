@@ -1,11 +1,8 @@
-//! HelpNeeded for an agent that accumulates ≥threshold Warning signals in
-//! the last WINDOW_GENS generations. Threshold is read from
-//! `state.substrate.mood.modulation().repeat_failure_threshold` so the policy
-//! tightens or relaxes with the system mood.
+//! HelpNeeded for an agent accumulating ≥threshold Warnings within a
+//! sliding window. Threshold is mood-driven (relaxes/tightens with system
+//! mood via `state.substrate.mood.modulation().repeat_failure_threshold`).
 
-use std::collections::HashMap;
-
-use super::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH};
+use super::{ObservedEmission, Observer};
 use crate::state::AppState;
 use crate::substrate::{SignalKind, SignalTarget};
 
@@ -20,10 +17,10 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
     let sub = &state.substrate;
     let window_start = sub.current_generation().saturating_sub(WINDOW_GENS);
 
-    let mut warnings_by_agent: HashMap<String, usize> = HashMap::new();
-    for s in super::iter_recent_warnings(sub, window_start) {
-        *warnings_by_agent.entry(s.posted_by.clone()).or_insert(0) += 1;
-    }
+    let warnings_by_agent =
+        super::count_by_key(super::iter_recent_warnings(sub, window_start), |s| {
+            s.posted_by.clone()
+        });
 
     let recent_helps = super::recent_help_targets(sub, "observer:repeat_failure", window_start);
     let threshold = sub.mood.modulation().repeat_failure_threshold;
@@ -33,19 +30,18 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
         if count < threshold || recent_helps.contains(&agent_id) {
             continue;
         }
-        emissions.push(ObservedEmission {
-            kind: SignalKind::HelpNeeded,
-            target: SignalTarget::Agent {
+        emissions.push(ObservedEmission::new(
+            SignalKind::HelpNeeded,
+            SignalTarget::Agent {
                 agent_id: agent_id.clone(),
             },
-            initial_strength: OBSERVER_INITIAL_STRENGTH,
-            payload: serde_json::json!({
+            serde_json::json!({
                 "reason": "repeat_failure",
                 "warning_count": count,
                 "window_gens": WINDOW_GENS,
                 "agent_id": agent_id,
             }),
-        });
+        ));
     }
     emissions
 }

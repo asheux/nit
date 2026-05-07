@@ -6,54 +6,12 @@ use crate::arbiters::{
     self, persistent_conflict, reduce_proposals, run_all, InterventionKind, InterventionProposal,
     InterventionTarget, ARBITER_MAX_PER_TICK, ARBITER_RETRY_LIMIT,
 };
-use crate::state::{AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState};
+use crate::state::AppState;
 use crate::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
-
-fn test_state() -> AppState {
-    let editor = crate::Buffer::from_str("editor", "", None);
-    let notes = crate::Buffer::from_str("notes", "", None);
-    AppState::new(std::path::PathBuf::from("."), editor, notes)
-}
+use crate::test_helpers::{add_codex_agent, temp_dir, test_state, test_state_in};
 
 fn test_state_on_disk(label: &str) -> AppState {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    dir.push(format!(
-        "nit-test-arbiters-{label}-{now}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let editor = crate::Buffer::from_str("editor", "", None);
-    let notes = crate::Buffer::from_str("notes", "", None);
-    AppState::new(dir, editor, notes)
-}
-
-fn add_codex_agent(state: &mut AppState, id: &str) {
-    state.agents.agents.push(AgentLane {
-        id: id.into(),
-        role: id.into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 1,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.active_turns.insert(
-        id.into(),
-        AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: None,
-        },
-    );
+    test_state_in(temp_dir(label))
 }
 
 /// Inject a ClaimViolation signal mimicking agent_bus.rs:286-303.

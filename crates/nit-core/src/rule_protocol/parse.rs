@@ -30,22 +30,26 @@ pub fn parse_protocol_spec(spec: &str, catalog: &RuleCatalog) -> Result<RuleProt
     RuleProtocol::new(phases, looped)
 }
 
+/// Loop-suffix forms accepted by `parse_protocol_spec`, in priority order.
+/// First match wins; the bare `"loop"` form is guarded against `/sloop`
+/// because that's a Generations-rule rulestring (e.g. `B2/S/sloop`)
+/// whose terminal `loop` is not the looping marker.
+const LOOP_SUFFIXES: &[(&str, usize)] = &[("(loop)", 6), (" loop", 5), ("loop", 4)];
+
 fn strip_loop_suffix(spec: &str) -> (String, bool) {
     let lowered = spec.to_ascii_lowercase();
-    let mut cleaned = spec.to_string();
-    let looped = if lowered.ends_with("(loop)") {
-        cleaned.truncate(cleaned.len() - 6);
-        true
-    } else if lowered.ends_with(" loop") {
-        cleaned.truncate(cleaned.len() - 5);
-        true
-    } else if lowered.ends_with("loop") && !lowered.ends_with("/sloop") {
-        cleaned.truncate(cleaned.len() - 4);
-        true
-    } else {
-        false
-    };
-    (cleaned, looped)
+    for (suffix, len) in LOOP_SUFFIXES {
+        if !lowered.ends_with(suffix) {
+            continue;
+        }
+        if *suffix == "loop" && lowered.ends_with("/sloop") {
+            continue;
+        }
+        let mut cleaned = spec.to_string();
+        cleaned.truncate(cleaned.len() - len);
+        return (cleaned, true);
+    }
+    (spec.to_string(), false)
 }
 
 fn split_phase(part: &str, idx: usize) -> Result<(&str, u32), String> {

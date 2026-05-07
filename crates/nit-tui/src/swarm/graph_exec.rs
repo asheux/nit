@@ -644,7 +644,13 @@ fn capture_pre_dispatch_file_state(
                 Ok(content) => (true, content.lines().count()),
                 Err(_) => (false, 0),
             };
-            out.insert(rel.to_string(), FilePreState { existed, line_count });
+            out.insert(
+                rel.to_string(),
+                FilePreState {
+                    existed,
+                    line_count,
+                },
+            );
         }
     }
     out
@@ -669,6 +675,7 @@ fn build_task_prompt(
     } else {
         run.scope_files.clone()
     };
+    let proposers_skipped = integrate_proposers_skipped(run, task);
     wrap_task_prompt(
         &run.root_prompt,
         run.mission_kind,
@@ -677,6 +684,7 @@ fn build_task_prompt(
         &effective_scope,
         run.spawn_cwd.as_path(),
         shard_slice,
+        proposers_skipped,
     )
 }
 
@@ -804,15 +812,55 @@ pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> 
 // agents to describe changes instead of executing them. Full output applies
 // to: judge (comparing proposals), integrate (implementing), and any task
 // with `writes: true` (custom write-role tasks from the planner).
+//
+// Context-budget compaction: for integrate tasks (or any write-role task)
+// when a judge dep with parsed_artifacts is present, propose-role dep
+// payloads are skipped. The judge's contract is to consolidate proposers
+// into a single decisive plan; reading both is redundant content that
+// crowds out tool_use accumulation budget. When no judge is present (small
+// swarms with direct propose→integrate handoff), proposers are kept since
+// they're the only source. The skip is signalled to the agent by a
+// breadcrumb in the dependency-outputs section so it knows where the
+// proposer detail lives if it needs to consult the on-disk artifacts.
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
     let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
-    let per_dep_cap = per_dep_budget(task.role.as_deref(), task.writes, task.deps.len());
+    let skip_proposers = needs_full_output && judge_with_artifacts_in_deps(run, task);
+
+    // Re-count after filtering so the per-dep budget is computed against
+    // the actual payload count (more headroom for the deps that survive).
+    let effective_dep_count = if skip_proposers {
+        task.deps
+            .iter()
+            .filter(|dep_id| {
+                run.tasks
+                    .iter()
+                    .find(|t| &t.id == *dep_id)
+                    .map(|dep| {
+                        dep.role
+                            .as_deref()
+                            .and_then(normalize_role_label)
+                            .as_deref()
+                            != Some("propose")
+                    })
+                    .unwrap_or(true)
+            })
+            .count()
+    } else {
+        task.deps.len()
+    };
+    let per_dep_cap = per_dep_budget(task.role.as_deref(), task.writes, effective_dep_count);
 
     let mut out = Vec::new();
     for dep_id in task.deps.iter() {
         let Some(dep) = run.tasks.iter().find(|t| t.id == *dep_id) else {
             continue;
         };
+        if skip_proposers {
+            let role = dep.role.as_deref().and_then(normalize_role_label);
+            if role.as_deref() == Some("propose") {
+                continue;
+            }
+        }
         let status = match dep.state {
             SwarmTaskState::Done => "DONE",
             SwarmTaskState::Failed => "FAILED",
@@ -828,4 +876,31 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
         out.push((label, truncate_chars(&text, per_dep_cap)));
     }
     out
+}
+
+// True when at least one judge dep has parsed_artifacts populated. Used by
+// `collect_dependency_payload` to decide whether to skip proposer deps for
+// context-budget compaction. Requires the judge to actually have output
+// (not just a judge id with no artifacts) so we never strip proposers when
+// the consolidation hasn't actually happened.
+fn judge_with_artifacts_in_deps(run: &SwarmRun, task: &SwarmTask) -> bool {
+    task.deps.iter().any(|dep_id| {
+        run.tasks
+            .iter()
+            .find(|t| &t.id == dep_id)
+            .map(|dep| {
+                let role = dep.role.as_deref().and_then(normalize_role_label);
+                role.as_deref() == Some("judge") && dep.parsed_artifacts.is_some()
+            })
+            .unwrap_or(false)
+    })
+}
+
+// True when this integrate task should expose the proposers-skipped
+// breadcrumb in the dependency-outputs section. Mirrors the predicate used
+// in `collect_dependency_payload` so prompt rendering and dep filtering
+// agree on the same condition.
+pub(super) fn integrate_proposers_skipped(run: &SwarmRun, task: &SwarmTask) -> bool {
+    task_uses_full_output_budget(task.role.as_deref(), task.writes)
+        && judge_with_artifacts_in_deps(run, task)
 }

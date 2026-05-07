@@ -41,13 +41,10 @@ pub struct Buffer {
     pub cursor: Cursor,
     pub viewport: Viewport,
     dirty: bool,
-    /// Line hashes of the base (on-disk) content for diff computation.
     #[serde(skip)]
     base_line_hashes: Vec<u64>,
-    /// Cached diff status per line. Recomputed when version changes.
     #[serde(skip)]
     diff_status: Vec<LineDiffStatus>,
-    /// Buffer version at which diff_status was last computed.
     #[serde(skip)]
     diff_version: u64,
 }
@@ -132,11 +129,14 @@ impl Buffer {
     }
 
     pub fn grapheme_width_at_line(&self, line: usize) -> usize {
-        self.line_as_str(line).graphemes(true).count()
+        self.line_as_string(line).graphemes(true).count()
     }
 
     pub fn line_as_string(&self, line: usize) -> String {
-        self.line_as_str(line)
+        if line >= self.rope.len_lines() {
+            return String::new();
+        }
+        self.rope.line(line).to_string()
     }
 
     pub fn line_char_start(&self, line: usize) -> usize {
@@ -149,17 +149,6 @@ impl Buffer {
         } else {
             self.rope.len_chars()
         }
-    }
-
-    pub fn cursor_index(&self) -> usize {
-        self.char_index()
-    }
-
-    fn line_as_str(&self, line: usize) -> String {
-        if line >= self.rope.len_lines() {
-            return String::new();
-        }
-        self.rope.line(line).to_string()
     }
 
     pub(super) fn line_char_len(&self, line: usize) -> usize {

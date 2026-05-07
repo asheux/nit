@@ -558,6 +558,7 @@ fn crate_names_from_paths(paths: &[String]) -> Vec<String> {
     set.into_iter().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn wrap_task_prompt(
     root_prompt: &str,
     mission_kind: SwarmMissionKind,
@@ -566,6 +567,7 @@ pub(super) fn wrap_task_prompt(
     scope_files: &[String],
     spawn_cwd: &Path,
     shard_files: Option<&[String]>,
+    proposers_skipped: bool,
 ) -> String {
     let mut out = String::new();
     append_task_continuation_preamble(&mut out, task);
@@ -581,15 +583,23 @@ pub(super) fn wrap_task_prompt(
 
     // Inject the scope file list BEFORE the task prompt so the agent sees
     // the full file checklist first, then the task instructions. Prevents
-    // the agent from forming a plan that ignores files.
-    append_task_scope_section(&mut out, task, scope_files, spawn_cwd);
+    // the agent from forming a plan that ignores files. Sharded integrate
+    // tasks skip the FILE CHECKLIST — the YOUR SHARD section that follows
+    // already lists the partition; rendering both would just bloat the
+    // prompt without adding signal.
+    let role_kind = task.role.as_deref().and_then(normalize_role_label);
+    let is_sharded_integrate =
+        role_kind.as_deref() == Some("integrate") && task.shard_index.is_some();
+    if !is_sharded_integrate {
+        append_task_scope_section(&mut out, task, scope_files, spawn_cwd);
+    }
     append_task_shard_section(&mut out, task, shard_files);
 
     out.push_str("\nYour task:\n");
     out.push_str(task.task_prompt.trim());
     out.push('\n');
 
-    append_task_dependency_outputs(&mut out, task, deps);
+    append_task_dependency_outputs(&mut out, task, deps, proposers_skipped);
     append_task_structured_artifacts(&mut out, task);
 
     out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
@@ -858,6 +868,7 @@ fn append_task_dependency_outputs(
     out: &mut String,
     task: &SwarmTask,
     deps: Option<&[(String, String)]>,
+    proposers_skipped: bool,
 ) {
     let Some(deps) = deps.filter(|d| !d.is_empty()) else {
         return;
@@ -881,6 +892,11 @@ fn append_task_dependency_outputs(
              requirements, not suggestions. See PROPOSER-PLAN BINDING in your ROLE \
              CONTRACT above for when a deviation is allowed and how to report it.\n",
         );
+        if proposers_skipped {
+            out.push_str(
+                "Proposer outputs are intentionally omitted — the judge below has consolidated them into a single binding plan, and reading both would duplicate content and crowd out tool-use budget. The raw proposer reports are still on disk under `.nit/swarm/<mission>/tasks/propose-*/output.md` if you need to consult them; do NOT try to re-derive proposer detail from the judge's verdict on your own.\n",
+            );
+        }
     } else {
         out.push_str("\nDependency outputs:\n");
     }

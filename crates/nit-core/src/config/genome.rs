@@ -10,7 +10,7 @@ pub struct GenomeGateConfig {
 impl Default for GenomeGateConfig {
     fn default() -> Self {
         Self {
-            min_tier: 1, // Oscillator
+            min_tier: 1,
             max_density: 0.45,
             min_components: 3,
             min_consistency: 0.4,
@@ -32,8 +32,8 @@ pub struct AgentGenomeConfig {
 impl Default for AgentGenomeConfig {
     fn default() -> Self {
         Self {
-            genome_context_enabled: true,
-            genome_gate_enabled: true,
+            genome_context_enabled: super::default_true(),
+            genome_gate_enabled: super::default_true(),
             genome_gate: GenomeGateConfig::default(),
         }
     }

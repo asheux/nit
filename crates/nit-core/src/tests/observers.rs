@@ -1,52 +1,6 @@
 use super::*;
 use crate::agent_bus::AgentBusEvent;
-use crate::state::{AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState};
-use crate::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
-
-fn test_state() -> AppState {
-    let editor = crate::Buffer::from_str("editor", "", None);
-    let notes = crate::Buffer::from_str("notes", "", None);
-    AppState::new(std::path::PathBuf::from("."), editor, notes)
-}
-
-fn add_codex_agent(state: &mut AppState, id: &str) {
-    state.agents.agents.push(AgentLane {
-        id: id.into(),
-        role: id.into(),
-        lane: "Codex".into(),
-        kind: AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
-        queue_len: 1,
-        current_mission: None,
-        last_message: String::new(),
-        shadow: false,
-    });
-    state.agents.active_turns.insert(
-        id.into(),
-        AgentTurnState {
-            started_at: std::time::Instant::now(),
-            last_heartbeat_at: std::time::Instant::now(),
-            last_output_at: std::time::Instant::now(),
-            stage: None,
-        },
-    );
-}
-
-fn inject_warning(state: &mut AppState, posted_by: &str, posted_at_gen: u64, counter: u64) {
-    let id = format!("{posted_at_gen}-{posted_by}-{counter}");
-    state.substrate.emit_signal(Signal {
-        id,
-        kind: SignalKind::Warning,
-        posted_by: posted_by.into(),
-        posted_at_gen,
-        target: SignalTarget::Agent {
-            agent_id: posted_by.into(),
-        },
-        initial_strength: SubstrateState::DEFAULT_INITIAL_STRENGTH,
-        payload: serde_json::Value::Null,
-    });
-}
+use crate::test_helpers::{add_codex_agent, inject_warning, test_state};
 
 #[test]
 fn framework_invokes_all_registered_observers() {

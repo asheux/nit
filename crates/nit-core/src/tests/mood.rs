@@ -2,48 +2,22 @@
 //! pressure window, override lock, and the per-mood multiplier dials.
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::agent_bus::AgentBusEvent;
 use crate::metabolism::{tick, tick_interval_for};
 use crate::mood::{auto_transition, Mood};
 use crate::state::AppState;
 use crate::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
-use crate::Buffer;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use crate::test_helpers::{temp_dir, test_state_in};
 
 fn test_state(label: &str) -> AppState {
-    let dir = temp_dir(label);
-    let editor = Buffer::from_str("editor", "", None);
-    let notes = Buffer::from_str("notes", "", None);
-    AppState::new(dir, editor, notes)
+    test_state_in(temp_dir(label))
 }
 
 fn inject_warning(state: &mut AppState, posted_by: &str, counter: u64) {
     let posted_at_gen = state.substrate.generation;
-    let id = format!("{posted_at_gen}-{posted_by}-{counter}");
-    state.substrate.emit_signal(Signal {
-        id,
-        kind: SignalKind::Warning,
-        posted_by: posted_by.into(),
-        posted_at_gen,
-        target: SignalTarget::Agent {
-            agent_id: posted_by.into(),
-        },
-        initial_strength: SubstrateState::DEFAULT_INITIAL_STRENGTH,
-        payload: serde_json::Value::Null,
-    });
+    crate::test_helpers::inject_warning(state, posted_by, posted_at_gen, counter);
 }
 
 #[test]

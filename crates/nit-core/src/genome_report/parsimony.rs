@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::recommendations::ts_parse;
+use super::source_scan::{is_comment_line, ts_parse};
 use super::{GenomeRecommendation, ParsimonyInfo, RecommendationSeverity};
 
 /// Minimum significant lines before parsimony analysis is applied.
@@ -41,20 +41,13 @@ pub(super) const PARSIMONY_COMMENT_RATIO_THRESHOLD: f32 = 0.35;
 /// dedupe). Legitimate comments carry new information; a repeat never does.
 pub(super) const PARSIMONY_DUPLICATE_COMMENT_THRESHOLD: usize = 1;
 
-/// True for a trimmed line that is syntactically a comment or comment
-/// continuation. The `*` rules are narrow on purpose: a bare
-/// `starts_with('*')` would misclassify real code like `*ptr = 5` or
-/// `*mut T = ...` as a comment, which both undercounts code lines AND
-/// inflates the comment ratio enough to wrongly flag a file as
-/// comment-padded. Block-comment continuation lines in practice are
-/// `* text`, a bare `*`, or `*/`.
-pub(super) fn is_comment_line(t: &str) -> bool {
-    t.starts_with("//")
-        || t.starts_with("/*")
-        || t == "*"
-        || t.starts_with("* ")
-        || t.starts_with("*/")
-}
+/// Crosses from "well-factored" to "starting to over-split" — emits an Info
+/// recommendation rather than the Warning that the >=15 / <3.0 combo emits.
+pub(super) const PARSIMONY_INFO_FN_COUNT_THRESHOLD: usize = 10;
+
+/// Approaching the 0.40 PARSIMONY_COMMENT_RATIO_THRESHOLD that warns; this
+/// lower bound emits an Info nudge first.
+pub(super) const PARSIMONY_COMMENT_RATIO_INFO_THRESHOLD: f32 = 0.30;
 
 pub(super) fn compute_parsimony(
     text: &str,
@@ -267,7 +260,7 @@ pub(super) fn generate_parsimony_recommendations(
             ),
             location: None,
         });
-    } else if parsimony.fn_count >= 10
+    } else if parsimony.fn_count >= PARSIMONY_INFO_FN_COUNT_THRESHOLD
         && parsimony.avg_fn_body_lines > 0.0
         && parsimony.avg_fn_body_lines < PARSIMONY_AVG_FN_BODY_THRESHOLD
     {
@@ -298,7 +291,7 @@ pub(super) fn generate_parsimony_recommendations(
             ),
             location: None,
         });
-    } else if parsimony.comment_ratio > 0.30 {
+    } else if parsimony.comment_ratio > PARSIMONY_COMMENT_RATIO_INFO_THRESHOLD {
         recs.push(GenomeRecommendation {
             metric: "comment_padding".into(),
             severity: RecommendationSeverity::Info,

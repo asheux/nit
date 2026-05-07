@@ -9,7 +9,7 @@
 //! same AppState snapshot observers just read, plus any signals observers
 //! emitted. No arbiter reads `InterventionEmitted` — prevents self-loops.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::state::{AppState, Intervention};
 use crate::substrate::{Signal, SignalKind, SignalTarget};
@@ -52,6 +52,65 @@ pub enum InterventionTarget {
     Global,
 }
 
+impl InterventionTarget {
+    /// Map this target to a `SignalTarget` for emission and cooldown matching.
+    pub fn signal_target(&self) -> SignalTarget {
+        match self {
+            InterventionTarget::Agent { agent_id }
+            | InterventionTarget::AgentPair { a: agent_id, .. } => SignalTarget::Agent {
+                agent_id: agent_id.clone(),
+            },
+            InterventionTarget::Mission { .. } | InterventionTarget::Global => SignalTarget::Global,
+        }
+    }
+
+    /// Whether a previously-emitted signal targets the same scope as this proposal.
+    pub fn matches_signal(&self, sig: &SignalTarget) -> bool {
+        match (self, sig) {
+            (InterventionTarget::Agent { agent_id: a }, SignalTarget::Agent { agent_id: b }) => {
+                a == b
+            }
+            (InterventionTarget::AgentPair { a, b }, SignalTarget::Agent { agent_id: x }) => {
+                a == x || b == x
+            }
+            (InterventionTarget::Global, SignalTarget::Global)
+            | (InterventionTarget::Mission { .. }, SignalTarget::Global) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the recipient(s)' retry budget is exhausted at the given limit.
+    /// Per-agent lookup so a burnt-out agent does not silence interventions
+    /// targeting other agents running in parallel.
+    pub fn budget_exhausted(&self, retries: &HashMap<String, u8>, limit: u8) -> bool {
+        match self {
+            InterventionTarget::Agent { agent_id } => {
+                retries.get(agent_id).copied().unwrap_or(0) >= limit
+            }
+            InterventionTarget::AgentPair { a, b } => {
+                let ca = retries.get(a).copied().unwrap_or(0);
+                let cb = retries.get(b).copied().unwrap_or(0);
+                ca.min(cb) >= limit
+            }
+            InterventionTarget::Mission { .. } | InterventionTarget::Global => {
+                retries.values().copied().max().unwrap_or(0) >= limit
+            }
+        }
+    }
+
+    /// Serializable scope summary for the InterventionEmitted signal payload.
+    pub fn payload_object(&self) -> serde_json::Value {
+        match self {
+            InterventionTarget::Agent { agent_id } => serde_json::json!({ "agent": agent_id }),
+            InterventionTarget::AgentPair { a, b } => serde_json::json!({ "pair": [a, b] }),
+            InterventionTarget::Mission { mission_id } => {
+                serde_json::json!({ "mission": mission_id })
+            }
+            InterventionTarget::Global => serde_json::json!({ "scope": "global" }),
+        }
+    }
+}
+
 pub type ArbiterFn = fn(&AppState) -> Vec<InterventionProposal>;
 
 pub struct Arbiter {
@@ -90,46 +149,14 @@ pub fn reduce_proposals(
 
     let mut reduced: Vec<Intervention> = Vec::new();
     for (name, prop) in raw {
-        // Per-(arbiter, target) cooldown: skip if an InterventionEmitted
-        // signal exists for this (name, target) in the cooldown window.
-        let already = state.substrate.signals.values().any(|s| {
-            s.kind == SignalKind::InterventionEmitted
-                && s.posted_by == format!("arbiter:{name}")
-                && s.posted_at_gen >= cooldown_start
-                && arbiter_target_matches_signal(&prop.target, &s.target)
-        });
-        if already {
+        if in_cooldown(state, name, &prop.target, cooldown_start) {
             continue;
         }
 
-        // Downgrade if the recipient agent's retry budget is exhausted.
-        // Per-agent lookup — a single burnt-out agent must not silence
-        // interventions targeting other agents running in parallel.
-        let budget_exhausted = match &prop.target {
-            InterventionTarget::Agent { agent_id } => {
-                state
-                    .genome_retry_counts
-                    .get(agent_id)
-                    .copied()
-                    .unwrap_or(0)
-                    >= genome_retry_limit
-            }
-            InterventionTarget::AgentPair { a, b } => {
-                let ca = state.genome_retry_counts.get(a).copied().unwrap_or(0);
-                let cb = state.genome_retry_counts.get(b).copied().unwrap_or(0);
-                ca.min(cb) >= genome_retry_limit
-            }
-            InterventionTarget::Mission { .. } | InterventionTarget::Global => {
-                state
-                    .genome_retry_counts
-                    .values()
-                    .copied()
-                    .max()
-                    .unwrap_or(0)
-                    >= genome_retry_limit
-            }
-        };
-        let kind = if budget_exhausted {
+        let kind = if prop
+            .target
+            .budget_exhausted(&state.genome_retry_counts, genome_retry_limit)
+        {
             InterventionKind::EmitSignalOnly
         } else {
             prop.kind.clone()
@@ -151,35 +178,31 @@ pub fn reduce_proposals(
     reduced
 }
 
-/// Helper: map an InterventionTarget to a SignalTarget for emission +
-/// cooldown matching.
-pub fn intervention_to_signal_target(t: &InterventionTarget) -> SignalTarget {
-    match t {
-        InterventionTarget::Agent { agent_id }
-        | InterventionTarget::AgentPair { a: agent_id, .. } => SignalTarget::Agent {
-            agent_id: agent_id.clone(),
-        },
-        InterventionTarget::Mission { .. } | InterventionTarget::Global => SignalTarget::Global,
-    }
+fn in_cooldown(
+    state: &AppState,
+    arbiter_name: &str,
+    target: &InterventionTarget,
+    cooldown_start: u64,
+) -> bool {
+    let posted_by = format!("arbiter:{arbiter_name}");
+    state.substrate.signals.values().any(|s| {
+        s.kind == SignalKind::InterventionEmitted
+            && s.posted_by == posted_by
+            && s.posted_at_gen >= cooldown_start
+            && target.matches_signal(&s.target)
+    })
 }
 
-fn arbiter_target_matches_signal(arb: &InterventionTarget, sig: &SignalTarget) -> bool {
-    match (arb, sig) {
-        (InterventionTarget::Agent { agent_id: a }, SignalTarget::Agent { agent_id: b }) => a == b,
-        (InterventionTarget::AgentPair { a, b }, SignalTarget::Agent { agent_id: x }) => {
-            a == x || b == x
-        }
-        (InterventionTarget::Global, SignalTarget::Global)
-        | (InterventionTarget::Mission { .. }, SignalTarget::Global) => true,
-        _ => false,
-    }
+/// Thin shim retained for cross-crate consumers — prefer the inherent method.
+pub fn intervention_to_signal_target(t: &InterventionTarget) -> SignalTarget {
+    t.signal_target()
 }
 
 /// Emit the InterventionEmitted signal for each reduced intervention
 /// and push them onto the queue for nit-tui to drain.
 pub fn apply_interventions(state: &mut AppState, interventions: Vec<Intervention>) {
     for iv in interventions {
-        let signal_target = intervention_to_signal_target(&iv.target);
+        let signal_target = iv.target.signal_target();
         let posted_by = format!("arbiter:{}", iv.arbiter_name);
         let id = state.substrate.next_signal_id(&posted_by);
         let posted_at_gen = state.substrate.current_generation();
@@ -192,12 +215,7 @@ pub fn apply_interventions(state: &mut AppState, interventions: Vec<Intervention
             initial_strength: ARBITER_INITIAL_STRENGTH,
             payload: serde_json::json!({
                 "rationale": iv.rationale,
-                "target": match &iv.target {
-                    InterventionTarget::Agent { agent_id } => serde_json::json!({"agent": agent_id}),
-                    InterventionTarget::AgentPair { a, b } => serde_json::json!({"pair": [a, b]}),
-                    InterventionTarget::Mission { mission_id } => serde_json::json!({"mission": mission_id}),
-                    InterventionTarget::Global => serde_json::json!({"scope": "global"}),
-                },
+                "target": iv.target.payload_object(),
                 "details": iv.payload.clone(),
             }),
         });

@@ -1,7 +1,7 @@
-//! Global Warning when active-signal count exceeds THRESHOLD, with a
-//! COOLDOWN_GENS-generation suppression window.
+//! Saturation alarm — emits one Warning per cooldown window when active
+//! signal count exceeds THRESHOLD.
 
-use super::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH};
+use super::{ObservedEmission, Observer};
 use crate::state::AppState;
 use crate::substrate::{SignalKind, SignalTarget};
 
@@ -19,19 +19,18 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
     if n <= THRESHOLD {
         return Vec::new();
     }
-    let cooldown_start = sub.current_generation().saturating_sub(COOLDOWN_GENS);
-    if super::recent_global_warning(sub, "observer:global_heat", cooldown_start) {
+    let window_start = sub.current_generation().saturating_sub(COOLDOWN_GENS);
+    if super::recent_global_warning(sub, "observer:global_heat", window_start) {
         return Vec::new();
     }
 
-    vec![ObservedEmission {
-        kind: SignalKind::Warning,
-        target: SignalTarget::Global,
-        initial_strength: OBSERVER_INITIAL_STRENGTH,
-        payload: serde_json::json!({
+    vec![ObservedEmission::new(
+        SignalKind::Warning,
+        SignalTarget::Global,
+        serde_json::json!({
             "reason": "global_heat",
             "signal_count": n,
             "threshold": THRESHOLD,
         }),
-    }]
+    )]
 }

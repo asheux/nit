@@ -1,31 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use tree_sitter::{Parser, Tree};
-
 use crate::seed::SeedEncoderId;
 
 use super::outlier::analyze_structural_outlier;
+use super::source_scan::ts_parse;
 use super::{EncoderScore, GenomeRecommendation, RecommendationSeverity};
 
-pub(super) fn ts_parse(text: &str, file_path: &Path) -> Option<Tree> {
-    let ext = file_path.extension()?.to_str()?;
-    let language = match ext {
-        "rs" => tree_sitter_rust::language(),
-        "py" => tree_sitter_python::language(),
-        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::language(),
-        "ts" | "tsx" => tree_sitter_typescript::language_typescript(),
-        "html" | "htm" => tree_sitter_html::language(),
-        "css" => tree_sitter_css::language(),
-        "json" => tree_sitter_json::language(),
-        "toml" => tree_sitter_toml::language(),
-        "sh" | "bash" => tree_sitter_bash::language(),
-        _ => return None,
-    };
-    let mut parser = Parser::new();
-    parser.set_language(language).ok()?;
-    parser.parse(text, None)
-}
+const DENSITY_LOW_THRESHOLD: f32 = 0.15;
+const MONOLITHIC_COMPONENT_THRESHOLD: usize = 3;
+const CYCLOMATIC_CRITICAL_THRESHOLD: u32 = 10;
+const IDENTIFIER_UNIQUENESS_MIN: f32 = 0.5;
+const NESTING_DEPTH_WARN: usize = 4;
+const NESTING_RANGE_GAP: usize = 2;
+const ENTROPY_WINDOW_LINES: usize = 10;
+const ENTROPY_MIN_TOKENS: usize = 5;
+const ENTROPY_LOW_THRESHOLD: f32 = 3.0;
 
 pub fn generate_recommendations(
     text: &str,
@@ -34,14 +24,13 @@ pub fn generate_recommendations(
 ) -> Vec<GenomeRecommendation> {
     let mut recs = Vec::new();
 
-    // Density: low density means poor structural variety; high density is good.
     for score in scores {
         if matches!(
             score.encoder,
             SeedEncoderId::TokenSpectrum
                 | SeedEncoderId::AstStructure
                 | SeedEncoderId::ComplexityField
-        ) && score.density < 0.15
+        ) && score.density < DENSITY_LOW_THRESHOLD
         {
             recs.push(GenomeRecommendation {
                 metric: "density".into(),
@@ -62,7 +51,7 @@ pub fn generate_recommendations(
         .iter()
         .find(|s| s.encoder == SeedEncoderId::AstStructure)
     {
-        if ast_score.components < 3 {
+        if ast_score.components < MONOLITHIC_COMPONENT_THRESHOLD {
             recs.push(GenomeRecommendation {
                 metric: "components".into(),
                 severity: RecommendationSeverity::Warning,
@@ -133,7 +122,7 @@ fn analyze_function_node(
     let end_line = node.end_position().row + 1;
 
     let cc = compute_cyclomatic_complexity(text, node);
-    if cc > 10 {
+    if cc > CYCLOMATIC_CRITICAL_THRESHOLD {
         recs.push(GenomeRecommendation {
             metric: "cyclomatic_complexity".into(),
             severity: RecommendationSeverity::Critical,
@@ -148,7 +137,7 @@ fn analyze_function_node(
     let (total_ids, unique_ids) = count_identifiers(text, node);
     if total_ids > 0 {
         let uniqueness = unique_ids as f32 / total_ids as f32;
-        if uniqueness < 0.5 {
+        if uniqueness < IDENTIFIER_UNIQUENESS_MIN {
             let pct = ((1.0 - uniqueness) * 100.0).round() as u32;
             recs.push(GenomeRecommendation {
                 metric: "identifier_uniqueness".into(),
@@ -253,7 +242,7 @@ fn analyze_nesting_depth(
 
     let mut sorted_lines: Vec<(usize, usize)> = max_depth_per_line
         .iter()
-        .filter(|&(_, &d)| d > 4)
+        .filter(|&(_, &d)| d > NESTING_DEPTH_WARN)
         .map(|(&line, &depth)| (line, depth))
         .collect();
     sorted_lines.sort_by_key(|&(line, _)| line);
@@ -267,7 +256,7 @@ fn analyze_nesting_depth(
     let mut end = start;
     let mut max_d = sorted_lines[0].1;
     for &(line, depth) in sorted_lines.iter().skip(1) {
-        if line <= end + 2 {
+        if line <= end + NESTING_RANGE_GAP {
             // Contiguous with a 1-line gap allowance.
             end = line;
             max_d = max_d.max(depth);
@@ -339,14 +328,14 @@ fn analyze_token_entropy(
     root: &tree_sitter::Node<'_>,
     recs: &mut Vec<GenomeRecommendation>,
 ) {
-    if lines.len() < 10 {
+    if lines.len() < ENTROPY_WINDOW_LINES {
         return;
     }
 
     let mut tokens_per_line: Vec<Vec<&str>> = vec![Vec::new(); lines.len()];
     collect_leaf_tokens(root, &mut tokens_per_line);
 
-    let window = 10;
+    let window = ENTROPY_WINDOW_LINES;
     let mut low_ranges: Vec<(usize, usize, f32)> = Vec::new();
 
     for start in 0..=lines.len().saturating_sub(window) {
@@ -359,13 +348,15 @@ fn analyze_token_entropy(
                 total += 1;
             }
         }
-        if total < 5 {
+        if total < ENTROPY_MIN_TOKENS {
             continue;
         }
         let entropy = shannon_entropy(&kind_counts, total);
-        if entropy < 3.0 {
+        if entropy < ENTROPY_LOW_THRESHOLD {
             match low_ranges.last_mut() {
-                Some((_, ref mut prev_end, ref mut min_e)) if start <= *prev_end + 2 => {
+                Some((_, ref mut prev_end, ref mut min_e))
+                    if start <= *prev_end + NESTING_RANGE_GAP =>
+                {
                     *prev_end = end;
                     if entropy < *min_e {
                         *min_e = entropy;

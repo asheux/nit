@@ -24,35 +24,30 @@ pub fn load_rule_config(workspace_root: &Path) -> RuleConfigLoad {
 
     let mut rule = GolRuleConfig::default();
     let mut rules = GolRulesConfig::default();
+    let mut user_rule_warnings: Vec<String> = Vec::new();
 
-    if let Some(path) = global_path.as_ref().filter(|p| p.exists()) {
-        match read_toml(path) {
-            Ok(value) => {
-                if let Some(default) = get_str(&value, &["gol", "rule", "default"]) {
-                    rule.default = default;
-                }
-                if let Some(workspace_override) =
-                    get_bool(&value, &["gol", "rule", "workspace_override"])
-                {
-                    rule.workspace_override = workspace_override;
-                }
-                rules.user = parse_user_rules(&value, &mut warnings);
-            }
-            Err(err) => warnings.push(format!("Failed to parse global config: {err}")),
+    read_optional_toml(global_path.as_deref(), &mut warnings, "global", |value| {
+        if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
+            rule.default = default;
         }
-    }
+        if let Some(workspace_override) = get_bool(value, &["gol", "rule", "workspace_override"]) {
+            rule.workspace_override = workspace_override;
+        }
+        rules.user = parse_user_rules(value, &mut |w| user_rule_warnings.push(w));
+    });
+    warnings.append(&mut user_rule_warnings);
 
     let mut workspace_rule = None;
-    if let Some(path) = workspace_path.as_ref().filter(|p| p.exists()) {
-        match read_toml(path) {
-            Ok(value) => {
-                if let Some(default) = get_str(&value, &["gol", "rule", "default"]) {
-                    workspace_rule = Some(default);
-                }
+    read_optional_toml(
+        workspace_path.as_deref(),
+        &mut warnings,
+        "workspace",
+        |value| {
+            if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
+                workspace_rule = Some(default);
             }
-            Err(err) => warnings.push(format!("Failed to parse workspace config: {err}")),
-        }
-    }
+        },
+    );
 
     RuleConfigLoad {
         rule,
@@ -61,6 +56,26 @@ pub fn load_rule_config(workspace_root: &Path) -> RuleConfigLoad {
         global_path,
         workspace_path,
         warnings,
+    }
+}
+
+/// If `path` exists, parse it as TOML and call `on_value`; otherwise no-op.
+/// Parse errors are appended to `warnings` with a `Failed to parse <label> config:`
+/// prefix (callers grep on that prefix).
+fn read_optional_toml<F>(
+    path: Option<&Path>,
+    warnings: &mut Vec<String>,
+    label: &str,
+    mut on_value: F,
+) where
+    F: FnMut(&toml::Value),
+{
+    let Some(path) = path.filter(|p| p.exists()) else {
+        return;
+    };
+    match read_toml(path) {
+        Ok(value) => on_value(&value),
+        Err(err) => warnings.push(format!("Failed to parse {label} config: {err}")),
     }
 }
 
@@ -77,14 +92,17 @@ pub(super) fn workspace_config_path(workspace_root: &Path) -> Option<PathBuf> {
     Some(local)
 }
 
-fn parse_user_rules(value: &toml::Value, warnings: &mut Vec<String>) -> Vec<GolUserRule> {
+fn parse_user_rules<F>(value: &toml::Value, warn: &mut F) -> Vec<GolUserRule>
+where
+    F: FnMut(String),
+{
     let Some(arr) = get_array(value, &["gol", "rules", "user"]) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for (idx, entry) in arr.iter().enumerate() {
         let Some(table) = entry.as_table() else {
-            warnings.push(format!("Rule entry {idx} is not a table; skipping"));
+            warn(format!("Rule entry {idx} is not a table; skipping"));
             continue;
         };
         let id = table.get("id").and_then(|v| v.as_str());
@@ -98,7 +116,7 @@ fn parse_user_rules(value: &toml::Value, warnings: &mut Vec<String>) -> Vec<GolU
                 rule: rule.to_string(),
                 description: description.to_string(),
             }),
-            _ => warnings.push(format!(
+            _ => warn(format!(
                 "Rule entry {idx} missing required fields (id/name/rule/description); skipping"
             )),
         }

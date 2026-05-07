@@ -19,19 +19,23 @@ impl Default for RulePersistence {
     }
 }
 
+impl RulePersistence {
+    pub fn target_path(&self) -> Option<PathBuf> {
+        if self.workspace_override {
+            self.workspace_path
+                .clone()
+                .or_else(|| self.global_path.clone())
+        } else {
+            self.global_path.clone()
+        }
+    }
+}
+
 pub fn persist_rule_selection(
     persistence: &RulePersistence,
     selector: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    let target = if persistence.workspace_override {
-        persistence
-            .workspace_path
-            .clone()
-            .or_else(|| persistence.global_path.clone())
-    } else {
-        persistence.global_path.clone()
-    };
-    let Some(path) = target else {
+    let Some(path) = persistence.target_path() else {
         return Ok(None);
     };
     let mut value = if path.exists() {

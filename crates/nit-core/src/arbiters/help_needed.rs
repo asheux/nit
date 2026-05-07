@@ -1,14 +1,9 @@
-//! HelpNeededArbiter — when `observer:repeat_failure` emits a HelpNeeded
-//! targeting an agent, propose a RedispatchWithEscalatedPrompt that tells
-//! the agent to downscope, simplify, and surface the blocker in plain text
-//! instead of retrying the same failing approach.
-//!
-//! Cooldown + per-tick budget are enforced by `reduce_proposals`, so this
-//! arbiter is free to emit one proposal per failing agent per tick without
-//! risk of a retry storm.
+//! Redispatch a downscope-and-explain prompt at agents whose
+//! `observer:repeat_failure` HelpNeeded keeps re-firing inside `WINDOW_GENS`.
 
 use super::{Arbiter, InterventionKind, InterventionProposal, InterventionTarget};
 use crate::state::AppState;
+use crate::substrate::Signal;
 
 pub const ARBITER: Arbiter = Arbiter {
     name: "help_needed",
@@ -22,29 +17,31 @@ fn observe(state: &AppState) -> Vec<InterventionProposal> {
         state,
         "observer:repeat_failure",
         WINDOW_GENS,
-        |signal, agent_id| {
-            let warning_count = signal
-                .payload
-                .get("warning_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            InterventionProposal {
-                kind: InterventionKind::RedispatchWithEscalatedPrompt {
-                    prompt: format_help_needed_prompt(warning_count),
-                },
-                target: InterventionTarget::Agent {
-                    agent_id: agent_id.to_string(),
-                },
-                rationale: format!(
-                    "help_needed: agent {agent_id} has {warning_count} warnings in {WINDOW_GENS}g"
-                ),
-                payload: serde_json::json!({
-                    "agent": agent_id,
-                    "warning_count": warning_count,
-                }),
-            }
-        },
+        build_help_needed_proposal,
     )
+}
+
+fn build_help_needed_proposal(signal: &Signal, agent_id: &str) -> InterventionProposal {
+    let warning_count = signal
+        .payload
+        .get("warning_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    InterventionProposal {
+        kind: InterventionKind::RedispatchWithEscalatedPrompt {
+            prompt: format_help_needed_prompt(warning_count),
+        },
+        target: InterventionTarget::Agent {
+            agent_id: agent_id.to_string(),
+        },
+        rationale: format!(
+            "help_needed: agent {agent_id} has {warning_count} warnings in {WINDOW_GENS}g"
+        ),
+        payload: serde_json::json!({
+            "agent": agent_id,
+            "warning_count": warning_count,
+        }),
+    }
 }
 
 fn format_help_needed_prompt(warning_count: u64) -> String {

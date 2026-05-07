@@ -240,6 +240,7 @@ fn no_nit_literals_in_dotfiles_workspace() {
             &scope,
             cwd.as_path(),
             None,
+            false,
         );
         // The role contract still mentions `cargo` / `just ci` as
         // *forbidden* example commands inside TEST_DISCIPLINE_CLAUSE — that
@@ -352,6 +353,7 @@ fn nit_on_nit_keeps_cargo_required_commands_block() {
             &scope,
             cwd.as_path(),
             None,
+            false,
         );
         assert!(
             prompt.contains("REQUIRED COMMANDS"),
@@ -604,6 +606,7 @@ fn wrap_task_prompt_omits_file_checklist_for_non_integrate_roles() {
             &scope,
             cwd.as_path(),
             None,
+            false,
         );
         for phrase in leak_phrases {
             assert!(

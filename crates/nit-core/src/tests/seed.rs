@@ -2,15 +2,28 @@
 //! tree-sitter fallback, and AST-driven encoder smoke probes.
 
 use super::*;
+use std::path::Path;
+
+fn make_input<'a>(text: &'a str, file_path: Option<&'a Path>) -> SeedInput<'a> {
+    SeedInput {
+        text,
+        source: GolSeedSource::Editor,
+        file_path,
+        version: 0,
+    }
+}
+
+fn unique_value_count(grid: &SeedValueGrid) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for v in grid.values() {
+        seen.insert(*v);
+    }
+    seen.len()
+}
 
 #[test]
 fn seed_encoders_do_not_panic_on_empty_input() {
-    let input = SeedInput {
-        text: "",
-        source: GolSeedSource::Editor,
-        file_path: None,
-        version: 0,
-    };
+    let input = make_input("", None);
     let params = SeedParams::default();
     for encoder in [
         SeedEncoderId::AsciiBytes,
@@ -47,26 +60,15 @@ impl Foo {
     }
 }
 "#;
-    let path = std::path::Path::new("test.rs");
-    let input = SeedInput {
-        text: rust_source,
-        source: GolSeedSource::Editor,
-        file_path: Some(path),
-        version: 0,
-    };
+    let path = Path::new("test.rs");
+    let input = make_input(rust_source, Some(path));
     let grid = TokenSpectrumEncoder.encode(&input, 0, 0);
     assert_eq!(grid.width(), 32);
     assert_eq!(grid.height(), 32);
-
-    // Verify non-uniform: at least 5 distinct values.
-    let mut seen = std::collections::HashSet::new();
-    for v in grid.values() {
-        seen.insert(*v);
-    }
+    let unique = unique_value_count(&grid);
     assert!(
-        seen.len() >= 5,
-        "Expected diverse values, got {} distinct",
-        seen.len()
+        unique >= 5,
+        "Expected diverse values, got {unique} distinct",
     );
 }
 
@@ -85,24 +87,15 @@ fn helper(a: &str, b: &str) -> String {
     format!("{a}{b}")
 }
 "#;
-    let path = std::path::Path::new("test.rs");
-    let input = SeedInput {
-        text: rust_source,
-        source: GolSeedSource::Editor,
-        file_path: Some(path),
-        version: 0,
-    };
+    let path = Path::new("test.rs");
+    let input = make_input(rust_source, Some(path));
     let grid = AstStructureEncoder.encode(&input, 0, 0);
     assert_eq!(grid.width(), 32);
 
-    let mut seen = std::collections::HashSet::new();
-    for v in grid.values() {
-        seen.insert(*v);
-    }
+    let unique = unique_value_count(&grid);
     assert!(
-        seen.len() >= 5,
-        "Expected diverse values, got {} distinct",
-        seen.len()
+        unique >= 5,
+        "Expected diverse values, got {unique} distinct",
     );
 }
 
@@ -131,36 +124,23 @@ fn simple() -> bool {
     true
 }
 "#;
-    let path = std::path::Path::new("test.rs");
-    let input = SeedInput {
-        text: rust_source,
-        source: GolSeedSource::Editor,
-        file_path: Some(path),
-        version: 0,
-    };
+    let path = Path::new("test.rs");
+    let input = make_input(rust_source, Some(path));
     let grid = ComplexityFieldEncoder.encode(&input, 0, 0);
     assert_eq!(grid.width(), 32);
 
-    let mut seen = std::collections::HashSet::new();
-    for v in grid.values() {
-        seen.insert(*v);
-    }
+    let unique = unique_value_count(&grid);
     assert!(
-        seen.len() >= 3,
-        "Expected diverse values, got {} distinct",
-        seen.len()
+        unique >= 3,
+        "Expected diverse values, got {unique} distinct",
     );
 }
 
 #[test]
 fn new_encoders_with_gibberish_fall_back_gracefully() {
+    // No file path → PlainText path → no tree-sitter parsing.
     let gibberish = "asdfjkl;asdfjkl;asdfjkl;asdfjkl;asdfjkl;";
-    let input = SeedInput {
-        text: gibberish,
-        source: GolSeedSource::Editor,
-        file_path: None, // no file path → PlainText → no tree-sitter
-        version: 0,
-    };
+    let input = make_input(gibberish, None);
     for encoder_id in [
         SeedEncoderId::TokenSpectrum,
         SeedEncoderId::AstStructure,

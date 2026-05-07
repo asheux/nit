@@ -18,6 +18,7 @@ impl Buffer {
         } else {
             (cursor, anchor)
         };
+        // vim-style inclusive end: visual selection covers the char under the cursor.
         let end = if end < len { end + 1 } else { len };
         if start >= len || end <= start {
             None
@@ -51,19 +52,22 @@ impl Buffer {
 
     pub fn delete_selection(&mut self) -> bool {
         self.end_edit_group();
-        let (start, end) = match self.selection_range() {
-            Some(range) => range,
-            None => return false,
+        let Some((start, end)) = self.selection_range() else {
+            return false;
         };
         if start >= end {
             return false;
         }
-        self.record_delete(start, end);
         self.push_undo();
+        self.apply_selection_removal(start, end);
+        self.dirty = true;
+        true
+    }
+
+    pub(super) fn apply_selection_removal(&mut self, start: usize, end: usize) {
+        self.record_delete(start, end);
         self.rope.remove(start..end);
         self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
-        self.dirty = true;
         self.clear_selection();
-        true
     }
 }

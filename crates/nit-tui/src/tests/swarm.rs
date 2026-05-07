@@ -1424,6 +1424,7 @@ fn task_prompt_includes_role_contract_guidance() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
 
     assert!(prompt.contains("ROLE CONTRACT:"));
@@ -1442,6 +1443,7 @@ fn research_role_contract_mentions_external_sources() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
 
     assert!(prompt.contains("papers, docs, web resources"));
@@ -1469,6 +1471,7 @@ fn computational_research_role_contract_mentions_modeling_and_simulation() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
 
     assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
@@ -4751,6 +4754,7 @@ fn wrap_task_prompt_injects_shard_section_when_shard_files_set() {
         &[],
         std::path::Path::new("."),
         Some(&shard_files),
+        false,
     );
     assert!(prompt.contains("YOUR SHARD (2/4)"));
     assert!(prompt.contains("crates/x/foo.rs"));
@@ -4769,6 +4773,7 @@ fn wrap_task_prompt_omits_shard_section_for_non_shard_task() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
     assert!(!prompt.contains("YOUR SHARD"));
     assert!(!prompt.contains("Modify ONLY the files in the shard list below"));
@@ -4790,6 +4795,7 @@ fn wrap_task_prompt_empty_shard_partition_renders_fallback_note() {
         &[],
         std::path::Path::new("."),
         Some(&[]),
+        false,
     );
     assert!(prompt.contains("YOUR SHARD (3/4)"));
     assert!(prompt.contains("Empty shard"));
@@ -4803,6 +4809,293 @@ fn integrate_role_contract_calls_out_stub_files_as_failure() {
     assert!(joined.contains("STUB FILES = TASK FAILURE"));
     assert!(joined.contains("snapshots every declared file's line count"));
     assert!(joined.contains("performative splits"));
+}
+
+// Context-budget compaction: when a judge with parsed_artifacts is in the
+// integrate task's deps, propose-role deps are filtered out. The judge has
+// already consolidated them — keeping both crowds the prompt with redundant
+// content.
+#[test]
+fn collect_dependency_payload_skips_proposers_when_judge_present() {
+    use super::SwarmTaskArtifacts;
+    let mut propose_a = make_task("propose-a", "p1", Some("propose"), Vec::new());
+    propose_a.state = SwarmTaskState::Done;
+    propose_a.output = Some("propose-a raw output".into());
+    let mut propose_b = make_task("propose-b", "p2", Some("propose"), Vec::new());
+    propose_b.state = SwarmTaskState::Done;
+    propose_b.output = Some("propose-b raw output".into());
+    let mut judge = make_task("judge", "j1", Some("judge"), Vec::new());
+    judge.state = SwarmTaskState::Done;
+    judge.parsed_artifacts = Some(SwarmTaskArtifacts {
+        summary: Some("consolidated".into()),
+        files: vec![super::SwarmArtifactFile {
+            path: "a.rs".into(),
+            notes: None,
+        }],
+        diffs: Vec::new(),
+        commands: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+    });
+    judge.output = Some("judge consolidated output".into());
+
+    let mut int_task = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-a", "propose-b", "judge"],
+    );
+    int_task.writes = true;
+    int_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(
+        SwarmTemplate::Lab,
+        vec![propose_a, propose_b, judge, int_task],
+    );
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    // Judge content is included.
+    assert!(prompt.contains("judge consolidated output"));
+    // Proposer raw outputs should be filtered out.
+    assert!(
+        !prompt.contains("propose-a raw output"),
+        "propose-a should be skipped when judge is present"
+    );
+    assert!(
+        !prompt.contains("propose-b raw output"),
+        "propose-b should be skipped when judge is present"
+    );
+}
+
+// Negative: no judge in deps → proposers MUST be kept (they're the only source).
+#[test]
+fn collect_dependency_payload_keeps_proposers_when_no_judge() {
+    let mut propose_a = make_task("propose-a", "p1", Some("propose"), Vec::new());
+    propose_a.state = SwarmTaskState::Done;
+    propose_a.output = Some("propose-a raw output".into());
+    let mut int_task = make_task("integrate", "w1", Some("integrate"), vec!["propose-a"]);
+    int_task.writes = true;
+    int_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(SwarmTemplate::Lab, vec![propose_a, int_task]);
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    assert!(
+        prompt.contains("propose-a raw output"),
+        "no judge → proposer must be included as the only source"
+    );
+}
+
+// Negative: judge present but with NO parsed_artifacts → proposers kept (judge
+// hasn't produced its consolidation yet, so proposers are still the source).
+#[test]
+fn collect_dependency_payload_keeps_proposers_when_judge_has_no_artifacts() {
+    let mut propose_a = make_task("propose-a", "p1", Some("propose"), Vec::new());
+    propose_a.state = SwarmTaskState::Done;
+    propose_a.output = Some("propose-a raw output".into());
+    let mut judge = make_task("judge", "j1", Some("judge"), Vec::new());
+    judge.state = SwarmTaskState::Done;
+    judge.parsed_artifacts = None; // judge ran but emitted no structured output
+    let mut int_task = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-a", "judge"],
+    );
+    int_task.writes = true;
+    int_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(SwarmTemplate::Lab, vec![propose_a, judge, int_task]);
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    assert!(
+        prompt.contains("propose-a raw output"),
+        "judge without artifacts → proposers stay as fallback source"
+    );
+}
+
+// Breadcrumb: when proposers are skipped, the dependency-outputs section
+// includes a one-line note pointing to the on-disk artifacts.
+#[test]
+fn integrate_prompt_breadcrumbs_proposer_skip() {
+    use super::SwarmTaskArtifacts;
+    let mut propose_a = make_task("propose-a", "p1", Some("propose"), Vec::new());
+    propose_a.state = SwarmTaskState::Done;
+    let mut judge = make_task("judge", "j1", Some("judge"), Vec::new());
+    judge.state = SwarmTaskState::Done;
+    judge.parsed_artifacts = Some(SwarmTaskArtifacts::default());
+    let mut int_task = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-a", "judge"],
+    );
+    int_task.writes = true;
+    int_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(SwarmTemplate::Lab, vec![propose_a, judge, int_task]);
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    assert!(
+        prompt.contains("Proposer outputs are intentionally omitted"),
+        "breadcrumb explaining the skip should be present"
+    );
+    assert!(prompt.contains(".nit/swarm/<mission>/tasks/propose-"));
+}
+
+// Sharded integrate task should NOT render the FILE CHECKLIST section —
+// the YOUR SHARD section already lists the partition. Saves prompt budget
+// without losing information.
+#[test]
+fn sharded_integrate_prompt_skips_file_checklist() {
+    use super::SwarmTaskArtifacts;
+    let mut judge = make_task("judge", "j1", Some("judge"), Vec::new());
+    judge.state = SwarmTaskState::Done;
+    judge.parsed_artifacts = Some(SwarmTaskArtifacts {
+        summary: None,
+        files: vec![
+            super::SwarmArtifactFile {
+                path: "a.rs".into(),
+                notes: None,
+            },
+            super::SwarmArtifactFile {
+                path: "b.rs".into(),
+                notes: None,
+            },
+        ],
+        diffs: Vec::new(),
+        commands: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+    });
+    let mut shard_task = make_task("integrate-shard-1", "w1", Some("integrate"), vec!["judge"]);
+    shard_task.writes = true;
+    shard_task.shard_index = Some((1, 2));
+    shard_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(SwarmTemplate::Parallel, vec![judge, shard_task]);
+    let task = run
+        .tasks
+        .iter()
+        .find(|t| t.id == "integrate-shard-1")
+        .unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    // FILE CHECKLIST should NOT appear (sharded → use YOUR SHARD instead).
+    assert!(
+        !prompt.contains("## FILE CHECKLIST"),
+        "sharded integrate should skip FILE CHECKLIST; got prompt of {} chars",
+        prompt.len()
+    );
+    // YOUR SHARD section should be present.
+    assert!(prompt.contains("## YOUR SHARD"));
+}
+
+// Negative: non-sharded integrate task DOES render FILE CHECKLIST.
+#[test]
+fn nonsharded_integrate_prompt_keeps_file_checklist() {
+    use super::SwarmTaskArtifacts;
+    let mut judge = make_task("judge", "j1", Some("judge"), Vec::new());
+    judge.state = SwarmTaskState::Done;
+    judge.parsed_artifacts = Some(SwarmTaskArtifacts {
+        summary: None,
+        files: vec![super::SwarmArtifactFile {
+            path: "a.rs".into(),
+            notes: None,
+        }],
+        diffs: Vec::new(),
+        commands: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+    });
+    let mut int_task = make_task("integrate", "w1", Some("integrate"), vec!["judge"]);
+    int_task.writes = true;
+    int_task.shard_index = None; // explicitly non-sharded
+    int_task.state = SwarmTaskState::Ready;
+
+    let run = make_run_with_tasks(SwarmTemplate::Lab, vec![judge, int_task]);
+    let task = run.tasks.iter().find(|t| t.id == "integrate").unwrap();
+    let prompt = build_task_prompt_for_test_with_judge_filter(&run, task);
+
+    assert!(prompt.contains("## FILE CHECKLIST"));
+    assert!(!prompt.contains("## YOUR SHARD"));
+}
+
+// Mirror of build_task_prompt_for_test that also exercises the
+// proposer-filter logic via integrate_proposers_skipped. The production
+// build_task_prompt is private; this test helper recreates the call path
+// so we can assert end-to-end behavior including the filter signal.
+fn build_task_prompt_for_test_with_judge_filter(run: &SwarmRun, task: &SwarmTask) -> String {
+    use super::partition_files_for_shard;
+    // Replicate the proposer-skip predicate: integrate task with judge
+    // dep that has parsed_artifacts.
+    let needs_full = matches!(task.role.as_deref(), Some("integrate")) || task.writes;
+    let judge_with_artifacts = task.deps.iter().any(|dep_id| {
+        run.tasks
+            .iter()
+            .find(|t| &t.id == dep_id)
+            .map(|dep| dep.role.as_deref() == Some("judge") && dep.parsed_artifacts.is_some())
+            .unwrap_or(false)
+    });
+    let skip_proposers = needs_full && judge_with_artifacts;
+
+    let mut declared: Vec<String> = Vec::new();
+    let mut payload: Vec<(String, String)> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref();
+        if matches!(role, Some("propose") | Some("judge")) {
+            if let Some(artifacts) = dep.parsed_artifacts.as_ref() {
+                for entry in artifacts.files.iter() {
+                    let p = entry.path.trim();
+                    if !p.is_empty() {
+                        declared.push(p.to_string());
+                    }
+                }
+            }
+        }
+        if skip_proposers && role == Some("propose") {
+            continue;
+        }
+        let label = format!("{} [DONE] (agent {})", dep.id, dep.agent_id);
+        let text = dep.output.clone().unwrap_or_default();
+        payload.push((label, text));
+    }
+    let role_kind = task.role.as_deref();
+    let effective_scope: Vec<String> = if role_kind == Some("integrate") && !declared.is_empty() {
+        let mut sorted = declared;
+        sorted.sort();
+        sorted.dedup();
+        sorted
+    } else {
+        run.scope_files.clone()
+    };
+    let shard_files: Option<Vec<String>> = task.shard_index.map(|(idx, total)| {
+        let source: Vec<String> = if !effective_scope.is_empty() {
+            effective_scope.clone()
+        } else {
+            run.scope_files.clone()
+        };
+        partition_files_for_shard(&source, idx, total)
+    });
+    let payload_slice: Option<&[(String, String)]> =
+        (!payload.is_empty()).then_some(payload.as_slice());
+    wrap_task_prompt(
+        &run.root_prompt,
+        run.mission_kind,
+        task,
+        payload_slice,
+        &effective_scope,
+        run.spawn_cwd.as_path(),
+        shard_files.as_deref(),
+        skip_proposers,
+    )
 }
 
 #[test]
@@ -4857,6 +5150,7 @@ fn structured_artifacts_block_for_propose_explains_files_semantics() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
     assert!(prompt.contains("STRUCTURED ARTIFACTS"));
     assert!(prompt.contains("`files` array — load-bearing for compliance"));
@@ -4877,6 +5171,7 @@ fn structured_artifacts_block_for_judge_explains_files_semantics() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
     assert!(prompt.contains("STRUCTURED ARTIFACTS"));
     assert!(prompt.contains("`files` array — load-bearing for compliance"));
@@ -4897,6 +5192,7 @@ fn structured_artifacts_block_for_review_skips_load_bearing_section() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
     assert!(!prompt.contains("`files` array — load-bearing for compliance"));
 }
@@ -4933,7 +5229,10 @@ fn structural_split_gaps_flags_newly_created_stub_file() {
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
         "state/agents.rs".to_string(),
-        super::FilePreState { existed: false, line_count: 0 },
+        super::FilePreState {
+            existed: false,
+            line_count: 0,
+        },
     )]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -4967,7 +5266,10 @@ fn structural_split_gaps_accepts_substantive_new_file() {
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
         "state/agents.rs".to_string(),
-        super::FilePreState { existed: false, line_count: 0 },
+        super::FilePreState {
+            existed: false,
+            line_count: 0,
+        },
     )]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -4978,7 +5280,10 @@ fn structural_split_gaps_accepts_substantive_new_file() {
     let gaps = structural_split_gaps(&run, "integrate", &state);
     let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
 
-    assert!(gaps.is_empty(), "30-line new file should not trigger; got {gaps:?}");
+    assert!(
+        gaps.is_empty(),
+        "30-line new file should not trigger; got {gaps:?}"
+    );
 }
 
 // Incomplete-split: huge source barely shrank + new sibling stubs.
@@ -4987,7 +5292,10 @@ fn structural_split_gaps_flags_incomplete_split() {
     use super::structural_split_gaps;
     let workspace = make_temp_workspace("incomplete");
     std::fs::create_dir_all(workspace.join("state")).unwrap();
-    let big = (0..5800).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+    let big = (0..5800)
+        .map(|i| format!("// line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(workspace.join("state.rs"), big).unwrap();
     std::fs::write(
         workspace.join("state/agents.rs"),
@@ -5000,8 +5308,20 @@ fn structural_split_gaps_flags_incomplete_split() {
     int_a.writes = true;
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([
-        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 5910 }),
-        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+        (
+            "state.rs".to_string(),
+            super::FilePreState {
+                existed: true,
+                line_count: 5910,
+            },
+        ),
+        (
+            "state/agents.rs".to_string(),
+            super::FilePreState {
+                existed: false,
+                line_count: 0,
+            },
+        ),
     ]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -5012,10 +5332,16 @@ fn structural_split_gaps_flags_incomplete_split() {
     let gaps = structural_split_gaps(&run, "integrate", &state);
     let _ = std::fs::remove_dir_all(workspace.parent().unwrap());
 
-    assert!(gaps.iter().any(|g| g.contains("state.rs") && g.contains("incomplete split")),
-        "expected incomplete-split for state.rs; got {gaps:?}");
-    assert!(gaps.iter().any(|g| g.contains("state/agents.rs") && g.contains("stub")),
-        "expected stub entry for state/agents.rs; got {gaps:?}");
+    assert!(
+        gaps.iter()
+            .any(|g| g.contains("state.rs") && g.contains("incomplete split")),
+        "expected incomplete-split for state.rs; got {gaps:?}"
+    );
+    assert!(
+        gaps.iter()
+            .any(|g| g.contains("state/agents.rs") && g.contains("stub")),
+        "expected stub entry for state/agents.rs; got {gaps:?}"
+    );
 }
 
 // Negative: real split (huge → small + substantive sibling) → no flag.
@@ -5024,9 +5350,15 @@ fn structural_split_gaps_accepts_real_split() {
     use super::structural_split_gaps;
     let workspace = make_temp_workspace("real-split");
     std::fs::create_dir_all(workspace.join("state")).unwrap();
-    let shrunk = (0..100).map(|_| "pub use foo;").collect::<Vec<_>>().join("\n");
+    let shrunk = (0..100)
+        .map(|_| "pub use foo;")
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(workspace.join("state.rs"), shrunk).unwrap();
-    let big_sibling = (0..200).map(|i| format!("pub fn f{i}() {{}}")).collect::<Vec<_>>().join("\n");
+    let big_sibling = (0..200)
+        .map(|i| format!("pub fn f{i}() {{}}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(workspace.join("state/agents.rs"), big_sibling).unwrap();
 
     let propose = propose_with_files("propose-01", &["state.rs", "state/agents.rs"]);
@@ -5034,8 +5366,20 @@ fn structural_split_gaps_accepts_real_split() {
     int_a.writes = true;
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([
-        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 5910 }),
-        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+        (
+            "state.rs".to_string(),
+            super::FilePreState {
+                existed: true,
+                line_count: 5910,
+            },
+        ),
+        (
+            "state/agents.rs".to_string(),
+            super::FilePreState {
+                existed: false,
+                line_count: 0,
+            },
+        ),
     ]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -5065,7 +5409,10 @@ fn structural_split_gaps_accepts_thin_shell_with_substantive_siblings() {
     )
     .unwrap();
     // New sibling: 30 lines of real content (above MIN_NON_STUB_LINES).
-    let real = (0..30).map(|i| format!("pub fn f{i}() {{}}")).collect::<Vec<_>>().join("\n");
+    let real = (0..30)
+        .map(|i| format!("pub fn f{i}() {{}}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(workspace.join("state/agents.rs"), real).unwrap();
 
     let propose = propose_with_files("propose-01", &["state.rs", "state/agents.rs"]);
@@ -5073,8 +5420,20 @@ fn structural_split_gaps_accepts_thin_shell_with_substantive_siblings() {
     int_a.writes = true;
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([
-        ("state.rs".to_string(), super::FilePreState { existed: true, line_count: 200 }),
-        ("state/agents.rs".to_string(), super::FilePreState { existed: false, line_count: 0 }),
+        (
+            "state.rs".to_string(),
+            super::FilePreState {
+                existed: true,
+                line_count: 200,
+            },
+        ),
+        (
+            "state/agents.rs".to_string(),
+            super::FilePreState {
+                existed: false,
+                line_count: 0,
+            },
+        ),
     ]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -5106,7 +5465,10 @@ fn structural_split_gaps_flags_thin_shell_without_substantive_siblings() {
     int_a.state = SwarmTaskState::Done;
     int_a.pre_dispatch_file_state = std::collections::HashMap::from([(
         "state.rs".to_string(),
-        super::FilePreState { existed: true, line_count: 200 },
+        super::FilePreState {
+            existed: true,
+            line_count: 200,
+        },
     )]);
 
     let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, int_a]);
@@ -5165,7 +5527,9 @@ fn propose_role_contract_excludes_audit_only_files_from_array() {
     let joined = lines.join(" || ");
     assert!(joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"));
     assert!(
-        joined.contains("Do NOT include files where you concluded \"audit only / no changes needed\""),
+        joined.contains(
+            "Do NOT include files where you concluded \"audit only / no changes needed\""
+        ),
         "propose contract should explicitly exclude audit-only files; got: {joined}"
     );
     assert!(joined.contains("false-positive re-dispatch"));
@@ -5307,6 +5671,7 @@ fn build_task_prompt_for_test(run: &SwarmRun, task: &SwarmTask) -> String {
         &effective_scope,
         run.spawn_cwd.as_path(),
         shard_files.as_deref(),
+        false,
     )
 }
 
@@ -5322,6 +5687,7 @@ fn structured_artifacts_block_excludes_audit_only_files_from_files_array() {
         &[],
         std::path::Path::new("."),
         None,
+        false,
     );
     assert!(prompt.contains("Do NOT include"));
     assert!(prompt.contains("AUDIT-ONLY"));

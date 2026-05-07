@@ -2,7 +2,7 @@ use ropey::Rope;
 
 use crate::cursor::Cursor;
 
-/// Per-line diff status relative to the base (on-disk) content.
+/// Diff state of a buffer line versus its on-disk base content.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LineDiffStatus {
     Unchanged,

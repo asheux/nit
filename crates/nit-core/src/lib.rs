@@ -28,8 +28,6 @@ pub mod state;
 pub mod substrate;
 pub mod viewport;
 
-mod agent_error_summary;
-
 #[cfg(test)]
 pub(crate) mod test_helpers;
 

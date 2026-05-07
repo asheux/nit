@@ -1,18 +1,7 @@
 use super::*;
+use crate::test_helpers::temp_dir;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_dir(label: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 #[test]
 fn default_state_has_zero_generation() {

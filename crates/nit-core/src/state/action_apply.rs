@@ -1,7 +1,1035 @@
-//! `apply_action` dispatcher and per-category helpers.
-//!
-//! Stub: the 1030-line `apply_action` 142-arm match still lives in `state.rs`.
-//! Splitting requires factoring per-category handlers (buffer-motion,
-//! visualizer, yank/paste, search, command-prompt, games) while preserving
-//! exact dispatch semantics for every Action variant. Deferred to a
-//! dedicated turn; tracked in the shard's risks JSON.
+use super::*;
+use crate::{actions::Action, io};
+use nit_gol::Rule;
+
+fn focus_order_index(focus: PaneId) -> usize {
+    PaneId::ALL.iter().position(|p| *p == focus).unwrap_or(0)
+}
+pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
+    state.metrics.last_action = Some(action.clone());
+    let mut should_exit = false;
+    let changed = true;
+
+    match action {
+        Action::Quit => {
+            if state.has_unsaved_editor_buffers() {
+                state.prompt = Some(Prompt::ConfirmQuit);
+            } else {
+                should_exit = true;
+            }
+        }
+        Action::ConfirmQuitYes => {
+            should_exit = true;
+        }
+        Action::ConfirmQuitNo => {
+            state.prompt = None;
+        }
+        Action::Save | Action::SaveAndNormal => {
+            let buf = state.editor_buffer_mut();
+            if buf.path().is_none() {
+                state.status = Some("No path to save".into());
+            } else if let Err(e) = io::save_buffer(buf) {
+                state.status = Some(format!("Save failed: {e}"));
+            } else {
+                buf.mark_clean();
+                state.status = Some("Saved".into());
+                // Request background genome evaluation for the saved file.
+                // The TUI layer picks this up and dispatches to GenomeWorker
+                // so the UI never blocks on GoL simulation.
+                if let Some(file_path) = state.editor_buffer().path().cloned() {
+                    state.genome_save_eval_pending = Some(file_path);
+                }
+            }
+            if matches!(action, Action::SaveAndNormal) {
+                state.mode = Mode::Normal;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.exit_insert_mode();
+                    buf.clear_selection();
+                }
+            }
+        }
+        Action::FocusNextPane => {
+            let idx = focus_order_index(state.focus);
+            let next = (idx + 1) % PaneId::ALL.len();
+            state.focus = PaneId::ALL[next];
+        }
+        Action::FocusPrevPane => {
+            let idx = focus_order_index(state.focus);
+            let prev = if idx == 0 {
+                PaneId::ALL.len() - 1
+            } else {
+                idx - 1
+            };
+            state.focus = PaneId::ALL[prev];
+        }
+        Action::FocusPane(p) => {
+            state.focus = p;
+        }
+        Action::SwitchMode(m) => {
+            state.mode = m;
+            if let Some(buf) = state.focused_buffer_mut() {
+                if m == Mode::Normal {
+                    buf.exit_insert_mode();
+                    buf.clear_selection();
+                } else if m == Mode::Visual {
+                    buf.set_selection_anchor();
+                } else {
+                    buf.clear_selection();
+                }
+            }
+        }
+        Action::ToggleMode => {
+            state.mode = state.mode.toggle();
+            let mode = state.mode;
+            if let Some(buf) = state.focused_buffer_mut() {
+                if mode == Mode::Normal {
+                    buf.exit_insert_mode();
+                }
+                buf.clear_selection();
+            }
+        }
+        Action::InsertChar(c) => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.insert_char(c);
+                buf.ensure_visible();
+            }
+        }
+        Action::InsertNewline => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.insert_newline();
+                buf.ensure_visible();
+            }
+        }
+        Action::InsertTab => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.insert_tab();
+                buf.ensure_visible();
+            }
+        }
+        Action::EnterVisual => {
+            state.mode = Mode::Visual;
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.set_selection_anchor();
+            }
+        }
+        Action::ExitVisual => {
+            state.mode = Mode::Normal;
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.clear_selection();
+            }
+        }
+        Action::YankSelection => {
+            let yank = if let Some(buf) = state.focused_buffer_mut() {
+                let yank = buf.yank_selection();
+                buf.clear_selection();
+                yank
+            } else {
+                None
+            };
+            if let Some(text) = yank {
+                state.yank_kind = if text.contains('\n') {
+                    YankKind::Line
+                } else {
+                    YankKind::Char
+                };
+                state.yank = Some(text);
+            } else {
+                state.yank = None;
+                state.yank_kind = YankKind::Char;
+            }
+            state.mode = Mode::Normal;
+        }
+        Action::YankLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                state.yank = Some(buf.yank_line());
+                state.yank_kind = YankKind::Line;
+            }
+        }
+        Action::DeleteSelection => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.delete_selection() {
+                    buf.ensure_visible();
+                }
+            }
+            state.mode = Mode::Normal;
+        }
+        Action::Paste => {
+            let yank = state.yank.clone();
+            let is_normal = state.mode == Mode::Normal;
+            let yank_kind = state.yank_kind;
+            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
+                if is_normal && yank_kind == YankKind::Line {
+                    buf.paste_line_below(&yank);
+                } else {
+                    if is_normal {
+                        buf.append();
+                    }
+                    buf.insert_str(&yank);
+                }
+                buf.ensure_visible();
+            }
+        }
+        Action::PasteLineAbove => {
+            let yank = state.yank.clone();
+            let yank_kind = state.yank_kind;
+            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
+                if yank_kind == YankKind::Line {
+                    buf.paste_line_above(&yank);
+                } else {
+                    let mut text = yank;
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    buf.paste_line_above(&text);
+                }
+                buf.ensure_visible();
+            }
+        }
+        Action::Append => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.append();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
+            }
+        }
+        Action::Backspace => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.backspace();
+                buf.ensure_visible();
+            }
+        }
+        Action::Delete => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::DeleteLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_line();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_up();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_down();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveLeft => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_left();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveRight => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_right();
+                buf.ensure_visible();
+            }
+        }
+        Action::PageUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                let height = buf.viewport.height.max(1);
+                buf.page_up(height);
+                buf.ensure_visible();
+            }
+        }
+        Action::PageDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                let height = buf.viewport.height.max(1);
+                buf.page_down(height);
+                buf.ensure_visible();
+            }
+        }
+        Action::Home => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_home();
+                buf.ensure_visible();
+            }
+        }
+        Action::End => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveWordEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveWordBack => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_back();
+                buf.ensure_visible();
+            }
+        }
+        Action::GoToTop => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.go_to_top();
+                buf.ensure_visible();
+            }
+        }
+        Action::GoToBottom => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.go_to_bottom();
+                buf.ensure_visible();
+            }
+        }
+        Action::OpenLineAbove => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.open_line_above();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
+            }
+        }
+        Action::OpenLineBelow => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.open_line_below();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
+            }
+        }
+        Action::Undo => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.undo() {
+                    buf.ensure_visible();
+                }
+            }
+        }
+        Action::Redo => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.redo() {
+                    buf.ensure_visible();
+                }
+            }
+        }
+        Action::ScrollUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.viewport.offset_line = buf.viewport.offset_line.saturating_sub(1);
+            }
+        }
+        Action::ScrollDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                let max_offset = buf.lines_len().saturating_sub(buf.viewport.height.max(1));
+                buf.viewport.offset_line =
+                    buf.viewport.offset_line.saturating_add(1).min(max_offset);
+            }
+        }
+        Action::ClearLogs => {
+            state.logs.clear();
+            state.logs_scroll = 0;
+        }
+        Action::ToggleJobPause => {
+            let was_paused = state.job.paused;
+            state.job.paused = !state.job.paused;
+            if was_paused {
+                // Resume log follow.
+                state.logs_scroll = 0;
+            }
+        }
+        Action::CommandPromptOpen => {
+            state.command_line = Some(CommandLine::new());
+        }
+        Action::CommandPromptCancel => {
+            state.command_line = None;
+        }
+        Action::CommandPromptBackspace => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.backspace();
+            }
+        }
+        Action::CommandPromptMoveLeft => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.move_left();
+            }
+        }
+        Action::CommandPromptMoveRight => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.move_right();
+            }
+        }
+        Action::CommandPromptExecute => {
+            if let Some(cmd) = state.command_line.take() {
+                should_exit = handle_command_line(state, &cmd.input);
+            }
+        }
+        Action::CommandPromptInput(ch) => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.insert(ch);
+            }
+        }
+        Action::VisualizerReseed => {
+            state.visualizer.seed = state.visualizer.seed.wrapping_add(1);
+            state.visualizer.pending_reseed = true;
+        }
+        Action::VisualizerApply => {
+            if state.visualizer.seed_search_active {
+                state.visualizer.pending_apply = true;
+            } else {
+                state.visualizer.variant = state.visualizer.variant.wrapping_add(1);
+                state.visualizer.pending_reseed = true;
+            }
+        }
+        Action::VisualizerToggleSearch => {
+            state.visualizer.seed_search_active = !state.visualizer.seed_search_active;
+            state.status = Some(if state.visualizer.seed_search_active {
+                "Seed search ON".into()
+            } else {
+                "Seed search OFF".into()
+            });
+        }
+        Action::VisualizerToggleWrap => {
+            state.visualizer.wrap = !state.visualizer.wrap;
+        }
+        Action::VisualizerToggleSeedSource => {
+            state.visualizer.seed_source = GolSeedSource::Editor;
+            state.status = Some("Seed source: Editor (only)".into());
+        }
+        Action::VisualizerSnapshot => {
+            state.visualizer.pending_snapshot = true;
+        }
+        Action::VisualizerPause => {
+            state.visualizer.paused = !state.visualizer.paused;
+            state.visualizer.paused_by_attractor = false;
+        }
+        Action::VisualizerCycleAutoStop => {
+            state.visualizer.auto_stop_policy = state.visualizer.auto_stop_policy.next();
+            state.status = Some(format!("Auto-stop: {}", state.visualizer.auto_stop_policy));
+        }
+        Action::VisualizerSpeedUp => {
+            state.visualizer.tick_ms = state.visualizer.tick_ms.saturating_sub(10).max(30);
+        }
+        Action::VisualizerSpeedDown => {
+            state.visualizer.tick_ms = (state.visualizer.tick_ms + 10).min(1000);
+        }
+        Action::VisualizerRun => {
+            state.visualizer.pending_run = true;
+            state.visualizer.pending_snapshot = true;
+            state.status = Some("Petri dish queued".into());
+        }
+        Action::VisualizerStop => {
+            state.visualizer.pending_close = true;
+            state.status = Some("Petri dish closing".into());
+        }
+        Action::GamesRun => {
+            state.games.pending_run = true;
+            state.status = Some("Games tournament queued".into());
+        }
+        Action::GamesStop => {
+            state.games.pending_close = true;
+            state.status = Some("Games tournament closing".into());
+        }
+        Action::GamesHide => {
+            state.games.pending_hide = true;
+            state.status = Some("Games tournament hiding".into());
+        }
+        Action::GamesShow => {
+            state.games.pending_show = true;
+            state.status = Some("Games tournament showing".into());
+        }
+        Action::GamesHistoryOpen => {
+            open_games_history_popup(state);
+        }
+        Action::PetriShow => {
+            state.visualizer.pending_show = true;
+            state.status = Some("Petri dish showing".into());
+        }
+        Action::VisualizerCycleRenderMode => {
+            state.visualizer.seed_plate_mode = state.visualizer.seed_plate_mode.next();
+            state.status = Some(format!(
+                "Plate mode: {}",
+                state.visualizer.seed_plate_mode.label()
+            ));
+        }
+        Action::VisualizerToggleAgeShading => {
+            state.visualizer.age_shading = !state.visualizer.age_shading;
+            state.status = Some(format!(
+                "Age shading: {}",
+                if state.visualizer.age_shading {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::VisualizerToggleTrails => {
+            state.visualizer.trails = !state.visualizer.trails;
+            state.status = Some(format!(
+                "Trails: {}",
+                if state.visualizer.trails { "ON" } else { "OFF" }
+            ));
+        }
+        Action::VisualizerToggleBBox => {
+            state.visualizer.overlay_bbox = !state.visualizer.overlay_bbox;
+            state.status = Some(format!(
+                "BBox: {}",
+                if state.visualizer.overlay_bbox {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::VisualizerToggleHeat => {
+            state.visualizer.overlay_heat = !state.visualizer.overlay_heat;
+            state.status = Some(format!(
+                "Heat: {}",
+                if state.visualizer.overlay_heat {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::VisualizerToggleScanlines => {
+            state.visualizer.scanlines = !state.visualizer.scanlines;
+            state.status = Some(format!(
+                "Scanlines: {}",
+                if state.visualizer.scanlines {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::GateMonitorToggleSubView => {
+            state.gate_monitor_sub_view = match state.gate_monitor_sub_view {
+                GateMonitorSubView::Stats => GateMonitorSubView::FileScores,
+                GateMonitorSubView::FileScores => GateMonitorSubView::Live,
+                GateMonitorSubView::Live => GateMonitorSubView::Stats,
+            };
+            state.gate_monitor_scroll = 0;
+        }
+        Action::GateMonitorSetSubView(target) => {
+            if state.gate_monitor_sub_view != target {
+                state.gate_monitor_sub_view = target;
+                state.gate_monitor_scroll = 0;
+            }
+        }
+        Action::ShowSubstrate => {
+            state.show_substrate_overlay = true;
+            state.substrate_overlay_scroll = 0;
+        }
+        Action::HideSubstrate => {
+            state.show_substrate_overlay = false;
+        }
+        Action::SubstrateOverlayToggleTab => {
+            state.substrate_overlay_tab = match state.substrate_overlay_tab {
+                SubstrateOverlayTab::Signals => SubstrateOverlayTab::Claims,
+                SubstrateOverlayTab::Claims => SubstrateOverlayTab::Assumptions,
+                SubstrateOverlayTab::Assumptions => SubstrateOverlayTab::Signals,
+            };
+            state.substrate_overlay_scroll = 0;
+        }
+        Action::VisualizerCycleSeedView => {
+            state.visualizer.seed_view = state.visualizer.seed_view.next();
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+        }
+        Action::VisualizerToggleSeedView => {
+            state.visualizer.seed_view = state.visualizer.seed_view.toggle_plate();
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+        }
+        Action::VisualizerCycleSeedOverlays => {
+            cycle_seed_overlays(&mut state.visualizer);
+            state.status = Some(format!(
+                "Overlays: {}",
+                seed_overlay_label(&state.visualizer)
+            ));
+        }
+        Action::VisualizerInspectLeft => {
+            move_inspector(state, -1, 0);
+        }
+        Action::VisualizerInspectRight => {
+            move_inspector(state, 1, 0);
+        }
+        Action::VisualizerInspectUp => {
+            move_inspector(state, 0, -1);
+        }
+        Action::VisualizerInspectDown => {
+            move_inspector(state, 0, 1);
+        }
+        Action::VisualizerInspectHome => {
+            set_inspector_pos(state, 0, 0);
+        }
+        Action::VisualizerInspectEnd => {
+            let (w, h) = inspector_dims(state);
+            if w > 0 && h > 0 {
+                set_inspector_pos(state, w - 1, h - 1);
+            }
+        }
+        Action::VisualizerInspectCenter => {
+            let (w, h) = inspector_dims(state);
+            if w > 0 && h > 0 {
+                set_inspector_pos(state, w / 2, h / 2);
+            }
+        }
+        Action::VisualizerInspectToggle => {
+            state.visualizer.inspector_enabled = !state.visualizer.inspector_enabled;
+            state.status = Some(format!(
+                "Inspector: {}",
+                if state.visualizer.inspector_enabled {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::VisualizerInspectJump(idx) => {
+            jump_inspector_to_index(state, idx);
+        }
+        Action::VisualizerCycleEncoder => {
+            state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Encoder: {}",
+                state.visualizer.seed_encoder.label()
+            ));
+        }
+        Action::VisualizerCycleSymmetry => {
+            state.visualizer.seed_params.symmetry = state.visualizer.seed_params.symmetry.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Symmetry: {}",
+                state.visualizer.seed_params.symmetry.label()
+            ));
+        }
+        Action::SetGolRuleById(id) => {
+            if let Some(named) = state.rule_catalog.find_by_id(&id) {
+                apply_rule_selection(state, SelectedRule::from_named(named), true);
+            } else {
+                state.status = Some(format!("Unknown GoL rule id: {id}"));
+            }
+        }
+        Action::SetGolRuleByString(text) => match Rule::parse(&text) {
+            Ok(rule) => {
+                let mut selected = SelectedRule::from_rule(rule);
+                if let Some(named) = state.rule_catalog.find_by_rule(rule) {
+                    selected.id = Some(named.id.clone());
+                    selected.name = Some(named.name.clone());
+                }
+                apply_rule_selection(state, selected, true);
+            }
+            Err(err) => {
+                state.status = Some(format!("Invalid GoL rule '{text}': {err}"));
+            }
+        },
+        Action::OpenRulePicker => {
+            if matches!(state.visualizer.rule_mode, RuleMode::Protocol(_)) {
+                state.status = Some("Rule picker disabled in protocol mode".into());
+            } else {
+                state.rule_picker.open = true;
+                state.rule_picker.query.clear();
+                state.rule_picker.selected = state
+                    .rule_catalog
+                    .index_of_selected(&state.gol_rule_selected)
+                    .unwrap_or(0);
+            }
+        }
+        Action::OpenProtocolPicker => {
+            state.protocol_picker.open = true;
+            state.protocol_picker.selected = 0;
+            state.protocol_picker.custom_input.clear();
+            state.protocol_picker.custom_error = None;
+            state.protocol_picker.custom_preview = None;
+        }
+        Action::CloseModal => {
+            state.rule_picker.open = false;
+            state.rule_picker.query.clear();
+            state.rule_picker.selected = 0;
+            state.protocol_picker.open = false;
+            state.protocol_picker.custom_error = None;
+            state.protocol_picker.custom_preview = None;
+        }
+        Action::ApplySelectedRuleFromPicker => {
+            let matches = state.rule_catalog.filter_indices(&state.rule_picker.query);
+            if matches.is_empty() {
+                state.status = Some("No rules match filter".into());
+                state.rule_picker.open = false;
+            } else {
+                let idx = state
+                    .rule_picker
+                    .selected
+                    .min(matches.len().saturating_sub(1));
+                if let Some(named) = state.rule_catalog.get(matches[idx]) {
+                    apply_rule_selection(state, SelectedRule::from_named(named), true);
+                }
+                state.rule_picker.open = false;
+            }
+        }
+        Action::ApplySelectedProtocolFromPicker => {
+            let presets = crate::rule_protocol::builtin_protocols(&state.rule_catalog);
+            let idx = state
+                .protocol_picker
+                .selected
+                .min(presets.len().saturating_add(1).saturating_sub(1));
+            if idx < presets.len() {
+                let preset = &presets[idx];
+                apply_protocol_selection(state, preset.mode.clone(), Some(preset.name.clone()));
+                state.status = Some(format!("Protocol set to {}", preset.name));
+                state.protocol_picker.open = false;
+                state.protocol_picker.custom_error = None;
+            } else {
+                match crate::rule_protocol::parse_protocol_spec(
+                    &state.protocol_picker.custom_input,
+                    &state.rule_catalog,
+                ) {
+                    Ok(mut protocol) => {
+                        protocol.reset();
+                        apply_protocol_selection(
+                            state,
+                            RuleMode::Protocol(protocol),
+                            Some("Custom".into()),
+                        );
+                        state.status = Some("Protocol set to Custom".into());
+                        state.protocol_picker.open = false;
+                        state.protocol_picker.custom_error = None;
+                    }
+                    Err(err) => {
+                        state.protocol_picker.custom_error = Some(err);
+                    }
+                }
+            }
+        }
+        Action::ToggleSyntax => {
+            state.settings.highlight.enabled = !state.settings.highlight.enabled;
+        }
+        Action::ToggleDebug => {
+            state.debug = !state.debug;
+            state.status = Some(if state.debug {
+                "Debug ON".into()
+            } else {
+                "Debug OFF".into()
+            });
+        }
+        Action::ToggleFileTree => {
+            state.file_tree.open = !state.file_tree.open;
+            if state.file_tree.open {
+                state.file_tree.root = state.workspace_root.clone();
+                state.focus = PaneId::Editor;
+                state.mode = Mode::Normal;
+            }
+        }
+        Action::OpenSearchPopup(mode) => {
+            state.show_help = false;
+            state.rule_picker.open = false;
+            state.protocol_picker.open = false;
+            state.fuzzy_search.open(mode, state.workspace_root.clone());
+            state.focus = PaneId::Editor;
+            state.mode = Mode::Normal;
+        }
+        Action::CloseSearchPopup => {
+            state.fuzzy_search.close();
+        }
+        Action::OpenFile(path) => {
+            if let Some(buffer_id) = state.find_editor_buffer_by_path(&path) {
+                state.active_editor_buffer_id = buffer_id;
+                state.focus = PaneId::Editor;
+                state.mode = Mode::Normal;
+                state.visualizer.pending_reseed = true;
+                state.status = Some(format!("Opened {}", path.display()));
+            } else {
+                match io::load_to_string(&path) {
+                    Ok(content) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "untitled".into());
+                        let buf = Buffer::from_str(name, &content, Some(path.clone()));
+                        if state.editor_buffer().is_dirty() {
+                            state.buffers.push(buf);
+                            state.active_editor_buffer_id = state.buffers.len() - 1;
+                        } else {
+                            state.buffers[state.active_editor_buffer_id] = buf;
+                        }
+                        state.focus = PaneId::Editor;
+                        state.mode = Mode::Normal;
+                        state.visualizer.pending_reseed = true;
+                        state.status = Some(format!("Opened {}", path.display()));
+                    }
+                    Err(err) => {
+                        state.status = Some(format!("Open failed: {err}"));
+                    }
+                }
+            }
+        }
+        Action::ShowHelp => {
+            state.show_help = true;
+            state.help_scroll = 0;
+        }
+        Action::HideHelp => {
+            state.show_help = false;
+            state.help_scroll = 0;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::HelpPopup) {
+                    state.ui_selection = None;
+                }
+            }
+        }
+        Action::MoveWordForward => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordForward => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordBack => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_back();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveFirstNonBlank => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_first_non_blank();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveLastNonBlank => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_last_non_blank();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveParagraphUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_paragraph_up();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveParagraphDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_paragraph_down();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportTop => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_top();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportMiddle => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_middle();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportBottom => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_bottom();
+                buf.ensure_visible();
+            }
+        }
+        Action::DeleteToEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_to_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::ChangeToEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_to_end();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::SubstituteChar => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_forward();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::SubstituteLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.substitute_line();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::JoinLines => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.join_lines();
+                buf.ensure_visible();
+            }
+        }
+        Action::ToggleCaseChar => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.toggle_case_char();
+                buf.ensure_visible();
+            }
+        }
+        Action::ReplaceChar(c) => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.replace_char(c);
+                buf.ensure_visible();
+            }
+        }
+        Action::FindChar(ch, forward, till) => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.find_char_in_line(ch, forward, till);
+                buf.ensure_visible();
+            }
+        }
+        Action::ScrollHalfPageDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.scroll_half_page_down();
+                buf.ensure_visible();
+            }
+        }
+        Action::ScrollHalfPageUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.scroll_half_page_up();
+                buf.ensure_visible();
+            }
+        }
+        Action::CenterViewportOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.center_viewport_on_cursor();
+            }
+        }
+        Action::ViewportTopOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.viewport_top_on_cursor();
+            }
+        }
+        Action::ViewportBottomOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.viewport_bottom_on_cursor();
+            }
+        }
+        Action::SearchWordForward => {
+            let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
+            if let Some(term) = word {
+                state.editor_search.term = Some(term.clone());
+                state.editor_search.whole_word = true;
+                state.editor_search.forward = true;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.search_next_match(&term, true);
+                    buf.ensure_visible();
+                }
+                state.status = Some(format!("/\\<{term}\\>"));
+            } else {
+                state.status = Some("No word under cursor".into());
+            }
+        }
+        Action::SearchWordBack => {
+            let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
+            if let Some(term) = word {
+                state.editor_search.term = Some(term.clone());
+                state.editor_search.whole_word = true;
+                state.editor_search.forward = false;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.search_prev_match(&term, true);
+                    buf.ensure_visible();
+                }
+                state.status = Some(format!("?\\<{term}\\>"));
+            } else {
+                state.status = Some("No word under cursor".into());
+            }
+        }
+        Action::SearchNext => {
+            let term = state.editor_search.term.clone();
+            let whole_word = state.editor_search.whole_word;
+            let forward = state.editor_search.forward;
+            if let Some(term) = term {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    let found = if forward {
+                        buf.search_next_match(&term, whole_word)
+                    } else {
+                        buf.search_prev_match(&term, whole_word)
+                    };
+                    buf.ensure_visible();
+                    if !found {
+                        state.status = Some(format!("Pattern not found: {term}"));
+                    }
+                }
+            } else {
+                state.status = Some("No previous search".into());
+            }
+        }
+        Action::SearchPrev => {
+            let term = state.editor_search.term.clone();
+            let whole_word = state.editor_search.whole_word;
+            let forward = state.editor_search.forward;
+            if let Some(term) = term {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    let found = if forward {
+                        buf.search_prev_match(&term, whole_word)
+                    } else {
+                        buf.search_next_match(&term, whole_word)
+                    };
+                    buf.ensure_visible();
+                    if !found {
+                        state.status = Some(format!("Pattern not found: {term}"));
+                    }
+                }
+            } else {
+                state.status = Some("No previous search".into());
+            }
+        }
+        Action::SearchClear => {
+            state.editor_search.clear();
+        }
+        Action::SearchPromptOpen => {
+            state.search_prompt = Some(SearchPrompt::new());
+        }
+        Action::SearchPromptCancel => {
+            state.search_prompt = None;
+        }
+        Action::SearchPromptBackspace => {
+            if let Some(p) = state.search_prompt.as_mut() {
+                p.backspace();
+            }
+        }
+        Action::SearchPromptInput(ch) => {
+            if let Some(p) = state.search_prompt.as_mut() {
+                p.insert(ch);
+            }
+        }
+        Action::SearchPromptExecute => {
+            if let Some(prompt) = state.search_prompt.take() {
+                let term = prompt.input;
+                if !term.is_empty() {
+                    state.editor_search.term = Some(term.clone());
+                    state.editor_search.whole_word = false;
+                    state.editor_search.forward = true;
+                    if let Some(buf) = state.focused_buffer_mut() {
+                        let found = buf.search_next_match(&term, false);
+                        buf.ensure_visible();
+                        if !found {
+                            state.status = Some(format!("Pattern not found: {term}"));
+                        } else {
+                            state.status = Some(format!("/{term}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ActionOutcome {
+        should_exit,
+        state_changed: changed,
+    }
+}

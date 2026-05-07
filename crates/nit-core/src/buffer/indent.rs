@@ -130,10 +130,11 @@ pub(super) fn matching_closer(opener: char) -> Option<char> {
     }
 }
 
-fn gcd(a: usize, b: usize) -> usize {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
     }
+    a
 }

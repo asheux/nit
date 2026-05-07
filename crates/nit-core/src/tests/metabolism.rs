@@ -3,31 +3,16 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::metabolism::tick;
 use crate::state::AppState;
 use crate::substrate::{
     Assumption, AssumptionTarget, Claim, ClaimKind, ClaimTarget, Signal, SignalKind, SignalTarget,
 };
-use crate::Buffer;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use crate::test_helpers::{temp_dir, test_state_in};
 
 fn test_state(label: &str) -> AppState {
-    let dir = temp_dir(label);
-    let editor = Buffer::from_str("editor", "", None);
-    let notes = Buffer::from_str("notes", "", None);
-    AppState::new(dir, editor, notes)
+    test_state_in(temp_dir(label))
 }
 
 #[test]

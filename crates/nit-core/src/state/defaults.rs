@@ -35,3 +35,15 @@ pub(super) fn codex_max_parallel_turns_default() -> usize {
 pub(super) fn claude_max_parallel_turns_default() -> usize {
     2
 }
+
+pub(super) fn chat_thread_scroll_default() -> usize {
+    super::CONSOLE_SCROLL_BOTTOM
+}
+
+pub(super) fn default_swarm_template() -> String {
+    "lab".into()
+}
+
+pub(super) fn default_swarm_mission() -> String {
+    "auto".into()
+}
