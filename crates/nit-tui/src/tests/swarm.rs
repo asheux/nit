@@ -5197,6 +5197,117 @@ fn structured_artifacts_block_for_review_skips_load_bearing_section() {
     assert!(!prompt.contains("`files` array — load-bearing for compliance"));
 }
 
+// --- Parallel template multi-writer permissions ---
+
+#[test]
+fn parallel_template_planner_prompt_does_not_say_single_writer() {
+    let prompt = build_planner_prompt(
+        "refactor src/",
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+    assert!(
+        !prompt.contains("Single-writer integrator"),
+        "parallel template must NOT use single-writer phrasing"
+    );
+    assert!(
+        !prompt.contains("only this agent may do workspace writes"),
+        "parallel template must NOT lock writes to one agent"
+    );
+    assert!(
+        !prompt.contains("only this agent may receive the `integrate` role"),
+        "parallel template must NOT lock the integrate role to one agent"
+    );
+    assert!(
+        prompt.contains("Primary integrator: `a1`"),
+        "parallel template should mark the chosen agent as PRIMARY, not SOLE"
+    );
+    assert!(
+        prompt.contains("additional `integrate` tasks may be assigned"),
+        "parallel header should explicitly permit multi-writer fan-out"
+    );
+}
+
+#[test]
+fn parallel_template_constraints_allow_multi_writer() {
+    let prompt = build_planner_prompt(
+        "refactor src/",
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+    assert!(
+        !prompt.contains("exactly one task with `role=integrate`"),
+        "parallel must not require exactly one integrate task"
+    );
+    assert!(
+        prompt.contains("AT LEAST ONE task with `role=integrate`"),
+        "parallel should require AT LEAST ONE integrate task"
+    );
+    assert!(
+        !prompt.contains("Treat `judge` and `integrate` as singleton roles"),
+        "parallel must not call integrate a singleton role"
+    );
+    assert!(
+        prompt.contains("`integrate` role MAY be split across multiple tasks"),
+        "parallel constraints should explicitly permit multiple integrate tasks"
+    );
+}
+
+#[test]
+fn lab_template_keeps_single_writer_constraint() {
+    let prompt = build_planner_prompt(
+        "refactor src/",
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+    assert!(prompt.contains("Single-writer integrator: `a1`"));
+    assert!(prompt.contains("only this agent may do workspace writes"));
+    assert!(prompt.contains("exactly one task with `role=integrate`"));
+}
+
+#[test]
+fn bulk_template_keeps_single_writer_constraint() {
+    let prompt = build_planner_prompt(
+        "refactor src/",
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+    assert!(prompt.contains("Single-writer integrator: `a1`"));
+    assert!(prompt.contains("only this agent may do workspace writes"));
+    assert!(
+        prompt.contains("Treat `judge` and `integrate` as singleton roles"),
+        "bulk template should keep both judge and integrate as singletons"
+    );
+}
+
 // Helper: build a temp workspace path that's unique per test run.
 fn make_temp_workspace(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()

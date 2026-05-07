@@ -145,12 +145,28 @@ fn append_planner_header(
     );
     out.push_str(&format!("Template: `{}`\n\n", template.label()));
     out.push_str(&format!("Mission focus: `{}`\n\n", mission_kind.label()));
-    if let Some(integrator_agent_id) = integrator_agent_id {
-        out.push_str(&format!(
-            "Single-writer integrator: `{integrator_agent_id}` (only this agent may do workspace writes, and only this agent may receive the `integrate` role).\n\n"
-        ));
-    } else if matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
-        out.push_str("Single-writer integrator: (none)\n\n");
+    // Parallel template's runtime allows multi-writer dispatch (the
+    // single-writer queue is removed for it). Saying "Single-writer
+    // integrator: only this agent may do writes" would contradict the
+    // runtime and force the planner to under-utilise the template — so
+    // for parallel we mark the agent as "primary" and explicitly permit
+    // additional integrate tasks. Lab and Bulk are convergence templates
+    // and keep the single-writer invariant.
+    match (template, integrator_agent_id) {
+        (SwarmTemplate::Parallel, Some(integrator_agent_id)) => {
+            out.push_str(&format!(
+                "Primary integrator: `{integrator_agent_id}` (additional `integrate` tasks may be assigned to other agents when the work splits naturally — e.g., topical subareas covered by different proposers. The runtime allows multi-writer dispatch under the parallel template.).\n\n"
+            ));
+        }
+        (SwarmTemplate::Lab | SwarmTemplate::Bulk, Some(integrator_agent_id)) => {
+            out.push_str(&format!(
+                "Single-writer integrator: `{integrator_agent_id}` (only this agent may do workspace writes, and only this agent may receive the `integrate` role).\n\n"
+            ));
+        }
+        (SwarmTemplate::Lab | SwarmTemplate::Bulk, None) => {
+            out.push_str("Single-writer integrator: (none)\n\n");
+        }
+        (SwarmTemplate::Parallel, None) => {}
     }
 }
 
@@ -193,13 +209,23 @@ fn append_planner_constraints(
         "- If you assign `research` or `computational-research`, ensure the task output asks for sources, methods, assumptions, and ranked strategy recommendations.\n",
     );
     append_mission_kind_lines(out, mission_kind);
-    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        out.push_str(
+    // Bulk converges through one integrator; parallel allows multi-writer
+    // dispatch (the runtime even removes the single-writer queue for
+    // parallel). So `integrate` is singleton only for Bulk; for Parallel
+    // the planner is free to fan out integrate across agents when work
+    // splits topically.
+    match template {
+        SwarmTemplate::Bulk => out.push_str(
             "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
-        );
+        ),
+        SwarmTemplate::Parallel => out.push_str(
+            "- Treat `judge` as a singleton role. The `integrate` role MAY be split across multiple tasks when the work splits naturally — e.g., one integrate task per topical subarea covered by a different proposer. The runtime allows multi-writer dispatch under parallel; use it when topical coherence beats alphabetical sharding. If you keep one integrate task, the runtime will auto-shard it for large scopes.\n",
+        ),
+        SwarmTemplate::Lab => {}
     }
     append_integrator_constraints(
         out,
+        template,
         mission_kind,
         integrator_agent_id,
         scope_files,
@@ -250,6 +276,7 @@ fn append_mission_kind_lines(out: &mut String, mission_kind: SwarmMissionKind) {
 
 fn append_integrator_constraints(
     out: &mut String,
+    template: SwarmTemplate,
     mission_kind: SwarmMissionKind,
     integrator_agent_id: Option<&str>,
     _scope_files: &[String],
@@ -258,15 +285,36 @@ fn append_integrator_constraints(
     let Some(integrator_agent_id) = integrator_agent_id else {
         return;
     };
-    out.push_str(&format!(
-        "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
-    ));
+    // Lab/Bulk converge through one writer — say so explicitly. Parallel
+    // permits multi-writer; the planner picks how many integrate tasks to
+    // emit based on topical fit.
+    match template {
+        SwarmTemplate::Lab | SwarmTemplate::Bulk => {
+            out.push_str(&format!(
+                "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
+            ));
+        }
+        SwarmTemplate::Parallel => {
+            out.push_str(&format!(
+                "- Code changes require `writes=true` and `role=integrate`. The PRIMARY integrator is `{integrator_agent_id}`; you MAY assign additional `integrate` tasks to other agents when work splits naturally (each with `writes=true`). Each integrate task's `task_prompt` MUST clearly state which files it owns.\n"
+            ));
+        }
+    }
     if !matches!(mission_kind, SwarmMissionKind::General) {
         return;
     }
-    out.push_str(&format!(
-        "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
-    ));
+    match template {
+        SwarmTemplate::Lab | SwarmTemplate::Bulk => {
+            out.push_str(&format!(
+                "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+            ));
+        }
+        SwarmTemplate::Parallel => {
+            out.push_str(&format!(
+                "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include AT LEAST ONE task with `role=integrate` and `writes=true`. The primary integrator is `{integrator_agent_id}`; additional integrate tasks may go to other agents. Without any integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+            ));
+        }
+    }
 }
 
 fn append_template_specific_constraints(out: &mut String, template: SwarmTemplate) {
