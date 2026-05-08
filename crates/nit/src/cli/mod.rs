@@ -45,11 +45,18 @@ pub(crate) struct Cli {
     #[arg(long, value_enum, default_value_t = CodexApprovalPolicyArg::Never)]
     pub codex_approval_policy: CodexApprovalPolicyArg,
 
-    /// Max concurrent Codex turns (MCP: in-flight calls; Exec: child processes)
+    /// Max concurrent in-flight agent turns across both Codex (MCP / Exec)
+    /// and Claude runners — they share this cap. Each runner holds at most
+    /// this many turns in its `active` set at once; turns beyond the cap
+    /// queue. Default 8 fits parallel-template swarms (6 to 7 proposers,
+    /// plus judge and integrate fan-out) without saturating typical FD
+    /// limits or provider rate caps. Lower if you're hitting 429s or OS
+    /// resource limits, raise toward 16 for large swarms on machines with
+    /// `ulimit -n` ≥ 4096.
     #[arg(
         long,
         alias = "codex-parallel",
-        default_value_t = 2u8,
+        default_value_t = 8u8,
         value_parser = clap::value_parser!(u8).range(1..=16)
     )]
     pub codex_max_parallel_turns: u8,
