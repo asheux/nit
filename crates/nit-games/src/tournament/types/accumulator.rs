@@ -1,9 +1,6 @@
-//! Per-strategy and pairwise accumulators used to roll up match results.
-
 use crate::config::ScoreAggregation;
 use crate::strategy::TmRunStats;
 
-/// Per-strategy running totals used by [`TournamentAccumulator`].
 #[derive(Clone, Debug)]
 pub struct StrategyStats {
     pub total: i64,
@@ -18,7 +15,6 @@ pub struct StrategyStats {
     pub tm_stats: Option<TmRunStats>,
 }
 
-/// Pairwise head-to-head statistics between two strategies.
 #[derive(Clone, Debug, Default)]
 pub struct PairStats {
     pub a_total: i64,
@@ -40,7 +36,6 @@ impl PairStats {
     }
 }
 
-/// Aggregates match results into per-strategy and pairwise statistics.
 pub struct TournamentAccumulator {
     pub strategies: Vec<StrategyStats>,
     pub pairwise: Option<Vec<Vec<PairStats>>>,

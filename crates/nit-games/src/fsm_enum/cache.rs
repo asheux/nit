@@ -1,4 +1,9 @@
 //! Memoisation caches shared across canonicalisation and behaviour grouping.
+//!
+//! The two caches are keyed differently — `(states, actions)` for the
+//! canonical-index list and `(states, actions, mode)` for behaviour
+//! representatives — so they live behind separate `Mutex<HashMap<_>>`s
+//! while sharing the `clone_cached_vec_result` accessor.
 
 use std::collections::HashMap;
 use std::hash::Hash;

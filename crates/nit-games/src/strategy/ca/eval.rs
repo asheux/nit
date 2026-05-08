@@ -2,7 +2,8 @@
 
 use crate::strategy::math::{checked_pow_usize, integer_digits_unsigned};
 
-/// Minimum symbol count for CA rule tables (binary minimum).
+/// Minimum symbol count for CA rule tables. Binary CAs are the common case;
+/// larger alphabets up-shift but the table must still cover at least 2 cells.
 pub(super) const MIN_SYMBOLS: u8 = 2;
 
 #[derive(Clone, Debug)]
@@ -13,8 +14,9 @@ pub struct CaRunResult {
     pub stopped_early: bool,
 }
 
-/// Decode a rule code into a lookup table for the given symbol count
-/// and neighborhood diameter (`two_r = 2 * radius`).
+/// Decode a rule code into a lookup table for the given symbol count and
+/// neighborhood diameter (`two_r = 2 * radius`). The table has
+/// `symbols^(2r+1)` entries.
 pub fn decode_ca_rule_table(rule_code: u64, symbols: u8, two_r: u32) -> Vec<u8> {
     let neighborhood = two_r.saturating_add(1) as usize;
     let table_len = checked_pow_usize(symbols.max(MIN_SYMBOLS) as usize, neighborhood).unwrap_or(0);
@@ -28,8 +30,8 @@ pub fn decode_ca_rule_table(rule_code: u64, symbols: u8, two_r: u32) -> Vec<u8> 
     .collect()
 }
 
-/// Run a shrinking cellular automaton: each step reduces the row width by `2r`,
-/// producing a pyramid of rows until convergence or step limit.
+/// Run a shrinking cellular automaton: each step reduces the row width by
+/// `2r`, producing a pyramid of rows until convergence or the step limit.
 pub fn run_shrinking_ca(
     rule_table: &[u8],
     symbols: u8,
@@ -75,8 +77,8 @@ pub fn run_shrinking_ca(
     }
 }
 
-/// Look up the next cell value from the rule table for a neighborhood window.
-/// Interprets `window` as a mixed-radix index into the table.
+/// Look up the next cell value by treating `window` as a mixed-radix index
+/// into `rule_table` (each cell is one base-`symbols` digit).
 fn ca_transition_symbol(rule_table: &[u8], symbols: u8, window: &[u8]) -> u8 {
     let radix = symbols.max(MIN_SYMBOLS) as usize;
     let table_index = window.iter().fold(0usize, |acc, &digit| {

@@ -1,3 +1,5 @@
+//! Bucketed cooperation-rate trajectories used in random-match charts.
+
 pub(super) struct TrajectoryData {
     pub a_rates: Vec<f64>,
     pub b_rates: Vec<f64>,
@@ -5,15 +7,24 @@ pub(super) struct TrajectoryData {
     pub ends: Vec<u32>,
 }
 
-pub(super) fn build_trajectory(outcomes: &[u8], samples: usize) -> TrajectoryData {
-    let total = outcomes.len();
-    if total == 0 {
-        return TrajectoryData {
+impl TrajectoryData {
+    fn empty() -> Self {
+        Self {
             a_rates: Vec::new(),
             b_rates: Vec::new(),
             starts: Vec::new(),
             ends: Vec::new(),
-        };
+        }
+    }
+}
+
+/// Bins per-round outcome bytes into `samples` equal-width buckets and
+/// reports the per-side cooperation rate within each bucket. Bucket
+/// `i` covers rounds `[i*total/samples, (i+1)*total/samples)`.
+pub(super) fn build_trajectory(outcomes: &[u8], samples: usize) -> TrajectoryData {
+    let total = outcomes.len();
+    if total == 0 {
+        return TrajectoryData::empty();
     }
     let samples = samples.min(total).max(1);
     let mut a_counts = vec![0u32; samples];

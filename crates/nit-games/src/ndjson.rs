@@ -1,4 +1,8 @@
 //! Atomic NDJSON file writer.
+//!
+//! `AtomicNdjsonWriter` streams JSON values one-per-line into a `.tmp`
+//! sibling, fsyncs on `finish()`, then renames into the final path so
+//! readers never observe a half-written file.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -6,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Buffered NDJSON writer with atomic rename on finish.
 pub(crate) struct AtomicNdjsonWriter {
     writer: BufWriter<File>,
     tmp_path: PathBuf,
@@ -36,7 +39,7 @@ impl AtomicNdjsonWriter {
         Ok(self.final_path)
     }
 
-    pub fn final_path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.final_path
     }
 }

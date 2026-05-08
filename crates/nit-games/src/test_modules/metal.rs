@@ -1,8 +1,9 @@
 //! Metal batch evaluator helpers used by the test suite.
 //!
-//! Lifted out of `tournament/metal/*.rs` so production source carries no
-//! test-only code paths. Consumers: `test_modules/tournament_metal.rs`
-//! and `test_modules/shared.rs::metal_totals_or_skip`.
+//! Production-source modules under `tournament/metal/*.rs` expose the
+//! production API only; these wrappers reach into the `test_internals`
+//! re-exports so test files can drive the GPU path without leaking
+//! `#[cfg(test)]` items into the production build.
 
 use crate::config::{NormalizedConfig, StrategySpec};
 use crate::tournament::test_internals::{
@@ -14,10 +15,10 @@ fn build_test_matchups(index_pairs: &[(usize, usize)]) -> Vec<Matchup> {
     index_pairs
         .iter()
         .enumerate()
-        .map(|(match_id, (a_idx, b_idx))| Matchup {
+        .map(|(match_id, &(a_idx, b_idx))| Matchup {
             match_id,
-            a_idx: *a_idx,
-            b_idx: *b_idx,
+            a_idx,
+            b_idx,
             repetition: 0,
         })
         .collect()
@@ -53,18 +54,20 @@ fn try_metal_batch_outcomes_prepared(
     )))
 }
 
+fn totals_from_outcomes(outcomes: Vec<MatchOutcome>) -> Vec<(i64, i64)> {
+    outcomes
+        .into_iter()
+        .map(|o| (o.result.a_total, o.result.b_total))
+        .collect()
+}
+
 pub(super) fn metal_batch_totals_for_test(
     config: &NormalizedConfig,
     index_pairs: &[(usize, usize)],
 ) -> Result<Option<Vec<(i64, i64)>>, String> {
     let test_matchups = build_test_matchups(index_pairs);
     let batch_outcomes = try_metal_batch_outcomes(config, &config.strategies, &test_matchups)?;
-    Ok(batch_outcomes.map(|outcomes| {
-        outcomes
-            .into_iter()
-            .map(|o| (o.result.a_total, o.result.b_total))
-            .collect()
-    }))
+    Ok(batch_outcomes.map(totals_from_outcomes))
 }
 
 #[allow(clippy::type_complexity)]
@@ -93,11 +96,5 @@ pub(super) fn metal_policy_probe_for_test(
     let Some((outcomes, _batch_count)) = chunked_result else {
         return Ok(None);
     };
-
-    let score_totals = outcomes
-        .into_iter()
-        .map(|o| (o.result.a_total, o.result.b_total))
-        .collect();
-
-    Ok(Some((score_totals, wall_time)))
+    Ok(Some((totals_from_outcomes(outcomes), wall_time)))
 }

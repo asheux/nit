@@ -38,6 +38,9 @@ pub use types::{
 #[cfg(test)]
 pub(crate) use session::build_strategy;
 
+// Test-only re-exports so `test_modules/` files (which live OUTSIDE the
+// `tournament` module privacy boundary) can poke at internal types.
+// Removing these breaks the test build on macOS.
 #[cfg(test)]
 pub(crate) mod test_internals {
     pub(crate) use super::metal::{

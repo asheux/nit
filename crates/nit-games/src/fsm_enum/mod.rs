@@ -41,35 +41,30 @@ impl FsmDefinition {
         }
     }
 
+    /// Hash-stable string key for caching and equivalence checks. Format:
+    /// `mode=<id>;states=<n>;start=<s>;outputs=<chars>;transitions=<row|row>`.
     pub fn stable_key(&self) -> String {
-        let mut out = String::new();
-        out.push_str("mode=");
-        out.push_str(match self.input_mode {
+        let mode_tag = match self.input_mode {
             InputMode::OpponentLastAction => "opp",
             InputMode::SelfLastAction => "self",
             InputMode::JointLastAction => "joint",
-        });
-        out.push_str(";states=");
-        out.push_str(&self.num_states.to_string());
-        out.push_str(";start=");
-        out.push_str(&self.start_state.to_string());
-        out.push_str(";outputs=");
-        for action in &self.outputs {
-            out.push(action.as_char());
-        }
-        out.push_str(";transitions=");
-        for (row_idx, row) in self.transitions.iter().enumerate() {
-            if row_idx > 0 {
-                out.push('|');
-            }
-            for (col_idx, next) in row.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&next.to_string());
-            }
-        }
-        out
+        };
+        let outputs: String = self.outputs.iter().map(|a| a.as_char()).collect();
+        let transitions = self
+            .transitions
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        format!(
+            "mode={mode_tag};states={};start={};outputs={outputs};transitions={transitions}",
+            self.num_states, self.start_state,
+        )
     }
 
     pub fn stable_hash(&self) -> u64 {
@@ -77,8 +72,9 @@ impl FsmDefinition {
     }
 }
 
-// Internal FSM with action-index outputs so canonicalisation, minimisation,
-// and trace signatures can stay in plain `usize` arithmetic.
+/// Internal FSM with action-index outputs (rather than `Action`) so
+/// canonicalisation, minimisation, and trace signatures stay in plain
+/// `usize` arithmetic.
 #[derive(Clone, Debug)]
 struct RawFsm {
     outputs: Vec<usize>,

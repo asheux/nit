@@ -10,7 +10,7 @@ use super::types::{
     MatchHistoryPreview, MatchOutcome, MatchResult, MatchSession, Matchup, MetalBatchState,
     RoundSnapshot, SeedDeriver, TournamentAccumulator, TournamentProgress,
 };
-use crate::config::{NormalizedConfig, StrategySpec};
+use crate::config::{EngineMode, NormalizedConfig, StrategySpec};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::FastStrategyModel;
 use crate::history_log::HistoryWriter;
@@ -63,7 +63,7 @@ impl TournamentRunner {
             config.strategies.len(),
             config.engine.complexity_cost.enabled,
             config.engine.score_aggregation,
-            !matches!(config.engine.mode, crate::config::EngineMode::Batch),
+            !matches!(config.engine.mode, EngineMode::Batch),
         );
         let strategies = config.strategies.clone();
         let runtime = RuntimeAcceleratorStats::new(config.engine.accelerator);
@@ -159,49 +159,62 @@ impl TournamentRunner {
                 rounds: self.config.rounds,
             });
         }
-        let mut remaining_step_budget = steps;
-        self.try_fast_forward_matches(&mut remaining_step_budget);
-        while remaining_step_budget > 0 {
-            if self.is_done() {
+        let mut remaining = steps;
+        self.try_fast_forward_matches(&mut remaining);
+        while remaining > 0 && !self.is_done() {
+            if !self.advance_one_round() {
                 break;
             }
-            if self.current.is_none() {
-                let Some(next_matchup) = self.schedule.matchup(self.match_index) else {
-                    break;
-                };
-                self.open_new_match(next_matchup);
-            }
-
-            let Some(mut active_session) = self.current.take() else {
-                break;
-            };
-            let round_snapshot = self.play_round(&mut active_session);
-            self.last_round = Some(round_snapshot.clone());
-            self.last_progress = Some(TournamentProgress::build(
-                self.match_index.saturating_add(1),
-                self.schedule.len().max(1),
-                active_session.round,
-                active_session.rounds_total,
-                false,
-                strategy_log_id(&self.strategies[active_session.matchup.a_idx]),
-                strategy_log_id(&self.strategies[active_session.matchup.b_idx]),
-                active_session.a_total,
-                active_session.b_total,
-                Some(&round_snapshot),
-                self.runtime.clone(),
-            ));
-            if active_session.round >= active_session.rounds_total {
-                self.finalize_completed_session(active_session);
-            } else {
-                self.current = Some(active_session);
-            }
-            remaining_step_budget = remaining_step_budget.saturating_sub(1);
-            self.try_fast_forward_matches(&mut remaining_step_budget);
+            remaining = remaining.saturating_sub(1);
+            self.try_fast_forward_matches(&mut remaining);
         }
     }
 
+    // Drives a single round of progress. Returns false when no further work
+    // is possible (schedule exhausted mid-step or no session can be opened).
+    fn advance_one_round(&mut self) -> bool {
+        if self.current.is_none() {
+            let Some(next_matchup) = self.schedule.matchup(self.match_index) else {
+                return false;
+            };
+            self.open_new_match(next_matchup);
+        }
+        let Some(mut session) = self.current.take() else {
+            return false;
+        };
+        let snapshot = self.play_round(&mut session);
+        self.last_round = Some(snapshot.clone());
+        self.last_progress = Some(self.progress_for_active(&session, Some(&snapshot)));
+        if session.round >= session.rounds_total {
+            self.finalize_completed_session(session);
+        } else {
+            self.current = Some(session);
+        }
+        true
+    }
+
+    fn progress_for_active(
+        &self,
+        session: &MatchSession,
+        last_snapshot: Option<&RoundSnapshot>,
+    ) -> TournamentProgress {
+        TournamentProgress::build(
+            self.match_index.saturating_add(1),
+            self.schedule.len().max(1),
+            session.round,
+            session.rounds_total,
+            false,
+            strategy_log_id(&self.strategies[session.matchup.a_idx]),
+            strategy_log_id(&self.strategies[session.matchup.b_idx]),
+            session.a_total,
+            session.b_total,
+            last_snapshot,
+            self.runtime.clone(),
+        )
+    }
+
     fn open_new_match(&mut self, next_matchup: Matchup) {
-        let new_session = MatchSession::new(
+        let session = MatchSession::new(
             next_matchup,
             &self.config,
             &self.strategies,
@@ -209,22 +222,22 @@ impl TournamentRunner {
             true,
             true,
         );
-        let player_a_id = self.strategies[new_session.matchup.a_idx].id.clone();
-        let player_b_id = self.strategies[new_session.matchup.b_idx].id.clone();
+        let player_a_id = self.strategies[session.matchup.a_idx].id.clone();
+        let player_b_id = self.strategies[session.matchup.b_idx].id.clone();
         self.emit(GameEvent::MatchStart {
             timestamp: EventWriter::timestamp(),
-            match_id: new_session.matchup.match_id,
+            match_id: session.matchup.match_id,
             match_index: self.match_index + 1,
             total_matches: self.schedule.len(),
             a: player_a_id.clone(),
             b: player_b_id.clone(),
-            repetition: new_session.matchup.repetition + 1,
+            repetition: session.matchup.repetition + 1,
         });
         self.last_progress = Some(TournamentProgress::build(
             self.match_index.saturating_add(1),
             self.schedule.len().max(1),
             0,
-            new_session.rounds_total,
+            session.rounds_total,
             false,
             player_a_id,
             player_b_id,
@@ -233,65 +246,63 @@ impl TournamentRunner {
             None,
             self.runtime.clone(),
         ));
-        self.current = Some(new_session);
+        self.current = Some(session);
     }
 
-    fn finalize_completed_session(&mut self, completed_session: MatchSession) {
+    fn finalize_completed_session(&mut self, session: MatchSession) {
         if self.collect_match_history_previews {
             self.completed_history_previews.push(MatchHistoryPreview {
                 match_index: self.match_index.saturating_add(1),
                 total_matches: self.schedule.len().max(1),
-                a: strategy_log_id(&self.strategies[completed_session.matchup.a_idx]),
-                b: strategy_log_id(&self.strategies[completed_session.matchup.b_idx]),
-                rounds_total: completed_session.rounds_total,
-                outcomes: completed_session.history_scores.clone(),
+                a: strategy_log_id(&self.strategies[session.matchup.a_idx]),
+                b: strategy_log_id(&self.strategies[session.matchup.b_idx]),
+                rounds_total: session.rounds_total,
+                outcomes: session.history_scores.clone(),
             });
         }
-        let first_strategy_spec = &self.strategies[completed_session.matchup.a_idx];
-        let second_strategy_spec = &self.strategies[completed_session.matchup.b_idx];
-        let complexity_cost_config = &self.config.engine.complexity_cost;
-        let first_tm_stats = completed_session.a_strategy.tm_stats();
-        let second_tm_stats = completed_session.b_strategy.tm_stats();
-        let first_adjusted_total = adjusted_total_for_match(
-            completed_session.a_total,
-            first_strategy_spec,
-            completed_session.rounds_total,
-            first_tm_stats,
-            complexity_cost_config,
-        );
-        let second_adjusted_total = adjusted_total_for_match(
-            completed_session.b_total,
-            second_strategy_spec,
-            completed_session.rounds_total,
-            second_tm_stats,
-            complexity_cost_config,
-        );
+        let a_spec = &self.strategies[session.matchup.a_idx];
+        let b_spec = &self.strategies[session.matchup.b_idx];
+        let cost = &self.config.engine.complexity_cost;
+        let a_tm_stats = session.a_strategy.tm_stats();
+        let b_tm_stats = session.b_strategy.tm_stats();
         let match_result = MatchResult {
-            a_idx: completed_session.matchup.a_idx,
-            b_idx: completed_session.matchup.b_idx,
-            rounds: completed_session.rounds_total,
-            a_total: completed_session.a_total,
-            b_total: completed_session.b_total,
-            a_adjusted_total: first_adjusted_total,
-            b_adjusted_total: second_adjusted_total,
-            repetition: completed_session.matchup.repetition,
-            match_id: completed_session.matchup.match_id,
+            a_idx: session.matchup.a_idx,
+            b_idx: session.matchup.b_idx,
+            rounds: session.rounds_total,
+            a_total: session.a_total,
+            b_total: session.b_total,
+            a_adjusted_total: adjusted_total_for_match(
+                session.a_total,
+                a_spec,
+                session.rounds_total,
+                a_tm_stats,
+                cost,
+            ),
+            b_adjusted_total: adjusted_total_for_match(
+                session.b_total,
+                b_spec,
+                session.rounds_total,
+                b_tm_stats,
+                cost,
+            ),
+            repetition: session.matchup.repetition,
+            match_id: session.matchup.match_id,
         };
         self.emit(GameEvent::MatchEnd {
             timestamp: EventWriter::timestamp(),
-            match_id: completed_session.matchup.match_id,
+            match_id: session.matchup.match_id,
             match_index: self.match_index + 1,
-            a_total: completed_session.a_total,
-            b_total: completed_session.b_total,
+            a_total: session.a_total,
+            b_total: session.b_total,
         });
-        self.emit_history(&completed_session);
+        self.emit_history(&session);
         self.runtime.note_cpu_matches(1);
         self.record_completed_outcome(MatchOutcome {
             result: match_result,
-            a_crashed: completed_session.a_crashed,
-            b_crashed: completed_session.b_crashed,
-            a_tm_stats: first_tm_stats.cloned(),
-            b_tm_stats: second_tm_stats.cloned(),
+            a_crashed: session.a_crashed,
+            b_crashed: session.b_crashed,
+            a_tm_stats: a_tm_stats.cloned(),
+            b_tm_stats: b_tm_stats.cloned(),
             last_round: self.last_round.clone(),
         });
         if self.is_done() {
@@ -301,48 +312,44 @@ impl TournamentRunner {
         }
     }
 
-    fn play_round(&mut self, active_session: &mut MatchSession) -> RoundSnapshot {
+    fn play_round(&mut self, session: &mut MatchSession) -> RoundSnapshot {
         self.runtime.note_cpu_activity();
-        let first_player_idx = active_session.matchup.a_idx;
-        let second_player_idx = active_session.matchup.b_idx;
-        let first_strategy_id = self.strategies[first_player_idx].id.clone();
-        let second_strategy_id = self.strategies[second_player_idx].id.clone();
+        let a_id = self.strategies[session.matchup.a_idx].id.clone();
+        let b_id = self.strategies[session.matchup.b_idx].id.clone();
 
-        let round_outcome = play_round_core(active_session, &self.config);
+        let outcome = play_round_core(session, &self.config);
 
-        if round_outcome.a_crash_now {
-            active_session.a_crashed = true;
-            self.results.strategies[first_player_idx].crash_count += 1;
-            self.results.strategies[first_player_idx].crashed = true;
-            self.emit(GameEvent::StrategyError {
-                timestamp: EventWriter::timestamp(),
-                strategy_id: first_strategy_id,
-                error: "panic in strategy".into(),
-            });
+        if outcome.a_crash_now {
+            session.a_crashed = true;
+            self.note_crash(session.matchup.a_idx, a_id);
         }
-        if round_outcome.b_crash_now {
-            active_session.b_crashed = true;
-            self.results.strategies[second_player_idx].crash_count += 1;
-            self.results.strategies[second_player_idx].crashed = true;
-            self.emit(GameEvent::StrategyError {
-                timestamp: EventWriter::timestamp(),
-                strategy_id: second_strategy_id,
-                error: "panic in strategy".into(),
-            });
+        if outcome.b_crash_now {
+            session.b_crashed = true;
+            self.note_crash(session.matchup.b_idx, b_id);
         }
 
         self.emit(GameEvent::Round {
             timestamp: EventWriter::timestamp(),
-            match_id: active_session.matchup.match_id,
+            match_id: session.matchup.match_id,
             match_index: self.match_index + 1,
-            round: active_session.round,
-            a_action: round_outcome.snapshot.a_action.as_char(),
-            b_action: round_outcome.snapshot.b_action.as_char(),
-            a_halted: round_outcome.snapshot.a_halted,
-            b_halted: round_outcome.snapshot.b_halted,
-            a_payoff: round_outcome.snapshot.a_payoff,
-            b_payoff: round_outcome.snapshot.b_payoff,
+            round: session.round,
+            a_action: outcome.snapshot.a_action.as_char(),
+            b_action: outcome.snapshot.b_action.as_char(),
+            a_halted: outcome.snapshot.a_halted,
+            b_halted: outcome.snapshot.b_halted,
+            a_payoff: outcome.snapshot.a_payoff,
+            b_payoff: outcome.snapshot.b_payoff,
         });
-        round_outcome.snapshot
+        outcome.snapshot
+    }
+
+    fn note_crash(&mut self, strategy_idx: usize, strategy_id: String) {
+        self.results.strategies[strategy_idx].crash_count += 1;
+        self.results.strategies[strategy_idx].crashed = true;
+        self.emit(GameEvent::StrategyError {
+            timestamp: EventWriter::timestamp(),
+            strategy_id,
+            error: "panic in strategy".into(),
+        });
     }
 }

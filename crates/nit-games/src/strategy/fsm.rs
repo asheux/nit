@@ -1,8 +1,7 @@
-//! Finite state machine (FSM) strategy implementation.
-//!
-//! An FSM strategy pairs an output function (state → action) with a transition
-//! function (state × input → state). Both are packed into a single integer via
-//! mixed-radix "notebook index" encoding.
+//! Finite state machine strategy: outputs (state → action) and transitions
+//! (state × input → state) packed into one mixed-radix "notebook index"
+//! integer per spec. Decoding splits the index into output digits and
+//! transition digits over `(num_states, action_count)`.
 
 use super::math::{
     checked_pow_u128, floor_div_rem_i128, integer_digits_signed_abs, integer_digits_unsigned,
@@ -36,9 +35,9 @@ pub fn decode_fsm_notebook_index(
     Ok((decoded.output_actions, decoded.transition_table))
 }
 
-/// Decode notebook index into raw numeric output digits and transition table.
-/// Preserves original digit values without converting to Action — used by
-/// fsm_enum for canonicalization where raw digit identity matters for k>2.
+/// Decode notebook index into raw output digits and transition table without
+/// converting to `Action`. `fsm_enum` canonicalisation needs raw digit
+/// identity for k > 2.
 pub(crate) fn decode_notebook_index_digits(
     index: u64,
     num_states: usize,
@@ -163,7 +162,6 @@ pub fn history_to_input_u64(history: &History) -> Option<u64> {
 
 // ── FSM strategy ────────────────────────────────────────────
 
-/// Maps opponent actions through state transitions to produce game actions.
 #[derive(Clone, Debug)]
 pub struct FsmStrategy {
     id: String,
@@ -175,7 +173,8 @@ pub struct FsmStrategy {
 }
 
 impl FsmStrategy {
-    /// Flattens the 2D transition table into row-major order for cache-friendly lookup.
+    /// Flattens the 2D transition table into row-major order for
+    /// cache-friendly lookup.
     pub fn new(
         id: impl Into<String>,
         start_state: usize,

@@ -39,9 +39,8 @@ impl SchedulePlan {
         let (a_idx, b_idx) = if self.self_play {
             (offset / self.strategy_count, offset % self.strategy_count)
         } else {
-            // Map a flat offset into an ordered pair (a, b) where a != b.
-            // Each row `a` has `N-1` opponents; b_offset skips index `a`
-            // itself so that b_offset >= a maps to b_offset + 1.
+            // Each row `a` has `N-1` opponents; the inner offset skips `a`
+            // itself so that `b_offset >= a` maps to `b_offset + 1`.
             let stride = self.strategy_count.saturating_sub(1);
             let a_idx = offset / stride;
             let b_offset = offset % stride;
@@ -68,8 +67,9 @@ impl SchedulePlan {
     }
 }
 
-/// Number of distinct matchups in a single repetition (N*N with self-play,
-/// N*(N-1) without). Returns `None` on overflow.
+// Distinct matchups in a single repetition: N*N with self-play, N*(N-1)
+// otherwise. Returns `None` on overflow so callers can refuse oversized
+// schedules instead of panicking deep inside scheduling.
 pub(super) fn matches_per_repetition(strategy_count: usize, self_play: bool) -> Option<usize> {
     if strategy_count == 0 {
         return Some(0);
@@ -81,7 +81,6 @@ pub(super) fn matches_per_repetition(strategy_count: usize, self_play: bool) -> 
     }
 }
 
-/// Total matches across all repetitions. Returns `None` on overflow.
 pub(super) fn total_schedule_matches(
     strategy_count: usize,
     repetitions: u32,

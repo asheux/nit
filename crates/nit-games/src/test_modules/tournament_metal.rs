@@ -3,11 +3,36 @@
 
 #![cfg(target_os = "macos")]
 
-use super::shared::{metal_totals_or_skip, simple_four_state_fsm_spec, simulate_match_from_specs};
-use crate::config::GamesConfig;
+#[path = "tournament_metal_data.rs"]
+mod data;
+
+use super::shared::{metal_totals_or_skip, simulate_match_from_specs};
+use crate::config::{GamesConfig, NormalizedConfig};
 use crate::game::Action;
 use crate::output::RuntimeAcceleratorBackend;
 use crate::tournament::TournamentRunner;
+use data::large_four_state_fsm_config;
+
+const LARGE_ROSTER_SIZE: usize = 52_000;
+
+fn assert_round_robin_baseline(
+    cfg: &NormalizedConfig,
+    totals: &[(i64, i64)],
+    pairs: &[(usize, usize)],
+) {
+    let expected = pairs
+        .iter()
+        .map(|(a, b)| {
+            simulate_match_from_specs(
+                &cfg.strategies[*a],
+                &cfg.strategies[*b],
+                cfg.payoff,
+                cfg.rounds,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(totals, expected.as_slice());
+}
 
 #[test]
 fn metal_fsm_batch_matches_cpu_baseline() {
@@ -36,24 +61,11 @@ num_states = 1
 k = 2
 "#;
     let cfg = GamesConfig::from_toml(src).expect("parse config");
-    let Some(totals) = metal_totals_or_skip(&cfg, &[(0, 1), (1, 0)]) else {
+    let pairs = [(0, 1), (1, 0)];
+    let Some(totals) = metal_totals_or_skip(&cfg, &pairs) else {
         return;
     };
-    let expected = vec![
-        simulate_match_from_specs(
-            &cfg.strategies[0],
-            &cfg.strategies[1],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-        simulate_match_from_specs(
-            &cfg.strategies[1],
-            &cfg.strategies[0],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-    ];
-    assert_eq!(totals, expected);
+    assert_round_robin_baseline(&cfg, &totals, &pairs);
 }
 
 #[test]
@@ -85,24 +97,11 @@ r = 1.0
 t = 4
 "#;
     let cfg = GamesConfig::from_toml(src).expect("parse config");
-    let Some(totals) = metal_totals_or_skip(&cfg, &[(0, 1), (1, 0)]) else {
+    let pairs = [(0, 1), (1, 0)];
+    let Some(totals) = metal_totals_or_skip(&cfg, &pairs) else {
         return;
     };
-    let expected = vec![
-        simulate_match_from_specs(
-            &cfg.strategies[0],
-            &cfg.strategies[1],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-        simulate_match_from_specs(
-            &cfg.strategies[1],
-            &cfg.strategies[0],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-    ];
-    assert_eq!(totals, expected);
+    assert_round_robin_baseline(&cfg, &totals, &pairs);
 }
 
 #[test]
@@ -136,56 +135,16 @@ max_steps_per_round = 16
 rule_code = 3
 "#;
     let cfg = GamesConfig::from_toml(src).expect("parse config");
-    let Some(totals) = metal_totals_or_skip(&cfg, &[(0, 1), (1, 0)]) else {
+    let pairs = [(0, 1), (1, 0)];
+    let Some(totals) = metal_totals_or_skip(&cfg, &pairs) else {
         return;
     };
-    let expected = vec![
-        simulate_match_from_specs(
-            &cfg.strategies[0],
-            &cfg.strategies[1],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-        simulate_match_from_specs(
-            &cfg.strategies[1],
-            &cfg.strategies[0],
-            cfg.payoff,
-            cfg.rounds,
-        ),
-    ];
-    assert_eq!(totals, expected);
+    assert_round_robin_baseline(&cfg, &totals, &pairs);
 }
 
 #[test]
 fn metal_large_homogeneous_four_state_fsm_roster_probe() {
-    let mut cfg = GamesConfig::from_toml(
-        r#"
-schema_version = 1
-game = "ipd"
-rounds = 10
-repetitions = 1
-self_play = false
-noise = 0.0
-
-[engine]
-mode = "batch"
-fast_eval = true
-accelerator = "metal"
-
-[[strategy]]
-id = "placeholder"
-type = "fsm"
-num_states = 1
-outputs = ["C"]
-transitions = [[0, 0]]
-"#,
-    )
-    .expect("parse config");
-
-    cfg.strategies = (0..52_000)
-        .map(|idx| simple_four_state_fsm_spec(format!("fsm_{idx}")))
-        .collect();
-
+    let cfg = large_four_state_fsm_config(false, LARGE_ROSTER_SIZE);
     let Some(totals) = metal_totals_or_skip(&cfg, &[(0, 1), (51_998, 51_999)]) else {
         return;
     };
@@ -194,34 +153,7 @@ transitions = [[0, 0]]
 
 #[test]
 fn metal_large_homogeneous_four_state_fsm_roster_probe_with_self_play() {
-    let mut cfg = GamesConfig::from_toml(
-        r#"
-schema_version = 1
-game = "ipd"
-rounds = 10
-repetitions = 1
-self_play = true
-noise = 0.0
-
-[engine]
-mode = "batch"
-fast_eval = true
-accelerator = "metal"
-
-[[strategy]]
-id = "placeholder"
-type = "fsm"
-num_states = 1
-outputs = ["C"]
-transitions = [[0, 0]]
-"#,
-    )
-    .expect("parse config");
-
-    cfg.strategies = (0..52_000)
-        .map(|idx| simple_four_state_fsm_spec(format!("fsm_{idx}")))
-        .collect();
-
+    let cfg = large_four_state_fsm_config(true, LARGE_ROSTER_SIZE);
     let Some(totals) = metal_totals_or_skip(&cfg, &[(0, 0), (0, 1), (51_999, 51_999)]) else {
         return;
     };
@@ -230,34 +162,7 @@ transitions = [[0, 0]]
 
 #[test]
 fn metal_large_homogeneous_four_state_fsm_full_chunk_probe() {
-    let mut cfg = GamesConfig::from_toml(
-        r#"
-schema_version = 1
-game = "ipd"
-rounds = 10
-repetitions = 1
-self_play = false
-noise = 0.0
-
-[engine]
-mode = "batch"
-fast_eval = true
-accelerator = "metal"
-
-[[strategy]]
-id = "placeholder"
-type = "fsm"
-num_states = 1
-outputs = ["C"]
-transitions = [[0, 0]]
-"#,
-    )
-    .expect("parse config");
-
-    cfg.strategies = (0..52_000)
-        .map(|idx| simple_four_state_fsm_spec(format!("fsm_{idx}")))
-        .collect();
-
+    let cfg = large_four_state_fsm_config(false, LARGE_ROSTER_SIZE);
     let pairs = (0..16_384usize)
         .map(|idx| (idx, 51_999usize.saturating_sub(idx)))
         .collect::<Vec<_>>();
@@ -298,9 +203,9 @@ k = 2
 "#;
 
     let cfg = GamesConfig::from_toml(src).expect("parse config");
-    let Some(_) = metal_totals_or_skip(&cfg, &[(0, 1)]) else {
+    if metal_totals_or_skip(&cfg, &[(0, 1)]).is_none() {
         return;
-    };
+    }
 
     let mut runner = TournamentRunner::new(cfg).with_match_history_previews(false);
     runner.step_rounds(5_000);
@@ -324,55 +229,32 @@ k = 2
 #[test]
 #[ignore = "local Metal throughput profiling"]
 fn metal_policy_profiles_four_state_fsm_on_local_device() {
-    let mut cfg = GamesConfig::from_toml(
-        r#"
-schema_version = 1
-game = "ipd"
-rounds = 10
-repetitions = 1
-self_play = false
-noise = 0.0
-
-[engine]
-mode = "batch"
-fast_eval = true
-accelerator = "metal"
-
-[[strategy]]
-id = "placeholder"
-type = "fsm"
-num_states = 1
-outputs = ["C"]
-transitions = [[0, 0]]
-"#,
-    )
-    .expect("parse config");
-
-    cfg.strategies = (0..52_000)
-        .map(|idx| simple_four_state_fsm_spec(format!("fsm_{idx}")))
-        .collect();
-
-    let pairs = (0..524_288usize)
-        .map(|idx| (idx % 52_000, 51_999usize.saturating_sub(idx % 52_000)))
-        .collect::<Vec<_>>();
-
-    let candidates = [
-        (65_536usize, 3usize),
-        (65_536usize, 4usize),
-        (98_304usize, 4usize),
-        (131_072usize, 3usize),
-        (131_072usize, 4usize),
-        (131_072usize, 5usize),
-        (196_608usize, 4usize),
-        (262_144usize, 3usize),
-        (262_144usize, 4usize),
+    const SAMPLES_PER_CANDIDATE: usize = 3;
+    const POLICY_CANDIDATES: &[(usize, usize)] = &[
+        (65_536, 3),
+        (65_536, 4),
+        (98_304, 4),
+        (131_072, 3),
+        (131_072, 4),
+        (131_072, 5),
+        (196_608, 4),
+        (262_144, 3),
+        (262_144, 4),
     ];
 
-    const SAMPLES_PER_CANDIDATE: usize = 3;
+    let cfg = large_four_state_fsm_config(false, LARGE_ROSTER_SIZE);
+    let pairs = (0..524_288usize)
+        .map(|idx| {
+            (
+                idx % LARGE_ROSTER_SIZE,
+                51_999usize.saturating_sub(idx % LARGE_ROSTER_SIZE),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut baseline = None;
-    let mut fastest = None;
-    for (matches_per_batch, inflight_batches) in candidates {
+    let mut fastest: Option<(usize, usize, f64)> = None;
+    for &(matches_per_batch, inflight_batches) in POLICY_CANDIDATES {
         let mut total_elapsed = 0.0f64;
         let mut best_elapsed = f64::INFINITY;
         let mut checksum = (0i64, 0i64);
@@ -386,7 +268,7 @@ transitions = [[0, 0]]
             .expect("policy probe") else {
                 return;
             };
-            let sample_checksum = totals.iter().fold((0i64, 0i64), |acc, value| {
+            checksum = totals.iter().fold((0i64, 0i64), |acc, value| {
                 (acc.0 + value.0, acc.1 + value.1)
             });
             if let Some(reference) = baseline.as_ref() {
@@ -394,34 +276,27 @@ transitions = [[0, 0]]
             } else {
                 baseline = Some(totals);
             }
-            checksum = sample_checksum;
             let elapsed_secs = elapsed.as_secs_f64();
             total_elapsed += elapsed_secs;
             best_elapsed = best_elapsed.min(elapsed_secs);
         }
         let average_elapsed = total_elapsed / SAMPLES_PER_CANDIDATE as f64;
-        let average_matches_per_second = pairs.len() as f64 / average_elapsed;
-        let best_matches_per_second = pairs.len() as f64 / best_elapsed;
+        let average_rate = pairs.len() as f64 / average_elapsed;
+        let best_rate = pairs.len() as f64 / best_elapsed;
         println!(
-            "metal_policy batch={} inflight={} avg={:.3}s avg_rate={:.0} best={:.3}s best_rate={:.0} checksum=({}, {})",
-            matches_per_batch,
-            inflight_batches,
-            average_elapsed,
-            average_matches_per_second,
-            best_elapsed,
-            best_matches_per_second,
-            checksum.0,
-            checksum.1
+            "metal_policy batch={matches_per_batch} inflight={inflight_batches} \
+             avg={average_elapsed:.3}s avg_rate={average_rate:.0} \
+             best={best_elapsed:.3}s best_rate={best_rate:.0} \
+             checksum=({}, {})",
+            checksum.0, checksum.1,
         );
-        if fastest
-            .as_ref()
-            .map(|(_, _, best_average): &(usize, usize, f64)| average_elapsed < *best_average)
-            .unwrap_or(true)
-        {
+        if fastest.is_none_or(|(_, _, best_avg)| average_elapsed < best_avg) {
             fastest = Some((matches_per_batch, inflight_batches, average_elapsed));
         }
     }
     if let Some((matches_per_batch, inflight_batches, average_elapsed)) = fastest {
-        println!("metal_policy best batch={matches_per_batch} inflight={inflight_batches} avg={average_elapsed:.3}s");
+        println!(
+            "metal_policy best batch={matches_per_batch} inflight={inflight_batches} avg={average_elapsed:.3}s"
+        );
     }
 }

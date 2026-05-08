@@ -1,23 +1,21 @@
-//! Match session lifecycle: strategy construction, per-round play, and the
-//! batch-mode `run_match_core` entry point shared by the kernel and the runner.
-
-use super::metal::adjusted_total_for_match;
-use super::types::{
-    MatchOutcome, MatchResult, MatchRole, MatchSession, Matchup, RoundOutcome, RoundSnapshot,
-    SeedDeriver,
+use super::super::metal::adjusted_total_for_match;
+use super::super::types::{
+    MatchOutcome, MatchResult, Matchup, RoundOutcome, RoundSnapshot, SeedDeriver,
 };
-use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
+use super::strategy_factory::strategy_log_id;
+use super::MatchSession;
+use crate::config::{NormalizedConfig, StrategySpec};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
 use crate::game::{payoffs_with_timeouts, Action, Outcome};
-use crate::history::History;
 use crate::history_log::MatchHistory;
-use crate::output::StrategyDefinition;
-use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmRunStats};
+use crate::strategy::TmRunStats;
 use nit_utils::rng::SplitMix64;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
+pub(in crate::tournament) fn tm_metrics_from_stats(
+    stats: &TmRunStats,
+) -> crate::output::TmDerivedMetrics {
     let rounds = stats.rounds.max(1);
     let avg_steps = stats.steps as f64 / rounds as f64;
     let output_rate = stats.output_events as f64 / rounds as f64;
@@ -33,42 +31,34 @@ pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDeri
     }
 }
 
-/// Query each strategy for its next action under panic isolation, apply
-/// noise, compute payoffs, then commit the round to the session buffers.
-pub(super) fn play_round_core(
+// Strategies are user-provided; isolate their `next_action` calls so a panic
+// in one player crashes only that side and the match continues with Defect.
+fn safe_next_action(
+    strategy: &mut dyn crate::strategy::Strategy,
+    history: &crate::history::History,
+    is_first_player: bool,
+) -> (Action, bool, bool) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        strategy.next_action(history, is_first_player)
+    })) {
+        Ok(action) => (action, strategy.last_halted(), false),
+        Err(_) => (Action::Defect, false, true),
+    }
+}
+
+pub(in crate::tournament) fn play_round_core(
     session: &mut MatchSession,
     config: &NormalizedConfig,
 ) -> RoundOutcome {
-    let (a_action, b_action, a_halted, b_halted, a_crash_now, b_crash_now) = {
-        let mut a_crash = false;
-        let mut b_crash = false;
-        let (a_action, a_halted) = if session.a_crashed {
-            (Action::Defect, false)
-        } else {
-            match catch_unwind(AssertUnwindSafe(|| {
-                session.a_strategy.next_action(&session.history, true)
-            })) {
-                Ok(action) => (action, session.a_strategy.last_halted()),
-                Err(_) => {
-                    a_crash = true;
-                    (Action::Defect, false)
-                }
-            }
-        };
-        let (b_action, b_halted) = if session.b_crashed {
-            (Action::Defect, false)
-        } else {
-            match catch_unwind(AssertUnwindSafe(|| {
-                session.b_strategy.next_action(&session.history, false)
-            })) {
-                Ok(action) => (action, session.b_strategy.last_halted()),
-                Err(_) => {
-                    b_crash = true;
-                    (Action::Defect, false)
-                }
-            }
-        };
-        (a_action, b_action, a_halted, b_halted, a_crash, b_crash)
+    let (mut a_action, a_halted, a_crash_now) = if session.a_crashed {
+        (Action::Defect, false, false)
+    } else {
+        safe_next_action(session.a_strategy.as_mut(), &session.history, true)
+    };
+    let (mut b_action, b_halted, b_crash_now) = if session.b_crashed {
+        (Action::Defect, false, false)
+    } else {
+        safe_next_action(session.b_strategy.as_mut(), &session.history, false)
     };
 
     if a_crash_now {
@@ -78,8 +68,8 @@ pub(super) fn play_round_core(
         session.b_crashed = true;
     }
 
-    let a_action = apply_noise(config.noise, a_action, &mut session.noise_rng);
-    let b_action = apply_noise(config.noise, b_action, &mut session.noise_rng);
+    a_action = apply_noise(config.noise, a_action, &mut session.noise_rng);
+    b_action = apply_noise(config.noise, b_action, &mut session.noise_rng);
     let (a_payoff, b_payoff) =
         payoffs_with_timeouts(config.payoff, a_action, b_action, a_halted, b_halted);
     let outcome = Outcome::from_actions(a_action, b_action);
@@ -134,89 +124,8 @@ fn apply_noise(noise: f32, action: Action, rng: &mut SplitMix64) -> Action {
     }
 }
 
-impl MatchSession {
-    pub(super) fn new(
-        matchup: Matchup,
-        config: &NormalizedConfig,
-        strategies: &[StrategySpec],
-        seed_deriver: &SeedDeriver,
-        record_history: bool,
-        record_trace: bool,
-    ) -> Self {
-        let rounds_total = config.rounds;
-        let max_memory = config.max_memory_n;
-        let a_spec = &strategies[matchup.a_idx];
-        let b_spec = &strategies[matchup.b_idx];
-        let a_seed = seed_deriver.strategy_seed(
-            matchup.match_id,
-            matchup.repetition,
-            MatchRole::A,
-            &a_spec.id,
-        );
-        let b_seed = seed_deriver.strategy_seed(
-            matchup.match_id,
-            matchup.repetition,
-            MatchRole::B,
-            &b_spec.id,
-        );
-        let mut a_strategy = build_strategy(a_spec, a_seed);
-        let mut b_strategy = build_strategy(b_spec, b_seed);
-        a_strategy.reset();
-        b_strategy.reset();
-        let noise_seed = seed_deriver.noise_seed(matchup.match_id, matchup.repetition);
-        let record_scores = record_history || record_trace;
-        Self {
-            matchup,
-            history: History::new(max_memory),
-            a_strategy,
-            b_strategy,
-            noise_rng: SplitMix64::new(noise_seed),
-            history_actions_a: if record_history {
-                String::with_capacity(rounds_total as usize)
-            } else {
-                String::new()
-            },
-            history_actions_b: if record_history {
-                String::with_capacity(rounds_total as usize)
-            } else {
-                String::new()
-            },
-            history_halted_a: if record_history {
-                String::with_capacity(rounds_total as usize)
-            } else {
-                String::new()
-            },
-            history_halted_b: if record_history {
-                String::with_capacity(rounds_total as usize)
-            } else {
-                String::new()
-            },
-            history_scores: if record_scores {
-                String::with_capacity(rounds_total as usize)
-            } else {
-                String::new()
-            },
-            history_payoffs: if record_trace {
-                Vec::with_capacity(rounds_total as usize)
-            } else {
-                Vec::new()
-            },
-            round: 0,
-            rounds_total,
-            a_total: 0,
-            b_total: 0,
-            a_crashed: false,
-            b_crashed: false,
-            record_history,
-            record_trace,
-        }
-    }
-}
-
-/// Run a full match, preferring the fast-eval product graph and falling back
-/// to per-round play. Emits events and history records through the closures.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run_match_core<E, H>(
+pub(in crate::tournament) fn run_match_core<E, H>(
     matchup: &Matchup,
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -241,11 +150,7 @@ where
     let b_spec = &strategies[matchup.b_idx];
     let cost = &config.engine.complexity_cost;
     let match_index = matchup.match_id + 1;
-    let owned_ids = if log_events || log_history {
-        Some((a_id.clone(), b_id.clone()))
-    } else {
-        None
-    };
+    let owned_ids = (log_events || log_history).then(|| (a_id.clone(), b_id.clone()));
 
     if log_events {
         let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
@@ -450,74 +355,5 @@ where
         a_tm_stats: session.a_strategy.tm_stats().cloned(),
         b_tm_stats: session.b_strategy.tm_stats().cloned(),
         last_round,
-    }
-}
-
-pub(super) fn build_strategy_definitions(strategies: &[StrategySpec]) -> Vec<StrategyDefinition> {
-    strategies
-        .iter()
-        .map(|spec| StrategyDefinition {
-            id: spec.id.clone(),
-            name: spec.name.clone(),
-            kind: spec.kind.clone(),
-            rng_seed_a: None,
-            rng_seed_b: None,
-        })
-        .collect()
-}
-
-/// Compact display id for a strategy: prefer the numeric FSM index, CA
-/// rule number, or TM rule code when present, otherwise fall back to `id`.
-pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
-    match &spec.kind {
-        StrategySpecKind::Fsm {
-            index: Some(index), ..
-        } => index.to_string(),
-        StrategySpecKind::Ca { n, .. } => n.to_string(),
-        StrategySpecKind::OneSidedTm {
-            rule_code: Some(rule_code),
-            ..
-        } => rule_code.to_string(),
-        _ => spec.id.clone(),
-    }
-}
-
-pub(crate) fn build_strategy(spec: &StrategySpec, _seed: u64) -> Box<dyn Strategy> {
-    match &spec.kind {
-        StrategySpecKind::Fsm {
-            start_state,
-            outputs,
-            input_mode,
-            transitions,
-            ..
-        } => Box::new(FsmStrategy::new(
-            spec.id.clone(),
-            *start_state,
-            outputs.clone(),
-            input_mode.unwrap_or_default(),
-            transitions.clone(),
-        )),
-        StrategySpecKind::Ca { n, k, r, t } => Box::new(CaStrategy::new(
-            spec.id.clone(),
-            *n,
-            *k,
-            (*r * 2.0).round() as u32,
-            *t,
-        )),
-        StrategySpecKind::OneSidedTm {
-            symbols,
-            start_state,
-            blank,
-            max_steps_per_round,
-            transitions,
-            ..
-        } => Box::new(OneSidedTmStrategy::new(
-            spec.id.clone(),
-            *symbols,
-            *start_state,
-            *blank,
-            *max_steps_per_round,
-            transitions.clone(),
-        )),
     }
 }

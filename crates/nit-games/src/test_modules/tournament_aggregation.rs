@@ -2,8 +2,28 @@
 
 use super::shared::{ranked_strategy, run_tournament_from_toml};
 use crate::config::{EngineMode, GamesConfig, ScoreAggregation};
+use crate::output::StrategyResult;
 use crate::tournament::TournamentRunner;
 use crate::{KernelRunMode, TournamentKernel};
+
+const SCORE_TOL: f64 = 1e-9;
+
+fn assert_close(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < SCORE_TOL,
+        "expected {expected}, got {actual}"
+    );
+}
+
+fn assert_all_c_mean_aggregation(entry: &StrategyResult) {
+    assert_eq!(entry.matches, 2);
+    assert_eq!(entry.total_payoff, -4);
+    assert_close(entry.average_payoff, -1.0);
+    assert_close(
+        entry.total_payoff_for_scoreboard(ScoreAggregation::Mean, false),
+        -2.0,
+    );
+}
 
 #[test]
 fn tournament_mean_aggregation_uses_per_round_payoff() {
@@ -30,17 +50,9 @@ k = 2
 "#;
 
     let results = run_tournament_from_toml(src);
-    let a = ranked_strategy(&results, "all_c_a");
-    let b = ranked_strategy(&results, "all_c_b");
-
-    assert_eq!(a.total_payoff, -4);
-    assert_eq!(a.matches, 2);
-    assert!((a.average_payoff - -1.0).abs() < 1e-9);
-    assert!((a.total_payoff_for_scoreboard(ScoreAggregation::Mean, false) - -2.0).abs() < 1e-9);
-    assert_eq!(b.total_payoff, -4);
-    assert_eq!(b.matches, 2);
-    assert!((b.average_payoff - -1.0).abs() < 1e-9);
-    assert!((b.total_payoff_for_scoreboard(ScoreAggregation::Mean, false) - -2.0).abs() < 1e-9);
+    for id in ["all_c_a", "all_c_b"] {
+        assert_all_c_mean_aggregation(ranked_strategy(&results, id));
+    }
 }
 
 #[test]
@@ -62,12 +74,8 @@ k = 2
 
     let results = run_tournament_from_toml(src);
     let entry = ranked_strategy(&results, "all_c");
-
-    assert_eq!(entry.matches, 2);
+    assert_all_c_mean_aggregation(entry);
     assert_eq!(entry.draws, 2);
-    assert_eq!(entry.total_payoff, -4);
-    assert!((entry.average_payoff - -1.0).abs() < 1e-9);
-    assert!((entry.total_payoff_for_scoreboard(ScoreAggregation::Mean, false) - -2.0).abs() < 1e-9);
 }
 
 #[test]
@@ -203,7 +211,7 @@ k = 2
     {
         assert_eq!(runner_row.id, kernel_row.id);
         assert_eq!(runner_row.total_payoff, kernel_row.total_payoff);
-        assert!((runner_row.average_payoff - kernel_row.average_payoff).abs() < 1e-9);
+        assert_close(runner_row.average_payoff, kernel_row.average_payoff);
         assert_eq!(runner_row.matches, kernel_row.matches);
         assert_eq!(runner_row.wins, kernel_row.wins);
         assert_eq!(runner_row.losses, kernel_row.losses);
@@ -213,7 +221,9 @@ k = 2
 
 #[test]
 fn strategy_result_score_respects_aggregation_and_adjustment() {
-    let result = crate::output::StrategyResult {
+    use ScoreAggregation::{Mean, Total};
+
+    let result = StrategyResult {
         id: "s".into(),
         name: None,
         total_payoff: 12,
@@ -229,34 +239,31 @@ fn strategy_result_score_respects_aggregation_and_adjustment() {
         tm_metrics: None,
     };
 
-    assert_eq!(result.score(ScoreAggregation::Total, false), 12.0);
-    assert_eq!(result.score(ScoreAggregation::Mean, false), 4.0);
-    assert_eq!(result.score(ScoreAggregation::Total, true), 9.75);
-    assert_eq!(result.score(ScoreAggregation::Mean, true), 3.25);
-    assert_eq!(
-        result.total_payoff_for_scoreboard(ScoreAggregation::Total, false),
-        12.0
-    );
-    assert_eq!(
-        result.total_payoff_for_scoreboard(ScoreAggregation::Mean, false),
-        12.0
-    );
-    assert_eq!(
-        result.total_payoff_for_scoreboard(ScoreAggregation::Total, true),
-        9.75
-    );
-    assert_eq!(
-        result.total_payoff_for_scoreboard(ScoreAggregation::Mean, true),
-        9.75
-    );
-    assert_eq!(result.formatted_score(ScoreAggregation::Mean, false), "4");
-    assert_eq!(result.formatted_score(ScoreAggregation::Mean, true), "3.25");
-    assert_eq!(
-        result.formatted_total_payoff(ScoreAggregation::Mean, false),
-        "12"
-    );
-    assert_eq!(
-        result.formatted_total_payoff(ScoreAggregation::Mean, true),
-        "9.75"
-    );
+    let score_cases = [
+        (Total, false, 12.0),
+        (Mean, false, 4.0),
+        (Total, true, 9.75),
+        (Mean, true, 3.25),
+    ];
+    for (aggregation, adjusted, expected) in score_cases {
+        assert_eq!(result.score(aggregation, adjusted), expected);
+    }
+
+    let scoreboard_cases = [
+        (Total, false, 12.0),
+        (Mean, false, 12.0),
+        (Total, true, 9.75),
+        (Mean, true, 9.75),
+    ];
+    for (aggregation, adjusted, expected) in scoreboard_cases {
+        assert_eq!(
+            result.total_payoff_for_scoreboard(aggregation, adjusted),
+            expected
+        );
+    }
+
+    assert_eq!(result.formatted_score(Mean, false), "4");
+    assert_eq!(result.formatted_score(Mean, true), "3.25");
+    assert_eq!(result.formatted_total_payoff(Mean, false), "12");
+    assert_eq!(result.formatted_total_payoff(Mean, true), "9.75");
 }

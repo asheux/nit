@@ -1,10 +1,9 @@
 //! Benchmark suite for the `nit-games` tournament engine.
 //!
-//! Helpers (config builders, the `BenchTournament` façade, head-movement
-//! enum, etc.) live in `shared/common.rs`; this file holds only the
-//! criterion bench fns and the `criterion_main!` harness. Placing the
-//! helpers under a subdirectory keeps Cargo's bench auto-discovery from
-//! picking them up as a standalone bench target.
+//! Config builders + `BenchTournament` façade live under `shared/common.rs`;
+//! this file holds the Criterion bench fns and the `criterion_main!` harness.
+//! Helpers live in a subdirectory so Cargo's bench auto-discovery does not
+//! pick them up as a standalone bench target.
 
 #[path = "shared/common.rs"]
 mod common;
@@ -28,31 +27,27 @@ use common::{
 
 // ── tournament sizes ──
 
+fn bench_fsm_field(c: &mut Criterion, label: &'static str, strategies: usize, rounds: u32) {
+    let bench =
+        BenchTournament::from_config(build_generic_fsm_tournament(strategies, rounds, 1, false));
+    c.bench_function(label, |b| {
+        b.iter(|| bench.run_sequential());
+    });
+}
+
 /// Baseline: a single 200-round match between two FSM strategies.
 fn bench_single_match(c: &mut Criterion) {
-    let pair_match =
-        BenchTournament::from_config(build_generic_fsm_tournament(2, BASELINE_ROUNDS, 1, false));
-    c.bench_function("single_match_200_rounds", |b| {
-        b.iter(|| pair_match.run_sequential());
-    });
+    bench_fsm_field(c, "single_match_200_rounds", 2, BASELINE_ROUNDS);
 }
 
 /// 16 strategies, 200 rounds, sequential.
 fn bench_tournament_small(c: &mut Criterion) {
-    let small_field =
-        BenchTournament::from_config(build_generic_fsm_tournament(16, BASELINE_ROUNDS, 1, false));
-    c.bench_function("tournament_small", |b| {
-        b.iter(|| small_field.run_sequential());
-    });
+    bench_fsm_field(c, "tournament_small", 16, BASELINE_ROUNDS);
 }
 
 /// 128 strategies × 50 rounds: O(n²) matchups stress the scheduler.
 fn bench_tournament_medium(c: &mut Criterion) {
-    let medium_field =
-        BenchTournament::from_config(build_generic_fsm_tournament(128, 50, 1, false));
-    c.bench_function("tournament_medium", |b| {
-        b.iter(|| medium_field.run_sequential());
-    });
+    bench_fsm_field(c, "tournament_medium", 128, 50);
 }
 
 // ── logging overhead ──

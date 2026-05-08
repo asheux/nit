@@ -26,51 +26,59 @@ fn prepare_metal_batch_inputs(
     Ok(Some((metal_batch_eval_config(config), payload)))
 }
 
+fn heuristic_policy(matchup_count: usize) -> BatchExecutionPolicy {
+    BatchExecutionPolicy {
+        matches_per_batch: matchup_count.clamp(1, 4_096),
+        inflight_batches: 1,
+    }
+}
+
+// `heuristic_matchup_count = Some(_)` skips the recommended-policy lookup and
+// uses an inline single-batch policy sized to the workload — the small-workload
+// path's avoid-the-cache shortcut. None forces the full policy lookup so the
+// per-shape cache populates.
+fn try_prepare_metal_batch_inner(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+    heuristic_matchup_count: Option<usize>,
+) -> Result<Option<PreparedMetalBatch>, String> {
+    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
+        return Ok(None);
+    };
+
+    if let Some(count) = heuristic_matchup_count {
+        let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+            return Ok(None);
+        };
+        return Ok(Some(PreparedMetalBatch {
+            prepared,
+            policy: heuristic_policy(count),
+            policy_source: BatchPolicySource::Heuristic,
+            policy_cache_key: None,
+            policy_cache_path: None,
+        }));
+    }
+
+    let Some(report) = nit_metal::recommended_batch_policy(&eval, &payload)? else {
+        return Ok(None);
+    };
+    let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Ok(None);
+    };
+    Ok(Some(PreparedMetalBatch {
+        prepared,
+        policy: report.policy,
+        policy_source: report.source,
+        policy_cache_key: report.cache_key,
+        policy_cache_path: report.cache_path,
+    }))
+}
+
 pub(crate) fn try_prepare_metal_batch(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
 ) -> Result<Option<PreparedMetalBatch>, String> {
-    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
-        return Ok(None);
-    };
-    let Some(policy_report) = nit_metal::recommended_batch_policy(&eval, &payload)? else {
-        return Ok(None);
-    };
-    let Some(prepared_handle) = nit_metal::try_prepare_batch(&eval, &payload)? else {
-        return Ok(None);
-    };
-
-    Ok(Some(PreparedMetalBatch {
-        prepared: prepared_handle,
-        policy: policy_report.policy,
-        policy_source: policy_report.source,
-        policy_cache_key: policy_report.cache_key,
-        policy_cache_path: policy_report.cache_path,
-    }))
-}
-
-fn try_prepare_metal_batch_for_matchups(
-    config: &NormalizedConfig,
-    strategies: &[StrategySpec],
-    matchup_count: usize,
-) -> Result<Option<PreparedMetalBatch>, String> {
-    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
-        return Ok(None);
-    };
-    let Some(prepared_handle) = nit_metal::try_prepare_batch(&eval, &payload)? else {
-        return Ok(None);
-    };
-
-    Ok(Some(PreparedMetalBatch {
-        prepared: prepared_handle,
-        policy: BatchExecutionPolicy {
-            matches_per_batch: matchup_count.clamp(1, 4_096),
-            inflight_batches: 1,
-        },
-        policy_source: BatchPolicySource::Heuristic,
-        policy_cache_key: None,
-        policy_cache_path: None,
-    }))
+    try_prepare_metal_batch_inner(config, strategies, None)
 }
 
 pub(crate) fn try_prepare_metal_batch_for_workload(
@@ -79,7 +87,7 @@ pub(crate) fn try_prepare_metal_batch_for_workload(
     matchup_count: usize,
 ) -> Result<Option<PreparedMetalBatch>, String> {
     if matchup_count <= SMALL_METAL_WORKLOAD_MATCHUPS {
-        try_prepare_metal_batch_for_matchups(config, strategies, matchup_count)
+        try_prepare_metal_batch_inner(config, strategies, Some(matchup_count))
     } else {
         try_prepare_metal_batch(config, strategies)
     }

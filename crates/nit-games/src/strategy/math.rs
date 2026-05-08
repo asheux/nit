@@ -10,7 +10,8 @@ pub(crate) fn integer_digits_signed_abs(value: i128, radix: usize, len: usize) -
     integer_digits_unsigned(value.unsigned_abs(), radix, len)
 }
 
-/// MSD-first base-`radix` digits, zero-padded to `len`. Radix clamped to >= 2.
+/// MSD-first base-`radix` digits, zero-padded to `len`. Radix is clamped
+/// to >= 2 because callers may pass 0/1 (single-output FSMs, etc.).
 pub(crate) fn integer_digits_unsigned(mut value: u128, radix: usize, len: usize) -> Vec<usize> {
     if len == 0 {
         return Vec::new();

@@ -1,8 +1,10 @@
 //! Wolfram-style mixed-radix codec for one-sided Turing machine rule numbers.
 //!
-//! A rule code is interpreted as a base-`2 * states * symbols` integer whose
-//! digits encode `(move_flag, write_symbol, next_state)` triples in row-major
-//! order over `(state, read_symbol)` pairs.
+//! A rule code is interpreted as a base-`2 * states * symbols` integer. Each
+//! digit packs `(move_flag, write_symbol, next_state)` in mixed-radix order;
+//! we walk the table in row-major `(state, read_symbol)` order, with the
+//! state axis traversed from highest down to 1 so the most-significant
+//! digits land in the highest state's row.
 
 use super::math::checked_pow_u128;
 use super::{TmMove, TmTransition};
@@ -39,10 +41,8 @@ pub fn decode_tm_rule_code_wolfram(
     (transitions, undecoded_suffix)
 }
 
-/// Extract a single TM transition from the lowest digit of the rule code.
-///
-/// The digit is decomposed as `(move_flag, write_symbol, next_state)` in
-/// mixed-radix form with base `2 * symbols * states`.
+/// Extract a single TM transition from the lowest digit of the rule code:
+/// `digit = move_flag + 2 * write_symbol + 2 * symbols * (next_state - 1)`.
 fn decode_single_wolfram_digit(
     remaining_code: u64,
     mixed_radix_base: u64,
@@ -64,7 +64,8 @@ fn decode_single_wolfram_digit(
     }
 }
 
-/// Maximum valid Wolfram rule index for the given state/symbol counts.
+/// Maximum valid Wolfram rule index for the given state/symbol counts, or
+/// `None` when the index space overflows `u128`.
 pub fn tm_max_index(states: usize, symbols: usize) -> Option<u128> {
     let mixed_radix = (2u128)
         .checked_mul(states as u128)?

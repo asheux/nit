@@ -43,6 +43,10 @@ pub(super) fn build_metal_batch_payload(strategies: &[StrategySpec]) -> Option<B
     }
 }
 
+// Snapshot of a single FSM after structural validation. Captured up-front so
+// the per-strategy uniform checks (state count, alphabet size) operate on
+// already-vetted values — every field downstream of this borrow is known to
+// satisfy the Metal shader's invariants.
 struct ValidatedFsm<'a> {
     state_count: usize,
     alphabet_size: usize,
@@ -55,9 +59,9 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
     let StrategySpecKind::Fsm {
         num_states,
         start_state,
-        outputs: state_outputs,
+        outputs,
         input_mode,
-        transitions: transition_table,
+        transitions,
         ..
     } = &spec.kind
     else {
@@ -72,21 +76,15 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
         return None;
     }
 
-    let state_count = (*num_states).max(state_outputs.len());
-    let alphabet_size = transition_table.first().map_or(0, Vec::len);
+    let state_count = (*num_states).max(outputs.len());
+    let alphabet_size = transitions.first().map_or(0, Vec::len);
 
-    if alphabet_size != 2
+    let shape_invalid = alphabet_size != 2
         || state_count == 0
-        || transition_table.len() != state_count
+        || transitions.len() != state_count
         || *start_state >= state_count
-    {
-        return None;
-    }
-
-    if transition_table
-        .iter()
-        .any(|row| row.len() != alphabet_size)
-    {
+        || transitions.iter().any(|row| row.len() != alphabet_size);
+    if shape_invalid {
         return None;
     }
 
@@ -94,8 +92,8 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
         state_count,
         alphabet_size,
         start_state: *start_state,
-        outputs: state_outputs,
-        transition_table,
+        outputs,
+        transition_table: transitions,
     })
 }
 
@@ -107,19 +105,18 @@ fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
     let mut flat_transitions = Vec::new();
 
     for spec in strategies {
-        let fsm = validate_fsm_spec(spec)?;
         let ValidatedFsm {
             state_count,
             alphabet_size,
-            start_state: start,
+            start_state,
             outputs,
-            transition_table: table,
-        } = fsm;
+            transition_table,
+        } = validate_fsm_spec(spec)?;
 
         ensure_uniform(&mut uniform_states, state_count)?;
         ensure_uniform(&mut uniform_alphabet, alphabet_size)?;
 
-        start_indices.push(start as u32);
+        start_indices.push(start_state as u32);
 
         flat_outputs.extend(outputs.iter().map(|action| match action {
             Action::Cooperate => 0u32,
@@ -128,11 +125,14 @@ fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
         let padding_needed = state_count.saturating_sub(outputs.len());
         flat_outputs.extend(std::iter::repeat_n(0u32, padding_needed));
 
-        let any_out_of_range = table.iter().flatten().any(|&n| n >= state_count);
-        if any_out_of_range {
+        if transition_table
+            .iter()
+            .flatten()
+            .any(|&idx| idx >= state_count)
+        {
             return None;
         }
-        flat_transitions.extend(table.iter().flatten().map(|&n| n as u32));
+        flat_transitions.extend(transition_table.iter().flatten().map(|&idx| idx as u32));
     }
 
     Some(FsmBatch {

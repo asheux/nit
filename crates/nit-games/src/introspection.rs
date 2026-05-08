@@ -6,7 +6,6 @@ use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::strategy::TmMove;
 
-/// Strategy family discriminant.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyIntrospectionKind {
@@ -61,7 +60,6 @@ pub struct TmTransitionRecord {
     pub next: u16,
 }
 
-/// Expand a flat TM transition table into per-`(state, read)` records.
 fn expand_tm_transitions(
     states: u16,
     symbols: u8,
@@ -313,14 +311,12 @@ fn format_tm_lines(lines: &mut Vec<String>, params: &StrategyIntrospectionParame
 pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("id: {}", intro.id));
-    lines.push(format!(
-        "kind: {}",
-        match intro.kind {
-            StrategyIntrospectionKind::Fsm => "fsm",
-            StrategyIntrospectionKind::Ca => "ca",
-            StrategyIntrospectionKind::OneSidedTm => "tm",
-        }
-    ));
+    let kind_label = match intro.kind {
+        StrategyIntrospectionKind::Fsm => "fsm",
+        StrategyIntrospectionKind::Ca => "ca",
+        StrategyIntrospectionKind::OneSidedTm => "tm",
+    };
+    lines.push(format!("kind: {kind_label}"));
     match &intro.parameters {
         StrategyIntrospectionParameters::Fsm {
             states,

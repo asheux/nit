@@ -21,12 +21,6 @@ impl RoundRecord {
     }
 }
 
-impl std::fmt::Display for RoundRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", self.a.as_char(), self.b.as_char())
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct History {
     rounds: Vec<RoundRecord>,

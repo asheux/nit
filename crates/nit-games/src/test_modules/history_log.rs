@@ -1,10 +1,11 @@
 //! Tests for the history log serialization format.
 
-use super::MatchHistory;
+use crate::history_log::MatchHistory;
 
-const FIXTURE_ROUND_COUNT: usize = 4;
+const FIXTURE_ROUND_COUNT: u32 = 4;
 
-/// Excludes optional fields (`cycle`, `a_tm_metrics`, `b_tm_metrics`).
+// Excludes optional fields (`cycle`, `a_tm_metrics`, `b_tm_metrics`); the
+// `none_optional_fields_are_omitted_from_json` test confirms that omission.
 const EXPECTED_FIELD_COUNT: usize = 10;
 
 const ALL_OUTCOMES_SEQUENCE: &str = "0123";
@@ -17,7 +18,7 @@ fn baseline_history_fixture() -> MatchHistory {
         a: "fsm_alpha".into(),
         b: "fsm_beta".into(),
         repetition: 1,
-        rounds: FIXTURE_ROUND_COUNT as u32,
+        rounds: FIXTURE_ROUND_COUNT,
         score_idx: ALL_OUTCOMES_SEQUENCE.into(),
         a_score: -6,
         b_score: -2,
@@ -27,41 +28,42 @@ fn baseline_history_fixture() -> MatchHistory {
     }
 }
 
+fn serialise(record: &MatchHistory) -> String {
+    serde_json::to_string(record).expect("serialize history record")
+}
+
 #[test]
 fn compact_payload_contains_expected_fields() {
-    let json_output_string =
-        serde_json::to_string(&baseline_history_fixture()).expect("serialize compact history");
+    let json = serialise(&baseline_history_fixture());
 
-    assert!(json_output_string.contains("\"score_idx\":\"0123\""));
-    assert!(json_output_string.contains("\"a\":\"fsm_alpha\""));
-    assert!(json_output_string.contains("\"b\":\"fsm_beta\""));
+    for fragment in [
+        r#""score_idx":"0123""#,
+        r#""a":"fsm_alpha""#,
+        r#""b":"fsm_beta""#,
+    ] {
+        assert!(json.contains(fragment), "missing fragment: {fragment}");
+    }
 
-    // Legacy per-move arrays must not appear in the compact format.
-    assert!(!json_output_string.contains("a_moves"));
-    assert!(!json_output_string.contains("b_moves"));
-
-    // Event-stream-only fields must not leak into the history log.
-    assert!(!json_output_string.contains("timestamp"));
-    assert!(!json_output_string.contains("event"));
+    // Legacy per-move arrays must not appear in the compact format, and
+    // event-stream-only fields must not leak into the history log.
+    for forbidden in ["a_moves", "b_moves", "timestamp", "event"] {
+        assert!(
+            !json.contains(forbidden),
+            "compact json leaked: {forbidden}"
+        );
+    }
 }
 
 #[test]
 fn none_optional_fields_are_omitted_from_json() {
-    let json_without_optionals =
-        serde_json::to_string(&baseline_history_fixture()).expect("serialize history");
+    let json = serialise(&baseline_history_fixture());
 
-    assert!(
-        !json_without_optionals.contains("\"cycle\""),
-        "cycle field should be skipped when None"
-    );
-    assert!(
-        !json_without_optionals.contains("\"a_tm_metrics\""),
-        "a_tm_metrics field should be skipped when None"
-    );
-    assert!(
-        !json_without_optionals.contains("\"b_tm_metrics\""),
-        "b_tm_metrics field should be skipped when None"
-    );
+    for skipped in ["\"cycle\"", "\"a_tm_metrics\"", "\"b_tm_metrics\""] {
+        assert!(
+            !json.contains(skipped),
+            "{skipped} should be skipped when None"
+        );
+    }
 }
 
 #[test]
@@ -80,10 +82,10 @@ fn single_round_fixture_serialises_correctly() {
         ..baseline_history_fixture()
     };
 
-    let json = serde_json::to_string(&record).expect("serialize single-round fixture");
-    assert!(json.contains("\"a\":\"one\""));
-    assert!(json.contains("\"b\":\"two\""));
-    assert!(json.contains("\"rounds\":1"));
+    let json = serialise(&record);
+    assert!(json.contains(r#""a":"one""#));
+    assert!(json.contains(r#""b":"two""#));
+    assert!(json.contains(r#""rounds":1"#));
     assert_eq!(record.score_idx.len(), 1);
 }
 
@@ -100,9 +102,10 @@ fn serialized_field_count() {
     );
 }
 
-/// The `"outcomes"` alias preserves backwards compatibility with older log files.
 #[test]
 fn score_idx_accepts_outcomes_alias_on_deserialise() {
+    // Older log files use `outcomes` for what is now `score_idx`; the
+    // deserialiser must continue to accept both spellings.
     let legacy_json_payload = r#"{
         "match_id": 1,
         "match_index": 0,
@@ -116,11 +119,7 @@ fn score_idx_accepts_outcomes_alias_on_deserialise() {
         "b_score": 0
     }"#;
 
-    let deserialised_record: MatchHistory =
+    let deserialised: MatchHistory =
         serde_json::from_str(legacy_json_payload).expect("deserialise with outcomes alias");
-
-    assert_eq!(
-        deserialised_record.score_idx, "012",
-        "outcomes alias should map to score_idx"
-    );
+    assert_eq!(deserialised.score_idx, "012");
 }

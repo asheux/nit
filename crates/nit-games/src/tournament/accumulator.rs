@@ -77,47 +77,23 @@ impl TournamentAccumulator {
         let outcome_order = compare_scores(a_outcome, b_outcome);
         let score_samples = u64::from(result.rounds);
         if result.a_idx == result.b_idx {
-            let stats = &mut self.strategies[result.a_idx];
-            stats.total += result.a_total + result.b_total;
-            stats.adjusted_total += result.a_adjusted_total + result.b_adjusted_total;
-            stats.score_samples += score_samples.saturating_mul(2);
-            stats.matches += 2;
-            match outcome_order {
-                Ordering::Greater | Ordering::Less => {
-                    stats.wins += 1;
-                    stats.losses += 1;
-                }
-                Ordering::Equal => {
-                    stats.draws += 2;
-                }
-            }
-            if a_crashed || b_crashed {
-                stats.crashed = true;
-            }
-            if let Some(pairwise) = self.pairwise.as_mut() {
-                record_pairwise(
-                    &mut pairwise[result.a_idx][result.b_idx],
-                    result.a_total,
-                    result.b_total,
-                    result.a_adjusted_total,
-                    result.b_adjusted_total,
-                    outcome_order,
-                );
-            }
-            merge_tm_stats(&mut stats.tm_stats, a_tm_stats.as_ref());
-            merge_tm_stats(&mut stats.tm_stats, b_tm_stats.as_ref());
+            self.apply_self_play(
+                &result,
+                a_crashed,
+                b_crashed,
+                a_tm_stats.as_ref(),
+                b_tm_stats.as_ref(),
+                outcome_order,
+                score_samples,
+            );
             return;
         }
         let (a_stats, b_stats) = if result.a_idx < result.b_idx {
             let (left, right) = self.strategies.split_at_mut(result.b_idx);
-            let a_stats = &mut left[result.a_idx];
-            let b_stats = &mut right[0];
-            (a_stats, b_stats)
+            (&mut left[result.a_idx], &mut right[0])
         } else {
             let (left, right) = self.strategies.split_at_mut(result.a_idx);
-            let b_stats = &mut left[result.b_idx];
-            let a_stats = &mut right[0];
-            (a_stats, b_stats)
+            (&mut right[0], &mut left[result.b_idx])
         };
         a_stats.total += result.a_total;
         b_stats.total += result.b_total;
@@ -160,7 +136,8 @@ impl TournamentAccumulator {
                 result.b_adjusted_total,
                 outcome_order,
             );
-            // Record the reverse perspective for the B-vs-A cell.
+            // Mirror the (a, b) cell into (b, a) so pairwise lookups are
+            // symmetric without callers having to reorder indices.
             let reverse_order = compare_scores(b_outcome, a_outcome);
             record_pairwise(
                 &mut pairwise[result.b_idx][result.a_idx],
@@ -171,6 +148,48 @@ impl TournamentAccumulator {
                 reverse_order,
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_self_play(
+        &mut self,
+        result: &MatchResult,
+        a_crashed: bool,
+        b_crashed: bool,
+        a_tm_stats: Option<&TmRunStats>,
+        b_tm_stats: Option<&TmRunStats>,
+        outcome_order: Ordering,
+        score_samples: u64,
+    ) {
+        let stats = &mut self.strategies[result.a_idx];
+        stats.total += result.a_total + result.b_total;
+        stats.adjusted_total += result.a_adjusted_total + result.b_adjusted_total;
+        stats.score_samples += score_samples.saturating_mul(2);
+        stats.matches += 2;
+        match outcome_order {
+            Ordering::Greater | Ordering::Less => {
+                stats.wins += 1;
+                stats.losses += 1;
+            }
+            Ordering::Equal => {
+                stats.draws += 2;
+            }
+        }
+        if a_crashed || b_crashed {
+            stats.crashed = true;
+        }
+        if let Some(pairwise) = self.pairwise.as_mut() {
+            record_pairwise(
+                &mut pairwise[result.a_idx][result.b_idx],
+                result.a_total,
+                result.b_total,
+                result.a_adjusted_total,
+                result.b_adjusted_total,
+                outcome_order,
+            );
+        }
+        merge_tm_stats(&mut stats.tm_stats, a_tm_stats);
+        merge_tm_stats(&mut stats.tm_stats, b_tm_stats);
     }
 
     pub(super) fn apply_outcome(&mut self, outcome: MatchOutcome) {

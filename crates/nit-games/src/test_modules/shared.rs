@@ -63,18 +63,14 @@ pub(super) fn metal_totals_or_skip(
 
 #[cfg(target_os = "macos")]
 pub(super) fn simple_four_state_fsm_spec(id: String) -> StrategySpec {
+    use Action::{Cooperate, Defect};
     StrategySpec {
         id,
         name: None,
         kind: StrategySpecKind::Fsm {
             num_states: 4,
             start_state: 0,
-            outputs: vec![
-                Action::Cooperate,
-                Action::Defect,
-                Action::Cooperate,
-                Action::Defect,
-            ],
+            outputs: vec![Cooperate, Defect, Cooperate, Defect],
             input_mode: Some(InputMode::OpponentLastAction),
             transitions: vec![vec![0, 1], vec![2, 3], vec![0, 1], vec![2, 3]],
             index: None,
@@ -82,6 +78,10 @@ pub(super) fn simple_four_state_fsm_spec(id: String) -> StrategySpec {
     }
 }
 
+// The notebook reference treats state 0's output as the "initial action" even
+// when no transition leads back to state 0 — the resulting `Vec<Option<Action>>`
+// preserves that quirk so downstream tests can detect strategies whose buggy
+// initial action diverges from the canonical decoder.
 pub(super) fn notebook_buggy_state_outputs(
     outputs: &[Action],
     transitions: &[Vec<usize>],
@@ -112,8 +112,8 @@ pub(super) fn notebook_rules_from_outputs_and_transitions(
     transitions: &[Vec<usize>],
 ) -> Vec<((usize, usize), (usize, usize))> {
     let states = outputs.len();
-    let actions = transitions.first().map(|row| row.len()).unwrap_or(0);
-    let mut rules = Vec::new();
+    let actions = transitions.first().map(Vec::len).unwrap_or(0);
+    let mut rules = Vec::with_capacity(states * actions);
     for state in 0..states {
         for input in 0..actions {
             let next = transitions
@@ -142,17 +142,19 @@ pub(super) fn notebook_buggy_fsm_to_index_from_rules(
         let idx = (state - 1).saturating_mul(actions).saturating_add(input);
         rhs[idx] = value;
     }
-    let nxt = rhs.iter().map(|(next, _)| next - 1).collect::<Vec<_>>();
-    let mut out = vec![0usize; states];
-    for &(next, output) in &rhs {
-        out[next - 1] = output;
-    }
 
-    let transitions_code = nxt.into_iter().fold(0u64, |acc, digit| {
-        acc.saturating_mul(states as u64)
-            .saturating_add(digit as u64)
-    });
-    let outputs_code = out.into_iter().fold(0u64, |acc, digit| {
+    let transitions_code = rhs
+        .iter()
+        .map(|(next, _)| next - 1)
+        .fold(0u64, |acc, digit| {
+            acc.saturating_mul(states as u64)
+                .saturating_add(digit as u64)
+        });
+    let mut outputs_per_state = vec![0usize; states];
+    for &(next, output) in &rhs {
+        outputs_per_state[next - 1] = output;
+    }
+    let outputs_code = outputs_per_state.into_iter().fold(0u64, |acc, digit| {
         acc.saturating_mul(actions as u64)
             .saturating_add(digit as u64)
     });
@@ -207,7 +209,6 @@ transitions = [
     if include_bad {
         src.push_str(
             r#"
-
 [[strategy]]
 id = "tm_bad"
 type = "tm"

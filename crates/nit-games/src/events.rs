@@ -75,7 +75,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Buffered NDJSON event writer; finalises with an atomic rename.
+/// Buffered NDJSON event writer; finalises with an atomic rename on `finish()`.
 pub struct EventWriter {
     inner: crate::ndjson::AtomicNdjsonWriter,
     include_rounds: bool,
@@ -102,7 +102,7 @@ impl EventWriter {
     }
 
     pub fn final_path(&self) -> &Path {
-        self.inner.final_path()
+        self.inner.path()
     }
 
     pub fn timestamp() -> String {

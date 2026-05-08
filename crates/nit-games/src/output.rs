@@ -40,6 +40,9 @@ pub struct StrategyResult {
 }
 
 impl StrategyResult {
+    /// The headline number ranked in the leaderboard. `aggregation`
+    /// chooses mean vs. total payoff and `adjusted` swaps in the
+    /// complexity-penalised value when one is available.
     pub fn score(&self, aggregation: ScoreAggregation, adjusted: bool) -> f64 {
         match (aggregation, adjusted) {
             (ScoreAggregation::Mean, true) => {
@@ -53,6 +56,9 @@ impl StrategyResult {
         }
     }
 
+    /// Always returns a *total* — when `aggregation = Mean` it scales
+    /// the per-match mean by the match count so the scoreboard column
+    /// stays comparable across aggregations.
     pub fn total_payoff_for_scoreboard(
         &self,
         aggregation: ScoreAggregation,
@@ -77,6 +83,10 @@ impl StrategyResult {
     }
 }
 
+/// Renders a payoff number for human-readable scoreboards: integers
+/// stay integers, near-zero collapses to `"0"` (avoiding `-0`), and
+/// fractional values are trimmed to up to three decimals with no
+/// trailing zeros.
 pub fn format_score_value(value: f64) -> String {
     if !value.is_finite() {
         return value.to_string();
@@ -195,15 +205,13 @@ impl RuntimeAcceleratorStats {
 
     pub fn note_cpu_matches(&mut self, match_count: usize) {
         self.cpu_matches = self.cpu_matches.saturating_add(match_count as u64);
-        if match_count > 0 && matches!(self.backend, RuntimeAcceleratorBackend::None) {
-            self.backend = RuntimeAcceleratorBackend::Cpu;
+        if match_count > 0 {
+            self.promote_to_cpu();
         }
     }
 
     pub fn note_cpu_activity(&mut self) {
-        if matches!(self.backend, RuntimeAcceleratorBackend::None) {
-            self.backend = RuntimeAcceleratorBackend::Cpu;
-        }
+        self.promote_to_cpu();
     }
 
     pub fn note_metal_batches(&mut self, batches: usize, matches: usize) {
@@ -222,8 +230,8 @@ impl RuntimeAcceleratorStats {
         cache_key: Option<String>,
         cache_path: Option<String>,
     ) {
-        self.metal_matches_per_batch = Some(matches_per_batch.min(u32::MAX as usize) as u32);
-        self.metal_inflight_batches = Some(inflight_batches.min(u32::MAX as usize) as u32);
+        self.metal_matches_per_batch = Some(saturate_u32(matches_per_batch));
+        self.metal_inflight_batches = Some(saturate_u32(inflight_batches));
         self.metal_policy_source = Some(source);
         self.metal_policy_cache_key = cache_key;
         self.metal_policy_cache_path = cache_path;
@@ -241,6 +249,16 @@ impl RuntimeAcceleratorStats {
             nit_metal::BatchPolicySource::Benchmarked => Some("tuned"),
         }
     }
+
+    fn promote_to_cpu(&mut self) {
+        if matches!(self.backend, RuntimeAcceleratorBackend::None) {
+            self.backend = RuntimeAcceleratorBackend::Cpu;
+        }
+    }
+}
+
+fn saturate_u32(value: usize) -> u32 {
+    value.min(u32::MAX as usize) as u32
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -308,22 +326,15 @@ impl RunLayout {
         let runs_root = base_dir.join("runs").join("games");
         let base_name = format!("{stamp}__seed-{seed}");
         let run_dir = unique_run_dir(&runs_root, &base_name, run_id);
-        let summary_path = run_dir.join("run_summary.json");
-        let definitions_path = run_dir.join("definitions.json");
-        let results_path = run_dir.join("results.json");
-        let events_path = run_dir.join("events.ndjson");
-        let history_path = run_dir.join("history.ndjson");
-        let config_path = run_dir.join("config.toml");
-        let analysis_dir = run_dir.join("analysis");
         Self {
+            summary_path: run_dir.join("run_summary.json"),
+            definitions_path: run_dir.join("definitions.json"),
+            results_path: run_dir.join("results.json"),
+            events_path: run_dir.join("events.ndjson"),
+            history_path: run_dir.join("history.ndjson"),
+            config_path: run_dir.join("config.toml"),
+            analysis_dir: run_dir.join("analysis"),
             run_dir,
-            summary_path,
-            definitions_path,
-            results_path,
-            events_path,
-            history_path,
-            config_path,
-            analysis_dir,
         }
     }
 }

@@ -1,9 +1,8 @@
 //! Shared scaffolding for the `engine_bench` Criterion suite.
 //!
-//! This module owns every spec / config builder, the `BenchTournament`
-//! façade, and the head-movement enum used by the TM benchmarks. The bench
-//! file consumes these helpers so each `bench_*` fn can focus on its
-//! Criterion plumbing.
+//! Owns every spec / config builder, the `BenchTournament` façade, and the
+//! head-movement enum the TM benchmarks consume — the bench file only
+//! deals with Criterion plumbing.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,18 +78,14 @@ pub fn tm_spec(
 
 pub fn binary_tm_transitions(movement: HeadMovement) -> Vec<TmTransition> {
     let move_dir = movement.to_tm_move();
-    vec![
-        TmTransition {
-            write: 0,
+    [0, 1]
+        .into_iter()
+        .map(|write| TmTransition {
+            write,
             move_dir,
             next: 1,
-        },
-        TmTransition {
-            write: 1,
-            move_dir,
-            next: 1,
-        },
-    ]
+        })
+        .collect()
 }
 
 pub fn ca_spec(

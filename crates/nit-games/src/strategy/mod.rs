@@ -22,21 +22,20 @@ pub use wolfram_codec::{decode_tm_rule_code_wolfram, tm_max_index};
 pub(crate) use fsm::{decode_notebook_index_digits, validate_decode_params};
 pub(crate) use tm::InputSuffix;
 
-/// Core trait for iterated game strategies.
-///
-/// Each strategy maintains internal state and produces an [`Action`] per round
-/// based on the accumulated [`History`] of play.
+/// Iterated-game strategy: maintains internal state across rounds and emits
+/// one [`Action`] per call from the accumulated [`History`].
 pub trait Strategy: Send {
     fn id(&self) -> &str;
     fn reset(&mut self);
     fn next_action(&mut self, history: &History, player_a: bool) -> Action;
 
-    /// TM-specific: whether the strategy halted on its last evaluation.
+    /// Whether the most recent TM evaluation halted (default: always halts).
+    /// Non-TM strategies should keep the default.
     fn last_halted(&self) -> bool {
         true
     }
 
-    /// TM-specific: accumulated runtime statistics.
+    /// Accumulated TM runtime statistics, when applicable.
     fn tm_stats(&self) -> Option<&TmRunStats> {
         None
     }

@@ -1,77 +1,12 @@
-use super::super::types::{StrategyConfig, StrategySpecKind};
-use super::common::{parse_actions, parse_input_mode};
-use crate::strategy::{decode_fsm_notebook_index, InputMode};
+use super::super::super::types::{StrategyConfig, StrategySpecKind};
+use super::super::common::parse_actions;
+use super::normalize_index;
+use crate::strategy::InputMode;
 
-pub(in crate::config) fn normalize_fsm_kind(
+pub(super) fn normalize_fsm_from_explicit(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
 ) -> StrategySpecKind {
-    let id = raw.id.as_str();
-    if let Some(mode) = parse_input_mode(id, raw.input_mode.as_deref(), errors) {
-        if !matches!(mode, InputMode::OpponentLastAction) {
-            errors.push(format!(
-                "strategy '{id}': FSM uses notebook semantics and only supports input_mode=opponent_last_action"
-            ));
-        }
-    }
-
-    if let Some(index) = raw.index {
-        normalize_fsm_from_index(raw, index, errors)
-    } else {
-        normalize_fsm_from_explicit(raw, errors)
-    }
-}
-
-fn normalize_fsm_from_index(
-    raw: &StrategyConfig,
-    index: u64,
-    errors: &mut Vec<String>,
-) -> StrategySpecKind {
-    let id = raw.id.as_str();
-    if raw.transitions.is_some() || raw.outputs.is_some() {
-        errors.push(format!(
-            "strategy '{id}': fsm index encoding cannot be combined with explicit outputs/transitions"
-        ));
-    }
-    let mut actions = raw.k.unwrap_or(2);
-    if actions != 2 {
-        errors.push(format!(
-            "strategy '{id}': notebook-compatible FSM gameplay currently supports k=2 only"
-        ));
-        actions = 2;
-    }
-    let states = raw.num_states.or(raw.states).unwrap_or(0);
-    if states == 0 {
-        errors.push(format!(
-            "strategy '{id}': num_states (or states) must be > 0 for indexed FSMs"
-        ));
-        return StrategySpecKind::Fsm {
-            num_states: 0,
-            start_state: 0,
-            outputs: Vec::new(),
-            input_mode: Some(InputMode::OpponentLastAction),
-            transitions: Vec::new(),
-            index: Some(index),
-        };
-    }
-    let (outputs, transitions) = match decode_fsm_notebook_index(index, states, actions) {
-        Ok(decoded) => decoded,
-        Err(err) => {
-            errors.push(format!("strategy '{id}': {err}"));
-            (Vec::new(), Vec::new())
-        }
-    };
-    StrategySpecKind::Fsm {
-        num_states: states,
-        start_state: 0,
-        outputs,
-        input_mode: Some(InputMode::OpponentLastAction),
-        transitions,
-        index: Some(index),
-    }
-}
-
-fn normalize_fsm_from_explicit(raw: &StrategyConfig, errors: &mut Vec<String>) -> StrategySpecKind {
     let id = raw.id.as_str();
     let outputs_raw = raw.outputs.clone().unwrap_or_default();
     let outputs = parse_actions(id, "outputs", outputs_raw, errors);
@@ -227,23 +162,4 @@ fn parse_fsm_transitions(
     }
 
     transitions
-}
-
-fn normalize_index(
-    id: &str,
-    field: &str,
-    value: usize,
-    input_index_base: u8,
-    errors: &mut Vec<String>,
-) -> usize {
-    if input_index_base != 1 {
-        return value;
-    }
-    if value == 0 {
-        errors.push(format!(
-            "strategy '{id}': {field} must be >= 1 when input_index_base = 1"
-        ));
-        return 0;
-    }
-    value - 1
 }

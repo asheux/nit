@@ -22,7 +22,7 @@ pub struct MatchHistory {
     pub repetition: u32,
     #[serde(default)]
     pub rounds: u32,
-    /// One digit per round; legacy logs use `"outcomes"` as the field name.
+    /// One digit per round; legacy logs used `"outcomes"` as the field name.
     #[serde(default, alias = "outcomes")]
     pub score_idx: String,
     #[serde(default)]
@@ -38,8 +38,8 @@ pub struct MatchHistory {
 }
 
 impl MatchHistory {
-    /// Falls back to the per-round digit count in `score_idx` when `rounds` is unset
-    /// (legacy logs predating the explicit `rounds` field).
+    /// Falls back to the per-round digit count in `score_idx` when
+    /// `rounds` is unset (legacy logs predating the explicit field).
     pub fn resolved_rounds(&self) -> u32 {
         if self.rounds > 0 {
             return self.rounds;
@@ -68,10 +68,6 @@ impl HistoryWriter {
     }
 
     pub fn final_path(&self) -> &Path {
-        self.inner.final_path()
+        self.inner.path()
     }
 }
-
-#[cfg(test)]
-#[path = "test_modules/history_log.rs"]
-mod tests;

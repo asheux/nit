@@ -1,15 +1,19 @@
 //! Test suite for the `nit-games` crate, organised by topic.
 //!
 //! Each per-topic file lives under `src/test_modules/`; this aggregator
-//! pulls them in via `#[path]` so existing files like
-//! `test_modules/fast_eval.rs` (paired with `fast_eval.rs`) keep their
-//! source-aligned location.
+//! pulls them in via `#[path]` so the production sources stay free of
+//! inline `#[cfg(test)] mod tests { ... }` blocks.
 
 #[path = "test_modules/shared.rs"]
 mod shared;
 
 #[path = "test_modules/metal.rs"]
 mod metal;
+
+#[path = "test_modules/fast_eval.rs"]
+mod fast_eval;
+#[path = "test_modules/history_log.rs"]
+mod history_log;
 
 #[path = "test_modules/strategies_ca.rs"]
 mod strategies_ca;

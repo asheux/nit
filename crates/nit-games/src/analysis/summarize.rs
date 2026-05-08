@@ -90,6 +90,9 @@ pub(super) fn summarize_record(
     }
 }
 
+/// Strips the `history__` prefix and `.ndjson` suffix from the source
+/// path so the analysis output filenames pair visually with the run
+/// they came from.
 pub(super) fn analysis_base_name(history_path: &Path) -> String {
     let name = history_path
         .file_name()
@@ -109,7 +112,7 @@ pub(super) fn analysis_base_name(history_path: &Path) -> String {
     }
 }
 
-pub(super) fn count_outcomes(bytes: &[u8]) -> OutcomeCounts {
+fn count_outcomes(bytes: &[u8]) -> OutcomeCounts {
     let mut counts = OutcomeCounts::default();
     for &b in bytes {
         match b {
@@ -189,8 +192,7 @@ pub(super) fn agg_to_summary(id: String, agg: StrategyAgg) -> StrategySummary {
 pub(super) fn is_random_match(a: &str, b: &str, needles: &[String]) -> bool {
     let a_lower = a.to_ascii_lowercase();
     let b_lower = b.to_ascii_lowercase();
-    needles.iter().any(|needle| {
-        let needle = needle.as_str();
-        a_lower.contains(needle) || b_lower.contains(needle)
-    })
+    needles
+        .iter()
+        .any(|needle| a_lower.contains(needle.as_str()) || b_lower.contains(needle.as_str()))
 }

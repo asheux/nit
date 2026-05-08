@@ -19,23 +19,23 @@ impl TournamentRunner {
                 self.runtime.clone(),
             ));
         }
-        if let Some(active_session) = self.current.as_ref() {
-            return self.progress_from_active_session(active_session);
+        if let Some(session) = self.current.as_ref() {
+            return self.progress_from_active_session(session);
         }
-        if let Some(cached_batch_progress) = self.progress_from_batch_cache() {
-            return Some(cached_batch_progress);
+        if let Some(cached) = self.progress_from_batch_cache() {
+            return Some(cached);
         }
-        if let Some(upcoming_matchup) = self.schedule.matchup(self.match_index) {
-            let first_label = strategy_log_id(self.strategies.get(upcoming_matchup.a_idx)?);
-            let second_label = strategy_log_id(self.strategies.get(upcoming_matchup.b_idx)?);
+        if let Some(matchup) = self.schedule.matchup(self.match_index) {
+            let a_label = strategy_log_id(self.strategies.get(matchup.a_idx)?);
+            let b_label = strategy_log_id(self.strategies.get(matchup.b_idx)?);
             return Some(TournamentProgress::build(
                 self.match_index.saturating_add(1),
                 self.schedule.len().max(1),
                 0,
                 self.config.rounds,
                 false,
-                first_label,
-                second_label,
+                a_label,
+                b_label,
                 0,
                 0,
                 None,
@@ -47,27 +47,25 @@ impl TournamentRunner {
 
     pub(super) fn progress_from_active_session(
         &self,
-        active_session: &MatchSession,
+        session: &MatchSession,
     ) -> Option<TournamentProgress> {
-        let active_matchup = &active_session.matchup;
-        let first_label = strategy_log_id(self.strategies.get(active_matchup.a_idx)?);
-        let second_label = strategy_log_id(self.strategies.get(active_matchup.b_idx)?);
-        let previous_round_snapshot = if active_session.round > 0 {
-            self.last_round.as_ref()
-        } else {
-            None
-        };
+        let matchup = &session.matchup;
+        let a_label = strategy_log_id(self.strategies.get(matchup.a_idx)?);
+        let b_label = strategy_log_id(self.strategies.get(matchup.b_idx)?);
+        let last_snapshot = (session.round > 0)
+            .then_some(self.last_round.as_ref())
+            .flatten();
         Some(TournamentProgress::build(
             self.match_index.saturating_add(1),
             self.schedule.len().max(1),
-            active_session.round,
-            active_session.rounds_total,
+            session.round,
+            session.rounds_total,
             false,
-            first_label,
-            second_label,
-            active_session.a_total,
-            active_session.b_total,
-            previous_round_snapshot,
+            a_label,
+            b_label,
+            session.a_total,
+            session.b_total,
+            last_snapshot,
             self.runtime.clone(),
         ))
     }
@@ -76,29 +74,27 @@ impl TournamentRunner {
         if !matches!(self.config.engine.mode, crate::config::EngineMode::Batch) {
             return None;
         }
-        let mut cached_snapshot = self.last_progress.clone()?;
-        cached_snapshot.runtime = self.runtime.clone();
-        Some(cached_snapshot)
+        let mut cached = self.last_progress.clone()?;
+        cached.runtime = self.runtime.clone();
+        Some(cached)
     }
 
     pub fn match_snapshot(&self) -> Option<MatchSnapshot> {
-        let active_session = self.current.as_ref()?;
-        let active_matchup = &active_session.matchup;
-        let first_label = strategy_log_id(self.strategies.get(active_matchup.a_idx)?);
-        let second_label = strategy_log_id(self.strategies.get(active_matchup.b_idx)?);
+        let session = self.current.as_ref()?;
+        let matchup = &session.matchup;
         Some(MatchSnapshot {
             match_index: self.match_index.saturating_add(1),
             total_matches: self.schedule.len().max(1),
-            round: active_session.round,
-            rounds: active_session.rounds_total,
-            a: first_label,
-            b: second_label,
-            a_score: active_session.a_total,
-            b_score: active_session.b_total,
-            outcomes: active_session.history_scores.clone(),
-            payoffs: active_session.history_payoffs.clone(),
-            a_halted: active_session.history_halted_a.clone(),
-            b_halted: active_session.history_halted_b.clone(),
+            round: session.round,
+            rounds: session.rounds_total,
+            a: strategy_log_id(self.strategies.get(matchup.a_idx)?),
+            b: strategy_log_id(self.strategies.get(matchup.b_idx)?),
+            a_score: session.a_total,
+            b_score: session.b_total,
+            outcomes: session.history_scores.clone(),
+            payoffs: session.history_payoffs.clone(),
+            a_halted: session.history_halted_a.clone(),
+            b_halted: session.history_halted_b.clone(),
         })
     }
 }

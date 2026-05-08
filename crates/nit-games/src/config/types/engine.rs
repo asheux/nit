@@ -77,7 +77,7 @@ pub enum FsmGroupingMode {
 }
 
 /// Per-step complexity costs subtracted from strategy scores. When `enabled`,
-/// each TM step or FSM state incurs a configurable penalty.
+/// each TM step or FSM state incurs the configured penalty.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ComplexityCostConfig {
     #[serde(default)]

@@ -59,40 +59,30 @@ pub fn accelerator_run_preflight(
         return Ok(());
     }
 
-    let blockers = collect_metal_blockers(event_logging, history_logging, match_history_previews);
+    let blockers = [
+        (event_logging, "event logging"),
+        (history_logging, "history logging"),
+        (match_history_previews, "interactive match history previews"),
+    ]
+    .into_iter()
+    .filter_map(|(active, label)| active.then_some(label))
+    .collect::<Vec<_>>();
+
     if !blockers.is_empty() {
-        let formatted = format_blocker_list(&blockers);
         return Err(format!(
-            "Metal accelerator was requested, but {formatted} currently requires the CPU path. \
-             Disable those features or use `accelerator = \"auto\"`."
+            "Metal accelerator was requested, but {} currently requires the CPU path. \
+             Disable those features or use `accelerator = \"auto\"`.",
+            join_with_oxford_comma(&blockers)
         ));
     }
 
     accelerator_preflight(config)
 }
 
-fn collect_metal_blockers(
-    event_logging: bool,
-    history_logging: bool,
-    match_history_previews: bool,
-) -> Vec<&'static str> {
-    let mut blockers = Vec::new();
-    if event_logging {
-        blockers.push("event logging");
-    }
-    if history_logging {
-        blockers.push("history logging");
-    }
-    if match_history_previews {
-        blockers.push("interactive match history previews");
-    }
-    blockers
-}
-
-fn format_blocker_list(items: &[&str]) -> String {
+fn join_with_oxford_comma(items: &[&str]) -> String {
     match items {
         [] => String::new(),
-        [single] => single.to_string(),
+        [single] => (*single).to_string(),
         [left, right] => format!("{left} and {right}"),
         _ => {
             let (init, last) = items.split_at(items.len() - 1);

@@ -8,21 +8,18 @@ use crate::strategy::{
     TmTransition,
 };
 
+fn always_right_zero_transitions() -> Vec<TmTransition> {
+    let rule = TmTransition {
+        write: 0,
+        move_dir: TmMove::Right,
+        next: 1,
+    };
+    vec![rule, rule]
+}
+
 #[test]
 fn tm_always_move_right_write_zero_cooperates_and_halts() {
-    let transitions = vec![
-        TmTransition {
-            write: 0,
-            move_dir: TmMove::Right,
-            next: 1,
-        },
-        TmTransition {
-            write: 0,
-            move_dir: TmMove::Right,
-            next: 1,
-        },
-    ];
-    let mut tm = OneSidedTmStrategy::new("tm", 2, 1, 0, 4, transitions);
+    let mut tm = OneSidedTmStrategy::new("tm", 2, 1, 0, 4, always_right_zero_transitions());
 
     let mut history = History::new(0);
     for _ in 0..3 {
@@ -38,6 +35,7 @@ fn tm_rule_code_zero_cooperates_on_first_round_then_times_out() {
     let (transitions, _) = decode_tm_rule_code_wolfram(0, 1, 2);
     let mut tm = OneSidedTmStrategy::new("tm_zero", 2, 1, 0, 4, transitions);
     let mut history = History::new(0);
+
     let action = tm.next_action(&history, true);
     assert_eq!(action, Action::Cooperate);
     assert!(tm.last_halted());
@@ -58,19 +56,17 @@ fn history_to_input_uses_flattened_pairs_binary_order() {
 #[test]
 fn timeout_scoring_matches_notebook_min_max_logic() {
     let payoff = PayoffMatrix::default_pd(); // min=-3, max=0
-    let both_halted = payoffs_with_timeouts(payoff, Action::Cooperate, Action::Defect, true, true);
-    assert_eq!(
-        both_halted,
-        payoff.payoffs(Action::Cooperate, Action::Defect)
-    );
+    let cd = (Action::Cooperate, Action::Defect);
 
-    let a_timeout = payoffs_with_timeouts(payoff, Action::Cooperate, Action::Defect, false, true);
+    let both_halted = payoffs_with_timeouts(payoff, cd.0, cd.1, true, true);
+    assert_eq!(both_halted, payoff.payoffs(cd.0, cd.1));
+
+    let a_timeout = payoffs_with_timeouts(payoff, cd.0, cd.1, false, true);
     assert_eq!(a_timeout, (-3, 0));
 
-    let b_timeout = payoffs_with_timeouts(payoff, Action::Cooperate, Action::Defect, true, false);
+    let b_timeout = payoffs_with_timeouts(payoff, cd.0, cd.1, true, false);
     assert_eq!(b_timeout, (0, -3));
 
-    let both_timeout =
-        payoffs_with_timeouts(payoff, Action::Cooperate, Action::Defect, false, false);
+    let both_timeout = payoffs_with_timeouts(payoff, cd.0, cd.1, false, false);
     assert_eq!(both_timeout, (-3, -3));
 }

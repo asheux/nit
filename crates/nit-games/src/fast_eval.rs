@@ -1,14 +1,14 @@
 //! Fast cycle-detecting match evaluation for FSM strategies.
 //!
-//! Transitions are stored in a flat `Vec<u32>` indexed by
-//! `state * alphabet + symbol` for cache-friendly simulation.
+//! Transitions are flattened into a single `Vec<u32>` indexed by
+//! `state * alphabet + symbol` so the inner loop walks contiguous
+//! memory and stays in L1.
 
 use std::collections::HashMap;
 
 use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::{Action, Outcome, PayoffMatrix};
 
-/// Flattened FSM representation optimised for cache-friendly match simulation.
 #[derive(Clone, Debug)]
 pub struct FastStrategyModel {
     pub id: String,
@@ -23,13 +23,13 @@ pub struct FastEvalResult {
     pub a_total: i64,
     pub b_total: i64,
     pub cycle: Option<CycleMetadata>,
-    /// Encoded outcome string (`'0'`=CC, `'1'`=CD, `'2'`=DC, `'3'`=DD).
+    /// Per-round outcome digit string (`'0'`=CC, `'1'`=CD, `'2'`=DC, `'3'`=DD).
     pub outcomes: Option<String>,
 }
 
-/// Periodic cycle discovered during match evaluation. Two deterministic FSMs
-/// always eventually cycle; this captures the transient prefix, cycle length,
-/// and per-outcome distribution within the cycle.
+/// Two deterministic FSMs always cycle eventually; this captures the
+/// transient prefix length, cycle length, and per-outcome distribution
+/// across one period so the remaining rounds can be fast-forwarded.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CycleMetadata {
     pub transient_rounds: u32,
@@ -43,7 +43,9 @@ pub struct CycleMetadata {
 }
 
 impl FastStrategyModel {
-    /// Returns `None` for non-FSM strategies or malformed FSM data.
+    /// Returns `None` for non-FSM strategies, empty/jagged transition
+    /// tables, or any FSM whose transition rows do not all share the
+    /// same alphabet width.
     pub fn from_spec(spec: &StrategySpec) -> Option<Self> {
         let StrategySpecKind::Fsm {
             start_state,
@@ -111,9 +113,10 @@ struct Snapshot {
     outcome_counts: [u64; 4],
 }
 
-/// Evaluates a match between two FSM strategies with optional cycle detection.
-/// When the combined state revisits a previously-seen pair, remaining rounds
-/// are fast-forwarded using the per-cycle payoff totals.
+/// Plays `rounds` rounds between two flattened FSMs. The combined
+/// `(state_a, state_b)` is hashed each round; once a pair repeats we
+/// know we are in a cycle and replicate the deltas across the
+/// remaining rounds in O(1).
 pub fn evaluate_match(
     model_a: &FastStrategyModel,
     model_b: &FastStrategyModel,
@@ -138,39 +141,19 @@ pub fn evaluate_match(
 
     while round < rounds {
         if detect_cycles {
-            if let Some(snap) = seen.get(&joint) {
-                let period = round.saturating_sub(snap.round);
-                if period > 0 {
-                    let delta_counts = [
-                        outcome_counts[0].saturating_sub(snap.outcome_counts[0]),
-                        outcome_counts[1].saturating_sub(snap.outcome_counts[1]),
-                        outcome_counts[2].saturating_sub(snap.outcome_counts[2]),
-                        outcome_counts[3].saturating_sub(snap.outcome_counts[3]),
-                    ];
-                    if record_cycle && cycle_meta.is_none() {
-                        let [cc, cd, dc, dd] = delta_counts;
-                        let denom = period.max(1) as f64;
-                        cycle_meta = Some(CycleMetadata {
-                            transient_rounds: snap.round,
-                            cycle_rounds: period,
-                            cycle_cc: cc,
-                            cycle_cd: cd,
-                            cycle_dc: dc,
-                            cycle_dd: dd,
-                            a_cycle_coop_rate: (cc + cd) as f64 / denom,
-                            b_cycle_coop_rate: (cc + dc) as f64 / denom,
-                        });
-                    }
-                    let delta_a = a_total.saturating_sub(snap.a_total);
-                    let delta_b = b_total.saturating_sub(snap.b_total);
-                    let full_cycles = (rounds - round) / period;
-                    a_total += delta_a * full_cycles as i64;
-                    b_total += delta_b * full_cycles as i64;
-                    for (acc, delta) in outcome_counts.iter_mut().zip(delta_counts.iter()) {
-                        *acc += delta * full_cycles as u64;
-                    }
-                    replicate_cycle_outcomes(outcomes.as_mut(), snap.round, round, full_cycles);
-                    round += period * full_cycles;
+            if let Some(snap) = seen.get(&joint).copied() {
+                if let Some(advanced) = fast_forward_cycle(
+                    snap,
+                    round,
+                    rounds,
+                    &mut a_total,
+                    &mut b_total,
+                    &mut outcome_counts,
+                    outcomes.as_mut(),
+                    record_cycle,
+                    &mut cycle_meta,
+                ) {
+                    round = advanced;
                 }
                 detect_cycles = false;
                 if round >= rounds {
@@ -212,6 +195,54 @@ pub fn evaluate_match(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn fast_forward_cycle(
+    snap: Snapshot,
+    round: u32,
+    rounds: u32,
+    a_total: &mut i64,
+    b_total: &mut i64,
+    outcome_counts: &mut [u64; 4],
+    outcomes: Option<&mut Vec<u8>>,
+    record_cycle: bool,
+    cycle_meta: &mut Option<CycleMetadata>,
+) -> Option<u32> {
+    let period = round.saturating_sub(snap.round);
+    if period == 0 {
+        return None;
+    }
+    let delta_counts = [
+        outcome_counts[0].saturating_sub(snap.outcome_counts[0]),
+        outcome_counts[1].saturating_sub(snap.outcome_counts[1]),
+        outcome_counts[2].saturating_sub(snap.outcome_counts[2]),
+        outcome_counts[3].saturating_sub(snap.outcome_counts[3]),
+    ];
+    if record_cycle && cycle_meta.is_none() {
+        let [cc, cd, dc, dd] = delta_counts;
+        let denom = period.max(1) as f64;
+        *cycle_meta = Some(CycleMetadata {
+            transient_rounds: snap.round,
+            cycle_rounds: period,
+            cycle_cc: cc,
+            cycle_cd: cd,
+            cycle_dc: dc,
+            cycle_dd: dd,
+            a_cycle_coop_rate: (cc + cd) as f64 / denom,
+            b_cycle_coop_rate: (cc + dc) as f64 / denom,
+        });
+    }
+    let delta_a = a_total.saturating_sub(snap.a_total);
+    let delta_b = b_total.saturating_sub(snap.b_total);
+    let full_cycles = (rounds - round) / period;
+    *a_total += delta_a * full_cycles as i64;
+    *b_total += delta_b * full_cycles as i64;
+    for (acc, delta) in outcome_counts.iter_mut().zip(delta_counts.iter()) {
+        *acc += delta * full_cycles as u64;
+    }
+    replicate_cycle_outcomes(outcomes, snap.round, round, full_cycles);
+    Some(round + period * full_cycles)
+}
+
 fn replicate_cycle_outcomes(
     buf: Option<&mut Vec<u8>>,
     cycle_start: u32,
@@ -229,7 +260,3 @@ fn replicate_cycle_outcomes(
         history.extend_from_within(range.clone());
     }
 }
-
-#[cfg(test)]
-#[path = "test_modules/fast_eval.rs"]
-mod tests;

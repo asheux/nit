@@ -155,11 +155,7 @@ pub struct HistoryAnalysis {
     pub preview: HistoryAnalysisPreview,
 }
 
-pub fn analyze_history(
-    history_path: &Path,
-    out_dir: &Path,
-    mut config: AnalysisConfig,
-) -> Result<HistoryAnalysis, String> {
+fn finalise_config(mut config: AnalysisConfig) -> AnalysisConfig {
     if config.tail_rounds == 0 {
         config.tail_rounds = DEFAULT_TAIL_ROUNDS;
     }
@@ -173,33 +169,32 @@ pub fn analyze_history(
         .random_match_substrings
         .iter_mut()
         .for_each(|s| s.make_ascii_lowercase());
+    config
+}
+
+fn build_paths(out_dir: &Path, base: &str) -> AnalysisPaths {
+    let join = |stem: &str| out_dir.join(stem).display().to_string();
+    AnalysisPaths {
+        summary: join(&format!("analysis__{base}.json")),
+        matches_csv: join(&format!("analysis_matches__{base}.csv")),
+        matches_ndjson: join(&format!("analysis_matches__{base}.ndjson")),
+        strategies_csv: join(&format!("analysis_strategies__{base}.csv")),
+        trajectories_csv: join(&format!("analysis_trajectories__{base}.csv")),
+    }
+}
+
+pub fn analyze_history(
+    history_path: &Path,
+    out_dir: &Path,
+    config: AnalysisConfig,
+) -> Result<HistoryAnalysis, String> {
+    let config = finalise_config(config);
 
     fs::create_dir_all(out_dir)
         .map_err(|err| format!("Failed to create analysis dir {}: {err}", out_dir.display()))?;
 
     let base = analysis_base_name(history_path);
-    let paths = AnalysisPaths {
-        summary: out_dir
-            .join(format!("analysis__{base}.json"))
-            .display()
-            .to_string(),
-        matches_csv: out_dir
-            .join(format!("analysis_matches__{base}.csv"))
-            .display()
-            .to_string(),
-        matches_ndjson: out_dir
-            .join(format!("analysis_matches__{base}.ndjson"))
-            .display()
-            .to_string(),
-        strategies_csv: out_dir
-            .join(format!("analysis_strategies__{base}.csv"))
-            .display()
-            .to_string(),
-        trajectories_csv: out_dir
-            .join(format!("analysis_trajectories__{base}.csv"))
-            .display()
-            .to_string(),
-    };
+    let paths = build_paths(out_dir, &base);
 
     let history_file =
         File::open(history_path).map_err(|err| format!("Failed to open history log: {err}"))?;

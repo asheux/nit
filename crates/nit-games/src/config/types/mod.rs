@@ -1,3 +1,6 @@
+//! Configuration type surface: engine flags, raw TOML structs, and the
+//! validated/normalized output produced by `config::normalize`.
+
 mod engine;
 mod normalized;
 mod raw;

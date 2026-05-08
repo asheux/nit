@@ -7,9 +7,9 @@ use std::collections::VecDeque;
 pub(crate) fn encode_matchup_pairs(matchups: &[Matchup]) -> Vec<MatchPair> {
     matchups
         .iter()
-        .map(|m| MatchPair {
-            a_idx: m.a_idx as u32,
-            b_idx: m.b_idx as u32,
+        .map(|pair| MatchPair {
+            a_idx: pair.a_idx as u32,
+            b_idx: pair.b_idx as u32,
         })
         .collect()
 }
@@ -55,6 +55,11 @@ pub(crate) fn match_outcomes_from_scores(
         .collect()
 }
 
+// Dispatches matchups to Metal in `policy.matches_per_batch`-sized chunks,
+// keeping up to `policy.inflight_batches` GPU command buffers in flight before
+// blocking on the oldest. This pipelines submission against completion: the
+// CPU encodes batch N+1 while batch N is on the GPU. Returning Ok(None)
+// signals an unsupported batch shape — caller falls back to the CPU path.
 pub(crate) fn try_metal_batch_outcomes_chunked_prepared(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -67,7 +72,7 @@ pub(crate) fn try_metal_batch_outcomes_chunked_prepared(
 
     let chunk_size = prepared.policy.matches_per_batch;
     let max_inflight = prepared.policy.inflight_batches;
-    let mut collected_outcomes = Vec::with_capacity(matchups.len());
+    let mut outcomes = Vec::with_capacity(matchups.len());
     let mut dispatch_count = 0usize;
     let mut inflight: VecDeque<InflightChunk<'_>> = VecDeque::new();
 
@@ -83,15 +88,15 @@ pub(crate) fn try_metal_batch_outcomes_chunked_prepared(
             pending,
         });
         if inflight.len() >= max_inflight {
-            drain_one_inflight(&mut inflight, config, strategies, &mut collected_outcomes)?;
+            drain_one_inflight(&mut inflight, config, strategies, &mut outcomes)?;
         }
     }
 
     while !inflight.is_empty() {
-        drain_one_inflight(&mut inflight, config, strategies, &mut collected_outcomes)?;
+        drain_one_inflight(&mut inflight, config, strategies, &mut outcomes)?;
     }
 
-    Ok(Some((collected_outcomes, dispatch_count)))
+    Ok(Some((outcomes, dispatch_count)))
 }
 
 struct InflightChunk<'a> {

@@ -5,6 +5,65 @@ use std::io::{BufWriter, Write};
 use super::trajectory::TrajectoryData;
 use super::{MatchSummary, StrategySummary};
 
+pub(super) mod columns {
+    pub const MATCHES: &[&str] = &[
+        "match_id",
+        "match_index",
+        "total_matches",
+        "repetition",
+        "rounds",
+        "a",
+        "b",
+        "a_score",
+        "b_score",
+        "cc",
+        "cd",
+        "dc",
+        "dd",
+        "a_coop_rate",
+        "b_coop_rate",
+        "tail_rounds",
+        "tail_cc",
+        "tail_cd",
+        "tail_dc",
+        "tail_dd",
+        "a_tail_coop_rate",
+        "b_tail_coop_rate",
+        "a_initial",
+        "b_initial",
+    ];
+
+    pub const TRAJECTORIES: &[&str] = &[
+        "match_id",
+        "match_index",
+        "a",
+        "b",
+        "sample_index",
+        "round_start",
+        "round_end",
+        "window_rounds",
+        "a_coop_rate",
+        "b_coop_rate",
+    ];
+
+    pub const STRATEGIES: &[&str] = &[
+        "id",
+        "matches",
+        "rounds",
+        "coop_rounds",
+        "coop_rate",
+        "tail_rounds",
+        "tail_coop_rounds",
+        "tail_coop_rate",
+        "total_score",
+        "avg_score_per_round",
+    ];
+}
+
+pub(super) use columns::{
+    MATCHES as MATCHES_CSV_COLUMNS, TRAJECTORIES as TRAJECTORIES_CSV_COLUMNS,
+};
+
 pub(super) fn write_match_summary(
     writer: &mut BufWriter<File>,
     summary: &MatchSummary,
@@ -20,46 +79,6 @@ pub(super) fn write_csv_header(
 ) -> Result<(), String> {
     writeln!(writer, "{}", columns.join(",")).map_err(|e| e.to_string())
 }
-
-pub(super) const MATCHES_CSV_COLUMNS: &[&str] = &[
-    "match_id",
-    "match_index",
-    "total_matches",
-    "repetition",
-    "rounds",
-    "a",
-    "b",
-    "a_score",
-    "b_score",
-    "cc",
-    "cd",
-    "dc",
-    "dd",
-    "a_coop_rate",
-    "b_coop_rate",
-    "tail_rounds",
-    "tail_cc",
-    "tail_cd",
-    "tail_dc",
-    "tail_dd",
-    "a_tail_coop_rate",
-    "b_tail_coop_rate",
-    "a_initial",
-    "b_initial",
-];
-
-pub(super) const TRAJECTORIES_CSV_COLUMNS: &[&str] = &[
-    "match_id",
-    "match_index",
-    "a",
-    "b",
-    "sample_index",
-    "round_start",
-    "round_end",
-    "window_rounds",
-    "a_coop_rate",
-    "b_coop_rate",
-];
 
 pub(super) fn write_match_csv_row(
     writer: &mut BufWriter<File>,
@@ -100,25 +119,12 @@ pub(super) fn write_match_csv_row(
     .map_err(|e| e.to_string())
 }
 
-const STRATEGIES_CSV_COLUMNS: &[&str] = &[
-    "id",
-    "matches",
-    "rounds",
-    "coop_rounds",
-    "coop_rate",
-    "tail_rounds",
-    "tail_coop_rounds",
-    "tail_coop_rate",
-    "total_score",
-    "avg_score_per_round",
-];
-
 pub(super) fn write_strategies_csv(
     path: &str,
     strategies: &[StrategySummary],
 ) -> Result<(), String> {
     let mut writer = BufWriter::new(File::create(path).map_err(|e| e.to_string())?);
-    write_csv_header(&mut writer, STRATEGIES_CSV_COLUMNS)?;
+    write_csv_header(&mut writer, columns::STRATEGIES)?;
     for strategy in strategies {
         let id = csv_escape(&strategy.id);
         writeln!(

@@ -7,16 +7,8 @@ use crate::tournament::types::MatchSession;
 
 impl TournamentRunner {
     pub fn finish(mut self, timestamp: String, run_id: String, config_text: String) -> RunSummary {
-        let event_log_path = self
-            .event_writer
-            .take()
-            .and_then(|pending_writer| pending_writer.finish().ok())
-            .map(|resolved_path| resolved_path.to_string_lossy().to_string());
-        let history_log_path = self
-            .history_writer
-            .take()
-            .and_then(|pending_writer| pending_writer.finish().ok())
-            .map(|resolved_path| resolved_path.to_string_lossy().to_string());
+        let event_log_path = take_log_path(self.event_writer.take().map(EventLog::Event));
+        let history_log_path = take_log_path(self.history_writer.take().map(EventLog::History));
         let final_results = self.results();
         RunSummary {
             schema_version: crate::output::RUN_SUMMARY_SCHEMA_VERSION,
@@ -44,53 +36,59 @@ impl TournamentRunner {
     }
 
     pub(super) fn emit(&mut self, event: GameEvent) {
-        let Some(event_log_writer) = self.event_writer.as_mut() else {
+        let Some(writer) = self.event_writer.as_mut() else {
             return;
         };
-        if matches!(event, GameEvent::Round { .. }) && !event_log_writer.include_rounds() {
+        if matches!(event, GameEvent::Round { .. }) && !writer.include_rounds() {
             return;
         }
-        let _ = event_log_writer.write(&event);
+        let _ = writer.write(&event);
     }
 
-    pub(super) fn emit_history(&mut self, finished_session: &MatchSession) {
-        let Some(history_log_writer) = self.history_writer.as_mut() else {
+    pub(super) fn emit_history(&mut self, session: &MatchSession) {
+        let Some(writer) = self.history_writer.as_mut() else {
             return;
         };
-        let first_label = strategy_log_id(&self.strategies[finished_session.matchup.a_idx]);
-        let second_label = strategy_log_id(&self.strategies[finished_session.matchup.b_idx]);
-        let should_include_tm_metrics = self.config.history.include_cycle_metadata;
-        let first_tm_metrics = if should_include_tm_metrics {
-            finished_session
-                .a_strategy
-                .tm_stats()
-                .map(tm_metrics_from_stats)
-        } else {
-            None
-        };
-        let second_tm_metrics = if should_include_tm_metrics {
-            finished_session
-                .b_strategy
-                .tm_stats()
-                .map(tm_metrics_from_stats)
-        } else {
-            None
-        };
+        let include_tm_metrics = self.config.history.include_cycle_metadata;
         let history_record = MatchHistory {
-            match_id: finished_session.matchup.match_id,
+            match_id: session.matchup.match_id,
             match_index: self.match_index + 1,
             total_matches: self.schedule.len(),
-            a: first_label,
-            b: second_label,
-            repetition: finished_session.matchup.repetition + 1,
-            rounds: finished_session.rounds_total,
-            score_idx: finished_session.history_scores.clone(),
-            a_score: finished_session.a_total,
-            b_score: finished_session.b_total,
+            a: strategy_log_id(&self.strategies[session.matchup.a_idx]),
+            b: strategy_log_id(&self.strategies[session.matchup.b_idx]),
+            repetition: session.matchup.repetition + 1,
+            rounds: session.rounds_total,
+            score_idx: session.history_scores.clone(),
+            a_score: session.a_total,
+            b_score: session.b_total,
             cycle: None,
-            a_tm_metrics: first_tm_metrics,
-            b_tm_metrics: second_tm_metrics,
+            a_tm_metrics: tm_metrics_if(include_tm_metrics, session.a_strategy.tm_stats()),
+            b_tm_metrics: tm_metrics_if(include_tm_metrics, session.b_strategy.tm_stats()),
         };
-        let _ = history_log_writer.write(&history_record);
+        let _ = writer.write(&history_record);
     }
+}
+
+fn tm_metrics_if(
+    enabled: bool,
+    stats: Option<&crate::strategy::TmRunStats>,
+) -> Option<crate::output::TmDerivedMetrics> {
+    if enabled {
+        stats.map(tm_metrics_from_stats)
+    } else {
+        None
+    }
+}
+
+enum EventLog {
+    Event(crate::events::EventWriter),
+    History(crate::history_log::HistoryWriter),
+}
+
+fn take_log_path(writer: Option<EventLog>) -> Option<String> {
+    let path = match writer? {
+        EventLog::Event(w) => w.finish().ok()?,
+        EventLog::History(w) => w.finish().ok()?,
+    };
+    Some(path.to_string_lossy().to_string())
 }

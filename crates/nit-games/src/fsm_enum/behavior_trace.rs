@@ -1,5 +1,7 @@
-//! Behavioural-equivalence grouping via input-trace signatures (WNBM) and
-//! canonical-minimised keys (Moorem).
+//! Behavioural-equivalence grouping. Two FSMs are equivalent iff they produce
+//! the same output sequence for every input sequence — the trace signature
+//! (WNBM mode) samples this at fixed depth, while Moorem normalises through
+//! Hopcroft minimisation. Both produce a `Vec<u16>` key suitable for hashing.
 
 use std::collections::HashMap;
 
@@ -17,7 +19,6 @@ use super::RawFsm;
 
 const NOTEBOOK_BEHAVIOR_TRACE_STEPS: usize = 12;
 
-/// Group canonical indices by behavioural equivalence (default WNBM mode).
 pub fn group_canonical_fsm_indices_by_behavior(
     states: usize,
     actions: usize,
@@ -48,7 +49,6 @@ pub fn group_canonical_fsm_indices_by_behavior_with_mode(
     Ok(groups)
 }
 
-/// One canonical index per distinct behaviour (default WNBM mode).
 pub fn unique_fsm_behavior_representatives(
     states: usize,
     actions: usize,
@@ -100,6 +100,9 @@ fn grouping_key(raw: &RawFsm, mode: FsmGroupingMode) -> Result<Vec<u16>, String>
     }
 }
 
+/// Concatenate the FSM's outputs across every input sequence of length
+/// `steps`. Two FSMs share this signature iff they're externally
+/// indistinguishable up to `steps` inputs.
 fn behavior_trace_signature(raw: &RawFsm, steps: usize) -> Result<Vec<u16>, String> {
     if raw.states() == 0 || raw.actions == 0 || steps == 0 {
         return Ok(Vec::new());
@@ -117,32 +120,42 @@ fn behavior_trace_signature(raw: &RawFsm, steps: usize) -> Result<Vec<u16>, Stri
     let mut digits = vec![0usize; steps];
 
     for sequence_idx in 0..sequence_count {
-        let mut code = sequence_idx;
-        for pos in (0..steps).rev() {
-            let digit = code % raw.actions;
-            code /= raw.actions;
-            digits[pos] = raw.actions - 1 - digit;
-        }
-
-        let mut state = 0usize;
-        for &input in &digits {
-            let next = raw
-                .transitions
-                .get(state)
-                .and_then(|row| row.get(input))
-                .copied()
-                .unwrap_or(state)
-                .min(raw.states().saturating_sub(1));
-            let out = raw.outputs.get(next).copied().unwrap_or(0);
-            if out > u16::MAX as usize {
-                return Err(
-                    "fsm behavior trace output digit exceeds supported key width".to_string(),
-                );
-            }
-            signature.push(out as u16);
-            state = next;
-        }
+        decode_input_sequence(sequence_idx, raw.actions, &mut digits);
+        run_and_record(raw, &digits, &mut signature)?;
     }
 
     Ok(signature)
+}
+
+/// Decode a sequence index into per-step input digits. The reversal
+/// `actions - 1 - digit` keeps the legacy ordering used by the cached
+/// keys in production.
+fn decode_input_sequence(mut code: usize, actions: usize, digits: &mut [usize]) {
+    let steps = digits.len();
+    for pos in (0..steps).rev() {
+        let digit = code % actions;
+        code /= actions;
+        digits[pos] = actions - 1 - digit;
+    }
+}
+
+fn run_and_record(raw: &RawFsm, digits: &[usize], signature: &mut Vec<u16>) -> Result<(), String> {
+    let max_state = raw.states().saturating_sub(1);
+    let mut state = 0usize;
+    for &input in digits {
+        let next = raw
+            .transitions
+            .get(state)
+            .and_then(|row| row.get(input))
+            .copied()
+            .unwrap_or(state)
+            .min(max_state);
+        let out = raw.outputs.get(next).copied().unwrap_or(0);
+        if out > u16::MAX as usize {
+            return Err("fsm behavior trace output digit exceeds supported key width".to_string());
+        }
+        signature.push(out as u16);
+        state = next;
+    }
+    Ok(())
 }

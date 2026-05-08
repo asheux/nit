@@ -4,7 +4,7 @@ mod payload;
 mod preflight;
 mod prep;
 
-use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
+use crate::config::{ComplexityCostConfig, NormalizedConfig, StrategySpec, StrategySpecKind};
 use crate::strategy::TmRunStats;
 
 pub(crate) use decline::metal_batch_decline_reason;
@@ -22,7 +22,7 @@ pub(super) fn adjusted_total_for_match(
     strategy: &StrategySpec,
     round_count: u32,
     tm_run_stats: Option<&TmRunStats>,
-    cost: &crate::config::ComplexityCostConfig,
+    cost: &ComplexityCostConfig,
 ) -> f64 {
     if !cost.enabled {
         return raw_total as f64;
@@ -34,11 +34,11 @@ fn complexity_penalty(
     strategy: &StrategySpec,
     round_count: u32,
     tm_run_stats: Option<&TmRunStats>,
-    cost: &crate::config::ComplexityCostConfig,
+    cost: &ComplexityCostConfig,
 ) -> f64 {
     match &strategy.kind {
         StrategySpecKind::OneSidedTm { .. } if cost.tm_step_cost != 0.0 => {
-            let total_steps = tm_run_stats.map_or(0.0, |s| s.steps as f64);
+            let total_steps = tm_run_stats.map_or(0.0, |stats| stats.steps as f64);
             cost.tm_step_cost * total_steps
         }
         StrategySpecKind::Fsm {
@@ -46,12 +46,8 @@ fn complexity_penalty(
             outputs,
             ..
         } if cost.fsm_state_cost != 0.0 => {
-            let state_count = if *num_states > 0 {
-                *num_states
-            } else {
-                outputs.len()
-            };
-            cost.fsm_state_cost * state_count as f64 * round_count as f64
+            let state_count = (*num_states).max(outputs.len()) as f64;
+            cost.fsm_state_cost * state_count * round_count as f64
         }
         _ => 0.0,
     }

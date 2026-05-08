@@ -1,14 +1,11 @@
-//! Per-match state: scheduled matchup, in-flight session, round results.
-
 use crate::game::Action;
 use crate::history::History;
 use crate::strategy::{Strategy, TmRunStats};
 use nit_utils::rng::SplitMix64;
 
-/// Outcome of a single completed match: strategy indices, raw and adjusted scores.
-///
-/// The `adjusted_total` fields incorporate complexity-cost penalties when enabled;
-/// otherwise they equal the raw totals cast to `f64`.
+// `a_adjusted_total` / `b_adjusted_total` carry complexity-cost penalties when
+// enabled in `EngineConfig::complexity_cost`; otherwise they equal the raw
+// totals cast to `f64`.
 #[derive(Clone, Debug)]
 pub struct MatchResult {
     pub a_idx: usize,
@@ -22,7 +19,6 @@ pub struct MatchResult {
     pub match_id: usize,
 }
 
-/// Which side of a match a strategy occupies (first-mover vs second-mover).
 #[derive(Copy, Clone, Debug)]
 pub enum MatchRole {
     A,
@@ -38,7 +34,6 @@ impl MatchRole {
     }
 }
 
-/// A scheduled matchup: two strategy indices, a repetition, and a global match id.
 #[derive(Clone, Debug)]
 pub struct Matchup {
     pub match_id: usize,
@@ -47,11 +42,8 @@ pub struct Matchup {
     pub repetition: u32,
 }
 
-/// Mutable state for a single match in progress.
-///
-/// Holds the two strategy instances, shared history buffer, noise RNG,
-/// per-round trace buffers, and cumulative scores. Created at the start
-/// of each match and consumed when the match finishes.
+// Built fresh per match by the kernel/runner and consumed when the match
+// finishes; never reused across matches.
 pub struct MatchSession {
     pub matchup: Matchup,
     pub history: History,
@@ -74,7 +66,6 @@ pub struct MatchSession {
     pub record_trace: bool,
 }
 
-/// Actions and payoffs from a single round of play.
 #[derive(Clone, Debug)]
 pub struct RoundSnapshot {
     pub a_action: Action,
@@ -85,14 +76,12 @@ pub struct RoundSnapshot {
     pub b_payoff: i32,
 }
 
-/// Round snapshot plus crash flags, returned from `play_round_core`.
 pub struct RoundOutcome {
     pub snapshot: RoundSnapshot,
     pub a_crash_now: bool,
     pub b_crash_now: bool,
 }
 
-/// Complete outcome of a match: result, crash flags, TM stats, and last round.
 pub struct MatchOutcome {
     pub result: MatchResult,
     pub a_crashed: bool,

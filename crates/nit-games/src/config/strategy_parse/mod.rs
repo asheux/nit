@@ -1,4 +1,8 @@
-//! Strategy specification parsing: FSM, CA, and TM normalization from TOML.
+//! Strategy specification parsing: FSM, CA, TM, and generated normalization.
+//!
+//! `fsm/` and `tm/` are split into per-encoding submodules (indexed/explicit
+//! for FSM; explicit/table/wolfram for TM); the rest are flat single-file
+//! parsers wired in here.
 
 mod ca;
 mod common;

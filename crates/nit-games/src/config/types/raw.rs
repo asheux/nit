@@ -24,8 +24,9 @@ pub struct GamesConfig {
     pub engine: Option<EngineConfig>,
 }
 
-/// Supports either four named PD scalars (`R`, `S`, `T`, `P`) or a full
-/// 2x2x2 matrix. If both are provided the matrix takes precedence.
+/// Either four named PD scalars (`R`, `S`, `T`, `P`) or a full 2x2x2 matrix.
+/// If both are provided the matrix takes precedence; the scalars are then
+/// validated against the matrix and any mismatch is reported as an error.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PayoffConfig {
     #[serde(rename = "R")]
@@ -80,7 +81,7 @@ pub struct StrategyConfig {
     pub rule_code: Option<u64>,
 }
 
-/// Like [`GamesConfig`] but with only the strategy hints needed for family expansion.
+/// Like [`GamesConfig`] but only retains the strategy hints needed for family expansion.
 #[derive(Clone, Debug, Deserialize)]
 pub(in crate::config) struct FamilyRunParseConfig {
     pub schema_version: Option<u32>,

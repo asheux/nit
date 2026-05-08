@@ -164,6 +164,31 @@ impl TournamentKernel {
         }
     }
 
+    // The Metal fast path is only safe when the caller hasn't asked for any
+    // events or history — those streams need per-match callbacks the GPU
+    // batch path can't synthesize.
+    fn try_run_metal_fast_path(
+        &self,
+        runtime: &mut RuntimeAcceleratorStats,
+        log_events: bool,
+        log_history: bool,
+        fast_eval_allowed: bool,
+    ) -> Option<TournamentAccumulator> {
+        if !(fast_eval_allowed && !log_events && !log_history) {
+            return None;
+        }
+        let outcomes = self.try_metal_batch_path(runtime)?;
+        let mut results = self.build_accumulator();
+        for outcome in outcomes {
+            results.apply_outcome(outcome);
+        }
+        Some(results)
+    }
+
+    fn finalize_results(&self, results: TournamentAccumulator) -> TournamentResults {
+        results.finalize(&self.config.strategies)
+    }
+
     fn run_sequential(
         &self,
         mut event_writer: Option<&mut EventWriter>,
@@ -186,21 +211,17 @@ impl TournamentKernel {
             .unwrap_or(false);
         let log_events = event_writer.is_some();
         let log_history = history_writer.is_some();
-
         let fast_eval_allowed = self.fast_eval_eligible(log_events, include_rounds);
 
-        if fast_eval_allowed && !log_events && !log_history {
-            if let Some(outcomes) = self.try_metal_batch_path(&mut runtime) {
-                for outcome in outcomes {
-                    results.apply_outcome(outcome);
-                }
-                if let Some(writer) = event_writer.as_mut() {
-                    let _ = writer.write(&GameEvent::TournamentEnd {
-                        timestamp: EventWriter::timestamp(),
-                    });
-                }
-                return (results.finalize(&self.config.strategies), runtime);
+        if let Some(metal_results) =
+            self.try_run_metal_fast_path(&mut runtime, log_events, log_history, fast_eval_allowed)
+        {
+            if let Some(writer) = event_writer.as_mut() {
+                let _ = writer.write(&GameEvent::TournamentEnd {
+                    timestamp: EventWriter::timestamp(),
+                });
             }
+            return (self.finalize_results(metal_results), runtime);
         }
 
         for match_id in 0..self.schedule.len() {
@@ -245,7 +266,7 @@ impl TournamentKernel {
                 timestamp: EventWriter::timestamp(),
             });
         }
-        (results.finalize(&self.config.strategies), runtime)
+        (self.finalize_results(results), runtime)
     }
 
     fn run_parallel(
@@ -267,26 +288,21 @@ impl TournamentKernel {
 
         let log_events = event_sender.is_some();
         let log_history = history_sender.is_some();
-        let event_sender_for_run = event_sender.clone();
-        let history_sender_for_run = history_sender.clone();
-
         let fast_eval_allowed = self.fast_eval_eligible(log_events, include_rounds);
 
-        if fast_eval_allowed && !log_events && !log_history {
-            if let Some(all_outcomes) = self.try_metal_batch_path(&mut runtime) {
-                if let Some(sender) = event_sender.as_ref() {
-                    let _ = sender.send(GameEvent::TournamentEnd {
-                        timestamp: EventWriter::timestamp(),
-                    });
-                }
-                let mut results = self.build_accumulator();
-                for outcome in all_outcomes {
-                    results.apply_outcome(outcome);
-                }
-                return (results.finalize(&self.config.strategies), runtime);
+        if let Some(metal_results) =
+            self.try_run_metal_fast_path(&mut runtime, log_events, log_history, fast_eval_allowed)
+        {
+            if let Some(sender) = event_sender.as_ref() {
+                let _ = sender.send(GameEvent::TournamentEnd {
+                    timestamp: EventWriter::timestamp(),
+                });
             }
+            return (self.finalize_results(metal_results), runtime);
         }
 
+        let event_sender_for_run = event_sender.clone();
+        let history_sender_for_run = history_sender.clone();
         let run = || {
             (0..self.schedule.len())
                 .into_par_iter()
@@ -339,6 +355,6 @@ impl TournamentKernel {
             results.apply_outcome(outcome);
         }
         runtime.note_cpu_matches(self.schedule.len());
-        (results.finalize(&self.config.strategies), runtime)
+        (self.finalize_results(results), runtime)
     }
 }

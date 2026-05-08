@@ -4,8 +4,8 @@ use super::strategy_parse::{
 };
 use super::types::{
     default_save_data, ConfigError, FamilyRunBaseConfig, FamilyRunParseConfig,
-    FamilyRunStrategyHint, GamesConfig, NormalizedConfig, ParallelismConfig, StrategyConfig,
-    StrategySpec, StrategySpecKind,
+    FamilyRunStrategyHint, GamesConfig, NormalizedConfig, ParallelismConfig, PayoffConfig,
+    StrategyConfig, StrategySpec, StrategySpecKind,
 };
 use super::{
     canonical_game_name, is_tm_kind, normalize_kind_str, ConfigResult, CONFIG_SCHEMA_VERSION,
@@ -20,7 +20,7 @@ struct RawBaseFields {
     repetitions: Option<u32>,
     self_play: Option<bool>,
     noise: Option<f32>,
-    payoff: Option<super::types::PayoffConfig>,
+    payoff: Option<PayoffConfig>,
 }
 
 struct ValidatedBase {
@@ -33,34 +33,36 @@ struct ValidatedBase {
     payoff: PayoffMatrix,
 }
 
-fn validate_base(raw: RawBaseFields, errors: &mut Vec<String>) -> ValidatedBase {
-    let schema_version = raw.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
-    let game = resolve_game_name(raw.game, errors);
-    let rounds = raw.rounds.unwrap_or(200);
-    let repetitions = raw.repetitions.unwrap_or(1);
-    let self_play = raw.self_play.unwrap_or(true);
-    let noise = raw.noise.unwrap_or(0.0).clamp(0.0, 1.0);
+impl RawBaseFields {
+    fn validate(self, errors: &mut Vec<String>) -> ValidatedBase {
+        let schema_version = self.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
+        let game = resolve_game_name(self.game, errors);
+        let rounds = self.rounds.unwrap_or(200);
+        let repetitions = self.repetitions.unwrap_or(1);
+        let self_play = self.self_play.unwrap_or(true);
+        let noise = self.noise.unwrap_or(0.0).clamp(0.0, 1.0);
 
-    if rounds == 0 {
-        errors.push("rounds must be > 0".to_string());
-    }
-    if repetitions == 0 {
-        errors.push("repetitions must be > 0".to_string());
-    }
+        if rounds == 0 {
+            errors.push("rounds must be > 0".to_string());
+        }
+        if repetitions == 0 {
+            errors.push("repetitions must be > 0".to_string());
+        }
 
-    let payoff = match raw.payoff {
-        Some(p) => payoff_from_config(p, errors),
-        None => PayoffMatrix::default_pd(),
-    };
+        let payoff = match self.payoff {
+            Some(p) => payoff_from_config(p, errors),
+            None => PayoffMatrix::default_pd(),
+        };
 
-    ValidatedBase {
-        schema_version,
-        game,
-        rounds,
-        repetitions,
-        self_play,
-        noise,
-        payoff,
+        ValidatedBase {
+            schema_version,
+            game,
+            rounds,
+            repetitions,
+            self_play,
+            noise,
+            payoff,
+        }
     }
 }
 
@@ -106,25 +108,12 @@ impl GamesConfig {
         base_dir: Option<&std::path::Path>,
     ) -> ConfigResult<NormalizedConfig> {
         let mut errors = Vec::new();
-
-        let base = validate_base(
-            RawBaseFields {
-                schema_version: self.schema_version,
-                game: self.game,
-                rounds: self.rounds,
-                repetitions: self.repetitions,
-                self_play: self.self_play,
-                noise: self.noise,
-                payoff: self.payoff,
-            },
-            &mut errors,
-        );
+        let base = self.raw_base_fields().validate(&mut errors);
 
         let mut strategies = Vec::new();
         if self.strategy.is_empty() {
             errors.push("at least one strategy is required".to_string());
         }
-
         for raw in self.strategy {
             match normalize_strategy(raw, base_dir) {
                 Ok(specs) => strategies.extend(specs),
@@ -156,6 +145,18 @@ impl GamesConfig {
             max_memory_n: 0,
             tm_filter_applied: false,
         })
+    }
+
+    fn raw_base_fields(&self) -> RawBaseFields {
+        RawBaseFields {
+            schema_version: self.schema_version,
+            game: self.game.clone(),
+            rounds: self.rounds,
+            repetitions: self.repetitions,
+            self_play: self.self_play,
+            noise: self.noise,
+            payoff: self.payoff.clone(),
+        }
     }
 }
 
@@ -206,19 +207,16 @@ impl FamilyRunBaseConfig {
 impl FamilyRunParseConfig {
     fn normalize_family_run_base(self) -> ConfigResult<FamilyRunBaseConfig> {
         let mut errors = Vec::new();
-
-        let base = validate_base(
-            RawBaseFields {
-                schema_version: self.schema_version,
-                game: self.game,
-                rounds: self.rounds,
-                repetitions: self.repetitions,
-                self_play: self.self_play,
-                noise: self.noise,
-                payoff: self.payoff,
-            },
-            &mut errors,
-        );
+        let base = RawBaseFields {
+            schema_version: self.schema_version,
+            game: self.game,
+            rounds: self.rounds,
+            repetitions: self.repetitions,
+            self_play: self.self_play,
+            noise: self.noise,
+            payoff: self.payoff,
+        }
+        .validate(&mut errors);
 
         let engine = self.engine.unwrap_or_default();
         validate_engine(&engine, &mut errors);
@@ -298,14 +296,7 @@ fn normalize_strategy(
             errors.push(format!(
                 "strategy '{id}': unknown type '{other}' (expected fsm, ca, tm, or generated)"
             ));
-            StrategySpecKind::Fsm {
-                num_states: 1,
-                start_state: 0,
-                outputs: vec![Action::Cooperate],
-                input_mode: Some(InputMode::OpponentLastAction),
-                transitions: vec![vec![0, 0]],
-                index: None,
-            }
+            fallback_fsm_spec()
         }
     };
 
@@ -313,6 +304,17 @@ fn normalize_strategy(
         Ok(vec![StrategySpec { id, name, kind }])
     } else {
         Err(errors)
+    }
+}
+
+fn fallback_fsm_spec() -> StrategySpecKind {
+    StrategySpecKind::Fsm {
+        num_states: 1,
+        start_state: 0,
+        outputs: vec![Action::Cooperate],
+        input_mode: Some(InputMode::OpponentLastAction),
+        transitions: vec![vec![0, 0]],
+        index: None,
     }
 }
 

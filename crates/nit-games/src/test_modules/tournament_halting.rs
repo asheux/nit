@@ -4,24 +4,22 @@ use super::shared::{
     halting_tm_tournament_toml, ranked_strategy, run_tournament_from_toml,
     tm_family_1x2_reference_toml,
 };
-use crate::config::{AcceleratorMode, EngineMode, GamesConfig};
+use crate::config::{AcceleratorMode, EngineMode, GamesConfig, NormalizedConfig};
 use crate::{
     accelerator_preflight, select_halting_turing_machine_strategies,
     try_select_halting_turing_machine_strategies,
     try_select_halting_turing_machine_strategies_with_diagnostics, TmHaltingFilterBackend,
 };
 
+fn strategy_ids(cfg: &NormalizedConfig) -> Vec<&str> {
+    cfg.strategies.iter().map(|spec| spec.id.as_str()).collect()
+}
+
 #[test]
 fn select_halting_turing_machine_strategies_drops_non_halting_tms() {
     let cfg = GamesConfig::from_toml(&halting_tm_tournament_toml(true)).expect("parse config");
     let filtered = select_halting_turing_machine_strategies(cfg);
-    let ids = filtered
-        .strategies
-        .iter()
-        .map(|spec| spec.id.as_str())
-        .collect::<Vec<_>>();
-
-    assert_eq!(ids, vec!["tm_c", "tm_d"]);
+    assert_eq!(strategy_ids(&filtered), vec!["tm_c", "tm_d"]);
 }
 
 #[test]
@@ -29,16 +27,15 @@ fn tm_tournament_matches_halting_only_roster() {
     let with_bad = run_tournament_from_toml(&halting_tm_tournament_toml(true));
     let expected = run_tournament_from_toml(&halting_tm_tournament_toml(false));
 
-    let actual_ids = with_bad
-        .ranking
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect::<Vec<_>>();
-    let expected_ids = expected
-        .ranking
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect::<Vec<_>>();
+    let ranking_ids = |results: &crate::output::TournamentResults| {
+        results
+            .ranking
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let actual_ids = ranking_ids(&with_bad);
+    let expected_ids = ranking_ids(&expected);
     assert_eq!(actual_ids, expected_ids);
     assert_eq!(actual_ids, vec!["tm_d", "tm_c"]);
 
@@ -66,17 +63,13 @@ fn tm_tournament_matches_halting_only_roster() {
     assert_eq!(actual_pair.draws, expected_pair.draws);
 }
 
+const RESULTS_06_GOOD_TMS: &[&str] = &["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"];
+
 #[test]
 fn select_halting_turing_machine_strategies_matches_results_06_good_tms() {
     let cfg = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
     let filtered = select_halting_turing_machine_strategies(cfg);
-    let ids = filtered
-        .strategies
-        .iter()
-        .map(|spec| spec.id.as_str())
-        .collect::<Vec<_>>();
-
-    assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
+    assert_eq!(strategy_ids(&filtered), RESULTS_06_GOOD_TMS);
 }
 
 #[cfg(target_os = "macos")]
@@ -84,11 +77,7 @@ fn select_halting_turing_machine_strategies_matches_results_06_good_tms() {
 fn metal_halting_turing_machine_selection_matches_cpu_results_06_good_tms() {
     let cfg_cpu = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
     let expected = select_halting_turing_machine_strategies(cfg_cpu);
-    let expected_ids = expected
-        .strategies
-        .iter()
-        .map(|spec| spec.id.as_str())
-        .collect::<Vec<_>>();
+    let expected_ids = strategy_ids(&expected);
 
     let mut cfg_metal =
         GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
@@ -98,13 +87,8 @@ fn metal_halting_turing_machine_selection_matches_cpu_results_06_good_tms() {
     if accelerator_preflight(&cfg_metal).is_err() {
         return;
     }
-    let actual = select_halting_turing_machine_strategies(cfg_metal);
-    let actual_ids = actual
-        .strategies
-        .iter()
-        .map(|spec| spec.id.as_str())
-        .collect::<Vec<_>>();
-
+    let filtered = select_halting_turing_machine_strategies(cfg_metal);
+    let actual_ids = strategy_ids(&filtered);
     assert_eq!(actual_ids, expected_ids);
 }
 

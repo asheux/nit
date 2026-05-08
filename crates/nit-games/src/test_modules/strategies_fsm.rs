@@ -1,5 +1,5 @@
-//! FSM strategy tests: notebook-index decoding, behaviour grouping, and
-//! the canonical-rep tables that downstream code reads back as references.
+//! FSM strategy tests: notebook-index decoding, behaviour grouping, and the
+//! canonical-rep tables that downstream code reads back as references.
 
 use super::shared::{
     notebook_buggy_fsm_to_index_from_rules, notebook_buggy_initial_action,
@@ -15,6 +15,16 @@ use crate::{
     unique_fsm_behavior_representatives_with_mode,
 };
 
+fn make_fsm(label: &str, outputs: Vec<Action>, transitions: Vec<Vec<usize>>) -> FsmStrategy {
+    FsmStrategy::new(
+        label,
+        0,
+        outputs,
+        InputMode::OpponentLastAction,
+        transitions,
+    )
+}
+
 #[test]
 fn fsm_notebook_index_s1_k2_all_d_and_all_c() {
     let (outputs_0, transitions_0) = decode_fsm_notebook_index(0, 1, 2).expect("decode idx 0");
@@ -25,20 +35,8 @@ fn fsm_notebook_index_s1_k2_all_d_and_all_c() {
     assert_eq!(transitions_0, vec![vec![0, 0]]);
     assert_eq!(transitions_1, vec![vec![0, 0]]);
 
-    let mut all_d = FsmStrategy::new(
-        "all_d",
-        0,
-        outputs_0,
-        InputMode::OpponentLastAction,
-        transitions_0,
-    );
-    let mut all_c = FsmStrategy::new(
-        "all_c",
-        0,
-        outputs_1,
-        InputMode::OpponentLastAction,
-        transitions_1,
-    );
+    let mut all_d = make_fsm("all_d", outputs_0, transitions_0);
+    let mut all_c = make_fsm("all_c", outputs_1, transitions_1);
 
     let mut history = History::new(0);
     assert_eq!(all_d.next_action(&history, true), Action::Defect);
@@ -96,9 +94,12 @@ fn user_reported_code_02_top_strategies_include_buggy_start_output_cases() {
         .collect::<Vec<_>>();
 
     assert_eq!(affected.len(), 36);
-    assert!(affected.contains(&3563));
-    assert!(affected.contains(&3234));
-    assert!(affected.contains(&3882));
+    for expected in [3563, 3234, 3882] {
+        assert!(
+            affected.contains(&expected),
+            "missing expected idx {expected}"
+        );
+    }
 }
 
 #[test]
@@ -106,20 +107,8 @@ fn fsm_uses_opponent_last_action_like_tft() {
     let outputs = vec![Action::Cooperate, Action::Defect];
     let transitions = vec![vec![0, 1], vec![0, 1]];
 
-    let mut a_fsm = FsmStrategy::new(
-        "tft_a",
-        0,
-        outputs.clone(),
-        InputMode::OpponentLastAction,
-        transitions.clone(),
-    );
-    let mut b_fsm = FsmStrategy::new(
-        "tft_b",
-        0,
-        outputs,
-        InputMode::OpponentLastAction,
-        transitions,
-    );
+    let mut a_fsm = make_fsm("tft_a", outputs.clone(), transitions.clone());
+    let mut b_fsm = make_fsm("tft_b", outputs, transitions);
 
     let mut history = History::new(0);
     assert_eq!(a_fsm.next_action(&history, true), Action::Cooperate);
