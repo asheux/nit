@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileTreeKind {
     File,
     Dir,
     Loading,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirEntryModel {
     pub name: String,
     pub path: PathBuf,
@@ -16,7 +18,7 @@ pub struct DirEntryModel {
     pub is_symlink: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileTreeRow {
     pub text: String,
     pub path: PathBuf,
@@ -24,7 +26,7 @@ pub struct FileTreeRow {
     pub depth: usize,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FileTreeState {
     pub open: bool,
     pub root: PathBuf,

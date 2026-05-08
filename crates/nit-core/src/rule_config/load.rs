@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 
-use crate::config::{GolRuleConfig, GolRulesConfig, GolUserRule};
+use crate::config::{GolRuleConfig, GolRulesConfig};
 
-use super::toml_io::{get_array, get_bool, get_str, read_toml};
+use super::parse_rules::parse_user_rules;
+use super::toml_io::{get_bool, get_str, read_toml};
 
 #[derive(Clone, Debug)]
 pub struct RuleConfigLoad {
@@ -18,36 +19,12 @@ pub struct RuleConfigLoad {
 }
 
 pub fn load_rule_config(workspace_root: &Path) -> RuleConfigLoad {
-    let mut warnings = Vec::new();
     let global_path = paths::config_dir().map(|p| p.join("config.toml"));
     let workspace_path = workspace_config_path(workspace_root);
 
-    let mut rule = GolRuleConfig::default();
-    let mut rules = GolRulesConfig::default();
-    let mut user_rule_warnings: Vec<String> = Vec::new();
-
-    read_optional_toml(global_path.as_deref(), &mut warnings, "global", |value| {
-        if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
-            rule.default = default;
-        }
-        if let Some(workspace_override) = get_bool(value, &["gol", "rule", "workspace_override"]) {
-            rule.workspace_override = workspace_override;
-        }
-        rules.user = parse_user_rules(value, &mut |w| user_rule_warnings.push(w));
-    });
-    warnings.append(&mut user_rule_warnings);
-
-    let mut workspace_rule = None;
-    read_optional_toml(
-        workspace_path.as_deref(),
-        &mut warnings,
-        "workspace",
-        |value| {
-            if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
-                workspace_rule = Some(default);
-            }
-        },
-    );
+    let mut warnings = Vec::new();
+    let (rule, rules) = load_global(global_path.as_deref(), &mut warnings);
+    let workspace_rule = load_workspace_override(workspace_path.as_deref(), &mut warnings);
 
     RuleConfigLoad {
         rule,
@@ -57,6 +34,33 @@ pub fn load_rule_config(workspace_root: &Path) -> RuleConfigLoad {
         workspace_path,
         warnings,
     }
+}
+
+fn load_global(path: Option<&Path>, warnings: &mut Vec<String>) -> (GolRuleConfig, GolRulesConfig) {
+    let mut rule = GolRuleConfig::default();
+    let mut rules = GolRulesConfig::default();
+    let mut user_rule_warnings: Vec<String> = Vec::new();
+    read_optional_toml(path, warnings, "global", |value| {
+        if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
+            rule.default = default;
+        }
+        if let Some(workspace_override) = get_bool(value, &["gol", "rule", "workspace_override"]) {
+            rule.workspace_override = workspace_override;
+        }
+        rules.user = parse_user_rules(value, &mut |w| user_rule_warnings.push(w));
+    });
+    warnings.append(&mut user_rule_warnings);
+    (rule, rules)
+}
+
+fn load_workspace_override(path: Option<&Path>, warnings: &mut Vec<String>) -> Option<String> {
+    let mut workspace_rule = None;
+    read_optional_toml(path, warnings, "workspace", |value| {
+        if let Some(default) = get_str(value, &["gol", "rule", "default"]) {
+            workspace_rule = Some(default);
+        }
+    });
+    workspace_rule
 }
 
 /// If `path` exists, parse it as TOML and call `on_value`; otherwise no-op.
@@ -79,7 +83,7 @@ fn read_optional_toml<F>(
     }
 }
 
-pub(super) fn workspace_config_path(workspace_root: &Path) -> Option<PathBuf> {
+fn workspace_config_path(workspace_root: &Path) -> Option<PathBuf> {
     let local = workspace_root.join(".nit").join("config.toml");
     if local.exists() {
         return Some(local);
@@ -90,36 +94,4 @@ pub(super) fn workspace_config_path(workspace_root: &Path) -> Option<PathBuf> {
         return Some(base.join("workspaces").join(format!("{hash:016x}.toml")));
     }
     Some(local)
-}
-
-fn parse_user_rules<F>(value: &toml::Value, warn: &mut F) -> Vec<GolUserRule>
-where
-    F: FnMut(String),
-{
-    let Some(arr) = get_array(value, &["gol", "rules", "user"]) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (idx, entry) in arr.iter().enumerate() {
-        let Some(table) = entry.as_table() else {
-            warn(format!("Rule entry {idx} is not a table; skipping"));
-            continue;
-        };
-        let id = table.get("id").and_then(|v| v.as_str());
-        let name = table.get("name").and_then(|v| v.as_str());
-        let rule = table.get("rule").and_then(|v| v.as_str());
-        let description = table.get("description").and_then(|v| v.as_str());
-        match (id, name, rule, description) {
-            (Some(id), Some(name), Some(rule), Some(description)) => out.push(GolUserRule {
-                id: id.to_string(),
-                name: name.to_string(),
-                rule: rule.to_string(),
-                description: description.to_string(),
-            }),
-            _ => warn(format!(
-                "Rule entry {idx} missing required fields (id/name/rule/description); skipping"
-            )),
-        }
-    }
-    out
 }

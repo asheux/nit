@@ -7,17 +7,14 @@ impl Buffer {
     }
 
     pub fn take_full_reparse(&mut self) -> bool {
-        let flag = self.full_reparse;
-        self.full_reparse = false;
-        flag
+        std::mem::replace(&mut self.full_reparse, false)
     }
 
     pub(super) fn record_insert(&mut self, start_char: usize, text: &str) {
         if text.is_empty() {
             return;
         }
-        let start_byte = self.rope.char_to_byte(start_char);
-        let start_point = self.point_from_char_index(start_char);
+        let (start_byte, start_point) = self.byte_and_point(start_char);
         let (new_end_byte, new_end_point) = advance_point(start_byte, start_point, text);
         self.push_edit(BufferEdit {
             start_byte,
@@ -33,10 +30,8 @@ impl Buffer {
         if start_char >= end_char {
             return;
         }
-        let start_byte = self.rope.char_to_byte(start_char);
-        let old_end_byte = self.rope.char_to_byte(end_char);
-        let start_point = self.point_from_char_index(start_char);
-        let old_end_point = self.point_from_char_index(end_char);
+        let (start_byte, start_point) = self.byte_and_point(start_char);
+        let (old_end_byte, old_end_point) = self.byte_and_point(end_char);
         self.push_edit(BufferEdit {
             start_byte,
             old_end_byte,
@@ -47,26 +42,10 @@ impl Buffer {
         });
     }
 
-    fn push_edit(&mut self, edit: BufferEdit) {
-        self.pending_edits.push(edit);
-        self.version = self.version.wrapping_add(1);
-    }
-
     pub(super) fn record_full_reparse(&mut self) {
         self.pending_edits.clear();
         self.full_reparse = true;
-        self.version = self.version.wrapping_add(1);
-    }
-
-    fn point_from_char_index(&self, idx: usize) -> BufferPoint {
-        let line = self.rope.char_to_line(idx);
-        let line_start_char = self.rope.line_to_char(line);
-        let line_start_byte = self.rope.char_to_byte(line_start_char);
-        let byte = self.rope.char_to_byte(idx);
-        BufferPoint {
-            row: line,
-            column: byte.saturating_sub(line_start_byte),
-        }
+        self.bump_version();
     }
 
     pub(super) fn set_cursor_from_char_index(&mut self, idx: usize) {
@@ -75,6 +54,28 @@ impl Buffer {
         self.cursor.line = line;
         self.cursor.col = idx.saturating_sub(line_start);
         self.clamp_col();
+    }
+
+    fn push_edit(&mut self, edit: BufferEdit) {
+        self.pending_edits.push(edit);
+        self.bump_version();
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
+    }
+
+    fn byte_and_point(&self, char_idx: usize) -> (usize, BufferPoint) {
+        let byte = self.rope.char_to_byte(char_idx);
+        let line = self.rope.char_to_line(char_idx);
+        let line_start_byte = self.rope.char_to_byte(self.rope.line_to_char(line));
+        (
+            byte,
+            BufferPoint {
+                row: line,
+                column: byte - line_start_byte,
+            },
+        )
     }
 }
 

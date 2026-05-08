@@ -1,10 +1,16 @@
 use std::path::Path;
 
-use tree_sitter::{Parser, Tree};
+use tree_sitter::{Language, Parser, Tree};
 
 pub(super) fn ts_parse(text: &str, file_path: &Path) -> Option<Tree> {
-    let ext = file_path.extension()?.to_str()?;
-    let language = match ext {
+    let language = language_for_extension(file_path.extension()?.to_str()?)?;
+    let mut parser = Parser::new();
+    parser.set_language(language).ok()?;
+    parser.parse(text, None)
+}
+
+fn language_for_extension(ext: &str) -> Option<Language> {
+    Some(match ext {
         "rs" => tree_sitter_rust::language(),
         "py" => tree_sitter_python::language(),
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::language(),
@@ -15,10 +21,7 @@ pub(super) fn ts_parse(text: &str, file_path: &Path) -> Option<Tree> {
         "toml" => tree_sitter_toml::language(),
         "sh" | "bash" => tree_sitter_bash::language(),
         _ => return None,
-    };
-    let mut parser = Parser::new();
-    parser.set_language(language).ok()?;
-    parser.parse(text, None)
+    })
 }
 
 /// True for a trimmed line that is syntactically a comment or comment

@@ -2,8 +2,51 @@ use super::*;
 use crate::{actions::Action, io};
 use nit_gol::Rule;
 
+fn on_off(flag: bool) -> &'static str {
+    if flag {
+        "ON"
+    } else {
+        "OFF"
+    }
+}
+
 fn focus_order_index(focus: PaneId) -> usize {
     PaneId::ALL.iter().position(|p| *p == focus).unwrap_or(0)
+}
+
+/// Run `f` on the focused buffer (if any), then call `ensure_visible` so
+/// the cursor stays on screen. Returns `true` when a buffer was focused —
+/// callers that need to follow up with state mutations (e.g. switching to
+/// Insert mode) chain on that bool.
+fn with_focused_buffer(state: &mut AppState, f: impl FnOnce(&mut Buffer)) -> bool {
+    if let Some(buf) = state.focused_buffer_mut() {
+        f(buf);
+        buf.ensure_visible();
+        true
+    } else {
+        false
+    }
+}
+
+/// Switch the global mode and update the focused buffer's selection /
+/// insert state to match. Centralises the per-mode buffer side-effects
+/// shared by `SwitchMode`, `ToggleMode`, `EnterVisual`, and `ExitVisual`.
+fn switch_mode_with_buffer(state: &mut AppState, mode: Mode) {
+    state.mode = mode;
+    if let Some(buf) = state.focused_buffer_mut() {
+        match mode {
+            Mode::Normal => {
+                buf.exit_insert_mode();
+                buf.clear_selection();
+            }
+            Mode::Visual => {
+                buf.set_selection_anchor();
+            }
+            _ => {
+                buf.clear_selection();
+            }
+        }
+    }
 }
 pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     state.metrics.last_action = Some(action.clone());
@@ -65,59 +108,30 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::FocusPane(p) => {
             state.focus = p;
         }
-        Action::SwitchMode(m) => {
-            state.mode = m;
-            if let Some(buf) = state.focused_buffer_mut() {
-                if m == Mode::Normal {
-                    buf.exit_insert_mode();
-                    buf.clear_selection();
-                } else if m == Mode::Visual {
-                    buf.set_selection_anchor();
-                } else {
-                    buf.clear_selection();
-                }
-            }
-        }
+        Action::SwitchMode(m) => switch_mode_with_buffer(state, m),
         Action::ToggleMode => {
-            state.mode = state.mode.toggle();
-            let mode = state.mode;
+            // ToggleMode is special: even if the new mode isn't Normal,
+            // we still clear the selection (the legacy semantic).
+            let next = state.mode.toggle();
+            state.mode = next;
             if let Some(buf) = state.focused_buffer_mut() {
-                if mode == Mode::Normal {
+                if next == Mode::Normal {
                     buf.exit_insert_mode();
                 }
                 buf.clear_selection();
             }
         }
         Action::InsertChar(c) => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.insert_char(c);
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.insert_char(c));
         }
         Action::InsertNewline => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.insert_newline();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.insert_newline());
         }
         Action::InsertTab => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.insert_tab();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.insert_tab());
         }
-        Action::EnterVisual => {
-            state.mode = Mode::Visual;
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.set_selection_anchor();
-            }
-        }
-        Action::ExitVisual => {
-            state.mode = Mode::Normal;
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.clear_selection();
-            }
-        }
+        Action::EnterVisual => switch_mode_with_buffer(state, Mode::Visual),
+        Action::ExitVisual => switch_mode_with_buffer(state, Mode::Normal),
         Action::YankSelection => {
             let yank = if let Some(buf) = state.focused_buffer_mut() {
                 let yank = buf.yank_selection();
@@ -186,119 +200,74 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::Append => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.append();
-                buf.ensure_visible();
+            if with_focused_buffer(state, |buf| buf.append()) {
                 state.mode = Mode::Insert;
             }
         }
         Action::Backspace => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.backspace();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.backspace());
         }
         Action::Delete => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.delete_forward();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.delete_forward());
         }
         Action::DeleteLine => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.delete_line();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.delete_line());
         }
         Action::MoveUp => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_up();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_up());
         }
         Action::MoveDown => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_down();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_down());
         }
         Action::MoveLeft => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_left();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_left());
         }
         Action::MoveRight => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_right();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_right());
         }
         Action::PageUp => {
-            if let Some(buf) = state.focused_buffer_mut() {
+            with_focused_buffer(state, |buf| {
                 let height = buf.viewport.height.max(1);
                 buf.page_up(height);
-                buf.ensure_visible();
-            }
+            });
         }
         Action::PageDown => {
-            if let Some(buf) = state.focused_buffer_mut() {
+            with_focused_buffer(state, |buf| {
                 let height = buf.viewport.height.max(1);
                 buf.page_down(height);
-                buf.ensure_visible();
-            }
+            });
         }
         Action::Home => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_home();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_home());
         }
         Action::End => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_end();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_end());
         }
         Action::MoveWordEnd => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_word_end();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_word_end());
         }
         Action::MoveWordBack => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_word_back();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_word_back());
         }
         Action::GoToTop => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.go_to_top();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.go_to_top());
         }
         Action::GoToBottom => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.go_to_bottom();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.go_to_bottom());
         }
         Action::OpenLineAbove => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.open_line_above();
-                buf.ensure_visible();
+            if with_focused_buffer(state, |buf| buf.open_line_above()) {
                 state.mode = Mode::Insert;
             }
         }
         Action::OpenLineBelow => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.open_line_below();
-                buf.ensure_visible();
+            if with_focused_buffer(state, |buf| buf.open_line_below()) {
                 state.mode = Mode::Insert;
             }
         }
         Action::Undo => {
+            // Skip ensure_visible when undo() returns false — there's
+            // nothing to make visible if the stack was empty.
             if let Some(buf) = state.focused_buffer_mut() {
                 if buf.undo() {
                     buf.ensure_visible();
@@ -381,11 +350,10 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerToggleSearch => {
             state.visualizer.seed_search_active = !state.visualizer.seed_search_active;
-            state.status = Some(if state.visualizer.seed_search_active {
-                "Seed search ON".into()
-            } else {
-                "Seed search OFF".into()
-            });
+            state.status = Some(format!(
+                "Seed search {}",
+                on_off(state.visualizer.seed_search_active)
+            ));
         }
         Action::VisualizerToggleWrap => {
             state.visualizer.wrap = !state.visualizer.wrap;
@@ -454,52 +422,24 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.age_shading = !state.visualizer.age_shading;
             state.status = Some(format!(
                 "Age shading: {}",
-                if state.visualizer.age_shading {
-                    "ON"
-                } else {
-                    "OFF"
-                }
+                on_off(state.visualizer.age_shading)
             ));
         }
         Action::VisualizerToggleTrails => {
             state.visualizer.trails = !state.visualizer.trails;
-            state.status = Some(format!(
-                "Trails: {}",
-                if state.visualizer.trails { "ON" } else { "OFF" }
-            ));
+            state.status = Some(format!("Trails: {}", on_off(state.visualizer.trails)));
         }
         Action::VisualizerToggleBBox => {
             state.visualizer.overlay_bbox = !state.visualizer.overlay_bbox;
-            state.status = Some(format!(
-                "BBox: {}",
-                if state.visualizer.overlay_bbox {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-            ));
+            state.status = Some(format!("BBox: {}", on_off(state.visualizer.overlay_bbox)));
         }
         Action::VisualizerToggleHeat => {
             state.visualizer.overlay_heat = !state.visualizer.overlay_heat;
-            state.status = Some(format!(
-                "Heat: {}",
-                if state.visualizer.overlay_heat {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-            ));
+            state.status = Some(format!("Heat: {}", on_off(state.visualizer.overlay_heat)));
         }
         Action::VisualizerToggleScanlines => {
             state.visualizer.scanlines = !state.visualizer.scanlines;
-            state.status = Some(format!(
-                "Scanlines: {}",
-                if state.visualizer.scanlines {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-            ));
+            state.status = Some(format!("Scanlines: {}", on_off(state.visualizer.scanlines)));
         }
         Action::GateMonitorToggleSubView => {
             state.gate_monitor_sub_view = match state.gate_monitor_sub_view {
@@ -576,11 +516,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.inspector_enabled = !state.visualizer.inspector_enabled;
             state.status = Some(format!(
                 "Inspector: {}",
-                if state.visualizer.inspector_enabled {
-                    "ON"
-                } else {
-                    "OFF"
-                }
+                on_off(state.visualizer.inspector_enabled)
             ));
         }
         Action::VisualizerInspectJump(idx) => {
@@ -704,11 +640,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::ToggleDebug => {
             state.debug = !state.debug;
-            state.status = Some(if state.debug {
-                "Debug ON".into()
-            } else {
-                "Debug OFF".into()
-            });
+            state.status = Some(format!("Debug {}", on_off(state.debug)));
         }
         Action::ToggleFileTree => {
             state.file_tree.open = !state.file_tree.open;
@@ -775,133 +707,75 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::MoveWordForward => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_word_forward();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_word_forward());
         }
         Action::MoveBigWordForward => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_big_word_forward();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_big_word_forward());
         }
         Action::MoveBigWordBack => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_big_word_back();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_big_word_back());
         }
         Action::MoveBigWordEnd => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_big_word_end();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_big_word_end());
         }
         Action::MoveFirstNonBlank => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_first_non_blank();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_first_non_blank());
         }
         Action::MoveLastNonBlank => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_last_non_blank();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_last_non_blank());
         }
         Action::MoveParagraphUp => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_paragraph_up();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_paragraph_up());
         }
         Action::MoveParagraphDown => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_paragraph_down();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_paragraph_down());
         }
         Action::MoveViewportTop => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_viewport_top();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_viewport_top());
         }
         Action::MoveViewportMiddle => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_viewport_middle();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_viewport_middle());
         }
         Action::MoveViewportBottom => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_viewport_bottom();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.move_viewport_bottom());
         }
         Action::DeleteToEnd => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.delete_to_end();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.delete_to_end());
         }
         Action::ChangeToEnd => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.delete_to_end();
-                buf.ensure_visible();
-            }
+            // ChangeToEnd swaps to Insert mode unconditionally, mirroring
+            // vim's `C` semantics (no-op buffer + still-in-Insert is the
+            // documented behaviour when there's no focused buffer).
+            with_focused_buffer(state, |buf| buf.delete_to_end());
             state.mode = Mode::Insert;
         }
         Action::SubstituteChar => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.delete_forward();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.delete_forward());
             state.mode = Mode::Insert;
         }
         Action::SubstituteLine => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.substitute_line();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.substitute_line());
             state.mode = Mode::Insert;
         }
         Action::JoinLines => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.join_lines();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.join_lines());
         }
         Action::ToggleCaseChar => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.toggle_case_char();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.toggle_case_char());
         }
         Action::ReplaceChar(c) => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.replace_char(c);
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.replace_char(c));
         }
         Action::FindChar(ch, forward, till) => {
-            if let Some(buf) = state.focused_buffer_mut() {
+            with_focused_buffer(state, |buf| {
                 buf.find_char_in_line(ch, forward, till);
-                buf.ensure_visible();
-            }
+            });
         }
         Action::ScrollHalfPageDown => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.scroll_half_page_down();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.scroll_half_page_down());
         }
         Action::ScrollHalfPageUp => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                buf.scroll_half_page_up();
-                buf.ensure_visible();
-            }
+            with_focused_buffer(state, |buf| buf.scroll_half_page_up());
         }
         Action::CenterViewportOnCursor => {
             if let Some(buf) = state.focused_buffer_mut() {

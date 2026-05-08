@@ -1,3 +1,11 @@
+//! Lab namespace registry — `LabId` discriminates between the GoL and
+//! Games subsystems. The `label`/`namespace`/`default_config` triples
+//! land in user-facing UI and on-disk paths, so the strings here are the
+//! contract: `namespace` is also the directory name under
+//! `<workspace>/.nit/<namespace>/`.
+
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,10 +49,12 @@ impl LabId {
     }
 }
 
-impl std::fmt::Display for LabId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LabId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.namespace())
     }
 }
 
+/// Backwards-compatible alias: the `AppState::app_kind` field is named
+/// after this type's earlier role as the app-wide discriminator.
 pub type AppKind = LabId;

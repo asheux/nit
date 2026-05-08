@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
 
+use crate::swarm::is_provider_quota_exhausted_in_result;
+
 #[derive(Clone, Debug)]
 pub struct ClaudeRunnerConfig {
     pub max_parallel_turns: usize,
@@ -911,6 +913,33 @@ fn run_turn(
     let token_count = extract_token_count_from_jsonl(&stdout);
     let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let endpoint = claude_endpoint_label(&model, resume_session_id.as_deref());
+
+    // Claude CLI exits 0 even when the account hit its quota — the limit
+    // banner ("You've hit your limit · resets ...") gets glued onto the
+    // result text instead of surfacing as a subprocess error. Treating that
+    // as a successful turn poisoned the swarm: it triggered genome retries
+    // against a dead quota, and silently completed `Synthesizing` with the
+    // banner as the report. Detect the banner and route to TurnFailed so
+    // the existing rate-limit-aware handlers fire.
+    if is_provider_quota_exhausted_in_result(&message) {
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Error,
+                endpoint,
+                latency_ms: Some(latency_ms),
+                last_error: Some(message.clone()),
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: session_id,
+            token_count,
+            message,
+        });
+        return;
+    }
+
     let _ = event_tx.send(AgentBusEvent::McpStatus {
         status: McpStatus {
             state: McpConnectionState::Connected,

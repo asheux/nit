@@ -1,6 +1,6 @@
-//! Re-prompt planners whose `observer:sparse_plan` HelpNeeded carries an
-//! unresolved-deps sample, surfacing that sample in the prompt so the
-//! planner can self-correct missing task ids.
+//! Re-prompt planners flagged by `observer:sparse_plan`. The observer emits
+//! HelpNeeded with a `missing_deps_sample` payload; we surface that sample in
+//! the prompt so the planner can self-correct missing task ids.
 
 use super::{Arbiter, InterventionKind, InterventionProposal, InterventionTarget};
 use crate::state::AppState;
@@ -14,25 +14,33 @@ pub const ARBITER: Arbiter = Arbiter {
 const WINDOW_GENS: u64 = 10;
 
 fn observe(state: &AppState) -> Vec<InterventionProposal> {
-    super::scan_help_needed_signals(
-        state,
-        "observer:sparse_plan",
-        WINDOW_GENS,
-        build_sparse_plan_proposal,
-    )
+    super::scan_help_needed_signals(state, "observer:sparse_plan", WINDOW_GENS, build_proposal)
 }
 
-fn build_sparse_plan_proposal(signal: &Signal, agent_id: &str) -> InterventionProposal {
-    let missing_deps = missing_deps_csv(signal);
+fn build_proposal(signal: &Signal, agent_id: &str) -> InterventionProposal {
+    let missing_deps = signal
+        .payload
+        .get("missing_deps_sample")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
     let unresolved_count = signal
         .payload
         .get("unresolved_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let prompt = format!(
+        "ARBITER: your recent plans repeatedly reference task IDs that don't exist in the DAG (missing: {missing_deps}). \
+Re-examine the task ids in your output. Every `deps` entry must match an id from your tasks list. \
+If you intended a role phase that the template doesn't support (e.g. judge in parallel), omit it and wire integrators directly to the proposer outputs."
+    );
     InterventionProposal {
-        kind: InterventionKind::RedispatchWithEscalatedPrompt {
-            prompt: format_sparse_plan_prompt(&missing_deps),
-        },
+        kind: InterventionKind::RedispatchWithEscalatedPrompt { prompt },
         target: InterventionTarget::Agent {
             agent_id: agent_id.to_string(),
         },
@@ -44,26 +52,4 @@ fn build_sparse_plan_proposal(signal: &Signal, agent_id: &str) -> InterventionPr
             "missing_deps_sample": signal.payload.get("missing_deps_sample"),
         }),
     }
-}
-
-fn missing_deps_csv(signal: &Signal) -> String {
-    signal
-        .payload
-        .get("missing_deps_sample")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
-}
-
-fn format_sparse_plan_prompt(missing_deps: &str) -> String {
-    format!(
-        "ARBITER: your recent plans repeatedly reference task IDs that don't exist in the DAG (missing: {missing_deps}). \
-Re-examine the task ids in your output. Every `deps` entry must match an id from your tasks list. \
-If you intended a role phase that the template doesn't support (e.g. judge in parallel), omit it and wire integrators directly to the proposer outputs."
-    )
 }

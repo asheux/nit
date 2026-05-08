@@ -42,6 +42,8 @@ pub struct FuzzySearchState {
     pub indexing: bool,
     pub searching: bool,
     pub status_msg: String,
+    /// Bumped on every open/close so async runners can detect a stale
+    /// invocation and discard their pending results.
     #[serde(skip)]
     pub generation: u64,
     #[serde(skip)]
@@ -52,27 +54,26 @@ pub struct FuzzySearchState {
 
 impl FuzzySearchState {
     pub fn open(&mut self, mode: SearchMode, root: PathBuf) {
+        self.reset_transient();
         self.open = true;
         self.mode = mode;
         self.root = root;
         self.query.clear();
-        self.selected = 0;
-        self.scroll_offset = 0;
         self.status_msg = "Indexing…".into();
-        self.file_results.clear();
-        self.match_results.clear();
         self.indexing = true;
-        self.searching = false;
-        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn close(&mut self) {
+        self.reset_transient();
         self.open = false;
+        self.status_msg.clear();
+    }
+
+    fn reset_transient(&mut self) {
         self.selected = 0;
         self.scroll_offset = 0;
         self.indexing = false;
         self.searching = false;
-        self.status_msg.clear();
         self.file_results.clear();
         self.match_results.clear();
         self.generation = self.generation.wrapping_add(1);

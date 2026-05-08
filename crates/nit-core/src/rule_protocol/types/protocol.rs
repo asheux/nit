@@ -26,10 +26,6 @@ impl RuleProtocol {
         })
     }
 
-    pub fn current_rule(&self) -> &RuleRef {
-        &self.phases[self.phase_idx].rule
-    }
-
     pub fn current_phase(&self) -> &RulePhase {
         &self.phases[self.phase_idx]
     }
@@ -85,10 +81,6 @@ impl RuleProtocol {
     pub fn hash(&self) -> u64 {
         stable_hash_bytes(self.canonical_string().as_bytes())
     }
-
-    pub fn cycle_steps(&self) -> u32 {
-        self.phases.iter().map(|phase| phase.steps).sum()
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -101,7 +93,7 @@ impl RuleMode {
     pub fn current_rule(&self) -> &RuleRef {
         match self {
             RuleMode::Fixed(rule) => rule,
-            RuleMode::Protocol(protocol) => protocol.current_rule(),
+            RuleMode::Protocol(protocol) => &protocol.phases[protocol.phase_idx].rule,
         }
     }
 
@@ -121,20 +113,6 @@ impl RuleMode {
         match self {
             RuleMode::Fixed(rule) => rule.selector(),
             RuleMode::Protocol(protocol) => protocol.canonical_string(),
-        }
-    }
-
-    pub fn protocol(&self) -> Option<&RuleProtocol> {
-        match self {
-            RuleMode::Protocol(protocol) => Some(protocol),
-            _ => None,
-        }
-    }
-
-    pub fn protocol_mut(&mut self) -> Option<&mut RuleProtocol> {
-        match self {
-            RuleMode::Protocol(protocol) => Some(protocol),
-            _ => None,
         }
     }
 }

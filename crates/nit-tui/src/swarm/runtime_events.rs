@@ -104,6 +104,9 @@ impl SwarmRuntime {
             SwarmStage::Synthesizing if agent_id == run.planner_agent_id => {
                 handle_completed_synthesizing(state, outcome, &mut run, agent_id, message)
             }
+            SwarmStage::Synthesizing if run.verifier_agent_id.as_deref() == Some(agent_id) => {
+                handle_completed_genome_review(state, &mut run, agent_id, message)
+            }
             _ => RunFate::Active,
         };
         self.commit_fate(mid, run, fate);
@@ -132,6 +135,9 @@ impl SwarmRuntime {
             }
             SwarmStage::Synthesizing if agent_id == run.planner_agent_id => {
                 handle_failed_synthesizing(state, outcome, &mut run, agent_id, message)
+            }
+            SwarmStage::Synthesizing if run.verifier_agent_id.as_deref() == Some(agent_id) => {
+                handle_failed_genome_review(state, &mut run, agent_id, message)
             }
             _ => RunFate::Active,
         };
@@ -912,6 +918,46 @@ fn handle_failed_synthesizing(
     update_mission_final(state, &run.mission_id, "ERROR");
     cleanup_swarm_clones_for_mission(state, &run.mission_id);
     RunFate::Completed
+}
+
+// The genome reviewer runs at Synthesizing alongside the planner's synth
+// dispatch (see `maybe_spawn_genome_review` + `poll_genome_reviews`). Its
+// output is advisory telemetry — the planner's synth is what actually
+// completes the mission. Without explicit terminal handling, the reviewer's
+// TurnCompleted/TurnFailed fell through to `_ => RunFate::Active` and was
+// silently dropped, so a quota-exhausted reviewer left no breadcrumb in the
+// mission console. Log the result and keep the run active; never fail the
+// mission on reviewer trouble.
+fn handle_completed_genome_review(
+    state: &mut AppState,
+    run: &mut SwarmRun,
+    agent_id: &str,
+    message: &str,
+) -> RunFate {
+    tag_last_agent_message_kind(state, agent_id, &run.mission_id, "genome-review");
+    let preview: String = message.chars().take(180).collect();
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!("Genome review ({agent_id}): {preview}"),
+    );
+    RunFate::Active
+}
+
+fn handle_failed_genome_review(
+    state: &mut AppState,
+    run: &mut SwarmRun,
+    agent_id: &str,
+    message: &str,
+) -> RunFate {
+    tag_last_agent_message_kind(state, agent_id, &run.mission_id, "genome-review");
+    let preview: String = message.chars().take(180).collect();
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!("Genome review failed ({agent_id}): {preview} — synthesis continues."),
+    );
+    RunFate::Active
 }
 
 // After every task is terminal: open verify (with optional async genome

@@ -1,6 +1,9 @@
 use super::*;
 use crate::seed::SeedEncoderId;
 
+mod hilbert;
+use hilbert::{hilbert_index_to_xy, hilbert_order_for};
+
 #[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum VisualizerMode {
     SimOnly,
@@ -18,13 +21,8 @@ impl GolRenderMode {
     pub fn next(self, braille_enabled: bool) -> Self {
         match self {
             GolRenderMode::Solid => GolRenderMode::HalfBlock,
-            GolRenderMode::HalfBlock => {
-                if braille_enabled {
-                    GolRenderMode::Braille
-                } else {
-                    GolRenderMode::Solid
-                }
-            }
+            GolRenderMode::HalfBlock if braille_enabled => GolRenderMode::Braille,
+            GolRenderMode::HalfBlock => GolRenderMode::Solid,
             GolRenderMode::Braille => GolRenderMode::Solid,
         }
     }
@@ -37,6 +35,10 @@ impl GolRenderMode {
         }
     }
 
+    /// Resolve to a render mode the terminal can actually display: callers
+    /// may have persisted `Braille` in settings, but if the current launch
+    /// disables braille (no font, low-color terminal) we degrade silently
+    /// to `HalfBlock` instead of rendering empty cells.
     pub fn effective(self, braille_enabled: bool) -> Self {
         match self {
             GolRenderMode::Braille if !braille_enabled => GolRenderMode::HalfBlock,
@@ -144,14 +146,18 @@ pub struct VisualizerState {
     pub pending_rule_change: bool,
 }
 
+/// Five overlay states the operator cycles through. Tuple layout matches
+/// the field order in [`VisualizerState`]:
+/// `(seed_show_grid, seed_show_bbox, seed_show_halo, seed_show_components, seed_show_inset)`.
+const SEED_OVERLAY_PRESETS: &[(bool, bool, bool, bool, bool)] = &[
+    (false, false, false, false, false),
+    (false, false, true, false, false),
+    (false, false, true, true, false),
+    (false, true, true, true, false),
+    (false, true, true, true, true),
+];
+
 pub(super) fn cycle_seed_overlays(state: &mut VisualizerState) {
-    const PRESETS: &[(bool, bool, bool, bool, bool)] = &[
-        (false, false, false, false, false),
-        (false, false, true, false, false),
-        (false, false, true, true, false),
-        (false, true, true, true, false),
-        (false, true, true, true, true),
-    ];
     let current = (
         state.seed_show_grid,
         state.seed_show_bbox,
@@ -159,11 +165,11 @@ pub(super) fn cycle_seed_overlays(state: &mut VisualizerState) {
         state.seed_show_components,
         state.seed_show_inset,
     );
-    let idx = PRESETS
+    let idx = SEED_OVERLAY_PRESETS
         .iter()
         .position(|preset| *preset == current)
         .unwrap_or(0);
-    let next = PRESETS[(idx + 1) % PRESETS.len()];
+    let next = SEED_OVERLAY_PRESETS[(idx + 1) % SEED_OVERLAY_PRESETS.len()];
     state.seed_show_grid = next.0;
     state.seed_show_bbox = next.1;
     state.seed_show_halo = next.2;
@@ -220,10 +226,8 @@ pub(super) fn move_inspector(state: &mut AppState, dx: isize, dy: isize) {
     }
     let encoder = state.visualizer.seed_encoder;
     let (x, y) = inspector_xy_fields(&mut state.visualizer, encoder);
-    let nx = clamp_signed(*x as isize + dx, 0, (w - 1) as isize) as usize;
-    let ny = clamp_signed(*y as isize + dy, 0, (h - 1) as isize) as usize;
-    *x = nx;
-    *y = ny;
+    *x = clamp_signed(*x as isize + dx, 0, (w - 1) as isize) as usize;
+    *y = clamp_signed(*y as isize + dy, 0, (h - 1) as isize) as usize;
 }
 
 pub(super) fn inspector_dims(state: &AppState) -> (usize, usize) {
@@ -244,64 +248,17 @@ pub(super) fn jump_inspector_to_index(state: &mut AppState, idx: u64) {
     let (w, h) = inspector_dims(state);
     let total = w.saturating_mul(h).max(1) as u64;
     let clamped = idx.min(total.saturating_sub(1));
-    match state.visualizer.seed_encoder {
+    let (x, y) = match state.visualizer.seed_encoder {
         SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             let order = hilbert_order_for(w);
-            let (x, y) = hilbert_index_to_xy(order, clamped as u32);
-            set_inspector_pos(state, x as usize, y as usize);
+            let (hx, hy) = hilbert_index_to_xy(order, clamped as u32);
+            (hx as usize, hy as usize)
         }
-        _ => {
-            let x = (clamped as usize) % w;
-            let y = (clamped as usize) / w;
-            set_inspector_pos(state, x, y);
-        }
-    }
-}
-
-fn hilbert_order_for(size: usize) -> u32 {
-    let mut order = 0u32;
-    let mut n = 1usize;
-    while n < size {
-        n <<= 1;
-        order += 1;
-    }
-    order
-}
-
-fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {
-    let mut x = 0u32;
-    let mut y = 0u32;
-    let mut t = index;
-    let mut s = 1u32;
-    let n = 1u32 << order;
-    while s < n {
-        let rx = (t / 2) & 1;
-        let ry = (t ^ rx) & 1;
-        let (nx, ny) = rot(s, x, y, rx, ry);
-        x = nx + s * rx;
-        y = ny + s * ry;
-        t /= 4;
-        s *= 2;
-    }
-    (x, y)
-}
-
-fn rot(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
-    if ry == 0 {
-        if rx == 1 {
-            return (n - 1 - x, n - 1 - y);
-        }
-        return (y, x);
-    }
-    (x, y)
+        _ => ((clamped as usize) % w, (clamped as usize) / w),
+    };
+    set_inspector_pos(state, x, y);
 }
 
 fn clamp_signed(value: isize, min: isize, max: isize) -> isize {
-    if value < min {
-        min
-    } else if value > max {
-        max
-    } else {
-        value
-    }
+    value.clamp(min, max)
 }

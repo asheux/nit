@@ -16,13 +16,15 @@ pub const ARBITER: Arbiter = Arbiter {
 const CONFLICT_WINDOW_GENS: u64 = 10;
 const CONFLICT_THRESHOLD: usize = 3;
 
+type PairCounts = HashMap<(String, String), (usize, Vec<String>)>;
+
 fn observe(state: &AppState) -> Vec<InterventionProposal> {
     let sub = &state.substrate;
     let window_start = sub
         .current_generation()
         .saturating_sub(CONFLICT_WINDOW_GENS);
 
-    let mut pair_counts: HashMap<(String, String), (usize, Vec<String>)> = HashMap::new();
+    let mut counts: PairCounts = HashMap::new();
     for s in sub.signals.values() {
         if s.kind != SignalKind::ClaimViolation || s.posted_at_gen < window_start {
             continue;
@@ -30,15 +32,14 @@ fn observe(state: &AppState) -> Vec<InterventionProposal> {
         let Some((violator, holder, path)) = extract_violation(s) else {
             continue;
         };
-        let pair = normalize_pair(violator, holder);
-        let entry = pair_counts.entry(pair).or_insert((0, Vec::new()));
+        let entry = counts.entry(normalize_pair(violator, holder)).or_default();
         entry.0 += 1;
         if !path.is_empty() && !entry.1.contains(&path) {
             entry.1.push(path);
         }
     }
 
-    pair_counts
+    counts
         .into_iter()
         .filter(|(_, (count, _))| *count >= CONFLICT_THRESHOLD)
         .map(|((a, b), (count, paths))| build_proposal(a, b, count, paths))
@@ -73,31 +74,27 @@ fn normalize_pair(a: String, b: String) -> (String, String) {
 }
 
 fn build_proposal(a: String, b: String, count: usize, paths: Vec<String>) -> InterventionProposal {
-    // pair is normalized (a < b) — the larger element receives the yield prompt.
-    let target_agent = b.clone();
-    let other = a.clone();
+    // Pair is normalized so a < b. We aim the prompt at the larger element so
+    // the same agent yields across re-runs (otherwise both could yield and stall).
+    let prompt = format_prompt(&a, &paths, count);
+    let rationale =
+        format!("persistent-conflict: {a} and {b} ({count} violations in {CONFLICT_WINDOW_GENS}g)");
+    let payload = serde_json::json!({
+        "violator_pair": [&a, &b],
+        "chosen_recipient": &b,
+        "violation_count": count,
+        "window_gens": CONFLICT_WINDOW_GENS,
+        "contested_paths": paths,
+    });
     InterventionProposal {
-        kind: InterventionKind::RedispatchWithEscalatedPrompt {
-            prompt: format_persistent_conflict_prompt(&other, &paths, count),
-        },
-        target: InterventionTarget::AgentPair {
-            a: a.clone(),
-            b: b.clone(),
-        },
-        rationale: format!(
-            "persistent-conflict: {a} and {b} ({count} violations in {CONFLICT_WINDOW_GENS}g)"
-        ),
-        payload: serde_json::json!({
-            "violator_pair": [a, b],
-            "chosen_recipient": target_agent,
-            "violation_count": count,
-            "window_gens": CONFLICT_WINDOW_GENS,
-            "contested_paths": paths,
-        }),
+        kind: InterventionKind::RedispatchWithEscalatedPrompt { prompt },
+        target: InterventionTarget::AgentPair { a, b },
+        rationale,
+        payload,
     }
 }
 
-fn format_persistent_conflict_prompt(other: &str, paths: &[String], count: usize) -> String {
+fn format_prompt(other: &str, paths: &[String], count: usize) -> String {
     let paths_list = if paths.is_empty() {
         "shared resources".to_string()
     } else {

@@ -571,7 +571,7 @@ fn role_response_format_lines(role: &str) -> Option<&'static [&'static str]> {
 /// "You've hit your limit · resets ...". Codex uses similar wording. When
 /// the quota is exhausted, retrying in-window just burns the task retry
 /// budget on calls that will fail immediately — so the swarm should stop.
-pub(super) fn is_provider_rate_limit_failure(message: &str) -> bool {
+pub(crate) fn is_provider_rate_limit_failure(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("api_error_status\":429")
         || lower.contains("api_error_status: 429")
@@ -581,6 +581,22 @@ pub(super) fn is_provider_rate_limit_failure(message: &str) -> bool {
         || lower.contains("rate limit")
         || lower.contains("rate-limited")
         || lower.contains("rate_limit")
+        || lower.contains("429 too many requests")
+}
+
+/// Narrower variant for matching CLI-emitted quota-exhaustion banners that
+/// appear in **successful** turn output (i.e. the subprocess exited 0 and
+/// the result text contains the limit notice instead of real work). The
+/// looser substrings used by `is_provider_rate_limit_failure` ("rate limit",
+/// "rate_limit") would false-positive on assistant prose discussing rate
+/// limiting as a topic — those are safe inside a known-failure message but
+/// not against arbitrary completion text. Match only the distinctive
+/// CLI-emitted phrases.
+pub(crate) fn is_provider_quota_exhausted_in_result(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    (lower.contains("you've hit your limit") && lower.contains("resets"))
+        || lower.contains("api_error_status\":429")
+        || lower.contains("api_error_status: 429")
         || lower.contains("429 too many requests")
 }
 

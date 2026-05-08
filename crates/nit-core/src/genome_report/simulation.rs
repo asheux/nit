@@ -13,16 +13,48 @@ pub(super) const MAX_GENERATIONS: u32 = 3000;
 /// encoders — the lift can bump you up roughly one tier at most.
 pub(super) const SOFT_BOTTLENECK_MAX_LIFT: u32 = 200;
 
-const GRID_MIN: usize = 32;
-const GRID_MID: usize = 48;
-const GRID_MAX: usize = 64;
+/// Adaptive grid sizing rule: small files get a small grid so structure isn't
+/// drowned in empty cells; large files get more room so distinct components
+/// don't merge. Thresholds are tuned against the median crate file size
+/// (~3 KB) and the long tail (>10 KB).
+struct GridConfig {
+    grid_min: usize,
+    grid_mid: usize,
+    grid_max: usize,
+    small_file_bytes: usize,
+    medium_file_bytes: usize,
+}
 
-const SMALL_FILE_BYTES: usize = 2048;
-const MEDIUM_FILE_BYTES: usize = 10240;
+impl GridConfig {
+    const fn default() -> Self {
+        Self {
+            grid_min: 32,
+            grid_mid: 48,
+            grid_max: 64,
+            small_file_bytes: 2048,
+            medium_file_bytes: 10240,
+        }
+    }
 
-const EARLY_POP_FRACTION: u32 = 10;
-const LATE_POP_NUM: u32 = 4;
-const LATE_POP_DEN: u32 = 5;
+    const fn size_for(&self, file_bytes: usize) -> usize {
+        if file_bytes <= self.small_file_bytes {
+            return self.grid_min;
+        }
+        if file_bytes <= self.medium_file_bytes {
+            return self.grid_mid;
+        }
+        self.grid_max
+    }
+}
+
+const GRID: GridConfig = GridConfig::default();
+
+/// Generation-fraction sample points for population growth classification.
+/// Sampling at fractions instead of absolute generation indices lets the same
+/// rule work for both fast-test (max=500) and production (max=3000) limits.
+const EARLY_SAMPLE_DENOM: u32 = 10;
+const LATE_SAMPLE_NUM: u32 = 4;
+const LATE_SAMPLE_DEN: u32 = 5;
 
 const EXPANDING_RATIO: f32 = 1.15;
 const COLLAPSING_RATIO: f32 = 0.85;
@@ -46,13 +78,13 @@ pub(super) const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
 ];
 
 pub(super) fn adaptive_grid_size(file_bytes: usize) -> usize {
-    if file_bytes <= SMALL_FILE_BYTES {
-        GRID_MIN
-    } else if file_bytes <= MEDIUM_FILE_BYTES {
-        GRID_MID
-    } else {
-        GRID_MAX
-    }
+    GRID.size_for(file_bytes)
+}
+
+enum StepOutcome {
+    Continue,
+    Extinct,
+    Cycled(u32),
 }
 
 pub(super) fn simulate_gol(
@@ -63,46 +95,45 @@ pub(super) fn simulate_gol(
     rule: Rule,
     max_generations: u32,
 ) -> EncoderScore {
-    let mut grid = initial.clone();
-    let mut seen: HashMap<u64, u32> = HashMap::new();
-    let mut peak_population: u32 = grid.alive_count() as u32;
-    let hash0 = grid.hash();
-    seen.insert(hash0, 0);
+    let mut canvas = initial.clone();
+    let mut history: HashMap<u64, u32> = HashMap::new();
+    let mut peak_population = canvas.alive_count() as u32;
+    history.insert(canvas.hash(), 0);
 
-    let mut generations_survived: u32 = 0;
+    let mut early_pop = 0u32;
+    let mut late_pop = 0u32;
+    let mut generations_survived = max_generations;
     let mut cycle_period: Option<u32> = None;
-    let mut early_pop: u32 = 0;
-    let mut late_pop: u32 = 0;
-    let mut died = false;
+    let mut extinct = false;
 
-    for gen in 1..=max_generations {
-        grid = nit_gol::step::step(&grid, rule, EdgeMode::Dead);
-        let alive = grid.alive_count() as u32;
-        if alive > peak_population {
-            peak_population = alive;
+    for current_gen in 1..=max_generations {
+        let (population, outcome) = advance_generation(
+            &mut canvas,
+            rule,
+            &mut history,
+            current_gen,
+            &mut peak_population,
+        );
+        if current_gen == max_generations / EARLY_SAMPLE_DENOM {
+            early_pop = population;
         }
-        if gen == max_generations / EARLY_POP_FRACTION {
-            early_pop = alive;
+        if current_gen == max_generations * LATE_SAMPLE_NUM / LATE_SAMPLE_DEN {
+            late_pop = population;
         }
-        if gen == max_generations * LATE_POP_NUM / LATE_POP_DEN {
-            late_pop = alive;
+        match outcome {
+            StepOutcome::Continue => continue,
+            StepOutcome::Extinct => {
+                generations_survived = current_gen;
+                extinct = true;
+                break;
+            }
+            StepOutcome::Cycled(period) => {
+                generations_survived = current_gen;
+                cycle_period = Some(period);
+                late_pop = population;
+                break;
+            }
         }
-        if alive == 0 {
-            generations_survived = gen;
-            died = true;
-            break;
-        }
-        let h = grid.hash();
-        if let Some(&first_seen) = seen.get(&h) {
-            generations_survived = gen;
-            cycle_period = Some(gen - first_seen);
-            late_pop = alive;
-            break;
-        }
-        seen.insert(h, gen);
-    }
-    if cycle_period.is_none() && generations_survived == 0 {
-        generations_survived = max_generations;
     }
 
     EncoderScore {
@@ -112,12 +143,33 @@ pub(super) fn simulate_gol(
         generations_survived,
         peak_population,
         cycle_period,
-        growth_class: classify_growth(early_pop, late_pop, died),
+        growth_class: classify_growth(early_pop, late_pop, extinct),
     }
 }
 
-fn classify_growth(early_pop: u32, late_pop: u32, died: bool) -> GrowthClass {
-    if died {
+fn advance_generation(
+    canvas: &mut Grid,
+    rule: Rule,
+    history: &mut HashMap<u64, u32>,
+    current_gen: u32,
+    peak_population: &mut u32,
+) -> (u32, StepOutcome) {
+    *canvas = nit_gol::step::step(canvas, rule, EdgeMode::Dead);
+    let population = canvas.alive_count() as u32;
+    *peak_population = (*peak_population).max(population);
+    if population == 0 {
+        return (population, StepOutcome::Extinct);
+    }
+    let fingerprint = canvas.hash();
+    if let Some(&first_seen) = history.get(&fingerprint) {
+        return (population, StepOutcome::Cycled(current_gen - first_seen));
+    }
+    history.insert(fingerprint, current_gen);
+    (population, StepOutcome::Continue)
+}
+
+fn classify_growth(early_pop: u32, late_pop: u32, extinct: bool) -> GrowthClass {
+    if extinct {
         return GrowthClass::Extinct;
     }
     if early_pop == 0 || late_pop == 0 {
@@ -134,22 +186,29 @@ fn classify_growth(early_pop: u32, late_pop: u32, died: bool) -> GrowthClass {
 }
 
 /// Cross-encoder consistency from actionable encoders only (AST + structural).
-/// Byte-level encoders are excluded — they add noise that doesn't reflect
-/// code quality the agent can act on.
+/// Computed as `1 - (std_dev / mean)` over generations-survived. A high value
+/// (≥0.85) means all encoders agree on the file's quality; a low value means
+/// the encoders disagree, which usually points at a single weak dimension
+/// dragging the report down. Byte-level encoders are excluded — they add
+/// noise that doesn't reflect code quality the agent can act on.
 pub(super) fn compute_consistency(scores: &[EncoderScore]) -> f32 {
-    let gens: Vec<f64> = scores
+    let samples: Vec<f64> = scores
         .iter()
-        .filter(|s| QUALITY_ENCODERS.contains(&s.encoder))
-        .map(|s| s.generations_survived as f64)
+        .filter(|score| QUALITY_ENCODERS.contains(&score.encoder))
+        .map(|score| score.generations_survived as f64)
         .collect();
-    if gens.is_empty() {
+    if samples.is_empty() {
         return 0.0;
     }
-    let mean = gens.iter().sum::<f64>() / gens.len() as f64;
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     if mean == 0.0 {
         return 0.0;
     }
-    let variance = gens.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / gens.len() as f64;
-    let std_dev = variance.sqrt();
+    let std_dev = standard_deviation(&samples, mean);
     (1.0 - (std_dev / mean) as f32).clamp(0.0, 1.0)
+}
+
+fn standard_deviation(samples: &[f64], mean: f64) -> f64 {
+    let variance = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    variance.sqrt()
 }

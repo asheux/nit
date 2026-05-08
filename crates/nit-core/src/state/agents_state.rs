@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use super::*;
 
-/// Initial MCP status before any connection attempt: offline with the
-/// "mock://offline" placeholder endpoint that the CLI overrides on launch.
+const OFFLINE_MCP_ENDPOINT: &str = "mock://offline";
+
+/// Initial MCP status before any connection attempt — the CLI overrides
+/// the placeholder endpoint as soon as it discovers the real bus address.
 fn default_offline_mcp_status() -> McpStatus {
     McpStatus {
         state: McpConnectionState::Disconnected,
-        endpoint: "mock://offline".into(),
+        endpoint: OFFLINE_MCP_ENDPOINT.into(),
         latency_ms: None,
         last_error: None,
     }
@@ -22,56 +24,49 @@ pub struct AgentsState {
     pub chat_input: String,
     #[serde(default)]
     pub chat_input_cursor: usize,
-    /// Selection anchor in the Agent Chat compose box (char index in `chat_input`).
-    /// Runtime-only.
+    /// Char index in `chat_input` where a selection started.
     #[serde(skip)]
     pub chat_input_selection_anchor: Option<usize>,
     #[serde(skip, default = "chat_input_scroll_default")]
     pub chat_input_scroll: usize,
-    /// Previously submitted prompts from the Agent Chat compose box.
-    /// Runtime-only: avoid persisting operator prompts to disk.
+    /// Previously submitted prompts. `#[serde(skip)]` because operator
+    /// prompts must not be persisted.
     #[serde(skip)]
     pub chat_prompt_history: Vec<String>,
-    /// History navigation cursor (index into `chat_prompt_history`) while cycling via Up/Down.
-    /// Runtime-only.
+    /// Index into `chat_prompt_history` while cycling via Up/Down.
     #[serde(skip)]
     pub chat_prompt_history_pos: Option<usize>,
     /// Draft compose text captured when entering history navigation.
-    /// Runtime-only.
     #[serde(skip)]
     pub chat_prompt_history_draft: Option<String>,
     pub chat_channel: AgentChannel,
-    /// Default swarm template used when auto-detecting swarm prompts or when `@swarm` omits an
-    /// explicit `template=...` argument.
+    /// Default swarm template, applied when `@swarm` omits `template=...`
+    /// or when prompt auto-detection fires.
     #[serde(default = "swarm_default_template_default")]
     pub swarm_default_template: String,
-    /// Default swarm mission preset used when swarm prompts omit an explicit mission focus.
-    /// `auto` preserves prompt-based detection; other values pin the mission kind.
+    /// Default swarm mission preset. `auto` preserves prompt-based
+    /// detection; other values pin the mission kind.
     #[serde(default = "swarm_default_mission_default")]
     pub swarm_default_mission: String,
-    /// Per-agent role hint for swarm planning (used by `parallel`/`bulk`).
-    /// Missing entry means "all roles".
+    /// Per-agent role hint for `parallel` / `bulk` planning. Missing
+    /// entry means "all roles".
     #[serde(default)]
     pub swarm_role_by_agent_id: HashMap<String, String>,
-    /// Agents marked as priority in the roster (used as a planning hint for `parallel`/`bulk`).
+    /// Agents marked priority in the roster (planning hint).
     #[serde(default)]
     pub swarm_priority_agent_ids: HashSet<String>,
-    /// Maximum number of Codex turns to run concurrently (from `--codex-max-parallel-turns`).
-    /// Runtime-only; used as a hint for auto-starting swarm sizes.
+    /// Concurrency caps from `--codex-max-parallel-turns` and the Claude
+    /// equivalent. Used as auto-start swarm-size hints.
     #[serde(skip, default = "codex_max_parallel_turns_default")]
     pub codex_max_parallel_turns: usize,
-    /// Maximum number of Claude turns to run concurrently.
-    /// Runtime-only; used as a hint for auto-starting swarm sizes.
     #[serde(skip, default = "claude_max_parallel_turns_default")]
     pub claude_max_parallel_turns: usize,
     pub agents: Vec<AgentLane>,
-    /// Cache of `agents[i].id -> i` so per-event handlers and per-frame
-    /// renderers can look an agent up in O(1) instead of scanning the
-    /// roster vec. Maintained explicitly when the production write paths
+    /// `agents[i].id -> i` cache for O(1) lookups. Production write paths
     /// (`agent_bus::upsert_agent`, `swarm::clones`, `multipane::setup`)
-    /// mutate the vec; lookups via `agents_get` / `agents_get_mut`
-    /// fall back to a linear scan if the entry is stale, so test code
-    /// doing `agents.push` directly stays correct.
+    /// keep it in sync; `agents_get` / `agents_get_mut` linear-scan-fall-back
+    /// when the entry is stale so direct `agents.push` from tests remains
+    /// correct. `rebuild_agents_index` repairs after bulk mutations.
     #[serde(skip, default)]
     pub agents_index: HashMap<String, usize>,
     pub missions: Vec<MissionRecord>,
@@ -82,22 +77,18 @@ pub struct AgentsState {
     pub diag_events: Vec<AgentDiagnosticEvent>,
     pub mcp: McpStatus,
     pub roster_selected: usize,
-    /// Selected backend group row in the roster, when keyboard/mouse focus is on a backend
-    /// instead of a concrete model row.
-    /// Runtime-only; UI navigation state.
+    /// Selected backend group row when focus is on a backend rather than
+    /// a concrete model row.
     #[serde(skip)]
     pub roster_selected_backend: Option<AgentLaneKind>,
-    /// When selecting in the roster "tree" under the selected model, this stores the selected
-    /// child-row (Size/Role) leaf index for keyboard navigation.
-    /// Runtime-only; UI navigation state.
+    /// Selected leaf inside the focused agent's Size/Role tree, used by
+    /// keyboard navigation.
     #[serde(skip)]
     pub roster_tree_selected: Option<RosterTreeSelection>,
     /// Backends whose model rows are expanded in the roster.
-    /// Runtime-only; UI navigation state.
     #[serde(skip, default)]
     pub roster_expanded_backend_kinds: HashSet<AgentLaneKind>,
-    /// Agents whose roster tree (Size/Role) is collapsed.
-    /// Runtime-only; UI navigation state.
+    /// Agents whose Size/Role subtree is collapsed.
     #[serde(skip, default)]
     pub roster_tree_collapsed_agent_ids: HashSet<String>,
     pub mission_selected: usize,
@@ -112,23 +103,17 @@ pub struct AgentsState {
     pub artifacts_popup_open: bool,
     #[serde(skip)]
     pub artifacts_popup_scroll: usize,
-    /// Last max scroll computed during render. Cached so wheel/keyboard scroll
-    /// handlers can clamp without paying the cost of rebuilding the rendered
-    /// markdown (`build_lines`) on every input event. Updated on each render,
-    /// starts at `usize::MAX` so the first scroll before any render is unclamped.
-    /// Runtime-only.
+    /// Cached `max_scroll` from the last render so wheel/keyboard handlers
+    /// can clamp without rebuilding the rendered markdown each input event.
+    /// `usize::MAX` is the "no render yet, scroll unclamped" sentinel.
     #[serde(skip, default = "artifacts_popup_last_max_scroll_default")]
     pub artifacts_popup_last_max_scroll: usize,
-    /// Chat input text for the artifacts popup compose box. Runtime-only.
     #[serde(skip)]
     pub artifacts_popup_chat_input: String,
-    /// Cursor position (char index) in the artifacts popup compose box. Runtime-only.
     #[serde(skip)]
     pub artifacts_popup_chat_cursor: usize,
-    /// Selection anchor in the artifacts popup compose box. Runtime-only.
     #[serde(skip)]
     pub artifacts_popup_chat_selection_anchor: Option<usize>,
-    /// Scroll offset for the artifacts popup compose box. Runtime-only.
     #[serde(skip, default = "chat_input_scroll_default")]
     pub artifacts_popup_chat_scroll: usize,
     #[serde(skip)]
@@ -156,30 +141,27 @@ pub struct AgentsState {
     pub global_archive_scroll: usize,
     #[serde(skip, default)]
     pub global_archive_filter: SavedRunHistoryFilter,
-    /// Full index of all archive entries (built when popup opens).
+    /// Full index built when the popup opens.
     #[serde(skip)]
     pub global_archive_index: Vec<GlobalArchiveEntry>,
-    /// Filtered results: (score, index_into_global_archive_index).
+    /// Filtered results as `(score, index_into_global_archive_index)`.
     #[serde(skip)]
     pub global_archive_filtered: Vec<(i64, usize)>,
-    /// When an artifact is opened from the archive, this holds the entry so the
-    /// artifact popup can load the correct content directly from the run.json
-    /// instead of relying on card-index matching.
+    /// Entry under inspection — the artifact popup loads content directly
+    /// from this entry's `run.json` rather than re-scanning by card index.
     #[serde(skip)]
     pub global_archive_opened_entry: Option<GlobalArchiveEntry>,
     #[serde(skip)]
     pub ops_scroll: usize,
-    /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
     #[serde(skip)]
     pub ops_viewport_width: usize,
-    /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
     #[serde(skip)]
     pub ops_viewport_height: usize,
-    /// Scroll offset for the agent console thread view.
-    /// `CONSOLE_SCROLL_BOTTOM` (usize::MAX) means "auto-scroll to bottom".
+    /// `CONSOLE_SCROLL_BOTTOM` (`usize::MAX`) means "auto-scroll to bottom".
     #[serde(skip)]
     pub console_scroll: usize,
-    /// Cached max scroll from last render (used by input handlers to clamp).
+    /// Cached `max_scroll` so input handlers can clamp without rebuilding
+    /// the console.
     #[serde(skip)]
     pub console_max_scroll: usize,
     #[serde(skip)]
@@ -192,109 +174,79 @@ pub struct AgentsState {
     pub pending_provenance_agent_ids: Vec<String>,
     #[serde(skip)]
     pub pending_legacy_notes_alert: Option<String>,
-    /// Codex model metadata (effective context window tokens) keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    // --- Codex model metadata, all keyed by model slug ---
+    // Populated when the roster is seeded from `~/.codex/models_cache.json`.
     #[serde(skip)]
     pub codex_effective_context_window_tokens: HashMap<String, u32>,
-    /// Best-effort estimated context tokens used per mission thread (heuristic; used for UI).
-    /// Runtime-only.
+    /// Heuristic estimate of context tokens used, per mission thread.
     #[serde(skip)]
     pub codex_estimated_tokens_used_by_mission: HashMap<String, u32>,
-    /// Codex model default reasoning effort (e.g. low/medium/high/xhigh) keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    /// Default reasoning effort per model (`low`/`medium`/`high`/`xhigh`).
     #[serde(skip)]
     pub codex_default_reasoning_effort: HashMap<String, String>,
-    /// Codex model supported reasoning effort "sizes" keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    /// Reasoning effort sizes the model accepts.
     #[serde(skip)]
     pub codex_supported_reasoning_efforts: HashMap<String, Vec<String>>,
-    /// Codex model operator-selected reasoning effort keyed by model slug.
-    /// Runtime-only; defaults to `codex_default_reasoning_effort` but can be changed in the roster.
+    /// Operator-selected reasoning effort. Defaults to
+    /// `codex_default_reasoning_effort`; mutated from the roster UI.
     #[serde(skip)]
     pub codex_selected_reasoning_effort: HashMap<String, String>,
-    /// Best-effort context remaining percentage for the currently running Codex turn.
-    /// Runtime-only; updated when dispatching a Codex turn.
+    /// Context-remaining percentage for the currently dispatched Codex turn.
     #[serde(skip)]
     pub codex_context_remaining_pct: HashMap<String, u8>,
-    /// Last-known Codex context remaining percentage for a mission thread, keyed by mission id then
-    /// model slug.
-    /// Runtime-only; updated when Codex reports token counts for a mission-backed session.
+    /// Last-known context-remaining percentage per mission thread,
+    /// keyed first by mission id then by model slug.
     #[serde(skip)]
     pub codex_mission_context_remaining_pct: HashMap<String, HashMap<String, u8>>,
-    /// Last-known Codex total token usage (non-mission chat), keyed by model slug.
-    /// Runtime-only; updated when Codex reports token counts.
+    /// Total tokens used in non-mission ad-hoc chat.
     #[serde(skip)]
     pub codex_used_tokens: HashMap<String, u32>,
-    /// Last-known Codex total token usage for mission threads, keyed by mission id then model slug.
-    /// Runtime-only; updated when Codex reports token counts.
+    /// Total tokens used per mission thread.
     #[serde(skip)]
     pub codex_mission_used_tokens: HashMap<String, HashMap<String, u32>>,
-    /// Maps agent_id → index of the user prompt message that triggered the current turn.
-    /// Set at dispatch time, consumed by TurnCompleted to link responses to their prompts.
-    /// Runtime-only.
+    /// `agent_id → user-prompt index` linking dispatched turns to their
+    /// triggering message; consumed by `TurnCompleted` to wire the reply.
     #[serde(skip)]
     pub codex_turn_prompt_idx: HashMap<String, usize>,
-    /// Codex session/thread ids keyed by model slug for non-mission chat. Used to resume an
-    /// ad-hoc "agent chat" thread across multiple prompts without requiring a mission.
-    /// Runtime-only.
+    /// Per-model Codex thread ids for ad-hoc (non-mission) chat resumption.
     #[serde(skip)]
     pub codex_thread_ids: HashMap<String, String>,
-    /// Codex session/thread ids keyed by mission id. Used to resume a "live mission" thread across
-    /// multiple prompts without prompt-stitching.
-    /// Runtime-only.
+    /// Per-mission Codex thread ids for live-mission resumption.
     #[serde(skip)]
     pub codex_mission_thread_ids: HashMap<String, HashMap<String, String>>,
     /// Active backend turn telemetry keyed by agent id.
-    /// Runtime-only.
     #[serde(skip)]
     pub active_turns: HashMap<String, AgentTurnState>,
-    /// Codex turns queued by the operator while another Codex turn is still running.
-    /// Runtime-only.
+    /// Codex turns queued behind an in-flight Codex turn.
     #[serde(skip)]
     pub queued_codex_turns: VecDeque<QueuedCodexTurn>,
-    /// Workspace-wide genome scan progress: `Some((done, total))` while the
-    /// scan is in flight, `None` when idle. Updated from the runtime each
-    /// main-loop tick; read by the agent-console breather to render the
-    /// "Evaluating genome: X/Y files" indicator.
-    /// Runtime-only.
+    /// `Some((done, total))` while the workspace-wide genome scan is in
+    /// flight, `None` when idle. Drives the "Evaluating genome: X/Y files"
+    /// breather in the agent console.
     #[serde(skip)]
     pub workspace_scan_progress: Option<(usize, usize)>,
-    /// Whether the `codex` CLI is available in PATH (used for backend inventory in the roster UI).
-    /// Runtime-only.
+    // --- CLI availability (read at startup for the roster's backend inventory) ---
     #[serde(skip)]
     pub codex_cli_available: bool,
-    /// Whether the `claude` CLI is available in PATH (used for backend inventory in the roster UI).
-    /// Runtime-only.
     #[serde(skip)]
     pub claude_cli_available: bool,
-    /// Whether the `gemini` CLI is available in PATH (used for backend inventory in the roster UI).
-    /// Runtime-only.
     #[serde(skip)]
     pub gemini_cli_available: bool,
-    /// Claude models discovered from the backend (CLI/API). Runtime-only.
+    // --- Claude model metadata, structurally parallel to the Codex block ---
     #[serde(skip)]
     pub claude_models: Vec<String>,
-    /// Claude model discovery error (if any). Runtime-only.
     #[serde(skip)]
     pub claude_models_error: Option<String>,
-    /// Claude model metadata (effective context window tokens) keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from probed Claude models.
     #[serde(skip)]
     pub claude_effective_context_window_tokens: HashMap<String, u32>,
-    /// Best-effort estimated context tokens used per mission session (heuristic; used for UI).
-    /// Runtime-only.
     #[serde(skip)]
     pub claude_estimated_tokens_used_by_mission: HashMap<String, u32>,
-    /// Claude model default effort level (e.g. low/medium/high/max) keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from probed Claude models.
+    /// Default effort level (`low`/`medium`/`high`/`max`).
     #[serde(skip)]
     pub claude_default_effort: HashMap<String, String>,
-    /// Claude model supported effort levels keyed by model slug.
-    /// Runtime-only; populated when seeding the roster from probed Claude models.
     #[serde(skip)]
     pub claude_supported_efforts: HashMap<String, Vec<String>>,
-    /// Claude model operator-selected effort level keyed by model slug.
-    /// Runtime-only; defaults to `claude_default_effort` but can be changed in the roster.
+    /// Operator-selected effort. Defaults to `claude_default_effort`.
     #[serde(skip)]
     pub claude_selected_effort: HashMap<String, String>,
     /// Best-effort context remaining percentage for the currently running Claude turn.
@@ -316,40 +268,33 @@ pub struct AgentsState {
     pub claude_mission_used_tokens: HashMap<String, HashMap<String, u32>>,
     /// Maps agent_id → index of the user prompt message that triggered the current Claude turn.
     /// Set at dispatch time, consumed by TurnCompleted to link responses to their prompts.
-    /// Runtime-only.
+    /// `agent_id → user-prompt index` for the active Claude turn. Mirrors
+    /// `codex_turn_prompt_idx`'s role for the Codex side.
     #[serde(skip)]
     pub claude_turn_prompt_idx: HashMap<String, usize>,
-    /// Claude session ids keyed by model slug for non-mission chat. Used to resume an ad-hoc
-    /// "agent chat" session across multiple prompts without requiring a mission.
-    /// Runtime-only.
+    /// Per-model Claude session ids for ad-hoc resumption.
     #[serde(skip)]
     pub claude_session_ids: HashMap<String, String>,
-    /// Claude session ids keyed by mission id then model slug. Used to resume a "live mission"
-    /// session across multiple prompts.
-    /// Runtime-only.
+    /// Per-mission Claude session ids for live-mission resumption.
     #[serde(skip)]
     pub claude_mission_session_ids: HashMap<String, HashMap<String, String>>,
-    /// Claude turns queued by the operator while another Claude turn is still running.
-    /// Runtime-only.
+    /// Claude turns queued behind an in-flight Claude turn.
     #[serde(skip)]
     pub queued_claude_turns: VecDeque<QueuedClaudeTurn>,
-    /// Gemini models discovered from the backend (CLI/API). Runtime-only.
     #[serde(skip)]
     pub gemini_models: Vec<String>,
-    /// Gemini model discovery error (if any). Runtime-only.
     #[serde(skip)]
     pub gemini_models_error: Option<String>,
-    /// In-flight intake-agent decision deferred until `TurnCompleted` /
-    /// `TurnFailed` lands for the synthetic intake lane. Runtime-only.
+    /// Intake decision deferred until `TurnCompleted` / `TurnFailed` lands
+    /// for the synthetic intake lane.
     #[serde(skip)]
     pub pending_intake: Option<PendingIntake>,
-    /// Operator-overridable lane id used for intake turns. When `None`,
-    /// `intake::start` clones the dispatching agent's lane — but only
-    /// when that lane is claude-class, since the intake system prompt
-    /// and 30s timeout are calibrated for haiku-style classifiers.
-    /// Setting this to a claude lane id lets a future operator setup
-    /// run a cheap claude preprocessor in front of a non-claude writer.
-    /// Runtime-only.
+    /// Operator override of the intake lane. `None` ⇒ `intake::start`
+    /// clones the dispatching agent's lane — but only when that lane is
+    /// claude-class, because the intake system prompt and 30 s timeout
+    /// are tuned for haiku-style classifiers. Setting this to a claude
+    /// lane id lets a future setup pre-classify with cheap claude even
+    /// when the writer is a non-claude backend.
     #[serde(skip)]
     pub intake_agent_id: Option<String>,
 }
@@ -375,10 +320,10 @@ impl AgentsState {
         self.event_epoch = self.event_epoch.wrapping_add(1);
     }
 
-    /// Look an agent up by id in O(1) via `agents_index`. Falls back to
-    /// a linear scan if the index is stale (e.g. test code mutated the
-    /// vec without going through the helpers); the next mutating event
-    /// that calls `rebuild_agents_index` repairs it.
+    /// O(1) lookup via `agents_index`, with a linear-scan fallback when the
+    /// cached index is stale (test code that mutates `agents` directly is the
+    /// usual culprit — the next event-handler call to `rebuild_agents_index`
+    /// repairs the cache).
     pub fn agents_get(&self, id: &str) -> Option<&AgentLane> {
         if let Some(&idx) = self.agents_index.get(id) {
             if let Some(lane) = self.agents.get(idx) {
@@ -399,9 +344,8 @@ impl AgentsState {
         self.agents.iter_mut().find(|a| a.id == id)
     }
 
-    /// Rebuild `agents_index` from the current `agents` vec. Cheap; call
-    /// after any code path that pushes / removes / reorders agents
-    /// outside of `agents_push` / `agents_remove_id`.
+    /// Repopulate `agents_index` after a bulk mutation that bypassed
+    /// `agents_push` / `agents_remove_id`. Cheap — O(n) scan over `agents`.
     pub fn rebuild_agents_index(&mut self) {
         self.agents_index.clear();
         self.agents_index.reserve(self.agents.len());

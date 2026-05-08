@@ -1,3 +1,10 @@
+//! Built-in protocol catalogue.
+//!
+//! Preset ids and shapes are part of the public surface — saved selections
+//! from older runs use these ids to round-trip back into a `RuleMode`, so
+//! renaming an entry breaks restore. Each looped duo pairs a "disturbance"
+//! phase with a "recovery" Conway phase to demonstrate phase sequencing.
+
 use nit_gol::Rule;
 
 use crate::gol_rules::RuleCatalog;
@@ -18,6 +25,19 @@ struct RuleLookup {
     fallback_name: Option<&'static str>,
 }
 
+impl RuleLookup {
+    fn resolve(&self, catalog: &RuleCatalog) -> RuleRef {
+        if let Some(named) = catalog.find_by_id(self.id) {
+            return RuleRef::from_catalog(named);
+        }
+        RuleRef {
+            id: None,
+            rule: Rule::parse(self.fallback_rulestring).unwrap_or_else(|_| Rule::conway()),
+            name: self.fallback_name.map(|s| s.into()),
+        }
+    }
+}
+
 struct PhaseSpec {
     lookup: &'static RuleLookup,
     label: &'static str,
@@ -28,8 +48,7 @@ struct LoopedDuoSpec {
     id: &'static str,
     name: &'static str,
     description: &'static str,
-    first: PhaseSpec,
-    second: PhaseSpec,
+    phases: [PhaseSpec; 2],
 }
 
 const CONWAY: RuleLookup = RuleLookup {
@@ -63,61 +82,69 @@ const LOOPED_DUOS: &[LoopedDuoSpec] = &[
         id: "incubate_replicators",
         name: "Incubate Replicators",
         description: "HighLife 16 then Conway 256 (loop)",
-        first: PhaseSpec {
-            lookup: &HIGHLIFE,
-            label: "Incubate",
-            steps: 16,
-        },
-        second: PhaseSpec {
-            lookup: &CONWAY,
-            label: "Stabilize",
-            steps: 256,
-        },
+        phases: [
+            PhaseSpec {
+                lookup: &HIGHLIFE,
+                label: "Incubate",
+                steps: 16,
+            },
+            PhaseSpec {
+                lookup: &CONWAY,
+                label: "Stabilize",
+                steps: 256,
+            },
+        ],
     },
     LoopedDuoSpec {
         id: "anneal_set",
         name: "Anneal & Set",
         description: "Vote 1 then Conway 31 (loop)",
-        first: PhaseSpec {
-            lookup: &VOTE,
-            label: "Anneal",
-            steps: 1,
-        },
-        second: PhaseSpec {
-            lookup: &CONWAY,
-            label: "Set",
-            steps: 31,
-        },
+        phases: [
+            PhaseSpec {
+                lookup: &VOTE,
+                label: "Anneal",
+                steps: 1,
+            },
+            PhaseSpec {
+                lookup: &CONWAY,
+                label: "Set",
+                steps: 31,
+            },
+        ],
     },
     LoopedDuoSpec {
         id: "coral_growth",
         name: "Coral Growth",
         description: "Coral 32 then Conway 128 (loop)",
-        first: PhaseSpec {
-            lookup: &CORAL,
-            label: "Grow",
-            steps: 32,
-        },
-        second: PhaseSpec {
-            lookup: &CONWAY,
-            label: "Settle",
-            steps: 128,
-        },
+        phases: [
+            PhaseSpec {
+                lookup: &CORAL,
+                label: "Grow",
+                steps: 32,
+            },
+            PhaseSpec {
+                lookup: &CONWAY,
+                label: "Settle",
+                steps: 128,
+            },
+        ],
     },
     LoopedDuoSpec {
         id: "chaos_injection",
         name: "Chaos Injection",
         description: "Seeds 4 then Conway 128 (loop)",
-        first: PhaseSpec {
-            lookup: &SEEDS,
-            label: "Inject",
-            steps: 4,
-        },
-        second: PhaseSpec {
-            lookup: &CONWAY,
-            label: "Recover",
-            steps: 128,
-        },
+        phases: [
+            PhaseSpec {
+                lookup: &SEEDS,
+                label: "Inject",
+                steps: 4,
+            },
+            PhaseSpec {
+                lookup: &CONWAY,
+                label: "Recover",
+                steps: 128,
+            },
+        ],
     },
 ];
 
@@ -126,44 +153,30 @@ pub fn builtin_protocols(catalog: &RuleCatalog) -> Vec<ProtocolPreset> {
         id: "fixed_conway".into(),
         name: "Fixed Conway".into(),
         description: "Single-rule Conway Life".into(),
-        mode: RuleMode::Fixed(resolve_lookup(catalog, &CONWAY)),
+        mode: RuleMode::Fixed(CONWAY.resolve(catalog)),
     }];
     out.extend(
         LOOPED_DUOS
             .iter()
-            .map(|spec| looped_two_phase(catalog, spec)),
+            .map(|spec| build_looped_duo(catalog, spec)),
     );
     out
 }
 
-fn looped_two_phase(catalog: &RuleCatalog, spec: &LoopedDuoSpec) -> ProtocolPreset {
-    let phases = vec![
-        RulePhase {
-            rule: resolve_lookup(catalog, spec.first.lookup),
-            steps: spec.first.steps,
-            label: Some(spec.first.label.into()),
-        },
-        RulePhase {
-            rule: resolve_lookup(catalog, spec.second.lookup),
-            steps: spec.second.steps,
-            label: Some(spec.second.label.into()),
-        },
-    ];
+fn build_looped_duo(catalog: &RuleCatalog, spec: &LoopedDuoSpec) -> ProtocolPreset {
+    let phases: Vec<RulePhase> = spec
+        .phases
+        .iter()
+        .map(|p| RulePhase {
+            rule: p.lookup.resolve(catalog),
+            steps: p.steps,
+            label: Some(p.label.into()),
+        })
+        .collect();
     ProtocolPreset {
         id: spec.id.into(),
         name: spec.name.into(),
         description: spec.description.into(),
         mode: RuleMode::Protocol(RuleProtocol::new(phases, true).expect("preset protocol")),
-    }
-}
-
-fn resolve_lookup(catalog: &RuleCatalog, lookup: &RuleLookup) -> RuleRef {
-    if let Some(named) = catalog.find_by_id(lookup.id) {
-        return RuleRef::from_catalog(named);
-    }
-    RuleRef {
-        id: None,
-        rule: Rule::parse(lookup.fallback_rulestring).unwrap_or_else(|_| Rule::conway()),
-        name: lookup.fallback_name.map(|s| s.into()),
     }
 }

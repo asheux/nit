@@ -7,22 +7,22 @@ pub enum PaneId {
     GateMonitor,
 }
 
-const SPECS: [(PaneId, &str); 5] = [
-    (PaneId::Notes, "AGENT CHAT"),
-    (PaneId::JobOutput, "AGENT OPS"),
-    (PaneId::Editor, "EDITOR"),
-    (PaneId::Visualizer, "VISUALIZER"),
-    (PaneId::GateMonitor, "GATE MONITOR"),
-];
-
 impl PaneId {
-    pub const ALL: [PaneId; 5] = [SPECS[0].0, SPECS[1].0, SPECS[2].0, SPECS[3].0, SPECS[4].0];
+    pub const ALL: [PaneId; 5] = [
+        PaneId::Notes,
+        PaneId::JobOutput,
+        PaneId::Editor,
+        PaneId::Visualizer,
+        PaneId::GateMonitor,
+    ];
 
     pub fn title(self) -> &'static str {
-        SPECS
-            .iter()
-            .find(|(id, _)| *id == self)
-            .map(|(_, t)| *t)
-            .unwrap_or("")
+        match self {
+            PaneId::Notes => "AGENT CHAT",
+            PaneId::JobOutput => "AGENT OPS",
+            PaneId::Editor => "EDITOR",
+            PaneId::Visualizer => "VISUALIZER",
+            PaneId::GateMonitor => "GATE MONITOR",
+        }
     }
 }

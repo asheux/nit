@@ -1,7 +1,8 @@
-//! Centralized tests for `Mood` and its modulation table — auto-transitions,
-//! pressure window, override lock, and the per-mood multiplier dials.
+//! Mood modulation: auto-transitions, override lock, decay/TTL multipliers,
+//! and the `SetMood` event flow.
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::agent_bus::AgentBusEvent;
@@ -9,15 +10,10 @@ use crate::metabolism::{tick, tick_interval_for};
 use crate::mood::{auto_transition, Mood};
 use crate::state::AppState;
 use crate::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
-use crate::test_helpers::{temp_dir, test_state_in};
+use crate::test_helpers::{inject_warning, temp_dir, test_state_in};
 
 fn test_state(label: &str) -> AppState {
     test_state_in(temp_dir(label))
-}
-
-fn inject_warning(state: &mut AppState, posted_by: &str, counter: u64) {
-    let posted_at_gen = state.substrate.generation;
-    crate::test_helpers::inject_warning(state, posted_by, posted_at_gen, counter);
 }
 
 #[test]
@@ -64,21 +60,17 @@ fn legacy_state_json_without_mood_loads_as_consolidation() {
 }
 
 #[test]
-fn auto_transition_c_to_defensive_on_pressure() {
-    // At pressure >= 8 from Consolidation, move to Defensive.
+fn auto_transition_consolidation_to_defensive_at_pressure_threshold() {
     assert_eq!(
         auto_transition(Mood::Consolidation, 8, 0),
         Some(Mood::Defensive)
     );
-    // Pressure 7 isn't enough.
     assert_eq!(auto_transition(Mood::Consolidation, 7, 0), None);
 }
 
 #[test]
-fn auto_transition_defensive_to_c_hysteresis() {
-    // Defensive stays put at pressure 6.
+fn auto_transition_defensive_to_consolidation_uses_hysteresis() {
     assert_eq!(auto_transition(Mood::Defensive, 6, 0), None);
-    // Drops back to Consolidation when pressure <= 4.
     assert_eq!(
         auto_transition(Mood::Defensive, 4, 0),
         Some(Mood::Consolidation)
@@ -86,16 +78,11 @@ fn auto_transition_defensive_to_c_hysteresis() {
 }
 
 #[test]
-fn auto_transition_does_not_thrash() {
-    // Oscillating pressure 7-9 stays Defensive.
-    for p in [7usize, 8, 9, 7, 8, 9] {
+fn auto_transition_does_not_thrash_in_hysteresis_band() {
+    // Pressure 5..=9 must hold Defensive — only <= 4 drops it.
+    for p in [7usize, 8, 9, 7, 8, 9, 5, 6] {
         assert_eq!(auto_transition(Mood::Defensive, p, 0), None);
     }
-    // Pressure 5-6 also stays Defensive.
-    for p in [5usize, 6] {
-        assert_eq!(auto_transition(Mood::Defensive, p, 0), None);
-    }
-    // Only drops when <= 4.
     assert_eq!(
         auto_transition(Mood::Defensive, 4, 0),
         Some(Mood::Consolidation)
@@ -103,10 +90,8 @@ fn auto_transition_does_not_thrash() {
 }
 
 #[test]
-fn auto_transition_c_to_exploration_requires_streak() {
-    // Zero pressure without streak is not enough.
+fn auto_transition_consolidation_to_exploration_requires_quiet_streak() {
     assert_eq!(auto_transition(Mood::Consolidation, 0, 0), None);
-    // Streak >= 3 with low pressure unlocks Exploration.
     assert_eq!(
         auto_transition(Mood::Consolidation, 0, 3),
         Some(Mood::Exploration)
@@ -120,8 +105,8 @@ fn manual_override_blocks_auto_transition() {
     state.substrate.mood = Mood::Defensive;
     state.substrate.mood_override_until_gen = state.substrate.generation + 20;
 
-    // No warnings at all (pressure=0). Auto-rule would drop Defensive to
-    // Consolidation, but the override lock must hold.
+    // No warnings (pressure=0): auto-rule would drop Defensive → Consolidation,
+    // but the override lock holds it pinned.
     for _ in 0..5 {
         tick(&mut state);
     }
@@ -145,28 +130,23 @@ fn metabolism_reads_mood_adjusted_interval() {
 fn observer_repeat_failure_uses_mood_threshold() {
     use crate::observers::repeat_failure;
 
-    // Defensive mood: threshold 1 — a single Warning is enough.
+    // Defensive: 1 warning → fires.
     let mut state_d = test_state("mood-obs-defensive");
     state_d.substrate.mood = Mood::Defensive;
-    inject_warning(&mut state_d, "a1", 0);
+    let gen_d = state_d.substrate.generation;
+    inject_warning(&mut state_d, "a1", gen_d, 0);
     let emissions = (repeat_failure::OBSERVER.run)(&state_d);
-    assert_eq!(
-        emissions.len(),
-        1,
-        "defensive mood with 1 warning should trigger HelpNeeded"
-    );
+    assert_eq!(emissions.len(), 1);
     assert_eq!(emissions[0].kind, SignalKind::HelpNeeded);
 
-    // Exploration mood: threshold 3 — 2 warnings should NOT trigger.
+    // Exploration: threshold 3, so 2 warnings stay silent.
     let mut state_e = test_state("mood-obs-exploration");
     state_e.substrate.mood = Mood::Exploration;
-    inject_warning(&mut state_e, "a1", 0);
-    inject_warning(&mut state_e, "a1", 1);
+    let gen_e = state_e.substrate.generation;
+    inject_warning(&mut state_e, "a1", gen_e, 0);
+    inject_warning(&mut state_e, "a1", gen_e, 1);
     let emissions = (repeat_failure::OBSERVER.run)(&state_e);
-    assert!(
-        emissions.is_empty(),
-        "exploration mood with 2 warnings should be silent"
-    );
+    assert!(emissions.is_empty());
 }
 
 #[test]
@@ -175,14 +155,13 @@ fn set_mood_event_applies_and_sets_override_lock() {
     state.substrate.generation = 5;
     assert_eq!(state.substrate.mood, Mood::Consolidation);
 
-    let event = AgentBusEvent::SetMood {
+    AgentBusEvent::SetMood {
         mood: Mood::Defensive,
         source: "user".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(state.substrate.mood, Mood::Defensive);
-    assert!(state.substrate.mood_override_until_gen > 0);
     assert_eq!(state.substrate.mood_override_until_gen, 5 + 20);
 
     let shift_signal = state
@@ -206,8 +185,8 @@ fn set_mood_event_applies_and_sets_override_lock() {
 
 #[test]
 fn modulation_has_signal_decay_multiplier_per_mood() {
-    // Defensive preserves signals longer (<1.0), Exploration sheds them
-    // faster (>1.0), Consolidation is the baseline (==1.0).
+    // Defensive preserves signals longer (<1.0); Exploration sheds them
+    // faster (>1.0); Consolidation is the baseline (==1.0).
     let d = Mood::Defensive.modulation().signal_decay_multiplier;
     let c = Mood::Consolidation.modulation().signal_decay_multiplier;
     let e = Mood::Exploration.modulation().signal_decay_multiplier;
@@ -218,8 +197,8 @@ fn modulation_has_signal_decay_multiplier_per_mood() {
 
 #[test]
 fn modulation_has_claim_ttl_multiplier_per_mood() {
-    // Defensive holds claims longer (>1.0), Exploration cycles them faster
-    // (<1.0), Consolidation is the baseline (==1.0).
+    // Defensive holds claims longer (>1.0); Exploration cycles them faster
+    // (<1.0); Consolidation is the baseline (==1.0).
     let d = Mood::Defensive.modulation().claim_ttl_multiplier;
     let c = Mood::Consolidation.modulation().claim_ttl_multiplier;
     let e = Mood::Exploration.modulation().claim_ttl_multiplier;
@@ -230,8 +209,6 @@ fn modulation_has_claim_ttl_multiplier_per_mood() {
 
 #[test]
 fn signal_decay_multiplier_affects_effective_strength() {
-    // Same signal (Warning, initial 1.0, posted at gen 0). Compare effective
-    // strength at gen 5 under Defensive (slower decay) vs Consolidation.
     let signal = Signal {
         id: "s1".into(),
         kind: SignalKind::Warning,
@@ -249,7 +226,7 @@ fn signal_decay_multiplier_affects_effective_strength() {
         under_defensive > under_consolidation,
         "defensive should preserve signals longer; got d={under_defensive} vs c={under_consolidation}"
     );
-    // Sanity: with a neutral multiplier the new API matches the old one.
+    // Neutral multiplier must match the legacy single-arg API.
     assert_eq!(
         signal.effective_strength_with_multiplier(5, 1.0),
         signal.effective_strength(5),
@@ -259,9 +236,8 @@ fn signal_decay_multiplier_affects_effective_strength() {
 #[test]
 fn file_write_auto_claim_ttl_respects_mood() {
     use crate::substrate::{Claim, ClaimKind, ClaimTarget};
-    use std::path::PathBuf;
 
-    fn first_claim_for(state: &crate::state::AppState, path: &PathBuf) -> Option<Claim> {
+    fn first_claim_for(state: &AppState, path: &PathBuf) -> Option<Claim> {
         state
             .substrate
             .claims

@@ -6018,6 +6018,38 @@ fn is_light_planner_strips_clone_suffix() {
     assert!(!is_light_planner("claude-opus-4-7#swarm-mis-001-clone-01"));
 }
 
+#[test]
+fn quota_exhausted_in_result_matches_claude_cli_banner() {
+    // Exact phrasing the Claude CLI appends when an account hits its quota.
+    assert!(is_provider_quota_exhausted_in_result(
+        "Working on the refactor.\n\nYou've hit your limit · resets 4:30pm (Africa/Nairobi)"
+    ));
+    assert!(is_provider_quota_exhausted_in_result(
+        "{\"type\":\"error\",\"api_error_status\":429}"
+    ));
+    assert!(is_provider_quota_exhausted_in_result(
+        "HTTP 429 Too Many Requests"
+    ));
+}
+
+#[test]
+fn quota_exhausted_in_result_skips_assistant_prose() {
+    // Narrow detector — must NOT trip on assistant prose merely discussing
+    // rate limiting as a topic. Otherwise a normal swarm response would
+    // route to TurnFailed and abort the run.
+    assert!(!is_provider_quota_exhausted_in_result(
+        "A rate limit caps how many requests per minute the API will accept."
+    ));
+    assert!(!is_provider_quota_exhausted_in_result(
+        "We were rate-limited last week, but the issue has since resolved."
+    ));
+    // "you've hit your limit" without "resets" → likely user prose, not the
+    // CLI quota banner. Require both halves of the banner.
+    assert!(!is_provider_quota_exhausted_in_result(
+        "It looks like you've hit your limit on what's possible with this API."
+    ));
+}
+
 mod scope_tests {
     use super::*;
     use std::fs;

@@ -9,10 +9,9 @@ impl Buffer {
     /// vim `Ctrl-d`: scroll half a screen down and move the cursor with it.
     pub fn scroll_half_page_down(&mut self) {
         self.end_edit_group();
-        let h = self.viewport.height.max(1);
-        let half = (h / 2).max(1);
+        let half = self.half_viewport();
         let max_line = self.rope.len_lines().saturating_sub(1);
-        self.cursor.line = (self.cursor.line + half).min(max_line);
+        self.cursor.line = self.cursor.line.saturating_add(half).min(max_line);
         self.viewport.offset_line = self.viewport.offset_line.saturating_add(half).min(max_line);
         self.clamp_col();
     }
@@ -20,8 +19,7 @@ impl Buffer {
     /// vim `Ctrl-u`: scroll half a screen up and move the cursor with it.
     pub fn scroll_half_page_up(&mut self) {
         self.end_edit_group();
-        let h = self.viewport.height.max(1);
-        let half = (h / 2).max(1);
+        let half = self.half_viewport();
         self.cursor.line = self.cursor.line.saturating_sub(half);
         self.viewport.offset_line = self.viewport.offset_line.saturating_sub(half);
         self.clamp_col();
@@ -29,9 +27,7 @@ impl Buffer {
 
     /// vim `zz`: center the viewport on the cursor line.
     pub fn center_viewport_on_cursor(&mut self) {
-        let h = self.viewport.height.max(1);
-        let half = h / 2;
-        self.viewport.offset_line = self.cursor.line.saturating_sub(half);
+        self.viewport.offset_line = self.cursor.line.saturating_sub(self.half_viewport());
     }
 
     /// vim `zt`: scroll so the cursor line is at the top of the viewport.
@@ -41,7 +37,11 @@ impl Buffer {
 
     /// vim `zb`: scroll so the cursor line is at the bottom of the viewport.
     pub fn viewport_bottom_on_cursor(&mut self) {
-        let h = self.viewport.height.max(1);
-        self.viewport.offset_line = self.cursor.line.saturating_sub(h.saturating_sub(1));
+        let last_visible_row = self.viewport.height.max(1).saturating_sub(1);
+        self.viewport.offset_line = self.cursor.line.saturating_sub(last_visible_row);
+    }
+
+    fn half_viewport(&self) -> usize {
+        (self.viewport.height.max(1) / 2).max(1)
     }
 }

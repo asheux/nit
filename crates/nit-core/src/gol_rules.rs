@@ -1,10 +1,10 @@
-//! Thin forwarder to `nit_gol::RuleCatalog::load_with_overlays`.
+//! Thin forwarder to [`nit_gol::RuleCatalog::load_with_overlays`].
 //!
 //! All rule-evaluation math (B/S decoding, neighbor counting, generation
-//! step) lives in the `nit-gol` crate. The `RuleOverlay` field-init order
-//! and `Vec` iteration order here are part of the determinism contract —
+//! step) lives in `nit-gol`. The [`RuleOverlay`] field-init order and the
+//! input `Vec` iteration order here are part of the determinism contract:
 //! changing them shifts GoL output and breaks every fast-eval / tournament
-//! test downstream. Hands off.
+//! test downstream — hands off.
 
 use crate::config::GolUserRule;
 

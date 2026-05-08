@@ -1,20 +1,25 @@
-use super::types::Snapshot;
+use super::types::{EditKind, EditMeta, Snapshot};
 use super::Buffer;
 
+/// Maximum snapshots retained per stack. The oldest entry is dropped on
+/// overflow so a long editing session keeps the redo path live without
+/// unbounded memory growth.
 pub(super) const UNDO_LIMIT: usize = 256;
 
 impl Buffer {
     pub fn undo(&mut self) -> bool {
-        self.pop_and_swap(true)
+        self.swap_with_history(true)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.pop_and_swap(false)
+        self.swap_with_history(false)
     }
 
     pub(super) fn push_undo(&mut self) {
         let snap = self.snapshot();
         push_snapshot(&mut self.undo, snap);
+        // A fresh edit invalidates the redo stack — the user is now branching
+        // away from any previously-undone state.
         self.redo.clear();
     }
 
@@ -26,7 +31,7 @@ impl Buffer {
         }
     }
 
-    fn pop_and_swap(&mut self, pop_undo: bool) -> bool {
+    fn swap_with_history(&mut self, pop_undo: bool) -> bool {
         let popped = if pop_undo {
             self.undo.pop()
         } else {
@@ -36,13 +41,14 @@ impl Buffer {
             return false;
         };
         self.end_edit_group();
-        // Push current state to the *opposite* stack so the swap is reversible.
+        // Push current state onto the *opposite* stack so the swap is reversible.
         let mirror = self.snapshot();
-        if pop_undo {
-            push_snapshot(&mut self.redo, mirror);
+        let target = if pop_undo {
+            &mut self.redo
         } else {
-            push_snapshot(&mut self.undo, mirror);
-        }
+            &mut self.undo
+        };
+        push_snapshot(target, mirror);
         self.rope = snapshot.rope;
         self.cursor = snapshot.cursor;
         self.dirty = snapshot.dirty;
@@ -53,7 +59,7 @@ impl Buffer {
 
     pub(super) fn begin_insert_group(&mut self, idx: usize) {
         let start_new = match self.last_edit {
-            Some(meta) => meta.kind != super::types::EditKind::Insert || meta.cursor_index != idx,
+            Some(meta) => meta.kind != EditKind::Insert || meta.cursor_index != idx,
             None => true,
         };
         if start_new {
@@ -62,10 +68,9 @@ impl Buffer {
     }
 
     pub(super) fn finish_insert_group(&mut self) {
-        let cursor_index = self.char_index();
-        self.last_edit = Some(super::types::EditMeta {
-            kind: super::types::EditKind::Insert,
-            cursor_index,
+        self.last_edit = Some(EditMeta {
+            kind: EditKind::Insert,
+            cursor_index: self.char_index(),
         });
     }
 

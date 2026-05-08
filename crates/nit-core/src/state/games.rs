@@ -99,6 +99,10 @@ pub struct GamesStrategyInspectState {
     pub source_label: Option<String>,
 }
 
+/// `last_max_scroll` is cached so wheel/keyboard scroll handlers can clamp
+/// without calling `build_columns` (which re-runs the TM simulation and
+/// rebuilds grid + rule tables) on every input event. `usize::MAX` is the
+/// "no render yet" sentinel — see `last_max_scroll_sentinel` below.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesTmSimState {
     pub open: bool,
@@ -113,10 +117,6 @@ pub struct GamesTmSimState {
     pub source_label: Option<String>,
     #[serde(skip)]
     pub scroll_offset: usize,
-    /// Last max_scroll computed during render. Cached so wheel/keyboard scroll
-    /// handlers can clamp without calling the expensive `build_columns`
-    /// function (which runs the TM simulation and formats grid + rule tables)
-    /// on every input event. `usize::MAX` is the sentinel for "no render yet".
     #[serde(skip, default = "scroll_cache_sentinel")]
     pub last_max_scroll: usize,
 }
@@ -131,11 +131,13 @@ impl Default for GamesTmSimState {
             steps_override: None,
             source_label: None,
             scroll_offset: 0,
-            last_max_scroll: usize::MAX,
+            last_max_scroll: scroll_cache_sentinel(),
         }
     }
 }
 
+/// `last_max_scroll` mirrors `GamesTmSimState`'s render-cache sentinel —
+/// `usize::MAX` means "no render yet, scroll position is unclamped".
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesCaSimState {
     pub open: bool,
@@ -150,9 +152,6 @@ pub struct GamesCaSimState {
     pub source_label: Option<String>,
     #[serde(skip)]
     pub scroll_offset: usize,
-    /// Last max_scroll computed during render. Cached so wheel/keyboard scroll
-    /// handlers can clamp without calling the expensive `build_columns`
-    /// function on every input event. `usize::MAX` = no render yet.
     #[serde(skip, default = "scroll_cache_sentinel")]
     pub last_max_scroll: usize,
 }
@@ -167,7 +166,7 @@ impl Default for GamesCaSimState {
             steps_override: None,
             source_label: None,
             scroll_offset: 0,
-            last_max_scroll: usize::MAX,
+            last_max_scroll: scroll_cache_sentinel(),
         }
     }
 }
@@ -286,37 +285,36 @@ pub struct GamesState {
 }
 
 pub(super) fn open_games_history_popup(state: &mut AppState) {
-    if state.games.match_history.total_entries == 0 && !state.games.match_history.entries.is_empty()
-    {
-        state.games.match_history.total_entries = state.games.match_history.entries.len();
-        state.games.match_history.loaded_start = 0;
-        state.games.match_history.max_rounds_seen = state
-            .games
-            .match_history
+    let games = &mut state.games;
+    let history = &mut games.match_history;
+
+    // Lazy-populate totals when entries arrived without going through the
+    // capture pipeline (e.g. opened from a previously-loaded run).
+    if history.total_entries == 0 && !history.entries.is_empty() {
+        history.total_entries = history.entries.len();
+        history.loaded_start = 0;
+        history.max_rounds_seen = history
             .entries
             .iter()
             .map(|entry| entry.rounds_total as usize)
             .max()
             .unwrap_or(0);
     }
-    if state.games.match_history.total_entries == 0 {
-        state.games.match_history.last_error = if state.games.match_history.capture_disabled_for_run
-        {
-            None
-        } else {
-            Some("No completed matches available yet. Start a tournament first.".into())
-        };
+
+    history.last_error = if history.total_entries == 0 && !history.capture_disabled_for_run {
+        Some("No completed matches available yet. Start a tournament first.".into())
     } else {
-        state.games.match_history.last_error = None;
-    }
-    state.games.run_browser.open = false;
-    state.games.replay.open = false;
-    state.games.strategy_inspect.open = false;
-    state.games.analysis.open = false;
-    state.games.tm_sim.open = false;
-    state.games.ca_sim.open = false;
-    state.games.match_history.open = true;
-    state.games.match_history.column_offset = 0;
-    state.games.match_history.round_limit = None;
+        None
+    };
+
+    games.run_browser.open = false;
+    games.replay.open = false;
+    games.strategy_inspect.open = false;
+    games.analysis.open = false;
+    games.tm_sim.open = false;
+    games.ca_sim.open = false;
+    games.match_history.open = true;
+    games.match_history.column_offset = 0;
+    games.match_history.round_limit = None;
     state.status = Some("Games match history plot opened".into());
 }

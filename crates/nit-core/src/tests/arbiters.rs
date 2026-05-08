@@ -1,10 +1,10 @@
-//! Centralized tests for the arbiter framework — observer→arbiter ordering,
-//! retry-budget enforcement, and per-arbiter intervention shapes.
+//! Tests for the arbiter framework — observer→arbiter ordering, retry-budget
+//! enforcement, and per-arbiter intervention shapes.
 
 use crate::agent_bus::AgentBusEvent;
 use crate::arbiters::{
-    self, persistent_conflict, reduce_proposals, run_all, InterventionKind, InterventionProposal,
-    InterventionTarget, ARBITER_MAX_PER_TICK, ARBITER_RETRY_LIMIT,
+    self, persistent_conflict, reduce_proposals, run_all, sparse_plan_arbiter, InterventionKind,
+    InterventionProposal, InterventionTarget, ARBITER_MAX_PER_TICK, ARBITER_RETRY_LIMIT,
 };
 use crate::state::AppState;
 use crate::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
@@ -14,7 +14,8 @@ fn test_state_on_disk(label: &str) -> AppState {
     test_state_in(temp_dir(label))
 }
 
-/// Inject a ClaimViolation signal mimicking agent_bus.rs:286-303.
+/// Inject a `ClaimViolation` signal mirroring the auto-emit shape from
+/// `agent_bus::file_ops` so persistent_conflict sees realistic input.
 fn inject_claim_violation(
     state: &mut AppState,
     violator: &str,
@@ -43,6 +44,14 @@ fn inject_claim_violation(
     });
 }
 
+/// Three violations forming the canonical persistent-conflict pattern: two
+/// agents fighting over two paths, alternating victim/holder.
+fn seed_persistent_conflict_pair(state: &mut AppState) {
+    inject_claim_violation(state, "a", "b", "foo.rs", 0, 0);
+    inject_claim_violation(state, "b", "a", "foo.rs", 0, 1);
+    inject_claim_violation(state, "a", "b", "bar.rs", 0, 2);
+}
+
 #[test]
 fn framework_invokes_all_registered_arbiters_empty_state() {
     let state = test_state();
@@ -67,9 +76,7 @@ fn persistent_conflict_silent_below_threshold() {
 #[test]
 fn persistent_conflict_triggers_at_threshold() {
     let mut state = test_state();
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     let proposals = (persistent_conflict::ARBITER.run)(&state);
     assert_eq!(proposals.len(), 1);
@@ -93,9 +100,7 @@ fn persistent_conflict_triggers_at_threshold() {
 #[test]
 fn persistent_conflict_deterministic_tiebreak() {
     let mut state = test_state();
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     let proposals = (persistent_conflict::ARBITER.run)(&state);
     assert_eq!(proposals.len(), 1);
@@ -106,14 +111,14 @@ fn persistent_conflict_deterministic_tiebreak() {
         .unwrap_or("");
     assert_eq!(
         chosen, "b",
-        "lexicographically-larger agent should be chosen"
+        "lexicographically-larger agent should be chosen",
     );
 }
 
 #[test]
 fn persistent_conflict_cooldown_respected() {
     let mut state = test_state();
-    // Pre-seed an InterventionEmitted signal for persistent_conflict targeting a.
+    // Pre-seed an InterventionEmitted for persistent_conflict targeting `a`.
     state.substrate.emit_signal(Signal {
         id: "seed-iv-0".into(),
         kind: SignalKind::InterventionEmitted,
@@ -125,23 +130,21 @@ fn persistent_conflict_cooldown_respected() {
         initial_strength: arbiters::ARBITER_INITIAL_STRENGTH,
         payload: serde_json::Value::Null,
     });
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     let raw = run_all(&state);
     assert_eq!(raw.len(), 1);
     let reduced = reduce_proposals(&state, raw, ARBITER_RETRY_LIMIT);
     assert!(
         reduced.is_empty(),
-        "cooldown should skip the persistent_conflict proposal"
+        "cooldown should skip the persistent_conflict proposal",
     );
 }
 
 #[test]
 fn persistent_conflict_outside_window_ignored() {
     let mut state = test_state();
-    // Advance generation beyond the 10-gen window.
+    // Advance past the 10-gen window relative to the violations.
     state.substrate.generation = 20;
     inject_claim_violation(&mut state, "a", "b", "foo.rs", 5, 0);
     inject_claim_violation(&mut state, "b", "a", "foo.rs", 5, 1);
@@ -154,7 +157,6 @@ fn persistent_conflict_outside_window_ignored() {
 #[test]
 fn reduce_proposals_enforces_per_tick_budget() {
     let state = test_state();
-    // Construct > ARBITER_MAX_PER_TICK raw proposals manually.
     let raw: Vec<(&'static str, InterventionProposal)> = (0..(ARBITER_MAX_PER_TICK + 2))
         .map(|i| {
             (
@@ -179,10 +181,7 @@ fn reduce_proposals_enforces_per_tick_budget() {
 fn turn_completed_integration_queues_intervention() {
     let mut state = test_state_on_disk("integration-turn-completed");
     add_codex_agent(&mut state, "gpt-test");
-
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     AgentBusEvent::TurnCompleted {
         agent_id: "gpt-test".into(),
@@ -196,7 +195,7 @@ fn turn_completed_integration_queues_intervention() {
     assert!(
         !state.pending_interventions.is_empty(),
         "expected at least one intervention queued, got {:?}",
-        state.pending_interventions
+        state.pending_interventions,
     );
 
     let arb_signals: Vec<_> = state
@@ -210,42 +209,38 @@ fn turn_completed_integration_queues_intervention() {
         .collect();
     assert!(
         !arb_signals.is_empty(),
-        "expected an InterventionEmitted signal from persistent_conflict"
+        "expected an InterventionEmitted signal from persistent_conflict",
     );
 }
 
 #[test]
 fn metabolism_tick_runs_arbiters() {
     let mut state = test_state_on_disk("integration-metabolism");
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     let outcome = crate::metabolism::tick(&mut state);
+
     assert!(
         outcome.arbiter_interventions > 0,
-        "expected arbiter interventions in tick outcome, got {outcome:?}"
+        "expected arbiter interventions in tick outcome, got {outcome:?}",
     );
     assert!(
         !state.pending_interventions.is_empty(),
-        "expected queue populated after metabolism tick"
+        "expected queue populated after metabolism tick",
     );
 }
 
 #[test]
 fn intervention_downgrades_to_signal_only_when_retry_budget_exhausted() {
     let mut state = test_state();
-    // Per-agent budgets: both agents in the pair must be exhausted for the
-    // AgentPair intervention to downgrade.
+    // AgentPair downgrade requires both agents to be exhausted.
     state
         .genome_retry_counts
         .insert("a".to_string(), ARBITER_RETRY_LIMIT);
     state
         .genome_retry_counts
         .insert("b".to_string(), ARBITER_RETRY_LIMIT);
-    inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
-    inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
-    inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);
+    seed_persistent_conflict_pair(&mut state);
 
     let raw = run_all(&state);
     assert_eq!(raw.len(), 1);
@@ -259,7 +254,6 @@ fn intervention_downgrades_to_signal_only_when_retry_budget_exhausted() {
 
 #[test]
 fn sparse_plan_arbiter_escalates_on_help_needed() {
-    use crate::arbiters::sparse_plan_arbiter;
     let mut state = test_state();
     state.substrate.emit_signal(Signal {
         id: "0-observer:sparse_plan-0".into(),
@@ -277,6 +271,7 @@ fn sparse_plan_arbiter_escalates_on_help_needed() {
             "missing_deps_sample": ["judge", "review"],
         }),
     });
+
     let proposals = (sparse_plan_arbiter::ARBITER.run)(&state);
     assert_eq!(proposals.len(), 1);
     let p = &proposals[0];
@@ -295,7 +290,6 @@ fn sparse_plan_arbiter_escalates_on_help_needed() {
 
 #[test]
 fn sparse_plan_arbiter_silent_without_help_needed() {
-    use crate::arbiters::sparse_plan_arbiter;
     let state = test_state();
     let proposals = (sparse_plan_arbiter::ARBITER.run)(&state);
     assert!(proposals.is_empty());

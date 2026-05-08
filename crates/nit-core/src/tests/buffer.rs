@@ -80,7 +80,7 @@ fn undo_single_step_on_selection_replace_newline_preserves_indent() {
     assert_eq!(buf.content_as_string(), "    foo");
 }
 
-// --- Smart indent tests ---
+// --- Smart indent ---
 
 #[test]
 fn newline_after_open_brace_increases_indent() {
@@ -193,6 +193,18 @@ fn open_line_below_no_opener_copies_indent() {
 }
 
 #[test]
+fn newline_after_brace_with_trailing_spaces() {
+    let mut buf = Buffer::from_str("test", "fn main() {   ", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 14; // after trailing spaces
+    buf.insert_newline();
+    // '{' is detected through trailing whitespace.
+    assert_eq!(buf.content_as_string(), "fn main() {   \n    ");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+#[test]
 fn indent_unit_detects_two_space_indent() {
     let buf = Buffer::from_str("test", "if true:\n  foo\n  bar\n", None);
     assert_eq!(buf.indent_unit(), "  ");
@@ -216,21 +228,20 @@ fn indent_unit_defaults_to_four_spaces() {
     assert_eq!(buf.indent_unit(), "    ");
 }
 
+// --- Diff ---
+
 #[test]
 fn diff_detects_added_lines() {
     let mut buf = Buffer::from_str("test", "a\nb\nc\n", None);
-    // No changes yet - all unchanged
     buf.compute_diff_if_needed();
     assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
     assert_eq!(buf.line_diff_status(1), LineDiffStatus::Unchanged);
 
-    // Insert a new line
     buf.cursor.line = 1;
     buf.cursor.col = 0;
     buf.open_line_above();
     buf.insert_str("new");
     buf.compute_diff_if_needed();
-    // The new line should be marked as Added
     assert_eq!(buf.line_diff_status(1), LineDiffStatus::Added);
 }
 
@@ -247,8 +258,9 @@ fn diff_detects_modified_lines() {
 
 #[test]
 fn diff_all_unchanged_on_open() {
+    // No edits → diff is not computed yet; the status array stays empty.
     let buf = Buffer::from_str("test", "a\nb\nc\n", None);
-    assert_eq!(buf.diff_statuses().len(), 0); // not computed yet
+    assert_eq!(buf.diff_statuses().len(), 0);
 }
 
 #[test]
@@ -260,7 +272,6 @@ fn diff_resets_on_mark_clean() {
     buf.compute_diff_if_needed();
     assert_eq!(buf.line_diff_status(0), LineDiffStatus::Modified);
 
-    // Simulate save
     buf.mark_clean();
     buf.compute_diff_if_needed();
     assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
@@ -268,10 +279,10 @@ fn diff_resets_on_mark_clean() {
 
 #[test]
 fn diff_modified_line_in_context() {
-    // Simulate: one line changed in the middle of unchanged code (like lib.rs case)
+    // One line changed in the middle of unchanged code (the lib.rs case).
     let base = "use foo;\nuse bar;\nuse baz;\nuse qux;\n";
     let mut buf = Buffer::from_str("test", base, None);
-    // Change "use bar;" → "use bar_v2;"
+    // "use bar;" → "use bar_v2;"
     buf.cursor.line = 1;
     buf.cursor.col = 7;
     buf.insert_str("_v2");
@@ -284,7 +295,6 @@ fn diff_modified_line_in_context() {
 
 #[test]
 fn diff_added_block_between_unchanged() {
-    // Simulate: new block inserted between existing code
     let base = "fn a() {}\nfn b() {}\n";
     let mut buf = Buffer::from_str("test", base, None);
     buf.cursor.line = 0;
@@ -297,19 +307,7 @@ fn diff_added_block_between_unchanged() {
     assert_eq!(buf.line_diff_status(2), LineDiffStatus::Unchanged);
 }
 
-#[test]
-fn newline_after_brace_with_trailing_spaces() {
-    let mut buf = Buffer::from_str("test", "fn main() {   ", None);
-    buf.cursor.line = 0;
-    buf.cursor.col = 14; // after trailing spaces
-    buf.insert_newline();
-    // Should detect '{' through trailing whitespace
-    assert_eq!(buf.content_as_string(), "fn main() {   \n    ");
-    assert_eq!(buf.cursor.line, 1);
-    assert_eq!(buf.cursor.col, 4);
-}
-
-// --- Vim motion tests ---
+// --- Vim word motions ---
 
 #[test]
 fn move_word_forward_skips_whitespace() {
@@ -339,7 +337,7 @@ fn move_big_word_forward_ignores_punctuation() {
     buf.cursor.line = 0;
     buf.cursor.col = 0;
     buf.move_big_word_forward();
-    // Should skip past "foo,bar" entirely and land on "baz"
+    // Skips past "foo,bar" and lands on "baz".
     assert_eq!(buf.cursor.col, 8);
 }
 
@@ -380,7 +378,7 @@ fn move_first_non_blank_on_blank_line_stays_at_zero() {
     buf.cursor.line = 0;
     buf.cursor.col = 2;
     buf.move_first_non_blank();
-    // Line is all whitespace so cursor goes past end to col 3.
+    // All-whitespace line: cursor goes past the end to col 3.
     assert_eq!(buf.cursor.col, 3);
 }
 
@@ -399,7 +397,7 @@ fn move_paragraph_down_jumps_to_blank_line() {
     buf.cursor.line = 0;
     buf.cursor.col = 0;
     buf.move_paragraph_down();
-    assert_eq!(buf.cursor.line, 2); // blank line
+    assert_eq!(buf.cursor.line, 2);
 }
 
 #[test]
@@ -444,7 +442,7 @@ fn move_viewport_bottom_uses_viewport_offset_and_height() {
     assert_eq!(buf.cursor.line, 3); // 1 + 3 - 1 = 3
 }
 
-// --- Vim operator tests ---
+// --- Vim operators ---
 
 #[test]
 fn delete_to_end_removes_rest_of_line() {
@@ -547,7 +545,7 @@ fn replace_char_does_nothing_on_newline() {
     assert_eq!(buf.content_as_string(), "hi\nlo");
 }
 
-// --- Vim find-char tests ---
+// --- Vim find-char ---
 
 #[test]
 fn find_char_forward_lands_on_target() {
@@ -603,7 +601,7 @@ fn find_char_does_not_leave_current_line() {
     assert_eq!(buf.cursor.col, 0);
 }
 
-// --- Vim scroll / viewport tests ---
+// --- Scroll / viewport ---
 
 #[test]
 fn scroll_half_page_down_moves_both_cursor_and_offset() {
@@ -635,7 +633,7 @@ fn center_viewport_on_cursor_centers_line() {
     buf.viewport.height = 5;
     buf.cursor.line = 5;
     buf.center_viewport_on_cursor();
-    // 5 - 5/2 = 5 - 2 = 3
+    // 5 - 5/2 = 3
     assert_eq!(buf.viewport.offset_line, 3);
 }
 
@@ -658,7 +656,7 @@ fn viewport_bottom_on_cursor_aligns_cursor_to_bottom() {
     assert_eq!(buf.viewport.offset_line, 2);
 }
 
-// --- Undo/redo interaction with new operators ---
+// --- Undo/redo for new operators ---
 
 #[test]
 fn delete_to_end_is_undoable() {
@@ -693,15 +691,14 @@ fn join_lines_is_undoable() {
     assert_eq!(buf.content_as_string(), "hello\nworld\n");
 }
 
-// --- Vim search (* / # / n / N) tests ---
+// --- Vim search (* / # / n / N) ---
 
 #[test]
 fn word_at_cursor_returns_identifier() {
-    let buf = Buffer::from_str("t", "foo bar_baz qux", None);
-    let mut b = buf;
-    b.cursor.line = 0;
-    b.cursor.col = 5; // inside 'bar_baz'
-    assert_eq!(b.word_at_cursor().as_deref(), Some("bar_baz"));
+    let mut buf = Buffer::from_str("t", "foo bar_baz qux", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 5; // inside 'bar_baz'
+    assert_eq!(buf.word_at_cursor().as_deref(), Some("bar_baz"));
 }
 
 #[test]
@@ -740,14 +737,13 @@ fn search_next_match_advances_cursor() {
     buf.cursor.line = 0;
     buf.cursor.col = 0;
     assert!(buf.search_next_match("foo", true));
-    // Next match is "foo" on line 1 at column 4 (after "bar ").
+    // "foo" on line 1 at column 4 (after "bar ").
     assert_eq!(buf.cursor.line, 1);
     assert_eq!(buf.cursor.col, 4);
-    // Again: advances to line 2.
     assert!(buf.search_next_match("foo", true));
     assert_eq!(buf.cursor.line, 2);
     assert_eq!(buf.cursor.col, 0);
-    // Again: wraps back to line 0.
+    // Wraps back to line 0.
     assert!(buf.search_next_match("foo", true));
     assert_eq!(buf.cursor.line, 0);
     assert_eq!(buf.cursor.col, 0);
@@ -769,7 +765,7 @@ fn search_next_match_returns_false_when_missing() {
     buf.cursor.line = 0;
     buf.cursor.col = 0;
     assert!(!buf.search_next_match("missing", false));
-    // Cursor doesn't move when no match.
+    // No match → cursor doesn't move.
     assert_eq!(buf.cursor.col, 0);
 }
 
@@ -797,26 +793,23 @@ fn search_whole_word_skips_substring_matches() {
     let mut buf = Buffer::from_str("t", "result results result\n", None);
     buf.cursor.line = 0;
     buf.cursor.col = 0;
-    // `whole_word` search from col 0 must skip "results" (substring) and
-    // land on the final "result" at col 15.
+    // From col 0 the whole-word search must skip "results" and land on the
+    // final "result" at col 15.
     assert!(buf.search_next_match("result", true));
     assert_eq!(buf.cursor.col, 15);
 }
 
 #[test]
 fn repeated_star_scans_through_matches_forward() {
-    // `*` jumps to next match each time. From inside the first match we
-    // should skip it and advance.
     let mut buf = Buffer::from_str("t", "foo foo foo\n", None);
     buf.cursor.line = 0;
     buf.cursor.col = 0;
-    // First `*` → already on first "foo", skip it and jump to second.
+    // From inside the first match, `*` skips it and advances.
     assert!(buf.search_next_match("foo", true));
     assert_eq!(buf.cursor.col, 4);
-    // Second call → jump to third.
     assert!(buf.search_next_match("foo", true));
     assert_eq!(buf.cursor.col, 8);
-    // Third call → wraps to first.
+    // Wrap to first.
     assert!(buf.search_next_match("foo", true));
     assert_eq!(buf.cursor.col, 0);
 }
@@ -826,13 +819,11 @@ fn repeated_hash_scans_through_matches_backward() {
     let mut buf = Buffer::from_str("t", "foo foo foo\n", None);
     buf.cursor.line = 0;
     buf.cursor.col = 8; // on third "foo"
-                        // First `#` from inside a match → go to previous match.
     assert!(buf.search_prev_match("foo", true));
     assert_eq!(buf.cursor.col, 4);
-    // Next call → first match.
     assert!(buf.search_prev_match("foo", true));
     assert_eq!(buf.cursor.col, 0);
-    // Wrap: go back to last match.
+    // Wrap back to last match.
     assert!(buf.search_prev_match("foo", true));
     assert_eq!(buf.cursor.col, 8);
 }

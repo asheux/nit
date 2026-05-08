@@ -1,5 +1,6 @@
-//! Saturation alarm — emits one Warning per cooldown window when active
-//! signal count exceeds THRESHOLD.
+//! Saturation alarm — emits one Warning per cooldown window when the active
+//! signal count exceeds `THRESHOLD`. Without the cooldown the arbiter feed
+//! would itself become a hot signal source while we are flagging hot signals.
 
 use super::{ObservedEmission, Observer};
 use crate::state::AppState;
@@ -15,8 +16,8 @@ const COOLDOWN_GENS: u64 = 10;
 
 fn observe(state: &AppState) -> Vec<ObservedEmission> {
     let sub = &state.substrate;
-    let n = sub.signals.len();
-    if n <= THRESHOLD {
+    let signal_count = sub.signals.len();
+    if signal_count <= THRESHOLD {
         return Vec::new();
     }
     let window_start = sub.current_generation().saturating_sub(COOLDOWN_GENS);
@@ -29,7 +30,7 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
         SignalTarget::Global,
         serde_json::json!({
             "reason": "global_heat",
-            "signal_count": n,
+            "signal_count": signal_count,
             "threshold": THRESHOLD,
         }),
     )]

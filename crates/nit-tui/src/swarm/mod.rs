@@ -172,9 +172,9 @@ pub(crate) use plan_parser::{detect_swarm_mission_kind_from_prompt, normalize_ro
 use prompts::append_task_continuation_preamble;
 pub(crate) use prompts::role_contract_lines;
 use prompts::{
-    build_planner_prompt, build_synthesis_prompt, detect_incomplete_signoff,
-    is_provider_rate_limit_failure, wrap_task_prompt,
+    build_planner_prompt, build_synthesis_prompt, detect_incomplete_signoff, wrap_task_prompt,
 };
+pub(crate) use prompts::{is_provider_quota_exhausted_in_result, is_provider_rate_limit_failure};
 pub(crate) use scope::enumerate_scope_files;
 use scope::sanitize_for_filename;
 #[cfg(test)]

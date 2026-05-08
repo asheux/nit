@@ -1,9 +1,11 @@
-//! Centralized tests for `AgentBusEvent::apply` — token accounting, turn
-//! lifecycle, soft-cancel routing, and substrate signal emission.
+//! Tests for `AgentBusEvent::apply` — token accounting, turn lifecycle,
+//! soft-cancel routing, file-write side effects, and substrate emission.
 
 use super::*;
-use crate::state::{AgentAlertSeverity, AgentStatus, MissionRecord};
-use crate::test_helpers::{add_claude_agent, add_codex_agent, test_state};
+use std::path::PathBuf;
+
+use crate::state::{AgentAlertSeverity, AgentChannel, AgentStatus, MissionPhase, MissionRecord};
+use crate::test_helpers::{add_claude_agent, add_codex_agent, temp_dir, test_state};
 
 #[test]
 fn token_count_routes_to_codex_maps_for_codex_agent() {
@@ -28,7 +30,6 @@ fn token_count_routes_to_codex_maps_for_codex_agent() {
         .agents
         .codex_context_remaining_pct
         .contains_key("gpt-test"));
-    // Claude maps should be empty.
     assert!(!state.agents.claude_used_tokens.contains_key("gpt-test"));
 }
 
@@ -55,7 +56,6 @@ fn token_count_routes_to_claude_maps_for_claude_agent() {
         .agents
         .claude_context_remaining_pct
         .contains_key("claude-opus"));
-    // Codex maps should be empty.
     assert!(!state.agents.codex_used_tokens.contains_key("claude-opus"));
 }
 
@@ -89,7 +89,6 @@ fn token_count_mission_scoped_for_claude() {
         .get("mis-001")
         .and_then(|m| m.get("claude-opus"))
         .is_some());
-    // Global maps should be empty.
     assert!(!state.agents.claude_used_tokens.contains_key("claude-opus"));
 }
 
@@ -98,21 +97,21 @@ fn turn_completed_stores_thread_id_in_codex_maps() {
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
 
-    let event = AgentBusEvent::TurnCompleted {
+    AgentBusEvent::TurnCompleted {
         agent_id: "gpt-test".into(),
         mission_id: None,
         thread_id: Some("thread-abc".into()),
         token_count: None,
         message: "Done.".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(
         state
             .agents
             .codex_thread_ids
             .get("gpt-test")
-            .map(|s| s.as_str()),
+            .map(String::as_str),
         Some("thread-abc"),
     );
 }
@@ -122,14 +121,14 @@ fn turn_completed_stores_mission_scoped_thread_id() {
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
 
-    let event = AgentBusEvent::TurnCompleted {
+    AgentBusEvent::TurnCompleted {
         agent_id: "gpt-test".into(),
         mission_id: Some("mis-001".into()),
         thread_id: Some("thread-mission".into()),
         token_count: None,
         message: "Done.".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(
         state
@@ -137,10 +136,9 @@ fn turn_completed_stores_mission_scoped_thread_id() {
             .codex_mission_thread_ids
             .get("mis-001")
             .and_then(|m| m.get("gpt-test"))
-            .map(|s| s.as_str()),
+            .map(String::as_str),
         Some("thread-mission"),
     );
-    // Global map should be empty.
     assert!(!state.agents.codex_thread_ids.contains_key("gpt-test"));
 }
 
@@ -149,38 +147,34 @@ fn turn_failed_source_label_matches_backend() {
     let mut state = test_state();
     add_claude_agent(&mut state, "claude-opus");
 
-    let event = AgentBusEvent::TurnFailed {
+    AgentBusEvent::TurnFailed {
         agent_id: "claude-opus".into(),
         mission_id: None,
         thread_id: None,
         token_count: None,
         message: "rate limited".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
-    // The alert source should say "claude", not "codex".
     let alert = state.agents.alerts.last().unwrap();
     assert_eq!(alert.source, "claude");
-
-    // The status bar message should say "Claude failed:".
     let status = state.status.as_deref().unwrap();
     assert!(status.starts_with("Claude failed:"), "got: {status}");
 }
 
 #[test]
 fn turn_failed_with_operator_cancel_routes_soft_path() {
-    // Pins the OPERATOR_CANCEL_TURN_MESSAGE soft-cancel branch in
-    // agent_bus.rs. A typo on either side (the const, the runner emit
-    // sites in claude_runner.rs / codex_runner.rs, or the bus match)
-    // would silently flip operator cancels into the hard error path:
-    // red status banner, substrate Warning, mission ERROR overwrite,
-    // alert noise. This test fails loudly if any of those drift.
+    // Pins the OPERATOR_CANCEL_TURN_MESSAGE soft-cancel branch in the bus.
+    // Drift on either side (the const, the runner emit sites, or the bus
+    // match) would silently flip operator cancels into the hard error path:
+    // red status banner, substrate Warning, mission ERROR overwrite, alert
+    // noise. This test fails loudly if any of those drift.
     let mut state = test_state();
     add_claude_agent(&mut state, "claude-opus");
     state.agents.missions.push(MissionRecord {
         id: "mis-001".into(),
         title: "test".into(),
-        phase: crate::state::MissionPhase::Execute,
+        phase: MissionPhase::Execute,
         swarm: true,
         assigned_agents: vec!["claude-opus".into()],
         status: "ABORTED".into(),
@@ -209,12 +203,12 @@ fn turn_failed_with_operator_cancel_routes_soft_path() {
     assert_eq!(
         state.agents.alerts.len(),
         alerts_before,
-        "soft-cancel must not push an alert"
+        "soft-cancel must not push an alert",
     );
     assert!(
         state.status.is_none(),
         "soft-cancel must not set the failure status banner, got: {:?}",
-        state.status
+        state.status,
     );
 
     let new_warnings = state
@@ -226,7 +220,7 @@ fn turn_failed_with_operator_cancel_routes_soft_path() {
     assert_eq!(
         state.substrate.signals.len() - signals_before,
         0,
-        "soft-cancel must not emit substrate signals; got {new_warnings} new warnings"
+        "soft-cancel must not emit substrate signals; got {new_warnings} new warnings",
     );
 
     let mission = state
@@ -237,7 +231,7 @@ fn turn_failed_with_operator_cancel_routes_soft_path() {
         .unwrap();
     assert_eq!(
         mission.status, "ABORTED",
-        "soft-cancel must not clobber an ABORTED mission status with ERROR"
+        "soft-cancel must not clobber an ABORTED mission status with ERROR",
     );
 
     let diag = state
@@ -249,16 +243,15 @@ fn turn_failed_with_operator_cancel_routes_soft_path() {
     assert!(
         diag.message.contains("cancelled by operator"),
         "diag message should reflect operator cancel, got: {}",
-        diag.message
+        diag.message,
     );
 }
 
 #[test]
 fn turn_failed_with_runner_internal_cancel_routes_soft_path() {
-    // The other half of the soft-cancel branch: MCP-driven runner
-    // cancels (`Cancelled (MCP stop)` / `Cancelled (MCP reconnect)`)
-    // ride the same path so the operator does not see an alert when
-    // they reconfigure MCP.
+    // MCP-driven runner cancels (`Cancelled (MCP stop)` / `Cancelled (MCP
+    // reconnect)`) ride the same soft path so reconfiguring MCP doesn't
+    // surface as an alert.
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
     let signals_before = state.substrate.signals.len();
@@ -299,7 +292,7 @@ fn file_write_populates_mission_accumulator_when_agent_has_mission() {
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: None,
-        path: std::path::PathBuf::from("src/a.rs"),
+        path: PathBuf::from("src/a.rs"),
     }
     .apply(&mut state);
 
@@ -307,21 +300,21 @@ fn file_write_populates_mission_accumulator_when_agent_has_mission() {
         .genome_mission_modified
         .get("mis-001")
         .unwrap()
-        .contains(&std::path::PathBuf::from("src/a.rs")));
+        .contains(&PathBuf::from("src/a.rs")));
 }
 
 #[test]
 fn file_write_with_explicit_mission_id_wins_over_agent_lookup() {
-    // New emitters carry mission_id directly in the event. This eliminates
-    // the race with TurnStarted where the agent's `current_mission` may not
-    // yet be populated.
+    // New emitters carry mission_id directly in the event so the mission
+    // accumulator does not race with `TurnStarted` setting
+    // `agent.current_mission`.
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
     // Agent has no current_mission set — the lookup path would fail.
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: Some("mis-042".into()),
-        path: std::path::PathBuf::from("src/x.rs"),
+        path: PathBuf::from("src/x.rs"),
     }
     .apply(&mut state);
 
@@ -329,7 +322,7 @@ fn file_write_with_explicit_mission_id_wins_over_agent_lookup() {
         .genome_mission_modified
         .get("mis-042")
         .unwrap()
-        .contains(&std::path::PathBuf::from("src/x.rs")));
+        .contains(&PathBuf::from("src/x.rs")));
 }
 
 #[test]
@@ -340,25 +333,23 @@ fn file_write_without_mission_skips_mission_accumulator() {
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: None,
-        path: std::path::PathBuf::from("src/a.rs"),
+        path: PathBuf::from("src/a.rs"),
     }
     .apply(&mut state);
 
     assert!(state.genome_mission_modified.is_empty());
-    // Per-turn attribution still works.
     assert!(state
         .genome_turn_modified
         .get("gpt-test")
         .unwrap()
-        .contains(&std::path::PathBuf::from("src/a.rs")));
+        .contains(&PathBuf::from("src/a.rs")));
 }
 
 #[test]
 fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
-    // Regression: when a swarm agent runs multiple sequential tasks, each
-    // TurnStarted clears `genome_turn_modified[agent]`. Before the mission
-    // accumulator existed, the swarm's genome review saw only files from the
-    // last turn — every earlier turn's work was invisible.
+    // Regression: each TurnStarted clears `genome_turn_modified[agent]`.
+    // Before the mission accumulator existed, the swarm's genome review saw
+    // only files from the last turn — every earlier turn's work was invisible.
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
     state
@@ -369,15 +360,13 @@ fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
         .unwrap()
         .current_mission = Some("mis-001".into());
 
-    // Turn 1: write file a.
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: Some("mis-001".into()),
-        path: std::path::PathBuf::from("a.rs"),
+        path: PathBuf::from("a.rs"),
     }
     .apply(&mut state);
 
-    // TurnStarted for turn 2 — this clears `genome_turn_modified[gpt-test]`.
     AgentBusEvent::TurnStarted {
         agent_id: "gpt-test".into(),
         mission_id: Some("mis-001".into()),
@@ -385,23 +374,20 @@ fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
     }
     .apply(&mut state);
 
-    // Turn 2: write file b.
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: Some("mis-001".into()),
-        path: std::path::PathBuf::from("b.rs"),
+        path: PathBuf::from("b.rs"),
     }
     .apply(&mut state);
 
-    // Per-turn only has the current turn's file.
     let per_turn = state.genome_turn_modified.get("gpt-test").unwrap();
-    assert!(!per_turn.contains(&std::path::PathBuf::from("a.rs")));
-    assert!(per_turn.contains(&std::path::PathBuf::from("b.rs")));
+    assert!(!per_turn.contains(&PathBuf::from("a.rs")));
+    assert!(per_turn.contains(&PathBuf::from("b.rs")));
 
-    // Mission accumulator has both.
     let mission = state.genome_mission_modified.get("mis-001").unwrap();
-    assert!(mission.contains(&std::path::PathBuf::from("a.rs")));
-    assert!(mission.contains(&std::path::PathBuf::from("b.rs")));
+    assert!(mission.contains(&PathBuf::from("a.rs")));
+    assert!(mission.contains(&PathBuf::from("b.rs")));
 }
 
 #[test]
@@ -409,13 +395,11 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
     let mut state = test_state();
     add_claude_agent(&mut state, "claude-opus");
 
-    // Store prompt index in the Claude map (as dispatch does for Claude agents).
     state
         .agents
         .claude_turn_prompt_idx
         .insert("claude-opus".into(), 42);
 
-    // Push a user prompt message so parent linking can work.
     state.agents.messages.push(AgentMessage {
         at: "t+0".into(),
         channel: AgentChannel::Agent,
@@ -426,19 +410,17 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
         kind: None,
     });
 
-    let event = AgentBusEvent::TurnCompleted {
+    AgentBusEvent::TurnCompleted {
         agent_id: "claude-opus".into(),
         mission_id: None,
         thread_id: None,
         token_count: None,
         message: "response".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
-    // The response message should be linked to prompt index 42.
     let response = state.agents.messages.last().unwrap();
     assert_eq!(response.prompt_msg_idx, Some(42));
-    // The claude_turn_prompt_idx should be consumed (removed).
     assert!(!state
         .agents
         .claude_turn_prompt_idx
@@ -464,6 +446,7 @@ fn emit_signal_event_round_trip_and_apply() {
 
     let mut state = test_state();
     restored.apply(&mut state);
+
     assert_eq!(state.substrate.signals.len(), 1);
     assert!(state.substrate.signals.contains_key(&signal.id));
 }
@@ -473,11 +456,10 @@ fn turn_completed_advances_substrate_generation() {
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
 
-    // Pre-seed a low-strength HelpNeeded signal that will fall below the
-    // prune threshold after the TurnCompleted tick advances the generation.
-    // HelpNeeded decay_rate = 0.5. With an initial strength of 0.05 at gen=0,
-    // at gen=1 the effective strength is 0.025 < 0.05 threshold.
-    let weak = crate::substrate::Signal {
+    // Pre-seed a low-strength HelpNeeded that decays past the prune
+    // threshold once TurnCompleted advances the generation. HelpNeeded's
+    // decay_rate=0.5: at gen=1 the effective strength is 0.025 < 0.05.
+    state.substrate.emit_signal(crate::substrate::Signal {
         id: "seed".into(),
         kind: crate::substrate::SignalKind::HelpNeeded,
         posted_by: "seed".into(),
@@ -485,23 +467,22 @@ fn turn_completed_advances_substrate_generation() {
         target: crate::substrate::SignalTarget::Global,
         initial_strength: 0.05,
         payload: serde_json::Value::Null,
-    };
-    state.substrate.emit_signal(weak);
+    });
     assert_eq!(state.substrate.current_generation(), 0);
     assert_eq!(state.substrate.signals.len(), 1);
 
-    let event = AgentBusEvent::TurnCompleted {
+    AgentBusEvent::TurnCompleted {
         agent_id: "gpt-test".into(),
         mission_id: None,
         thread_id: None,
         token_count: None,
         message: "ok".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(state.substrate.current_generation(), 1);
-    // The weak pre-seeded signal was pruned at tick; the auto-emitted
-    // DoneMarker from TurnCompleted survives (posted_at_gen=0, effective=0.95).
+    // Weak pre-seeded signal pruned; auto-emitted DoneMarker
+    // (posted_at_gen=0, effective=0.95) survives.
     assert_eq!(state.substrate.signals.len(), 1);
     let remaining = state.substrate.signals.values().next().unwrap();
     assert_eq!(remaining.kind, crate::substrate::SignalKind::DoneMarker);
@@ -510,33 +491,24 @@ fn turn_completed_advances_substrate_generation() {
 
 #[test]
 fn turn_completed_persists_substrate_to_disk() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    dir.push(format!(
-        "nit-test-apply-persist-{now}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-
+    let dir = temp_dir("apply-persist");
     let editor = crate::Buffer::from_str("editor", "", None);
     let notes = crate::Buffer::from_str("notes", "", None);
     let mut state = AppState::new(dir.clone(), editor, notes);
     add_codex_agent(&mut state, "gpt-test");
 
-    let signal = crate::substrate::Signal {
-        id: "0-agent-a-0".into(),
-        kind: crate::substrate::SignalKind::DoneMarker,
-        posted_by: "agent-a".into(),
-        posted_at_gen: 0,
-        target: crate::substrate::SignalTarget::Global,
-        initial_strength: 1.0,
-        payload: serde_json::Value::Null,
-    };
-    AgentBusEvent::EmitSignal { signal }.apply(&mut state);
+    AgentBusEvent::EmitSignal {
+        signal: crate::substrate::Signal {
+            id: "0-agent-a-0".into(),
+            kind: crate::substrate::SignalKind::DoneMarker,
+            posted_by: "agent-a".into(),
+            posted_at_gen: 0,
+            target: crate::substrate::SignalTarget::Global,
+            initial_strength: 1.0,
+            payload: serde_json::Value::Null,
+        },
+    }
+    .apply(&mut state);
 
     AgentBusEvent::TurnCompleted {
         agent_id: "gpt-test".into(),
@@ -552,9 +524,7 @@ fn turn_completed_persists_substrate_to_disk() {
 
     let reloaded = crate::substrate::SubstrateState::load(&dir);
     assert_eq!(reloaded.current_generation(), 1);
-    // Two signals survive: the manually-emitted DoneMarker and the auto-emitted
-    // DoneMarker from TurnCompleted. Both posted at gen=0, pruned at gen=1
-    // (effective=0.95, above threshold).
+    // Both the manually-emitted and auto-emitted DoneMarker survive at gen=1.
     assert_eq!(reloaded.signals.len(), 2);
     assert!(reloaded.signals.contains_key("0-agent-a-0"));
     let auto_emitted: Vec<_> = reloaded
@@ -565,7 +535,7 @@ fn turn_completed_persists_substrate_to_disk() {
     assert_eq!(auto_emitted.len(), 1);
     assert_eq!(
         auto_emitted[0].kind,
-        crate::substrate::SignalKind::DoneMarker
+        crate::substrate::SignalKind::DoneMarker,
     );
 }
 
@@ -588,8 +558,7 @@ fn turn_completed_emits_done_marker_signal() {
     let signal = state.substrate.signals.values().next().unwrap();
     assert_eq!(signal.kind, crate::substrate::SignalKind::DoneMarker);
     assert_eq!(signal.posted_by, "gpt-test");
-    // Signal is posted at the pre-advance generation (0), then the counter
-    // advances to 1 — so reading current_generation after apply returns 1.
+    // Posted at the pre-advance generation (0); the counter then advances to 1.
     assert_eq!(signal.posted_at_gen, 0);
     match &signal.target {
         crate::substrate::SignalTarget::Agent { agent_id } => {
@@ -599,7 +568,7 @@ fn turn_completed_emits_done_marker_signal() {
     }
     assert_eq!(
         signal.payload.get("message").and_then(|v| v.as_str()),
-        Some("Done.")
+        Some("Done."),
     );
     assert_eq!(state.substrate.current_generation(), 1);
 }
@@ -631,7 +600,7 @@ fn turn_failed_emits_warning_signal() {
     }
     assert_eq!(
         signal.payload.get("message").and_then(|v| v.as_str()),
-        Some("rate limited")
+        Some("rate limited"),
     );
     // TurnFailed does NOT advance the generation.
     assert_eq!(state.substrate.current_generation(), before_gen);
@@ -646,7 +615,7 @@ fn file_write_auto_claim_inserts_exclusive_write() {
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
         mission_id: None,
-        path: std::path::PathBuf::from("src/a.rs"),
+        path: PathBuf::from("src/a.rs"),
     }
     .apply(&mut state);
 
@@ -655,7 +624,7 @@ fn file_write_auto_claim_inserts_exclusive_write() {
     assert_eq!(claim.kind, crate::substrate::ClaimKind::ExclusiveWrite);
     match &claim.target {
         crate::substrate::ClaimTarget::File { path } => {
-            assert_eq!(path, &std::path::PathBuf::from("src/a.rs"));
+            assert_eq!(path, &PathBuf::from("src/a.rs"));
         }
         other => panic!("expected File target, got {other:?}"),
     }
@@ -667,9 +636,8 @@ fn file_write_auto_claim_conflict_emits_violation_and_queues_retry() {
     let mut state = test_state();
     add_codex_agent(&mut state, "a1");
     add_codex_agent(&mut state, "a2");
-    let path = std::path::PathBuf::from("src/a.rs");
+    let path = PathBuf::from("src/a.rs");
 
-    // Pre-seed an ExclusiveWrite claim for the path by agent "a2" with TTL=5.
     let seeded = crate::substrate::Claim {
         id: "seed-c".into(),
         kind: crate::substrate::ClaimKind::ExclusiveWrite,
@@ -690,10 +658,10 @@ fn file_write_auto_claim_conflict_emits_violation_and_queues_retry() {
     }
     .apply(&mut state);
 
-    // (iii) The conflicting write's claim was NOT inserted.
+    // (i) The conflicting writer's claim was NOT inserted.
     assert_eq!(state.substrate.claims.len(), claims_before);
 
-    // (i) Exactly 1 new ClaimViolation signal emitted, posted by a1.
+    // (ii) Exactly one new ClaimViolation, posted by a1.
     let new_signals = state.substrate.signals.len() - signals_before;
     assert_eq!(new_signals, 1);
     let violation = state
@@ -704,7 +672,7 @@ fn file_write_auto_claim_conflict_emits_violation_and_queues_retry() {
         .expect("expected a ClaimViolation signal");
     assert_eq!(violation.posted_by, "a1");
 
-    // (ii) Retry queued with agent_id=a1, conflicting_holder=a2.
+    // (iii) Retry queued with agent_id=a1, conflicting_holder=a2.
     assert_eq!(state.pending_claim_retries.len(), 1);
     let req = &state.pending_claim_retries[0];
     assert_eq!(req.agent_id, "a1");
@@ -716,13 +684,13 @@ fn file_write_auto_claim_conflict_emits_violation_and_queues_retry() {
 fn turn_completed_expires_stale_claims() {
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
-    // Seed a claim with TTL=1 at gen=0. After TurnCompleted advances gen to 1,
-    // expire_claims should drop it.
+    // Claim with TTL=1 at gen=0. After TurnCompleted advances gen to 1,
+    // expire_claims drops it.
     let claim = crate::substrate::Claim {
         id: "stale".into(),
         kind: crate::substrate::ClaimKind::ExclusiveWrite,
         target: crate::substrate::ClaimTarget::File {
-            path: std::path::PathBuf::from("a.rs"),
+            path: PathBuf::from("a.rs"),
         },
         claimed_by: "seed".into(),
         claimed_at_gen: 0,
@@ -749,9 +717,8 @@ fn turn_completed_expires_stale_claims() {
 fn file_write_invalidates_overlapping_assumption_and_emits_warning() {
     let mut state = test_state();
     add_codex_agent(&mut state, "writer-b");
-    let path = std::path::PathBuf::from("src/a.rs");
+    let path = PathBuf::from("src/a.rs");
 
-    // Seed an assumption for "poster-a" targeting the path.
     let assumption = crate::substrate::Assumption {
         id: "assm-1".into(),
         target: crate::substrate::AssumptionTarget::File { path: path.clone() },
@@ -775,15 +742,14 @@ fn file_write_invalidates_overlapping_assumption_and_emits_warning() {
     // (i) Assumption gone from substrate.
     assert!(
         state.substrate.assumptions.is_empty(),
-        "assumption should be invalidated by overlapping write"
+        "assumption should be invalidated by overlapping write",
     );
 
-    // (ii) A new Warning signal exists posted_by="writer-b" targeting
-    // Agent{"poster-a"} with reason="assumption_invalidated_by_write".
+    // (ii) Warning emitted by writer-b targeting Agent{poster-a}.
     let new_signal_count = state.substrate.signals.len() - signals_before;
     assert!(
         new_signal_count >= 1,
-        "expected at least one new signal, got {new_signal_count}"
+        "expected at least one new signal, got {new_signal_count}",
     );
     let warning = state
         .substrate
@@ -804,7 +770,7 @@ fn file_write_invalidates_overlapping_assumption_and_emits_warning() {
     }
     assert_eq!(
         warning.payload.get("writer").and_then(|v| v.as_str()),
-        Some("writer-b")
+        Some("writer-b"),
     );
 }
 
@@ -813,11 +779,10 @@ fn file_write_leaves_non_overlapping_assumption_intact() {
     let mut state = test_state();
     add_codex_agent(&mut state, "writer-b");
 
-    // Assumption on a.rs.
     let assumption = crate::substrate::Assumption {
         id: "assm-a".into(),
         target: crate::substrate::AssumptionTarget::File {
-            path: std::path::PathBuf::from("a.rs"),
+            path: PathBuf::from("a.rs"),
         },
         fact: serde_json::json!({}),
         posted_by: "poster-a".into(),
@@ -826,31 +791,18 @@ fn file_write_leaves_non_overlapping_assumption_intact() {
         rationale: "read".into(),
     };
     state.substrate.assert_assumption(assumption);
-    let signals_before_invalidation: Vec<_> = state
-        .substrate
-        .signals
-        .values()
-        .filter(|s| {
-            s.payload.get("reason").and_then(|v| v.as_str())
-                == Some("assumption_invalidated_by_write")
-        })
-        .cloned()
-        .collect();
-    assert!(signals_before_invalidation.is_empty());
 
     // Write to b.rs, not a.rs.
     AgentBusEvent::FileWrite {
         agent_id: "writer-b".into(),
         mission_id: None,
-        path: std::path::PathBuf::from("b.rs"),
+        path: PathBuf::from("b.rs"),
     }
     .apply(&mut state);
 
-    // Assumption is still present.
     assert_eq!(state.substrate.assumptions.len(), 1);
     assert!(state.substrate.assumptions.contains_key("assm-a"));
 
-    // No invalidation-reason Warning signal emitted.
     let invalidation_warnings = state
         .substrate
         .signals
@@ -867,9 +819,8 @@ fn file_write_leaves_non_overlapping_assumption_intact() {
 fn file_write_invalidates_assumption_even_when_auto_claim_conflicts() {
     let mut state = test_state();
     add_codex_agent(&mut state, "writer-c");
-    let path = std::path::PathBuf::from("src/contested.rs");
+    let path = PathBuf::from("src/contested.rs");
 
-    // Seed ExclusiveWrite claim by "other-a" on P with long TTL.
     let pre_claim = crate::substrate::Claim {
         id: "pre-claim".into(),
         kind: crate::substrate::ClaimKind::ExclusiveWrite,
@@ -881,7 +832,6 @@ fn file_write_invalidates_assumption_even_when_auto_claim_conflicts() {
     };
     state.substrate.assert_claim(pre_claim).unwrap();
 
-    // Seed an assumption by "poster-b" on P.
     let assumption = crate::substrate::Assumption {
         id: "assm-b".into(),
         target: crate::substrate::AssumptionTarget::File { path: path.clone() },
@@ -901,7 +851,7 @@ fn file_write_invalidates_assumption_even_when_auto_claim_conflicts() {
     }
     .apply(&mut state);
 
-    // (i) ClaimViolation signal emitted for writer-c's conflict.
+    // (i) ClaimViolation emitted for writer-c.
     let violations: Vec<_> = state
         .substrate
         .signals
@@ -910,15 +860,12 @@ fn file_write_invalidates_assumption_even_when_auto_claim_conflicts() {
         .collect();
     assert!(
         !violations.is_empty(),
-        "expected a ClaimViolation signal for the conflicting write"
+        "expected a ClaimViolation signal for the conflicting write",
     );
     assert!(violations.iter().any(|v| v.posted_by == "writer-c"));
 
     // (ii) Assumption gone.
-    assert!(
-        state.substrate.assumptions.is_empty(),
-        "assumption should be invalidated even when auto-claim conflicted"
-    );
+    assert!(state.substrate.assumptions.is_empty());
 
     // (iii) Warning signal emitted for invalidation.
     let invalidation = state
@@ -959,13 +906,11 @@ fn file_write_global_assumption_invalidated_by_any_path() {
     AgentBusEvent::FileWrite {
         agent_id: "writer-z".into(),
         mission_id: None,
-        path: std::path::PathBuf::from("any/random/path.rs"),
+        path: PathBuf::from("any/random/path.rs"),
     }
     .apply(&mut state);
 
-    // Global-targeted assumption is invalidated by any write.
     assert!(state.substrate.assumptions.is_empty());
-
     let invalidation = state
         .substrate
         .signals
@@ -992,11 +937,11 @@ fn set_mood_event_applies_and_sets_override_lock() {
     state.substrate.generation = 5;
     assert_eq!(state.substrate.mood, Mood::Consolidation);
 
-    let event = AgentBusEvent::SetMood {
+    AgentBusEvent::SetMood {
         mood: Mood::Defensive,
         source: "user".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(state.substrate.mood, Mood::Defensive);
     assert!(state.substrate.mood_override_until_gen > 0);
@@ -1012,27 +957,27 @@ fn set_mood_event_applies_and_sets_override_lock() {
         .expect("expected mood_manual_override signal");
     assert_eq!(
         shift_signal.payload.get("source").and_then(|v| v.as_str()),
-        Some("user")
+        Some("user"),
     );
 }
 
 #[test]
 fn emit_signal_request_mints_id_and_writes_substrate() {
-    // The *Request variant delegates id minting to the substrate — callers
-    // (e.g. the nit-mcp back-channel) never see raw counter state.  We seed
-    // the substrate at a non-zero generation so the format is observable.
+    // The *Request variant delegates id minting to the substrate so external
+    // callers (e.g. the nit-mcp back-channel) never see raw counter state.
+    // Seed at non-zero gen so the format is observable.
     let mut state = test_state();
     state.substrate.generation = 4;
     let before = state.substrate.signal_counter;
 
-    let event = AgentBusEvent::EmitSignalRequest {
+    AgentBusEvent::EmitSignalRequest {
         posted_by: "mcp-agent".into(),
         kind: crate::substrate::SignalKind::Lead,
         target: crate::substrate::SignalTarget::Global,
         payload: serde_json::json!({"hint": "try this"}),
         initial_strength: Some(0.9),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(state.substrate.signals.len(), 1);
     assert_eq!(state.substrate.signal_counter, before + 1);
@@ -1050,23 +995,23 @@ fn assert_claim_request_mints_id_and_honors_mood_ttl() {
     use crate::mood::Mood;
 
     // Defensive mood has a 1.5x claim_ttl_multiplier — a 4-gen claim should
-    // be stretched to 6 on apply.  We bypass SetMood to skip the override
+    // be stretched to 6 on apply. We bypass SetMood to skip the override
     // lock and its synthetic mood_manual_override signal.
     let mut state = test_state();
     state.substrate.mood = Mood::Defensive;
     assert!((state.substrate.mood.modulation().claim_ttl_multiplier - 1.5).abs() < f32::EPSILON);
 
     let before = state.substrate.claim_counter;
-    let event = AgentBusEvent::AssertClaimRequest {
+    AgentBusEvent::AssertClaimRequest {
         claimed_by: "mcp-agent".into(),
         kind: crate::substrate::ClaimKind::ExclusiveWrite,
         target: crate::substrate::ClaimTarget::File {
-            path: std::path::PathBuf::from("/tmp/mcp-test.rs"),
+            path: PathBuf::from("/tmp/mcp-test.rs"),
         },
         ttl_gens: 4,
         rationale: "integration-from-mcp".into(),
-    };
-    event.apply(&mut state);
+    }
+    .apply(&mut state);
 
     assert_eq!(state.substrate.claims.len(), 1);
     assert_eq!(state.substrate.claim_counter, before + 1);
@@ -1075,6 +1020,6 @@ fn assert_claim_request_mints_id_and_honors_mood_ttl() {
     assert_eq!(claim.ttl_gens, 6, "defensive mood should multiply 4 * 1.5");
     assert_eq!(claim.rationale, "integration-from-mcp");
     assert_eq!(claim.kind, crate::substrate::ClaimKind::ExclusiveWrite);
-    // No conflicts, so no ClaimViolation signals should have been emitted.
+    // No conflicts → no ClaimViolation signals.
     assert!(state.substrate.signals.is_empty());
 }

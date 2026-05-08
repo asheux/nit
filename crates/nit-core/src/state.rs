@@ -12,7 +12,6 @@ use crate::{
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
-use nit_games::analysis::AnalysisConfig;
 use nit_gol::Rule;
 use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -61,9 +60,7 @@ pub use text_input::{CommandLine, EditorSearch, SearchPrompt};
 pub use visualizer::{GolRenderMode, VisualizerMode, VisualizerRuleEntry, VisualizerState};
 
 use cmd_line::{apply_protocol_selection, apply_rule_selection, handle_command_line};
-use family_run::{
-    build_family_run_override, parse_ca_rule_tuple, parse_tm_input_token, parse_tm_rule_tuple,
-};
+use family_run::build_family_run_override;
 use games::open_games_history_popup;
 use visualizer::{
     cycle_seed_overlays, inspector_dims, jump_inspector_to_index, move_inspector,
@@ -260,88 +257,81 @@ pub struct AppState {
     pub protocol_picker: ProtocolPickerState,
     #[serde(skip)]
     pub rule_persistence: crate::rule_config::RulePersistence,
-    /// Cached genome reports per file path (runtime-only, loaded from .nit/genome/).
+    /// Cached genome reports per file path; loaded from `.nit/genome/`.
     #[serde(skip)]
     pub genome_reports: HashMap<PathBuf, crate::genome_report::GenomeReport>,
-    /// Last genome diff text for inclusion in agent prompts.
+    /// Last genome diff text — surfaced to agents in retry prompts.
     #[serde(skip)]
     pub last_genome_diff: Option<String>,
-    /// Quality change direction from the last genome recomputation.
-    /// +1 = improved, -1 = degraded, 0 = unchanged.
+    /// Direction of the last quality change: `+1` improved, `-1` degraded,
+    /// `0` unchanged.
     #[serde(skip)]
     pub genome_quality_delta: i32,
     /// Baseline genome reports captured before the agent's first turn.
-    /// Retries compare against these baselines, not the previous iteration.
+    /// Retries compare against THESE baselines, not the previous iteration —
+    /// otherwise an agent that swings between equally bad shapes would
+    /// never trip the regression check.
     #[serde(skip)]
     pub genome_baselines: HashMap<PathBuf, crate::genome_report::GenomeReport>,
-    /// Files modified during each agent's turn (per-agent tracking).
-    /// Key: agent_id, Value: set of file paths modified during that agent's turn.
+    /// Files modified during each agent's current turn.
     #[serde(skip)]
     pub genome_turn_modified: HashMap<String, HashSet<PathBuf>>,
-    /// Files modified across an entire mission (per-mission accumulator).
-    /// Key: mission_id, Value: set of file paths modified by any agent during
-    /// that mission. Unlike `genome_turn_modified`, this is NOT cleared
-    /// between turns — so when an agent runs multiple sequential tasks within
-    /// the same mission, files from earlier turns are still visible at swarm
-    /// end. Populated by the `FileWrite` handler when the writing agent has a
-    /// `current_mission`; cleared on swarm start and follow-up reactivation.
+    /// Per-mission accumulator (NOT cleared between turns) so that a
+    /// swarm-end summary can see files modified across the whole mission,
+    /// not just the final turn. Populated by the `FileWrite` handler when
+    /// the writer has a `current_mission`; cleared on swarm start and
+    /// follow-up reactivation.
     #[serde(skip)]
     pub genome_mission_modified: HashMap<String, HashSet<PathBuf>>,
-    /// Which agents currently have active turns. File attribution is done
-    /// by the runners via `FileWrite` events — not by filesystem tracking.
+    /// Agents currently in an active turn. File attribution rides on the
+    /// runners' `FileWrite` events — not on filesystem polling.
     #[serde(skip)]
     pub genome_turn_active: HashSet<String>,
-    /// True when genome computation has been requested but not yet executed.
+    /// `true` when a genome computation has been requested but not finished.
     #[serde(skip)]
     pub genome_computing: bool,
-    /// Consecutive genome retry attempts for the current agent turn.
-    /// Reset to 0 when quality improves or stays the same.
-    ///
-    /// NOTE: For parallel swarms, prefer `genome_retry_counts` (per-agent).
-    /// This scalar is kept for display and non-agent-scoped paths (manual
-    /// saves, shadow evals) where agent context is not available.
+    /// Consecutive retry attempts for the current agent turn. Reset to 0
+    /// when quality improves or stays the same. Kept as a scalar for
+    /// display and non-agent-scoped paths (manual saves, shadow evals);
+    /// parallel swarm code uses `genome_retry_counts` (per-agent) so a
+    /// single noisy agent can't starve another's budget.
     #[serde(skip)]
     pub genome_retry_count: u8,
-    /// Per-agent retry counters. In parallel mode, retry budget is enforced
-    /// per-agent so a single noisy agent can't starve other agents' retries.
-    /// Key: agent_id. Missing entry is treated as 0.
+    /// Per-agent retry counters. Missing entry treated as 0.
     #[serde(skip)]
     pub genome_retry_counts: HashMap<String, u8>,
     /// Per-agent quality delta from the last authoritative evaluation batch.
-    /// Used by `build_genome_retry_prompt` to decide whether to retry.
-    /// Key: agent_id. Missing entry is treated as 0 (no data, no retry).
+    /// Read by `build_genome_retry_prompt` to decide whether to retry.
+    /// Missing entry treated as 0 (no data → no retry).
     #[serde(skip)]
     pub genome_quality_deltas: HashMap<String, i32>,
-    /// Pending claim-violation retry requests queued by `agent_bus` when a
+    /// Claim-violation retry requests queued by `agent_bus` when a
     /// FileWrite auto-claim conflicts. Drained by the TUI event loop after
     /// each event-apply cycle; shares `genome_retry_count` as its budget.
     #[serde(skip)]
     pub pending_claim_retries: Vec<ClaimRetryRequest>,
-    /// Pending arbiter interventions produced at tick boundaries. Drained by
-    /// the TUI event loop after `pending_claim_retries`; shares
-    /// `genome_retry_count` as its budget.
+    /// Arbiter interventions produced at tick boundaries. Drained after
+    /// `pending_claim_retries`; shares `genome_retry_count` as budget.
     #[serde(skip)]
     pub pending_interventions: Vec<Intervention>,
-    /// Rolling count of consecutive turns where quality met or exceeded the
-    /// agent's adaptive min tier. Used for adaptive quality thresholds — agents
-    /// that consistently hit their tier get pushed toward the next one, up to
-    /// Tier V (Replicator).
+    /// Consecutive turns where quality met or exceeded the agent's
+    /// adaptive minimum tier. Drives the adaptive-threshold ladder up
+    /// to Tier V (Replicator).
     #[serde(skip)]
     pub genome_agent_streak: HashMap<String, u8>,
     /// Effective minimum tier per agent, elevated by adaptive thresholds.
     #[serde(skip)]
     pub genome_agent_min_tier: HashMap<String, crate::genome_report::GenomeTier>,
-    /// Real-time per-file shadow evaluation results during an active agent turn.
-    /// Populated by the file watcher as files change; cleared on TurnStarted.
+    /// Real-time per-file shadow evaluation results during an active turn.
+    /// Populated by the file watcher; cleared on `TurnStarted`.
     #[serde(skip)]
     pub genome_shadow_evals: HashMap<PathBuf, GenomeShadowEval>,
-    /// Per-agent in-flight genome evaluation batches. Each completed turn
-    /// opens a batch keyed by `agent_id`; results tagged with that id
-    /// decrement `pending` until it reaches 0, at which point the retry
-    /// decision is made for THAT agent. Keeping batches per-agent lets
-    /// parallel swarm turns finalize independently — without this, a later
-    /// turn's `dispatch_turn_genome_evals` would clobber an earlier agent's
-    /// slot and its retry would never fire.
+    /// Per-agent in-flight evaluation batches. Each completed turn opens
+    /// one batch keyed by `agent_id`; results tagged with that id decrement
+    /// `pending` until it reaches 0, then the retry decision fires for
+    /// THAT agent. Keeping batches per-agent lets parallel swarm turns
+    /// finalize independently — otherwise a later turn's
+    /// `dispatch_turn_genome_evals` would clobber an earlier agent's slot.
     #[serde(skip)]
     pub genome_eval_batches: HashMap<String, GenomeEvalBatch>,
     /// Set by `Action::Save` to request a background genome evaluation.
@@ -416,6 +406,139 @@ pub struct ActionOutcome {
     pub state_changed: bool,
 }
 
+/// Construct the visualizer subtree of a fresh `AppState`. Conway-on-B3/S23
+/// is the canonical default rule, and the seed-overlay defaults
+/// (`halo` + `inset` ON, others OFF) match the first preset that
+/// `cycle_seed_overlays` cycles through — so a freshly opened lab and a
+/// post-cycle lab match.
+fn default_visualizer_state(settings: &Settings) -> VisualizerState {
+    VisualizerState {
+        seed: 1,
+        variant: 0,
+        mode: VisualizerMode::SimOnly,
+        seed_encoder: SeedEncoderId::TokenSpectrum,
+        seed_view: SeedViewMode::Genome,
+        seed_plate_mode: SeedPreviewMode::Solid,
+        seed_params: SeedParams::default(),
+        seed_stats: SeedStats::default(),
+        seed_hash: 0,
+        input_hash: 0,
+        seed_search_active: false,
+        seed_search_rps: 0,
+        render_mode: GolRenderMode::HalfBlock,
+        running: false,
+        age_shading: true,
+        trails: true,
+        overlay_bbox: false,
+        overlay_heat: false,
+        scanlines: false,
+        paused: false,
+        paused_by_attractor: false,
+        wrap: settings.gol.wrap,
+        rule: "B3/S23".to_string(),
+        rule_mode: RuleMode::Fixed(RuleRef {
+            id: None,
+            rule: Rule::conway(),
+            name: None,
+        }),
+        protocol_name: None,
+        generation: 0,
+        alive: 0,
+        period: None,
+        auto_stop_policy: AutoStopPolicy::Fixed,
+        last_attractor: None,
+        tick_ms: settings.gol.tick_ms,
+        seed_source: settings.gol.seed_source,
+        search_rps: 0,
+        leaderboard: Vec::new(),
+        last_score: None,
+        seed_show_grid: false,
+        seed_show_bbox: false,
+        seed_show_halo: true,
+        seed_show_components: false,
+        seed_show_inset: true,
+        seed_scanline: false,
+        seed_zoom: 1,
+        inspector_enabled: true,
+        inspect_ascii_x: 0,
+        inspect_ascii_y: 0,
+        inspect_lifehash_x: 0,
+        inspect_lifehash_y: 0,
+        inspect_hilbert_x: 0,
+        inspect_hilbert_y: 0,
+        inspect_ascii_hash: 0,
+        inspect_lifehash_hash: 0,
+        inspect_hilbert_hash: 0,
+        seed_snapshots_written: 0,
+        seed_snapshots_dropped: 0,
+        seed_snapshot_queue_depth: 0,
+        seed_last_snapshot_path: None,
+        snapshots_written: 0,
+        snapshots_dropped: 0,
+        snapshot_queue_depth: 0,
+        last_snapshot_path: None,
+        petri_hidden: false,
+        pending_reseed: false,
+        pending_apply: false,
+        pending_snapshot: false,
+        pending_run: false,
+        pending_close: false,
+        pending_hide: false,
+        pending_show: false,
+        pending_rule_change: false,
+    }
+}
+
+/// Construct the `GamesState` subtree of a fresh `AppState`. All popups
+/// and `pending_*` flags start cleared — the petri dish starts idle and
+/// only switches to `Running` once the operator dispatches `:games run`.
+fn default_games_state() -> GamesState {
+    GamesState {
+        status: GamesStatus::Idle,
+        running: false,
+        paused: false,
+        petri_hidden: false,
+        steps_per_tick: 1,
+        steps_use_match_units: false,
+        last_error: None,
+        runtime: nit_games::RuntimeAcceleratorStats::default(),
+        last_run: None,
+        last_run_path: None,
+        last_event_path: None,
+        last_history_path: None,
+        analysis: GamesAnalysisState {
+            open: false,
+            running: false,
+            source_path: None,
+            last_error: None,
+            summary: None,
+            preview: None,
+            scroll_offset: 0,
+        },
+        petri_lines: Vec::new(),
+        pending_run: false,
+        pending_run_override: None,
+        config_preview: None,
+        config_preview_pending: false,
+        pending_family_run: None,
+        family_building: false,
+        pending_close: false,
+        pending_hide: false,
+        pending_show: false,
+        pending_export: false,
+        pending_analyze: None,
+        pending_run_browser: false,
+        pending_run_load: None,
+        pending_replay: None,
+        run_browser: GamesRunBrowserState::default(),
+        replay: GamesReplayState::default(),
+        strategy_inspect: GamesStrategyInspectState::default(),
+        tm_sim: GamesTmSimState::default(),
+        ca_sim: GamesCaSimState::default(),
+        match_history: GamesMatchHistoryState::default(),
+    }
+}
+
 impl AppState {
     pub fn new(workspace_root: PathBuf, editor: Buffer, notes: Buffer) -> Self {
         let settings = Settings::default();
@@ -429,6 +552,8 @@ impl AppState {
             root: workspace_root.clone(),
             ..FuzzySearchState::default()
         };
+        let visualizer = default_visualizer_state(&settings);
+        let games = default_games_state();
         Self {
             app_kind: AppKind::Gol,
             gitignored_dirs: Vec::new(),
@@ -444,81 +569,7 @@ impl AppState {
                 paused: false,
                 progress: 0.0,
             },
-            visualizer: VisualizerState {
-                seed: 1,
-                variant: 0,
-                mode: VisualizerMode::SimOnly,
-                seed_encoder: SeedEncoderId::TokenSpectrum,
-                seed_view: SeedViewMode::Genome,
-                seed_plate_mode: SeedPreviewMode::Solid,
-                seed_params: SeedParams::default(),
-                seed_stats: SeedStats::default(),
-                seed_hash: 0,
-                input_hash: 0,
-                seed_search_active: false,
-                seed_search_rps: 0,
-                render_mode: GolRenderMode::HalfBlock,
-                running: false,
-                age_shading: true,
-                trails: true,
-                overlay_bbox: false,
-                overlay_heat: false,
-                scanlines: false,
-                paused: false,
-                paused_by_attractor: false,
-                wrap: settings.gol.wrap,
-                rule: "B3/S23".to_string(),
-                rule_mode: RuleMode::Fixed(RuleRef {
-                    id: None,
-                    rule: Rule::conway(),
-                    name: None,
-                }),
-                protocol_name: None,
-                generation: 0,
-                alive: 0,
-                period: None,
-                auto_stop_policy: AutoStopPolicy::Fixed,
-                last_attractor: None,
-                tick_ms: settings.gol.tick_ms,
-                seed_source: settings.gol.seed_source,
-                search_rps: 0,
-                leaderboard: Vec::new(),
-                last_score: None,
-                seed_show_grid: false,
-                seed_show_bbox: false,
-                seed_show_halo: true,
-                seed_show_components: false,
-                seed_show_inset: true,
-                seed_scanline: false,
-                seed_zoom: 1,
-                inspector_enabled: true,
-                inspect_ascii_x: 0,
-                inspect_ascii_y: 0,
-                inspect_lifehash_x: 0,
-                inspect_lifehash_y: 0,
-                inspect_hilbert_x: 0,
-                inspect_hilbert_y: 0,
-                inspect_ascii_hash: 0,
-                inspect_lifehash_hash: 0,
-                inspect_hilbert_hash: 0,
-                seed_snapshots_written: 0,
-                seed_snapshots_dropped: 0,
-                seed_snapshot_queue_depth: 0,
-                seed_last_snapshot_path: None,
-                snapshots_written: 0,
-                snapshots_dropped: 0,
-                snapshot_queue_depth: 0,
-                last_snapshot_path: None,
-                petri_hidden: false,
-                pending_reseed: false,
-                pending_apply: false,
-                pending_snapshot: false,
-                pending_run: false,
-                pending_close: false,
-                pending_hide: false,
-                pending_show: false,
-                pending_rule_change: false,
-            },
+            visualizer,
             metrics: Metrics {
                 last_render_ms: 0,
                 frame_count: 0,
@@ -530,50 +581,7 @@ impl AppState {
             settings,
             debug: false,
             gol_rule_selected,
-            games: GamesState {
-                status: GamesStatus::Idle,
-                running: false,
-                paused: false,
-                petri_hidden: false,
-                steps_per_tick: 1,
-                steps_use_match_units: false,
-                last_error: None,
-                runtime: nit_games::RuntimeAcceleratorStats::default(),
-                last_run: None,
-                last_run_path: None,
-                last_event_path: None,
-                last_history_path: None,
-                analysis: GamesAnalysisState {
-                    open: false,
-                    running: false,
-                    source_path: None,
-                    last_error: None,
-                    summary: None,
-                    preview: None,
-                    scroll_offset: 0,
-                },
-                petri_lines: Vec::new(),
-                pending_run: false,
-                pending_run_override: None,
-                config_preview: None,
-                config_preview_pending: false,
-                pending_family_run: None,
-                family_building: false,
-                pending_close: false,
-                pending_hide: false,
-                pending_show: false,
-                pending_export: false,
-                pending_analyze: None,
-                pending_run_browser: false,
-                pending_run_load: None,
-                pending_replay: None,
-                run_browser: GamesRunBrowserState::default(),
-                replay: GamesReplayState::default(),
-                strategy_inspect: GamesStrategyInspectState::default(),
-                tm_sim: GamesTmSimState::default(),
-                ca_sim: GamesCaSimState::default(),
-                match_history: GamesMatchHistoryState::default(),
-            },
+            games,
             file_tree,
             fuzzy_search,
             editor_search: EditorSearch::default(),

@@ -1,5 +1,7 @@
-use crate::genome_report::*;
 use std::path::Path;
+
+use crate::genome_report::*;
+use crate::seed::SeedEncoderId;
 
 const WELL_STRUCTURED_RUST: &str = r#"
 /// A simple calculator module.
@@ -87,19 +89,17 @@ fn genome_report_well_structured_rust() {
     let report = compute_genome_report_fast(WELL_STRUCTURED_RUST, path);
 
     assert_eq!(report.encoder_scores.len(), 4);
-    // Well-structured code should score reasonably well on AST-driven encoders.
     for score in &report.encoder_scores {
         if matches!(
             score.encoder,
-            crate::seed::SeedEncoderId::TokenSpectrum
-                | crate::seed::SeedEncoderId::AstStructure
-                | crate::seed::SeedEncoderId::ComplexityField
+            SeedEncoderId::TokenSpectrum
+                | SeedEncoderId::AstStructure
+                | SeedEncoderId::ComplexityField,
         ) {
-            // Should survive at least some generations.
             assert!(
                 score.generations_survived > 0,
                 "{} survived 0 generations",
-                score.encoder.label()
+                score.encoder.label(),
             );
         }
     }
@@ -110,7 +110,7 @@ fn genome_report_gibberish() {
     let path = Path::new("test.rs");
     let report = compute_genome_report_fast(GIBBERISH, path);
 
-    // Gibberish is trivially small — auto-pass as Spaceship.
+    // Trivially small input → auto-pass as Spaceship with no encoder runs.
     assert!(report.encoder_scores.is_empty());
     assert_eq!(report.tier, GenomeTier::Spaceship);
     assert!(!report.recommendations.is_empty());
@@ -121,10 +121,8 @@ fn genome_report_empty_file() {
     let path = Path::new("empty.rs");
     let report = compute_genome_report_fast("", path);
 
-    // Empty file is trivially small — auto-pass as Spaceship.
     assert!(report.encoder_scores.is_empty());
     assert_eq!(report.tier, GenomeTier::Spaceship);
-    // Should not panic.
 }
 
 #[test]
@@ -141,7 +139,7 @@ fn genome_diff_detects_improvement() {
     let before = GenomeReport {
         file_path: path.to_path_buf(),
         encoder_scores: vec![EncoderScore {
-            encoder: crate::seed::SeedEncoderId::TokenSpectrum,
+            encoder: SeedEncoderId::TokenSpectrum,
             density: 0.50,
             components: 2,
             generations_survived: 40,
@@ -159,7 +157,7 @@ fn genome_diff_detects_improvement() {
     let after = GenomeReport {
         file_path: path.to_path_buf(),
         encoder_scores: vec![EncoderScore {
-            encoder: crate::seed::SeedEncoderId::TokenSpectrum,
+            encoder: SeedEncoderId::TokenSpectrum,
             density: 0.35,
             components: 5,
             generations_survived: 300,
@@ -174,14 +172,17 @@ fn genome_diff_detects_improvement() {
         grid_size: 32,
         parsimony: ParsimonyInfo::default(),
     };
+
     let diff = compute_genome_diff(&before, &after);
+
     assert_eq!(diff.tier_before, GenomeTier::StillLife);
     assert_eq!(diff.tier_after, GenomeTier::Spaceship);
     assert!(diff.tier_after > diff.tier_before);
     assert_eq!(diff.encoder_diffs.len(), 1);
     assert!(diff.encoder_diffs[0].generations_delta > 0);
     assert!(diff.encoder_diffs[0].components_delta > 0);
-    assert!(diff.encoder_diffs[0].density_delta < 0.0); // density improved (decreased)
+    // Density delta is negative when density improves (decreases).
+    assert!(diff.encoder_diffs[0].density_delta < 0.0);
 }
 
 #[test]
@@ -190,7 +191,7 @@ fn genome_diff_detects_regression() {
     let before = GenomeReport {
         file_path: path.to_path_buf(),
         encoder_scores: vec![EncoderScore {
-            encoder: crate::seed::SeedEncoderId::AstStructure,
+            encoder: SeedEncoderId::AstStructure,
             density: 0.30,
             components: 6,
             generations_survived: 500,
@@ -208,7 +209,7 @@ fn genome_diff_detects_regression() {
     let after = GenomeReport {
         file_path: path.to_path_buf(),
         encoder_scores: vec![EncoderScore {
-            encoder: crate::seed::SeedEncoderId::AstStructure,
+            encoder: SeedEncoderId::AstStructure,
             density: 0.55,
             components: 1,
             generations_survived: 20,
@@ -223,7 +224,9 @@ fn genome_diff_detects_regression() {
         grid_size: 32,
         parsimony: ParsimonyInfo::default(),
     };
+
     let diff = compute_genome_diff(&before, &after);
+
     assert!(diff.tier_after < diff.tier_before);
     assert!(diff.encoder_diffs[0].generations_delta < 0);
     assert!(diff.encoder_diffs[0].components_delta < 0);
@@ -231,7 +234,6 @@ fn genome_diff_detects_regression() {
 
 #[test]
 fn genome_recommendations_high_density() {
-    // A file with very dense code (no whitespace/comments) should trigger density warnings.
     let dense_code = "fn a(){let x=1;let y=2;let z=x+y;println!(\"{}\",z);}\n\
                       fn b(){let x=1;let y=2;let z=x+y;println!(\"{}\",z);}\n\
                       fn c(){let x=1;let y=2;let z=x+y;println!(\"{}\",z);}\n\
@@ -240,28 +242,24 @@ fn genome_recommendations_high_density() {
     let path = Path::new("dense.rs");
     let report = compute_genome_report_fast(dense_code, path);
 
-    // Check if any AST encoder has high density and a recommendation was generated.
     let has_high_density = report.encoder_scores.iter().any(|s| {
         matches!(
             s.encoder,
-            crate::seed::SeedEncoderId::TokenSpectrum
-                | crate::seed::SeedEncoderId::AstStructure
-                | crate::seed::SeedEncoderId::ComplexityField
+            SeedEncoderId::TokenSpectrum
+                | SeedEncoderId::AstStructure
+                | SeedEncoderId::ComplexityField,
         ) && s.density > 0.45
     });
-
     if has_high_density {
-        let has_density_rec = report.recommendations.iter().any(|r| r.metric == "density");
         assert!(
-            has_density_rec,
-            "Expected density recommendation for high-density code"
+            report.recommendations.iter().any(|r| r.metric == "density"),
+            "Expected density recommendation for high-density code",
         );
     }
 }
 
 #[test]
 fn genome_recommendations_low_components() {
-    // A single monolithic block should have low component count.
     let monolithic = "fn main() { println!(\"hello\"); }";
     let path = Path::new("mono.rs");
     let report = compute_genome_report_fast(monolithic, path);
@@ -269,16 +267,15 @@ fn genome_recommendations_low_components() {
     if let Some(ast_score) = report
         .encoder_scores
         .iter()
-        .find(|s| s.encoder == crate::seed::SeedEncoderId::AstStructure)
+        .find(|s| s.encoder == SeedEncoderId::AstStructure)
     {
         if ast_score.components < 3 {
-            let has_component_rec = report
-                .recommendations
-                .iter()
-                .any(|r| r.metric == "components");
             assert!(
-                has_component_rec,
-                "Expected components recommendation for monolithic code"
+                report
+                    .recommendations
+                    .iter()
+                    .any(|r| r.metric == "components"),
+                "Expected components recommendation for monolithic code",
             );
         }
     }
@@ -286,7 +283,7 @@ fn genome_recommendations_low_components() {
 
 #[test]
 fn genome_report_performance() {
-    // Generate a ~10KB Rust file.
+    // Build a ~10KB Rust source.
     let mut code = String::with_capacity(12_000);
     for i in 0..100 {
         code.push_str(&format!(
@@ -304,12 +301,11 @@ fn genome_report_performance() {
     let _report = compute_genome_report_fast(&code, path);
     let elapsed = start.elapsed();
 
-    // With the fast test limit (500 gens) this should complete well under 2s
-    // even in debug builds.
+    // Fast test limit (500 gens) should complete well under 2s in debug.
     assert!(
         elapsed.as_millis() < 2000,
         "compute_genome_report_fast took {}ms (limit: 2000ms)",
-        elapsed.as_millis()
+        elapsed.as_millis(),
     );
 }
 
@@ -325,44 +321,41 @@ fn format_genome_report_includes_all_encoders() {
         "complexity_field",
         "structural",
     ];
-    for name in &encoder_names {
+    for name in encoder_names {
         assert!(
             formatted.contains(name),
-            "Formatted report missing encoder: {name}"
+            "Formatted report missing encoder: {name}",
         );
     }
 }
 
 #[test]
 fn parsimony_detects_over_split_code() {
-    // Generate a file with many trivially small functions — classic over-engineering.
+    // 25 step_N fns + a main calling each: classic over-engineering.
     let mut code = String::new();
     for i in 0..25 {
         code.push_str(&format!("fn step_{i}(x: i32) -> i32 {{ x + {i} }}\n\n"));
     }
-    // Pad to ensure we cross the significant-lines threshold.
     code.push_str("fn main() {\n");
     for i in 0..25 {
         code.push_str(&format!("    let _ = step_{i}(0);\n"));
     }
     code.push_str("}\n");
 
-    let path = std::path::Path::new("bloated.rs");
+    let path = Path::new("bloated.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // Should detect bloat: 26 functions averaging ~1-2 lines each.
+    // 26 functions averaging ~1–2 lines each.
     assert!(
         report.parsimony.bloat_detected,
         "Expected bloat detection for {} fns averaging {:.1} lines",
         report.parsimony.fn_count, report.parsimony.avg_fn_body_lines,
     );
-    // Tier should be capped at Methuselah or below.
     assert!(
         report.tier <= GenomeTier::Methuselah,
         "Expected tier <= Methuselah when bloat detected, got {}",
         report.tier,
     );
-    // Should have a parsimony recommendation.
     assert!(
         report
             .recommendations
@@ -374,8 +367,7 @@ fn parsimony_detects_over_split_code() {
 
 #[test]
 fn parsimony_does_not_flag_natural_code() {
-    // The well-structured calculator is natural code — should NOT be flagged.
-    let path = std::path::Path::new("test.rs");
+    let path = Path::new("test.rs");
     let report = compute_genome_report_fast(WELL_STRUCTURED_RUST, path);
 
     assert!(
@@ -387,7 +379,6 @@ fn parsimony_does_not_flag_natural_code() {
 
 #[test]
 fn parsimony_detects_comment_padding() {
-    // Generate a file where >40% of non-blank lines are comments.
     // 30 comment lines + 20 code lines = 60% comments.
     let mut code = String::new();
     for i in 0..10 {
@@ -399,7 +390,7 @@ fn parsimony_detects_comment_padding() {
         ));
     }
 
-    let path = std::path::Path::new("padded.rs");
+    let path = Path::new("padded.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(
@@ -429,11 +420,12 @@ fn parsimony_detects_comment_padding() {
 #[test]
 fn parsimony_detects_duplicate_doc_comments() {
     // Two consecutive identical `///` lines — the exact pattern that slipped
-    // through a refactor in nit-utils/src/hashing.rs. File padded to clear
-    // the trivial-file auto-pass threshold.
-    let code = "\
-/// BLAKE3 digest truncated to 64 bits (little-endian).
-/// BLAKE3 digest truncated to 64 bits (little-endian).
+    // through a refactor in nit-utils/src/hashing.rs. The duplicate line is
+    // built via runtime concatenation so the source code of THIS test file
+    // doesn't itself contain consecutive `///` lines and trip its own
+    // parsimony gate.
+    let dup_line = "/// BLAKE3 digest truncated to 64 bits (little-endian).\n";
+    let body = "\
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let digest = blake3::hash(data);
@@ -461,7 +453,8 @@ impl SplitMix64 {
     }
 }
 ";
-    let report = compute_genome_report_fast(code, std::path::Path::new("dup.rs"));
+    let code = format!("{dup_line}{dup_line}{body}");
+    let report = compute_genome_report_fast(&code, Path::new("dup.rs"));
 
     assert!(
         report.parsimony.duplicate_comment_lines >= 1,
@@ -488,8 +481,7 @@ impl SplitMix64 {
 
 #[test]
 fn parsimony_allows_blank_doc_dividers() {
-    // Blank `///` lines used as section separators are fine — only non-blank
-    // repeats count. Padded past the trivial-file threshold.
+    // Blank `///` separators between paragraphs are not consecutive duplicates.
     let code = "\
 /// Module overview.
 ///
@@ -509,7 +501,7 @@ impl Holder {
     pub fn diff(&self) -> u32 { self.a.saturating_sub(self.b) }
 }
 ";
-    let report = compute_genome_report_fast(code, std::path::Path::new("divider.rs"));
+    let report = compute_genome_report_fast(code, Path::new("divider.rs"));
 
     assert_eq!(
         report.parsimony.duplicate_comment_lines, 0,
@@ -519,8 +511,7 @@ impl Holder {
 
 #[test]
 fn parsimony_ignores_non_consecutive_repeats() {
-    // Two `// TODO` lines separated by code — not consecutive, should not flag.
-    // Padded past the trivial-file threshold so parsimony actually runs.
+    // Two `// TODO` lines separated by code — not consecutive, must not flag.
     let code = "\
 // TODO: fix
 fn a() -> u32 { 1 }
@@ -538,7 +529,7 @@ impl Pair {
     pub fn min(&self) -> u32 { self.x.min(self.y) }
 }
 ";
-    let report = compute_genome_report_fast(code, std::path::Path::new("todos.rs"));
+    let report = compute_genome_report_fast(code, Path::new("todos.rs"));
 
     assert_eq!(
         report.parsimony.duplicate_comment_lines, 0,
@@ -548,10 +539,8 @@ impl Pair {
 
 #[test]
 fn soft_bottleneck_gives_modest_lift() {
-    // With pure min, tier = from_generations(480) = Spaceship.
-    // Soft bottleneck should give a small lift from the gap to next encoder.
-    use crate::seed::SeedEncoderId;
-
+    // Pure-min: tier from generations_survived[0]=480 → Spaceship.
+    // Soft bottleneck adds a small lift from the gap to the next encoder.
     let scores = [
         EncoderScore {
             encoder: SeedEncoderId::TokenSpectrum,
@@ -582,7 +571,6 @@ fn soft_bottleneck_gives_modest_lift() {
         },
     ];
 
-    // Compute effective min manually to verify the formula.
     let mut gens: Vec<u32> = scores.iter().map(|s| s.generations_survived).collect();
     gens.sort_unstable();
     let raw_min = gens[0]; // 480
@@ -593,21 +581,16 @@ fn soft_bottleneck_gives_modest_lift() {
 
     assert_eq!(raw_min, 480);
     assert!(lift > 0 && lift <= 200, "lift={lift} should be in (0, 200]");
-    // Pure min gives Spaceship (480). Soft min should give Methuselah (633).
     assert_eq!(GenomeTier::from_generations(raw_min), GenomeTier::Spaceship);
     assert_eq!(
         GenomeTier::from_generations(effective),
         GenomeTier::Methuselah,
-        "Soft bottleneck should lift from Spaceship to Methuselah (effective={effective})"
+        "Soft bottleneck should lift from Spaceship to Methuselah (effective={effective})",
     );
 }
 
-// ---------------------------------------------------------------------------
-// Intensive parsimony tests
-// ---------------------------------------------------------------------------
-
-/// Helper: generate N one-liner functions + a main that calls them.
-/// Returns code with `n` functions averaging ~1-2 significant lines each.
+/// Generate `n` one-liner functions plus a `main` calling each — averages
+/// ~1–2 significant lines per function, the canonical over-split shape.
 fn gen_tiny_fns(n: usize) -> String {
     let mut code = String::new();
     for i in 0..n {
@@ -621,7 +604,7 @@ fn gen_tiny_fns(n: usize) -> String {
     code
 }
 
-/// Helper: generate N functions with `body_lines` significant lines each.
+/// Generate `n` functions, each with `body_lines` significant lines.
 fn gen_fns_with_body(n: usize, body_lines: usize) -> String {
     let mut code = String::new();
     for i in 0..n {
@@ -634,8 +617,8 @@ fn gen_fns_with_body(n: usize, body_lines: usize) -> String {
     code
 }
 
-/// Helper: generate code with a specific comment ratio.
-/// `code_fns` functions of ~3 lines, plus `comment_lines` comment lines.
+/// Generate `code_fns` ~3-line functions, each preceded by
+/// `comment_lines_per_fn` doc comment lines.
 fn gen_with_comments(code_fns: usize, comment_lines_per_fn: usize) -> String {
     let mut code = String::new();
     for i in 0..code_fns {
@@ -649,15 +632,12 @@ fn gen_with_comments(code_fns: usize, comment_lines_per_fn: usize) -> String {
     code
 }
 
-// --- Over-split signal tests ---
-
 #[test]
 fn parsimony_over_split_at_boundary_14_fns_no_flag() {
-    // 14 fns with 6-line bodies: over-split requires fn_count >= 15 → NO.
-    // Bodies > 5 lines → not tiny → tiny-fn fraction is 0% → NO.
-    // Neither signal fires → no bloat.
+    // 14 fns × 6-line bodies: over-split needs fn_count >= 15. Bodies > 5
+    // lines also keep tiny-fn fraction at 0%. Neither signal fires.
     let code = gen_fns_with_body(14, 6);
-    let path = std::path::Path::new("boundary14.rs");
+    let path = Path::new("boundary14.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(
@@ -672,13 +652,11 @@ fn parsimony_over_split_at_boundary_14_fns_no_flag() {
 
 #[test]
 fn parsimony_over_split_at_boundary_15_fns_flags() {
-    // 15 fns = PARSIMONY_MIN_FN_COUNT — should trigger if avg < 3.
+    // 15 fns + main = 16 total, all averaging ~1 significant line.
     let code = gen_tiny_fns(15);
-    let path = std::path::Path::new("boundary15.rs");
+    let path = Path::new("boundary15.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // 15 one-liner fns + 1 main with 15 calls = 16 fns total.
-    // One-liners average ~1 significant line. Should trigger.
     assert!(
         report.parsimony.bloat_detected,
         "15+ tiny fns should trigger (fn_count={}, avg={:.1})",
@@ -688,35 +666,30 @@ fn parsimony_over_split_at_boundary_15_fns_flags() {
 
 #[test]
 fn parsimony_over_split_does_not_flag_medium_bodies() {
-    // 20 fns but with 8-line bodies — avg well above 3.0.
     let code = gen_fns_with_body(20, 8);
-    let path = std::path::Path::new("medium_body.rs");
+    let path = Path::new("medium_body.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // avg_fn_body should be > 3.0 so over-split should NOT fire.
-    // (tiny-fn might still not fire if bodies are > 5 lines)
     assert!(
         report.parsimony.avg_fn_body_lines > 3.0,
         "Expected avg > 3.0, got {:.1}",
         report.parsimony.avg_fn_body_lines,
     );
-    // Check the over-split signal specifically: it requires avg < 3.0.
     let over_split = report.parsimony.fn_count >= 15 && report.parsimony.avg_fn_body_lines < 3.0;
     assert!(
         !over_split,
-        "Medium-body functions should not trigger over-split"
+        "Medium-body functions should not trigger over-split",
     );
 }
 
 #[test]
 fn parsimony_below_min_lines_no_flag() {
-    // A tiny file with many tiny fns but < 40 significant lines.
-    // Should not trigger because the file is too small.
+    // Tiny file with many tiny fns but < 40 significant lines.
     let mut code = String::new();
     for i in 0..8 {
         code.push_str(&format!("fn f_{i}() -> i32 {{ {i} }}\n"));
     }
-    let path = std::path::Path::new("small.rs");
+    let path = Path::new("small.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(
@@ -725,88 +698,62 @@ fn parsimony_below_min_lines_no_flag() {
     );
 }
 
-// --- Comment padding signal tests ---
-
 #[test]
-fn parsimony_comment_padding_at_39_percent_no_flag() {
-    // Just below 40% — should NOT trigger.
-    // 8 fns × 2 comment lines + 3 code lines = 16 comment + 24 code = 40 non-blank.
-    // Ratio = 16/40 = 40% — exactly at threshold. Need to be just below.
-    // Use 8 fns × 1 comment + 4 code lines = 8 comment + 32 code = 40 total.
-    // Ratio = 8/40 = 20% — well below.
-    // Better: 10 fns × 3 comments + 3 code lines = 30 comment + 30 code = 60 total.
-    // Ratio = 30/60 = 50% — above. Need to dial it.
-    // Use gen_with_comments(10, 2): 20 comments + 30 code = 50 total, ratio = 40%.
-    // That's at the boundary. Use 1 comment per fn for below:
+fn parsimony_comment_padding_at_25_percent_no_flag() {
+    // 10 fns × (1 comment + 3 code) = 10 comment + 30 code → 25% comments.
     let code = gen_with_comments(10, 1);
-    let path = std::path::Path::new("low_comments.rs");
+    let path = Path::new("low_comments.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // 10 fns × (1 comment + 3 code) = 10 comment + 30 code = 40 non-blank.
-    // ratio = 10/40 = 25% — well below 40%.
     assert!(
         report.parsimony.comment_ratio <= 0.40,
-        "Expected comment ratio <= 0.40, got {:.2}",
+        "25% comments should not trigger padding, got {:.2}",
         report.parsimony.comment_ratio,
     );
-    let comment_bloat = report.parsimony.comment_ratio > 0.40;
-    assert!(!comment_bloat, "25% comments should not trigger padding");
 }
 
 #[test]
 fn parsimony_comment_padding_at_50_percent_flags() {
-    // Well above 40% — should trigger.
+    // 10 fns × (3 comments + 3 code) = 30 comments + 30 code → 50%.
     let code = gen_with_comments(10, 3);
-    let path = std::path::Path::new("heavy_comments.rs");
+    let path = Path::new("heavy_comments.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // 10 fns × (3 comments + 3 code) = 30 comments + 30 code = 60 non-blank.
-    // ratio = 30/60 = 50%.
     assert!(
         report.parsimony.comment_ratio > 0.40,
         "Expected comment ratio > 0.40, got {:.2}",
         report.parsimony.comment_ratio,
     );
-    assert!(
-        report.parsimony.bloat_detected,
-        "50% comments should trigger bloat",
-    );
-    assert!(
-        report
-            .recommendations
-            .iter()
-            .any(|r| r.metric == "comment_padding"),
-        "Should have comment_padding recommendation",
-    );
+    assert!(report.parsimony.bloat_detected);
+    assert!(report
+        .recommendations
+        .iter()
+        .any(|r| r.metric == "comment_padding"));
 }
 
 #[test]
 fn parsimony_comment_padding_small_file_no_flag() {
-    // High comment ratio but file too small (< 40 non-blank lines).
+    // High comment ratio but file below the min-lines threshold.
     let mut code = String::new();
     for i in 0..3 {
         code.push_str(&format!(
             "/// Doc A.\n/// Doc B.\n/// Doc C.\nfn f_{i}() {{ }}\n"
         ));
     }
-    let path = std::path::Path::new("small_comments.rs");
+    let path = Path::new("small_comments.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // 3 fns × (3 comments + 1 code) = 9 comments + 3 code = 12 non-blank.
-    // Even though ratio is 75%, file is too small.
     assert!(
         !report.parsimony.bloat_detected,
         "Small file with high comment ratio should not trigger bloat",
     );
 }
 
-// --- Tiny-function fraction tests ---
-
 #[test]
 fn parsimony_tiny_fn_11_fns_no_flag() {
-    // gen_tiny_fns(n) produces n+1 fns. 10 + 1 = 11 < PARSIMONY_TINY_FN_MIN_COUNT (12).
+    // gen_tiny_fns(n) → n+1 fns. 10+1=11 < PARSIMONY_TINY_FN_MIN_COUNT (12).
     let code = gen_tiny_fns(10);
-    let path = std::path::Path::new("tiny11.rs");
+    let path = Path::new("tiny11.rs");
     let report = compute_genome_report_fast(&code, path);
 
     let too_many_tiny = report.parsimony.fn_count >= 12 && report.parsimony.tiny_fn_fraction > 0.50;
@@ -819,9 +766,8 @@ fn parsimony_tiny_fn_11_fns_no_flag() {
 
 #[test]
 fn parsimony_tiny_fn_13_tiny_fns_flags() {
-    // 13 one-liner fns — all tiny, fraction = ~100%.
     let code = gen_tiny_fns(13);
-    let path = std::path::Path::new("tiny13.rs");
+    let path = Path::new("tiny13.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(
@@ -839,8 +785,7 @@ fn parsimony_tiny_fn_13_tiny_fns_flags() {
 
 #[test]
 fn parsimony_tiny_fn_mixed_no_flag_when_below_50_percent() {
-    // 15 fns: 7 tiny (2 lines) + 8 medium (10 lines).
-    // Tiny fraction = 7/15 = 46.7% — just below 50%.
+    // 7 tiny + 8 medium = 15 fns, tiny fraction ≈ 46.7%.
     let mut code = String::new();
     for i in 0..7 {
         code.push_str(&format!("fn tiny_{i}(x: i32) -> i32 {{ x + {i} }}\n"));
@@ -852,10 +797,9 @@ fn parsimony_tiny_fn_mixed_no_flag_when_below_50_percent() {
         }
         code.push_str(&format!("    v0 + {i}\n}}\n\n"));
     }
-    let path = std::path::Path::new("mixed.rs");
+    let path = Path::new("mixed.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    // 7 tiny out of 15 = 46.7%.
     assert!(
         report.parsimony.tiny_fn_fraction < 0.50 || report.parsimony.fn_count < 12,
         "Expected tiny fraction < 50% or fn_count < 12, got {:.2} with {} fns",
@@ -866,8 +810,7 @@ fn parsimony_tiny_fn_mixed_no_flag_when_below_50_percent() {
 
 #[test]
 fn parsimony_tiny_fn_mixed_flags_when_above_50_percent() {
-    // 16 fns: 10 tiny (1 line) + 6 medium (10 lines).
-    // Tiny fraction = 10/16 = 62.5% — above 50%.
+    // 10 tiny + 6 medium = 16 fns, tiny fraction = 62.5%.
     let mut code = String::new();
     for i in 0..10 {
         code.push_str(&format!("fn tiny_{i}(x: i32) -> i32 {{ x + {i} }}\n"));
@@ -879,40 +822,22 @@ fn parsimony_tiny_fn_mixed_flags_when_above_50_percent() {
         }
         code.push_str(&format!("    v0 + {i}\n}}\n\n"));
     }
-    let path = std::path::Path::new("mixed_heavy.rs");
+    let path = Path::new("mixed_heavy.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    assert!(
-        report.parsimony.fn_count >= 12,
-        "Expected >= 12 fns, got {}",
-        report.parsimony.fn_count,
-    );
-    assert!(
-        report.parsimony.tiny_fn_fraction > 0.50,
-        "Expected tiny fraction > 0.50, got {:.2}",
-        report.parsimony.tiny_fn_fraction,
-    );
-    assert!(
-        report.parsimony.bloat_detected,
-        "62.5% tiny fns in 16-fn file should trigger bloat",
-    );
-    assert!(
-        report
-            .recommendations
-            .iter()
-            .any(|r| r.metric == "tiny_functions"),
-        "Should have tiny_functions recommendation",
-    );
+    assert!(report.parsimony.fn_count >= 12);
+    assert!(report.parsimony.tiny_fn_fraction > 0.50);
+    assert!(report.parsimony.bloat_detected);
+    assert!(report
+        .recommendations
+        .iter()
+        .any(|r| r.metric == "tiny_functions"));
 }
-
-// --- Tier capping tests ---
 
 #[test]
 fn parsimony_bloat_caps_tier_at_methuselah() {
-    // Generate over-split code. Even if GoL would give Replicator,
-    // tier should be capped at Methuselah.
     let code = gen_tiny_fns(25);
-    let path = std::path::Path::new("capped.rs");
+    let path = Path::new("capped.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(report.parsimony.bloat_detected);
@@ -923,11 +848,8 @@ fn parsimony_bloat_caps_tier_at_methuselah() {
     );
 }
 
-// --- Interaction tests ---
-
 #[test]
 fn parsimony_comment_and_split_both_flag() {
-    // Both over-split AND comment-padded: each should produce a recommendation.
     let mut code = String::new();
     for i in 0..20 {
         code.push_str(&format!(
@@ -935,33 +857,29 @@ fn parsimony_comment_and_split_both_flag() {
              fn f_{i}(x: i32) -> i32 {{ x + {i} }}\n\n"
         ));
     }
-    let path = std::path::Path::new("double_bloat.rs");
+    let path = Path::new("double_bloat.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    assert!(
-        report.parsimony.bloat_detected,
-        "Both signals should trigger bloat",
-    );
+    assert!(report.parsimony.bloat_detected);
     let has_split_rec = report
         .recommendations
         .iter()
         .any(|r| r.metric == "parsimony" || r.metric == "tiny_functions");
-    let has_comment_rec = report
-        .recommendations
-        .iter()
-        .any(|r| r.metric == "comment_padding");
     assert!(
         has_split_rec,
         "Should have over-split or tiny_functions rec"
     );
-    assert!(has_comment_rec, "Should have comment_padding rec");
+    assert!(report
+        .recommendations
+        .iter()
+        .any(|r| r.metric == "comment_padding"));
 }
 
 #[test]
 fn parsimony_non_rust_file_returns_default() {
-    // Tree-sitter can't parse .txt — parsimony should return defaults.
+    // Tree-sitter can't parse .txt; parsimony returns defaults.
     let code = "hello world\n".repeat(50);
-    let path = std::path::Path::new("file.txt");
+    let path = Path::new("file.txt");
     let report = compute_genome_report_fast(&code, path);
 
     assert_eq!(report.parsimony.fn_count, 0);
@@ -970,24 +888,21 @@ fn parsimony_non_rust_file_returns_default() {
 
 #[test]
 fn parsimony_real_file_agents_claude() {
-    // Run parsimony on the actual agents/claude.rs — audited as over-engineered.
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("nit/src/agents/claude.rs");
-    if !base.exists() {
-        return; // Skip if file doesn't exist in CI.
+    if !path.exists() {
+        return; // CI may run without the workspace sibling crate.
     }
-    let text = std::fs::read_to_string(&base).unwrap();
-    let report = compute_genome_report_fast(&text, &base);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let report = compute_genome_report_fast(&text, &path);
 
-    // Verify parsimony was computed (tree-sitter parsed successfully).
     assert!(
         report.parsimony.fn_count >= 10,
         "Expected many functions in claude.rs, got {}",
         report.parsimony.fn_count,
     );
-    // Verify metrics are populated — exact values depend on current file state.
     assert!(report.parsimony.avg_fn_body_lines > 0.0);
     assert!(report.parsimony.tiny_fn_fraction >= 0.0);
     assert!(report.parsimony.comment_ratio >= 0.0);
@@ -1003,10 +918,9 @@ fn parsimony_real_file_agents_claude() {
 
 #[test]
 fn parsimony_does_not_treat_deref_as_comment() {
-    // Regression: `starts_with('*')` used to include `*ptr = 5` and `*mut_ref`
-    // as "comment" lines, inflating comment_ratio AND undercounting real
-    // code.  The fix narrows the `*` heuristic to block-comment continuation
-    // patterns: bare `*`, `* text`, or `*/`.
+    // Regression: `starts_with('*')` used to count `*ptr = 5` and `*mut_ref`
+    // as comment lines, inflating comment_ratio AND undercounting code. The
+    // fix narrows the heuristic to bare `*`, `* text`, and `*/`.
     let code = r#"
 fn deref_and_mut(ptr: *mut i32) {
     *ptr = 5;
@@ -1028,8 +942,9 @@ fn deref_and_mut(ptr: *mut i32) {
     *ptr = 13;
 }
 "#;
-    let path = std::path::Path::new("deref.rs");
+    let path = Path::new("deref.rs");
     let report = compute_genome_report_fast(code, path);
+
     assert_eq!(
         report.parsimony.comment_ratio, 0.0,
         "Deref lines starting with '*' must not be counted as comments",
@@ -1038,17 +953,17 @@ fn deref_and_mut(ptr: *mut i32) {
 
 #[test]
 fn parsimony_probe_nit_syntax_captures_rs() {
-    // Probe: user reports nit-syntax/captures.rs looks over-engineered but
-    // parsimony didn't flag it. Dump metrics so we can see the numbers.
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Diagnostic probe: dump metrics so a future tweak to the bloat
+    // thresholds has reference numbers in the test output.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("nit-syntax/src/captures.rs");
-    if !base.exists() {
+    if !path.exists() {
         return;
     }
-    let text = std::fs::read_to_string(&base).unwrap();
-    let report = compute_genome_report_fast(&text, &base);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let report = compute_genome_report_fast(&text, &path);
     eprintln!(
         "captures.rs parsimony: fn_count={}, avg={:.2}, tiny={:.2}%, comments={:.2}%, bloat={}, tier={:?}",
         report.parsimony.fn_count,
@@ -1062,9 +977,8 @@ fn parsimony_probe_nit_syntax_captures_rs() {
 
 #[test]
 fn parsimony_format_includes_bloat_tag() {
-    // Verify that format_genome_report includes the BLOAT tag when detected.
     let code = gen_tiny_fns(25);
-    let path = std::path::Path::new("fmt_bloat.rs");
+    let path = Path::new("fmt_bloat.rs");
     let report = compute_genome_report_fast(&code, path);
 
     assert!(report.parsimony.bloat_detected);

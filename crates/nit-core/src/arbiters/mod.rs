@@ -1,12 +1,12 @@
-//! Arbiter framework — the fourth role in the living-system taxonomy.
+//! Arbiter framework — fourth role in the living-system taxonomy.
 //!
-//! Arbiters read the substrate at tick boundaries (TurnCompleted,
-//! metabolic tick), detect structural failures (persistent conflicts,
-//! deadlocks, stuck slots), and produce interventions that actuate via
-//! nit-tui's existing retry/dispatch infrastructure.
+//! Arbiters read the substrate at tick boundaries (TurnCompleted, metabolic
+//! tick), detect structural failures (persistent conflicts, deadlocks, stuck
+//! slots), and produce interventions that actuate via nit-tui's existing
+//! retry/dispatch infrastructure.
 //!
-//! Invariant: arbiters run AFTER observers in every tick. They see the
-//! same AppState snapshot observers just read, plus any signals observers
+//! Invariant: arbiters run AFTER observers in every tick. They see the same
+//! `AppState` snapshot observers just read, plus any signals observers
 //! emitted. No arbiter reads `InterventionEmitted` — prevents self-loops.
 
 use std::collections::{HashMap, HashSet};
@@ -20,14 +20,12 @@ pub mod sparse_plan_arbiter;
 
 pub const ARBITER_INITIAL_STRENGTH: f32 = 2.0;
 pub const ARBITER_COOLDOWN_GENS: u64 = 10;
+
+/// Default; mood modulation overrides via `mood.modulation().arbiter_max_per_tick`.
 pub const ARBITER_MAX_PER_TICK: usize = 2;
 
-/// Mirror of nit-tui's `GENOME_RETRY_LIMIT` (3). Kept here so
-/// `agent_bus` and `metabolism` can pass a retry cap into
-/// `reduce_proposals` without depending on nit-tui. Must stay in sync
-/// with `crates/nit-tui/src/app/genome_retry.rs::GENOME_RETRY_LIMIT`;
-/// the `genome_retry_limit_matches_arbiter_retry_limit` test in
-/// `crates/nit-tui/src/app/tests.rs` enforces equality.
+/// Mirror of nit-tui's `GENOME_RETRY_LIMIT`. Equality is enforced by the
+/// `genome_retry_limit_matches_arbiter_retry_limit` test in nit-tui.
 pub const ARBITER_RETRY_LIMIT: u8 = 3;
 
 #[derive(Clone, Debug)]
@@ -65,13 +63,14 @@ impl InterventionTarget {
     }
 
     /// Whether a previously-emitted signal targets the same scope as this proposal.
-    pub fn matches_signal(&self, sig: &SignalTarget) -> bool {
-        match (self, sig) {
-            (InterventionTarget::Agent { agent_id: a }, SignalTarget::Agent { agent_id: b }) => {
-                a == b
-            }
-            (InterventionTarget::AgentPair { a, b }, SignalTarget::Agent { agent_id: x }) => {
-                a == x || b == x
+    pub fn matches_signal(&self, signal_target: &SignalTarget) -> bool {
+        match (self, signal_target) {
+            (
+                InterventionTarget::Agent { agent_id: own },
+                SignalTarget::Agent { agent_id: other },
+            ) => own == other,
+            (InterventionTarget::AgentPair { a, b }, SignalTarget::Agent { agent_id: other }) => {
+                a == other || b == other
             }
             (InterventionTarget::Global, SignalTarget::Global)
             | (InterventionTarget::Mission { .. }, SignalTarget::Global) => true,
@@ -79,7 +78,6 @@ impl InterventionTarget {
         }
     }
 
-    /// Whether the recipient(s)' retry budget is exhausted at the given limit.
     /// Per-agent lookup so a burnt-out agent does not silence interventions
     /// targeting other agents running in parallel.
     pub fn budget_exhausted(&self, retries: &HashMap<String, u8>, limit: u8) -> bool {
@@ -88,9 +86,9 @@ impl InterventionTarget {
                 retries.get(agent_id).copied().unwrap_or(0) >= limit
             }
             InterventionTarget::AgentPair { a, b } => {
-                let ca = retries.get(a).copied().unwrap_or(0);
-                let cb = retries.get(b).copied().unwrap_or(0);
-                ca.min(cb) >= limit
+                let count_a = retries.get(a).copied().unwrap_or(0);
+                let count_b = retries.get(b).copied().unwrap_or(0);
+                count_a.min(count_b) >= limit
             }
             InterventionTarget::Mission { .. } | InterventionTarget::Global => {
                 retries.values().copied().max().unwrap_or(0) >= limit
@@ -125,19 +123,18 @@ pub const REGISTERED_ARBITERS: &[Arbiter] = &[
 ];
 
 pub fn run_all(state: &AppState) -> Vec<(&'static str, InterventionProposal)> {
-    let mut out = Vec::new();
-    for arb in REGISTERED_ARBITERS {
-        for p in (arb.run)(state) {
-            out.push((arb.name, p));
+    let mut all_proposals = Vec::new();
+    for arbiter in REGISTERED_ARBITERS {
+        for proposal in (arbiter.run)(state) {
+            all_proposals.push((arbiter.name, proposal));
         }
     }
-    out
+    all_proposals
 }
 
-/// Apply safety guards: per-(arbiter, target) cooldown; per-tick budget;
-/// downgrade to EmitSignalOnly if the retry budget is exhausted.
-///
-/// Does NOT consume budget — actuation (dispatch) does that.
+/// Apply per-(arbiter, target) cooldown, per-tick budget, and downgrade to
+/// `EmitSignalOnly` when the retry budget is exhausted. Does NOT consume the
+/// retry budget — actuation (dispatch) does that.
 pub fn reduce_proposals(
     state: &AppState,
     raw: Vec<(&'static str, InterventionProposal)>,
@@ -146,36 +143,34 @@ pub fn reduce_proposals(
     let current_gen = state.substrate.current_generation();
     let cooldown_start = current_gen.saturating_sub(ARBITER_COOLDOWN_GENS);
     let max_per_tick = state.substrate.mood.modulation().arbiter_max_per_tick;
+    let retry_counts = &state.genome_retry_counts;
 
-    let mut reduced: Vec<Intervention> = Vec::new();
-    for (name, prop) in raw {
-        if in_cooldown(state, name, &prop.target, cooldown_start) {
+    let mut accepted: Vec<Intervention> = Vec::new();
+    for (arbiter_name, proposal) in raw {
+        if in_cooldown(state, arbiter_name, &proposal.target, cooldown_start) {
             continue;
         }
-
-        let kind = if prop
+        let outcome_kind = if proposal
             .target
-            .budget_exhausted(&state.genome_retry_counts, genome_retry_limit)
+            .budget_exhausted(retry_counts, genome_retry_limit)
         {
             InterventionKind::EmitSignalOnly
         } else {
-            prop.kind.clone()
+            proposal.kind.clone()
         };
-
-        reduced.push(Intervention {
-            arbiter_name: name,
-            kind,
-            target: prop.target,
-            rationale: prop.rationale,
-            payload: prop.payload,
+        accepted.push(Intervention {
+            arbiter_name,
+            kind: outcome_kind,
+            target: proposal.target,
+            rationale: proposal.rationale,
+            payload: proposal.payload,
             decided_at_gen: current_gen,
         });
-
-        if reduced.len() >= max_per_tick {
+        if accepted.len() >= max_per_tick {
             break;
         }
     }
-    reduced
+    accepted
 }
 
 fn in_cooldown(
@@ -185,25 +180,20 @@ fn in_cooldown(
     cooldown_start: u64,
 ) -> bool {
     let posted_by = format!("arbiter:{arbiter_name}");
-    state.substrate.signals.values().any(|s| {
-        s.kind == SignalKind::InterventionEmitted
-            && s.posted_by == posted_by
-            && s.posted_at_gen >= cooldown_start
-            && target.matches_signal(&s.target)
+    state.substrate.signals.values().any(|signal| {
+        signal.kind == SignalKind::InterventionEmitted
+            && signal.posted_by == posted_by
+            && signal.posted_at_gen >= cooldown_start
+            && target.matches_signal(&signal.target)
     })
 }
 
-/// Thin shim retained for cross-crate consumers — prefer the inherent method.
-pub fn intervention_to_signal_target(t: &InterventionTarget) -> SignalTarget {
-    t.signal_target()
-}
-
-/// Emit the InterventionEmitted signal for each reduced intervention
-/// and push them onto the queue for nit-tui to drain.
+/// Emit the InterventionEmitted signal for each reduced intervention and push
+/// it onto the queue for nit-tui to drain.
 pub fn apply_interventions(state: &mut AppState, interventions: Vec<Intervention>) {
-    for iv in interventions {
-        let signal_target = iv.target.signal_target();
-        let posted_by = format!("arbiter:{}", iv.arbiter_name);
+    for intervention in interventions {
+        let signal_target = intervention.target.signal_target();
+        let posted_by = format!("arbiter:{}", intervention.arbiter_name);
         let id = state.substrate.next_signal_id(&posted_by);
         let posted_at_gen = state.substrate.current_generation();
         state.substrate.emit_signal(crate::substrate::Signal {
@@ -214,12 +204,12 @@ pub fn apply_interventions(state: &mut AppState, interventions: Vec<Intervention
             target: signal_target,
             initial_strength: ARBITER_INITIAL_STRENGTH,
             payload: serde_json::json!({
-                "rationale": iv.rationale,
-                "target": iv.target.payload_object(),
-                "details": iv.payload.clone(),
+                "rationale": intervention.rationale,
+                "target": intervention.target.payload_object(),
+                "details": intervention.payload.clone(),
             }),
         });
-        state.pending_interventions.push(iv);
+        state.pending_interventions.push(intervention);
     }
 }
 
@@ -238,12 +228,12 @@ pub(super) fn scan_help_needed_signals<F>(
 where
     F: FnMut(&Signal, &str) -> InterventionProposal,
 {
-    let sub = &state.substrate;
-    let window_start = sub.current_generation().saturating_sub(window_gens);
+    let substrate = &state.substrate;
+    let window_start = substrate.current_generation().saturating_sub(window_gens);
 
     let mut proposals = Vec::new();
     let mut seen_agents: HashSet<String> = HashSet::new();
-    for signal in sub.signals.values() {
+    for signal in substrate.signals.values() {
         if signal.posted_at_gen < window_start {
             continue;
         }

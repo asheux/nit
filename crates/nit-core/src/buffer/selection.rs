@@ -9,22 +9,21 @@ impl Buffer {
         self.selection_anchor = None;
     }
 
+    /// Active selection as `(start, end)` char indices. The end is **exclusive
+    /// for slicing but vim-inclusive for the visual cell**: it points one past
+    /// the char under the cursor, so `rope.slice(start..end)` covers the cell.
+    /// Returns `None` for an empty buffer or a degenerate range.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         let anchor = self.selection_anchor?;
         let cursor = self.char_index();
         let len = self.rope.len_chars();
-        let (start, end) = if anchor <= cursor {
+        let (lo, hi) = if anchor <= cursor {
             (anchor, cursor)
         } else {
             (cursor, anchor)
         };
-        // vim-style inclusive end: visual selection covers the char under the cursor.
-        let end = if end < len { end + 1 } else { len };
-        if start >= len || end <= start {
-            None
-        } else {
-            Some((start, end))
-        }
+        let end = (hi + 1).min(len);
+        (lo < len && end > lo).then_some((lo, end))
     }
 
     pub fn yank_selection(&self) -> Option<String> {
@@ -32,17 +31,13 @@ impl Buffer {
         Some(self.rope.slice(start..end).to_string())
     }
 
+    /// Linewise yank ("Y" in vim) of the cursor's line. The result is always
+    /// `\n`-terminated so a paste re-creates the trailing newline even when
+    /// the source line was the buffer's last (newline-less) line.
     pub fn yank_line(&self) -> String {
-        let line = self
-            .cursor
-            .line
-            .min(self.rope.len_lines().saturating_sub(1));
+        let line = self.clamped_cursor_line();
         let start = self.rope.line_to_char(line);
-        let end = if line + 1 < self.rope.len_lines() {
-            self.rope.line_to_char(line + 1)
-        } else {
-            self.rope.len_chars()
-        };
+        let end = self.line_char_end(line);
         let mut text = self.rope.slice(start..end).to_string();
         if !text.ends_with('\n') {
             text.push('\n');

@@ -1,3 +1,6 @@
+//! Tests for the `rule_config` persistence layer — defaults that load-bear on
+//! the workspace-override / global-fallback choice in the rule picker.
+
 use crate::rule_config::RulePersistence;
 
 #[test]

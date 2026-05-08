@@ -1,3 +1,10 @@
+//! Multi-phase GoL rule sequencing.
+//!
+//! A protocol drives the simulation through an ordered list of phases —
+//! each phase pins one rule for a given number of generations. Optional
+//! looping turns the sequence into a cycle so long-running simulations
+//! can keep advancing past the last phase.
+
 mod parse;
 mod presets;
 mod types;

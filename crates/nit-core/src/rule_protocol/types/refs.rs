@@ -1,6 +1,12 @@
+//! Catalogue references stored inside a `RuleProtocol` phase.
+//!
+//! `selector()` is the round-trip key for protocol specs: when a rule has a
+//! catalogue id we use that (so user-renamed rules still resolve), and we
+//! fall back to the rulestring for ad-hoc rules without an id.
+
 use nit_gol::Rule;
 
-use crate::gol_rules::SelectedRule;
+use crate::gol_rules::{NamedRule, SelectedRule};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RuleRef {
@@ -18,7 +24,7 @@ impl RuleRef {
         }
     }
 
-    pub fn from_catalog(rule: &crate::gol_rules::NamedRule) -> Self {
+    pub fn from_catalog(rule: &NamedRule) -> Self {
         Self {
             id: Some(rule.id.clone()),
             rule: rule.rule,

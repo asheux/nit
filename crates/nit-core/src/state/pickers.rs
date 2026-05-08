@@ -1,6 +1,6 @@
-// Picker overlays are transient UI state — intentionally not Serialize/Deserialize.
-// Each launch resets them; persisting an open picker would race with the rule
-// catalog reload that happens after deserialization.
+// Picker overlays are transient UI state — not Serialize/Deserialize because
+// persisting an open picker would race with the rule-catalog reload that
+// runs after AppState deserialization.
 
 #[derive(Clone, Debug, Default)]
 pub struct RulePickerState {

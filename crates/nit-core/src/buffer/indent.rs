@@ -1,44 +1,46 @@
 use super::Buffer;
 
+/// Cap on the lines scanned to infer the buffer's indent unit. Bounds the
+/// inference cost on huge files; the first ~200 indented lines are nearly
+/// always representative.
+const INDENT_SCAN_LINES: usize = 200;
+
+/// Minimum/maximum widths accepted by [`Buffer::indent_unit`]. A 1-space unit
+/// is honored only when the gcd of observed widths actually equals 1 (e.g. an
+/// off-by-one mis-indent); >8 is treated as noise and clamped down.
+const MIN_INDENT_WIDTH: usize = 1;
+const MAX_INDENT_WIDTH: usize = 8;
+
+const FALLBACK_INDENT: &str = "    ";
+
 impl Buffer {
     pub(super) fn line_indent(&self, line: usize) -> String {
         if line >= self.rope.len_lines() {
             return String::new();
         }
-        let mut indent = String::new();
-        for ch in self.rope.line(line).chars() {
-            if ch == '\n' {
-                break;
-            }
-            if ch == ' ' || ch == '\t' {
-                indent.push(ch);
-            } else {
-                break;
-            }
-        }
-        indent
+        self.rope
+            .line(line)
+            .chars()
+            .take_while(|&ch| ch == ' ' || ch == '\t')
+            .collect()
     }
 
-    /// Detect the indent unit used in this buffer (e.g. "\t", "  ", "    ").
+    /// Inferred indent unit (`"\t"` or N spaces). The first tab-indented line
+    /// short-circuits to `"\t"`; otherwise the gcd of observed leading-space
+    /// widths defines the unit, falling back to 4 spaces when no indented
+    /// content is found.
     pub(super) fn indent_unit(&self) -> String {
-        let max = self.rope.len_lines().min(200);
-        let mut use_tabs = false;
-        let mut widths = Vec::new();
-        for i in 0..max {
+        let mut widths: Vec<usize> = Vec::new();
+        let scan = self.rope.len_lines().min(INDENT_SCAN_LINES);
+        for i in 0..scan {
             let line = self.rope.line(i);
             let mut spaces = 0usize;
             for ch in line.chars() {
-                if ch == '\t' {
-                    use_tabs = true;
-                    break;
-                } else if ch == ' ' {
-                    spaces += 1;
-                } else {
-                    break;
+                match ch {
+                    '\t' => return "\t".to_string(),
+                    ' ' => spaces += 1,
+                    _ => break,
                 }
-            }
-            if use_tabs {
-                break;
             }
             let has_content = line
                 .chars()
@@ -48,72 +50,41 @@ impl Buffer {
                 widths.push(spaces);
             }
         }
-        if use_tabs {
-            return "\t".to_string();
-        }
-        if widths.is_empty() {
-            return "    ".to_string();
-        }
-        let mut g = widths[0];
-        for &w in &widths[1..] {
-            g = gcd(g, w);
-        }
-        " ".repeat(g.clamp(1, 8))
+        let Some(unit) = widths.iter().copied().reduce(gcd) else {
+            return FALLBACK_INDENT.to_string();
+        };
+        " ".repeat(unit.clamp(MIN_INDENT_WIDTH, MAX_INDENT_WIDTH))
     }
 
     pub(super) fn last_non_ws_char_on_line(&self, line: usize) -> Option<char> {
         if line >= self.rope.len_lines() {
             return None;
         }
-        let mut result = None;
-        for ch in self.rope.line(line).chars() {
-            if ch == '\n' || ch == '\r' {
-                break;
-            }
-            if ch != ' ' && ch != '\t' {
-                result = Some(ch);
-            }
-        }
-        result
+        self.rope
+            .line(line)
+            .chars()
+            .take_while(|&ch| ch != '\n' && ch != '\r')
+            .filter(|ch| !is_indent_ws(*ch))
+            .last()
     }
 
     pub(super) fn last_non_ws_before_cursor(&self) -> Option<char> {
-        let line = self
-            .cursor
-            .line
-            .min(self.rope.len_lines().saturating_sub(1));
+        let line = self.clamped_cursor_line();
         let line_start = self.rope.line_to_char(line);
-        let idx = self.char_index();
-        let mut i = idx;
-        while i > line_start {
-            let ch = self.rope.char(i - 1);
-            if ch != ' ' && ch != '\t' {
-                return Some(ch);
-            }
-            i -= 1;
-        }
-        None
+        let cursor = self.char_index();
+        (line_start..cursor)
+            .rev()
+            .map(|i| self.rope.char(i))
+            .find(|ch| !is_indent_ws(*ch))
     }
 
     pub(super) fn first_non_ws_after_cursor(&self) -> Option<char> {
-        let idx = self.char_index();
-        let line = self
-            .cursor
-            .line
-            .min(self.rope.len_lines().saturating_sub(1));
-        let line_end_char = self.rope.line_to_char(line) + self.line_char_len(line);
-        let mut i = idx;
-        while i < line_end_char {
-            let ch = self.rope.char(i);
-            if ch == '\n' || ch == '\r' {
-                return None;
-            }
-            if ch != ' ' && ch != '\t' {
-                return Some(ch);
-            }
-            i += 1;
-        }
-        None
+        let line = self.clamped_cursor_line();
+        let line_end = self.rope.line_to_char(line) + self.line_char_len(line);
+        (self.char_index()..line_end)
+            .map(|i| self.rope.char(i))
+            .take_while(|&ch| ch != '\n' && ch != '\r')
+            .find(|ch| !is_indent_ws(*ch))
     }
 }
 
@@ -128,6 +99,10 @@ pub(super) fn matching_closer(opener: char) -> Option<char> {
         '[' => Some(']'),
         _ => None,
     }
+}
+
+fn is_indent_ws(ch: char) -> bool {
+    ch == ' ' || ch == '\t'
 }
 
 fn gcd(mut a: usize, mut b: usize) -> usize {

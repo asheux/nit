@@ -12,15 +12,14 @@ fn settings_default_round_trips_through_toml() {
     );
     assert_eq!(
         original.swarm.gate_retry_limit,
-        restored.swarm.gate_retry_limit
+        restored.swarm.gate_retry_limit,
     );
 }
 
 #[test]
 fn settings_tolerates_missing_optional_keys() {
-    // Older config files predating `swarm`, `genome`, and `intake_enabled`
-    // must keep deserializing — the `#[serde(default)]` attributes provide
-    // the back-compat hooks.
+    // Older configs predating `swarm`, `genome`, and `intake_enabled` must
+    // still deserialize — `#[serde(default)]` provides the back-compat hooks.
     let baseline = toml::to_string(&Settings::default()).expect("serialize defaults");
     let mut trimmed: toml::Table = toml::from_str(&baseline).expect("re-parse defaults");
     trimmed.remove("swarm");

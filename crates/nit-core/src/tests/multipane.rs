@@ -1,9 +1,11 @@
+//! Multipane state shape: per-pane chat isolation, default values, and the
+//! serde skip set for transient fields.
+
 use super::*;
 use std::path::PathBuf;
 
-#[test]
-fn multipane_state_isolates_chat_inputs() {
-    let mut mp = MultipaneState {
+fn three_panes() -> MultipaneState {
+    MultipaneState {
         backend_agent_id: "test-model".into(),
         panes: (0..3)
             .map(|i| PaneSession {
@@ -18,8 +20,12 @@ fn multipane_state_isolates_chat_inputs() {
         grid_rows: 2,
         backend_filter: Some("test-model".into()),
         help_open: false,
-    };
+    }
+}
 
+#[test]
+fn multipane_state_isolates_chat_inputs() {
+    let mut mp = three_panes();
     mp.panes[1].chat_input = "hello pane 1".into();
     mp.panes[1].chat_input_cursor = 5;
 
@@ -30,8 +36,10 @@ fn multipane_state_isolates_chat_inputs() {
 }
 
 #[test]
-fn pane_session_default_has_no_dir_search() {
+fn pane_session_default_values_match_lab_template() {
     let pane = PaneSession::default();
+
+    // Roster + selection: empty/clean, no preselected agent.
     assert!(pane.dir_search.is_none());
     assert!(pane.mission_id.is_none());
     assert!(pane.chat_prompt_history.is_empty());
@@ -40,14 +48,18 @@ fn pane_session_default_has_no_dir_search() {
     assert_eq!(pane.roster_scroll, 0);
     assert!(pane.roster_collapsed_agent_ids.is_empty());
     assert!(pane.roster_tree_selected.is_none());
-    // The "stick to bottom" sentinel — newly created panes follow new
-    // chat content automatically.
-    assert_eq!(pane.chat_thread_scroll, crate::state::CONSOLE_SCROLL_BOTTOM);
     assert!(pane.auto_expanded_backend.is_none());
     assert!(pane.auto_expanded_agent.is_none());
     assert!(!pane.has_run_mission);
     assert!(pane.selected_effort.is_empty());
     assert!(pane.selection.is_none());
+
+    // "Stick to bottom" sentinel: new panes follow new chat content.
+    assert_eq!(pane.chat_thread_scroll, crate::state::CONSOLE_SCROLL_BOTTOM);
+
+    // Swarm template defaults — `lab` template, `auto` mission.
+    assert_eq!(pane.swarm_template, "lab");
+    assert_eq!(pane.swarm_mission, "auto");
 }
 
 #[test]
@@ -73,6 +85,7 @@ fn dir_search_state_serde_skips_expanded_and_last_visible() {
     };
     s.expanded.insert(PathBuf::from("/tmp/a"));
     s.expanded.insert(PathBuf::from("/tmp/b"));
+
     let json = serde_json::to_string(&s).expect("serialize");
     assert!(!json.contains("expanded"), "expanded must be skipped");
     assert!(
@@ -80,23 +93,12 @@ fn dir_search_state_serde_skips_expanded_and_last_visible() {
         "last_visible must be skipped"
     );
     assert!(json.contains("view_offset"), "view_offset must persist");
+
     let round: DirSearchState = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(round.view_offset, 7);
     assert_eq!(round.last_visible, 0, "last_visible defaults on load");
     assert!(round.expanded.is_empty(), "expanded defaults on load");
     assert_eq!(round.query, "foo");
-}
-
-#[test]
-fn pane_session_default_template_is_lab() {
-    let pane = PaneSession::default();
-    assert_eq!(pane.swarm_template, "lab");
-}
-
-#[test]
-fn pane_session_default_mission_is_auto() {
-    let pane = PaneSession::default();
-    assert_eq!(pane.swarm_mission, "auto");
 }
 
 #[test]

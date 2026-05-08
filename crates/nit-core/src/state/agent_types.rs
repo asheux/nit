@@ -1,5 +1,8 @@
 use super::*;
 
+/// Top-level dock tab in the Agent OPS surface. `Patch` is legacy/hidden —
+/// `next()` / `prev()` skip past it so the visible tab strip matches the
+/// renderer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentOpsTab {
     Roster,
@@ -34,28 +37,31 @@ pub enum GlobalArchiveSourceKind {
     AdHoc,
 }
 
+/// One row in the global archive browser. `search_hay` and `search_tokens`
+/// are pre-computed at index build time so per-keystroke fuzzy and BM25
+/// scoring stays O(rows) without re-tokenising the full content.
 #[derive(Clone, Debug)]
 pub struct GlobalArchiveEntry {
-    /// "PROMPT" | "REPLY" | "PATCH" | "EVIDENCE"
+    /// `"PROMPT"` | `"REPLY"` | `"PATCH"` | `"EVIDENCE"`.
     pub kind: &'static str,
     pub owner: String,
     /// Truncated display preview (~120 chars).
     pub preview: String,
-    /// Mission title or "ad-hoc: {agent_id}".
+    /// Mission title or `"ad-hoc: {agent_id}"`.
     pub source: String,
-    /// The mission_id or agent_id.
+    /// `mission_id` or `agent_id`, matching `source_kind`.
     pub source_id: String,
     pub source_kind: GlobalArchiveSourceKind,
-    /// Relative label ("saved 2h ago").
+    /// Relative label such as `"saved 2h ago"`.
     pub time_label: String,
     pub archive_micros: Option<u128>,
-    /// Path to the run.json containing this artifact.
+    /// Path to the `run.json` containing this artifact.
     pub run_path: String,
-    /// Index of this artifact within the run's messages/patches/evidence arrays.
+    /// Position inside the run's `messages` / `patches` / `evidence` array.
     pub artifact_index: usize,
-    /// Pre-lowercased haystack for fuzzy matching: kind + owner + source + full_text.
+    /// Lowercased haystack for fuzzy matching (kind + owner + source + full_text).
     pub search_hay: String,
-    /// Lowercased word tokens extracted from the full content (for BM25 scoring).
+    /// Lowercased word tokens for BM25 scoring.
     pub search_tokens: Vec<String>,
 }
 
@@ -275,9 +281,10 @@ pub struct AgentLane {
 }
 
 impl AgentLane {
-    /// Lane kinds may arrive untagged from older snapshots. The kind enum
-    /// is the source of truth, but when it is Unknown we fall back to the
-    /// case-insensitive lane string (which the runner sets from the CLI).
+    /// `kind` is the source of truth, but older snapshots arrive with
+    /// `kind == Unknown` and only the lane string filled in (the runner
+    /// sets it from the CLI), so fall back to a case-insensitive match
+    /// on `lane` to recognise pre-tagged rosters.
     fn lane_matches(&self, kind: AgentLaneKind, name: &str) -> bool {
         self.kind == kind
             || (self.kind == AgentLaneKind::Unknown && self.lane.eq_ignore_ascii_case(name))
@@ -291,11 +298,14 @@ impl AgentLane {
         self.lane_matches(AgentLaneKind::Claude, "claude")
     }
 
+    /// True for lanes whose backend can accept priority hints from the
+    /// `parallel`/`bulk` swarm planner. Excludes lanes whose role
+    /// equals their lane name (i.e. unspecialised default lanes).
     pub fn supports_swarm_priority(&self) -> bool {
-        let backend_supports_priority = self.lane_matches(AgentLaneKind::Codex, "codex")
+        let backend_ok = self.lane_matches(AgentLaneKind::Codex, "codex")
             || self.lane_matches(AgentLaneKind::Claude, "claude")
             || self.lane_matches(AgentLaneKind::Gemini, "gemini");
-        backend_supports_priority && !self.role.eq_ignore_ascii_case(&self.lane)
+        backend_ok && !self.role.eq_ignore_ascii_case(&self.lane)
     }
 }
 
@@ -333,11 +343,11 @@ pub struct AgentMessage {
     pub agent_id: Option<String>,
     pub mission_id: Option<String>,
     pub text: String,
-    /// Index of the user prompt message that this reply is responding to.
-    /// `None` for user prompts themselves, or for replies where the prompt is unknown.
+    /// Index of the user prompt this reply is responding to. `None` for
+    /// user prompts themselves and for replies where the prompt is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_msg_idx: Option<usize>,
-    /// Optional kind tag for special message types (e.g. "synth" for synthesis reports).
+    /// Optional kind tag, e.g. `"synth"` for synthesis reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
 }
@@ -397,13 +407,18 @@ pub struct AgentConsoleRowsCacheKey {
     pub event_epoch: u64,
 }
 
+/// Cached rendered rows for the agent console. Keyed by viewport width and
+/// message-list epoch so a no-op render can reuse `rows` instead of replaying
+/// the wrapping/highlighting pipeline. `breather_slots` records where inline
+/// "agent thinking…" breathers must be spliced in for prompts whose replies
+/// are still pending.
 #[derive(Clone, Debug, Default)]
 pub struct AgentConsoleRowsCache {
     pub key: Option<AgentConsoleRowsCacheKey>,
     pub rows: Vec<AgentConsoleRow>,
     pub last_message_was_user: bool,
-    /// `(row_index, prompt_msg_idx)` — positions inside `rows` where an inline
-    /// breather should be spliced in when agents are still pending for that prompt.
+    /// Positions `(row_index, prompt_msg_idx)` where a breather row should
+    /// be inserted before render.
     pub breather_slots: Vec<(usize, usize)>,
 }
 
@@ -438,28 +453,30 @@ pub struct GenomeEvalBatch {
     pub mission_id: Option<String>,
 }
 
+/// Codex turn queued behind an in-flight Codex turn for the same agent.
+/// `prompt_msg_idx` is the index of the user message that triggered it,
+/// preserved so the eventual reply can be linked back in the chat log.
 #[derive(Clone, Debug)]
 pub struct QueuedCodexTurn {
     pub agent_id: String,
     pub mission_id: Option<String>,
     pub prompt: String,
-    /// Index of the user prompt message that triggered this queued turn.
     pub prompt_msg_idx: Option<usize>,
 }
 
+/// Claude analogue of [`QueuedCodexTurn`] — see that struct for semantics.
 #[derive(Clone, Debug)]
 pub struct QueuedClaudeTurn {
     pub agent_id: String,
     pub mission_id: Option<String>,
     pub prompt: String,
-    /// Index of the user prompt message that triggered this queued turn.
     pub prompt_msg_idx: Option<usize>,
 }
 
 /// Operator chat-state stashed while an intake turn is in flight. The
 /// bus-event handler resumes the deferred dispatch using this snapshot
 /// once the intake decision lands (or on parse-fail / timeout / abort).
-/// Runtime-only: never serialized — `started_at` is an `Instant`.
+/// Runtime-only — `started_at` is an `Instant`, so this is never persisted.
 #[derive(Clone, Debug)]
 pub struct PendingIntake {
     pub mission_id: Option<String>,

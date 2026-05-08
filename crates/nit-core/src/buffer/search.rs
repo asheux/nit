@@ -6,79 +6,55 @@ impl Buffer {
     /// Returns `true` if the character was found and the cursor moved.
     pub fn find_char_in_line(&mut self, ch: char, forward: bool, till: bool) -> bool {
         self.end_edit_group();
-        let line = self
-            .cursor
-            .line
-            .min(self.rope.len_lines().saturating_sub(1));
+        let line = self.clamped_cursor_line();
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let cur_col = self.cursor.col.min(line_len);
-        if forward {
-            let start = cur_col.saturating_add(1);
-            let mut col = start;
-            while col < line_len {
-                if self.rope.char(line_start + col) == ch {
-                    let target = if till { col.saturating_sub(1) } else { col };
-                    if till && target < cur_col {
-                        return false;
-                    }
-                    self.cursor.col = target;
-                    return true;
-                }
-                col += 1;
-            }
+
+        let landing = if forward {
+            let probe = cur_col.saturating_add(1);
+            (probe..line_len).find(|&col| self.rope.char(line_start + col) == ch)
+        } else if cur_col == 0 {
+            None
         } else {
-            if cur_col == 0 {
-                return false;
-            }
-            let mut col = cur_col - 1;
-            loop {
-                if self.rope.char(line_start + col) == ch {
-                    let target = if till { col + 1 } else { col };
-                    if till && target > cur_col {
-                        return false;
-                    }
-                    self.cursor.col = target;
-                    return true;
-                }
-                if col == 0 {
-                    break;
-                }
-                col -= 1;
-            }
+            (0..cur_col)
+                .rev()
+                .find(|&col| self.rope.char(line_start + col) == ch)
+        };
+        let Some(landing) = landing else {
+            return false;
+        };
+
+        let target = match (forward, till) {
+            (true, true) => landing.saturating_sub(1),
+            (false, true) => landing + 1,
+            _ => landing,
+        };
+        // till must not snap onto-or-past the cursor (vim disallows zero/backward t-jumps).
+        if till && ((forward && target < cur_col) || (!forward && target > cur_col)) {
+            return false;
         }
-        false
+        self.cursor.col = target;
+        true
     }
 
     /// Identifier-style word under the cursor (alnum + `_`); scans forward on
     /// the current line if the cursor is not on a word char.
     pub fn word_at_cursor(&self) -> Option<String> {
-        let len = self.rope.len_chars();
-        if len == 0 {
+        if self.rope.len_chars() == 0 {
             return None;
         }
-        let line = self
-            .cursor
-            .line
-            .min(self.rope.len_lines().saturating_sub(1));
+        let line = self.clamped_cursor_line();
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
-        let mut col = self.cursor.col.min(line_len);
+        let initial = self.cursor.col.min(line_len);
+        let pivot = (initial..line_len).find(|&i| is_word_char(self.rope.char(line_start + i)))?;
 
-        if col >= line_len || !is_word_char(self.rope.char(line_start + col)) {
-            while col < line_len && !is_word_char(self.rope.char(line_start + col)) {
-                col += 1;
-            }
-            if col >= line_len {
-                return None;
-            }
-        }
-
-        let mut start = col;
+        let mut start = pivot;
         while start > 0 && is_word_char(self.rope.char(line_start + start - 1)) {
             start -= 1;
         }
-        let mut end = col;
+        let mut end = pivot;
         while end < line_len && is_word_char(self.rope.char(line_start + end)) {
             end += 1;
         }
@@ -100,38 +76,39 @@ impl Buffer {
         term: &str,
         whole_word: bool,
     ) -> Vec<(usize, usize)> {
-        let mut out = Vec::new();
+        let mut hits = Vec::new();
         if term.is_empty() || line >= self.rope.len_lines() {
-            return out;
+            return hits;
         }
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let term_chars: Vec<char> = term.chars().collect();
-        let tlen = term_chars.len();
-        if tlen == 0 || tlen > line_len {
-            return out;
+        let term_len = term_chars.len();
+        if term_len == 0 || term_len > line_len {
+            return hits;
         }
-        // Materialize the line slice once so the inner match avoids per-position
-        // rope reads (which traverse the tree on each call).
+        // Materialize once: per-position rope reads traverse the tree on each call.
         let line_chars: Vec<char> = self
             .rope
             .slice(line_start..line_start + line_len)
             .chars()
             .collect();
-        let mut i = 0;
-        while i + tlen <= line_len {
-            if line_chars[i..i + tlen] != term_chars[..] {
-                i += 1;
-                continue;
-            }
-            if whole_word && !word_boundaries_ok(&line_chars, i, tlen, line_len) {
-                i += 1;
-                continue;
-            }
-            out.push((i, i + tlen));
-            i += tlen;
+        let mut at = 0;
+        while at + term_len <= line_len {
+            let end = at + term_len;
+            let chars_match = line_chars[at..end] == term_chars[..];
+            let boundary_ok = !whole_word
+                || ((at == 0 || !is_word_char(line_chars[at - 1]))
+                    && (end >= line_len || !is_word_char(line_chars[end])));
+            let stride = if chars_match && boundary_ok {
+                hits.push((at, end));
+                term_len
+            } else {
+                1
+            };
+            at += stride;
         }
-        out
+        hits
     }
 
     /// Move cursor to next match of `term` after the cursor; wrap to top on miss.
@@ -158,92 +135,60 @@ impl Buffer {
         let cursor_line = self.cursor.line;
         let cursor_col = self.cursor.col;
 
-        // Pass 1: same line as cursor, after/before the cursor column.
-        if let Some(s) = cursor_line_match(self, cursor_line, cursor_col, term, whole_word, forward)
-        {
-            return self.move_to_match(cursor_line, s);
-        }
-
-        // Pass 2: lines past the cursor in the chosen direction.
-        let beyond: Box<dyn Iterator<Item = usize>> = if forward {
-            Box::new((cursor_line + 1)..total_lines)
+        // Pass 1: same line as cursor. Forward picks the first match strictly
+        // past the cursor; backward steps off the enclosing match (if any) so
+        // the cursor doesn't snap onto its current match's start.
+        let same_line = self.search_line_matches(cursor_line, term, whole_word);
+        let pass_one = if forward {
+            same_line
+                .iter()
+                .find(|(start, _)| *start > cursor_col)
+                .map(|(start, _)| *start)
         } else {
-            Box::new((0..cursor_line).rev())
+            let enclosing = same_line
+                .iter()
+                .find(|(start, end)| *start <= cursor_col && *end > cursor_col)
+                .map(|(start, _)| *start);
+            let boundary = enclosing.unwrap_or(cursor_col);
+            same_line
+                .iter()
+                .rev()
+                .find(|(start, _)| *start < boundary)
+                .map(|(start, _)| *start)
         };
-        for l in beyond {
-            if let Some(s) = first_or_last_match(self, l, term, whole_word, forward) {
-                return self.move_to_match(l, s);
-            }
+        if let Some(col) = pass_one {
+            self.cursor.line = cursor_line;
+            self.cursor.col = col;
+            self.clamp_col();
+            return true;
         }
 
-        // Pass 3: wrap. Forward wraps from top through cursor_line; backward
-        // wraps from bottom back through cursor_line.
-        let wrap: Box<dyn Iterator<Item = usize>> = if forward {
-            Box::new(0..=cursor_line)
+        // Passes 2 + 3: walk past the cursor in `forward` direction, then wrap
+        // around to the cursor's own line so prior occurrences are reachable.
+        let mut probe: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new(((cursor_line + 1)..total_lines).chain(0..=cursor_line))
         } else {
-            Box::new((cursor_line..total_lines).rev())
+            Box::new(
+                (0..cursor_line)
+                    .rev()
+                    .chain((cursor_line..total_lines).rev()),
+            )
         };
-        for l in wrap {
-            if let Some(s) = first_or_last_match(self, l, term, whole_word, forward) {
-                return self.move_to_match(l, s);
-            }
-        }
-        false
-    }
-
-    fn move_to_match(&mut self, line: usize, col: usize) -> bool {
+        let hit = probe.find_map(|l| {
+            let line_hits = self.search_line_matches(l, term, whole_word);
+            let pick = if forward {
+                line_hits.first()
+            } else {
+                line_hits.last()
+            };
+            pick.map(|(start, _)| (l, *start))
+        });
+        let Some((line, col)) = hit else {
+            return false;
+        };
         self.cursor.line = line;
         self.cursor.col = col;
         self.clamp_col();
         true
-    }
-}
-
-fn word_boundaries_ok(line_chars: &[char], i: usize, tlen: usize, line_len: usize) -> bool {
-    let before_ok = i == 0 || !is_word_char(line_chars[i - 1]);
-    let after_ok = i + tlen >= line_len || !is_word_char(line_chars[i + tlen]);
-    before_ok && after_ok
-}
-
-fn cursor_line_match(
-    buffer: &Buffer,
-    line: usize,
-    cursor_col: usize,
-    term: &str,
-    whole_word: bool,
-    forward: bool,
-) -> Option<usize> {
-    let matches = buffer.search_line_matches(line, term, whole_word);
-    if forward {
-        matches
-            .iter()
-            .find(|(s, _)| *s > cursor_col)
-            .map(|(s, _)| *s)
-    } else {
-        let enclosing_start = matches
-            .iter()
-            .find(|(s, e)| *s <= cursor_col && *e > cursor_col)
-            .map(|(s, _)| *s);
-        let boundary = enclosing_start.unwrap_or(cursor_col);
-        matches
-            .iter()
-            .rev()
-            .find(|(s, _)| *s < boundary)
-            .map(|(s, _)| *s)
-    }
-}
-
-fn first_or_last_match(
-    buffer: &Buffer,
-    line: usize,
-    term: &str,
-    whole_word: bool,
-    forward: bool,
-) -> Option<usize> {
-    let matches = buffer.search_line_matches(line, term, whole_word);
-    if forward {
-        matches.first().map(|(s, _)| *s)
-    } else {
-        matches.last().map(|(s, _)| *s)
     }
 }

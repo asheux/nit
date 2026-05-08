@@ -187,6 +187,12 @@ impl Buffer {
         let text = self.rope.line(line).to_string();
         text.trim_end_matches('\n').trim().is_empty()
     }
+
+    pub(super) fn clamped_cursor_line(&self) -> usize {
+        self.cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1))
+    }
 }
 
 #[cfg(test)]

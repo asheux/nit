@@ -1,20 +1,10 @@
-//! Centralized tests for `MissionMemoryIndex` — tokenization,
-//! TF/IDF scoring, and on-disk index persistence.
+//! Tests for `MissionMemoryIndex` — tokenization, TF/IDF scoring, and
+//! on-disk index persistence.
 
 use super::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn temp_workspace(label: &str) -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut dir = std::env::temp_dir();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use crate::test_helpers::temp_dir;
 
 fn write_fixture_mission(
     root: &Path,
@@ -26,6 +16,7 @@ fn write_fixture_mission(
 ) {
     let mdir = root.join(".nit").join("swarm").join(mission_id);
     std::fs::create_dir_all(&mdir).unwrap();
+
     let run = serde_json::json!({
         "id": mission_id,
         "title": title,
@@ -35,6 +26,7 @@ fn write_fixture_mission(
         "tasks": [],
     });
     std::fs::write(mdir.join("run.json"), serde_json::to_string(&run).unwrap()).unwrap();
+
     let summaries_arr: Vec<_> = summaries
         .iter()
         .enumerate()
@@ -49,6 +41,7 @@ fn write_fixture_mission(
         serde_json::to_string(&summary).unwrap(),
     )
     .unwrap();
+
     let tdir = mdir.join("tasks").join("t-001");
     std::fs::create_dir_all(&tdir).unwrap();
     let files_arr: Vec<_> = file_paths
@@ -91,7 +84,7 @@ fn path_tokens_splits_paths() {
 
 #[test]
 fn build_index_from_corpus_fixture() {
-    let root = temp_workspace("mm-build");
+    let root = temp_dir("mm-build");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -108,7 +101,9 @@ fn build_index_from_corpus_fixture() {
         &["docs/orchestration.md"],
         &["Reviewed all orchestration documentation"],
     );
+
     let idx = build_index(&root);
+
     assert_eq!(idx.missions.len(), 2);
     let titles: Vec<&str> = idx.missions.iter().map(|m| m.title.as_str()).collect();
     assert!(titles.contains(&"refactor nit-gol module"));
@@ -120,12 +115,11 @@ fn build_index_from_corpus_fixture() {
 
 #[test]
 fn build_index_skips_empty_mission_dirs() {
-    let root = temp_workspace("mm-skip");
+    let root = temp_dir("mm-skip");
     // Empty mission directory (no summary.json, no run.json, no tasks).
     std::fs::create_dir_all(root.join(".nit").join("swarm").join("mis-099")).unwrap();
     // Non-mission directory (doesn't start with mis-).
     std::fs::create_dir_all(root.join(".nit").join("swarm").join("foo-abc")).unwrap();
-    // One valid fixture mission for comparison.
     write_fixture_mission(
         &root,
         "mis-001",
@@ -134,14 +128,16 @@ fn build_index_skips_empty_mission_dirs() {
         &["src/lib.rs"],
         &["did something"],
     );
+
     let idx = build_index(&root);
+
     assert_eq!(idx.missions.len(), 1);
     assert_eq!(idx.missions[0].mission_id, "mis-001");
 }
 
 #[test]
 fn retrieve_returns_expected_ordering() {
-    let root = temp_workspace("mm-order");
+    let root = temp_dir("mm-order");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -166,13 +162,14 @@ fn retrieve_returns_expected_ordering() {
         &["ui/button.tsx"],
         &["Button restyle"],
     );
+
     let idx = build_index(&root);
     let hits = retrieve_similar(&idx, "refactor catalog module with dedupe", &[], &[], 5);
+
     assert!(hits.len() >= 2);
     assert_eq!(hits[0].mission.mission_id, "mis-001");
-    // Second hit should be the weakly-matching docs mission.
+    // Second hit is the weakly-matching docs mission.
     assert_eq!(hits[1].mission.mission_id, "mis-002");
-    // Unrelated mission should not appear.
     assert!(hits.iter().all(|h| h.mission.mission_id != "mis-003"));
 }
 
@@ -185,7 +182,7 @@ fn retrieve_empty_corpus_returns_empty() {
 
 #[test]
 fn retrieve_path_bonus_boosts_file_overlap() {
-    let root = temp_workspace("mm-path");
+    let root = temp_dir("mm-path");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -202,16 +199,18 @@ fn retrieve_path_bonus_boosts_file_overlap() {
         &["ui/button.tsx"],
         &["refactor"],
     );
+
     let idx = build_index(&root);
     let scope_tokens = path_tokens(&["crates/nit-gol/src/catalog.rs".to_string()]);
     let hits = retrieve_similar(&idx, "refactor", &scope_tokens, &[], 5);
+
     assert!(!hits.is_empty());
     assert_eq!(hits[0].mission.mission_id, "mis-001");
 }
 
 #[test]
 fn retrieve_excludes_listed_missions() {
-    let root = temp_workspace("mm-exclude");
+    let root = temp_dir("mm-exclude");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -228,35 +227,41 @@ fn retrieve_excludes_listed_missions() {
         &["crates/nit-gol/src/catalog.rs"],
         &["Another catalog refactor"],
     );
+
     let idx = build_index(&root);
     let hits = retrieve_similar(&idx, "refactor catalog", &[], &["mis-001"], 5);
+
     assert!(hits.iter().all(|h| h.mission.mission_id != "mis-001"));
     assert!(hits.iter().any(|h| h.mission.mission_id == "mis-002"));
 }
 
 #[test]
 fn upsert_mission_dedupes_by_id() {
-    let root = temp_workspace("mm-upsert");
+    let root = temp_dir("mm-upsert");
     write_fixture_mission(&root, "mis-001", "first", "parallel", &["a/b.rs"], &["one"]);
+
     let idx1 = upsert_mission(&root, "mis-001").unwrap();
     let idx2 = upsert_mission(&root, "mis-001").unwrap();
+
     assert_eq!(idx1.missions.len(), 1);
     assert_eq!(idx2.missions.len(), 1);
 }
 
 #[test]
 fn load_tolerates_corrupt_json() {
-    let root = temp_workspace("mm-corrupt");
+    let root = temp_dir("mm-corrupt");
     let memdir = root.join(".nit").join("memory");
     std::fs::create_dir_all(&memdir).unwrap();
     std::fs::write(memdir.join("index.json"), b"{{{ not valid json").unwrap();
+
     let idx = load_index(&root);
+
     assert!(idx.missions.is_empty());
 }
 
 #[test]
 fn save_and_load_round_trip() {
-    let root = temp_workspace("mm-roundtrip");
+    let root = temp_dir("mm-roundtrip");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -265,37 +270,35 @@ fn save_and_load_round_trip() {
         &["src/lib.rs"],
         &["did work"],
     );
+
     let built = build_index(&root);
     save_index(&root, &built).unwrap();
     let loaded = load_index(&root);
+
     assert_eq!(built, loaded);
 }
 
 #[test]
 fn idf_weight_decreases_with_frequency() {
-    // Rare terms (df=1 of 4) get much more weight than ubiquitous ones
-    // (df=4 of 4).
+    // Rare terms (df=1 of 4) outweigh ubiquitous ones (df=4 of 4).
     let rare = idf_weight(1, 4);
     let common = idf_weight(4, 4);
     assert!(
         rare > common,
-        "rare term should weigh more than common; rare={rare}, common={common}"
+        "rare term should weigh more than common; rare={rare}, common={common}",
     );
-    // Corner case: zero corpus returns the neutral weight of 1.0.
+    // Empty corpus and never-seen terms both fall back to the neutral weight
+    // of 1.0; retrieval never assigns negative weight.
     assert_eq!(idf_weight(0, 0), 1.0);
-    // A term not present in the corpus (df=0) also returns the neutral
-    // weight — retrieval never assigns negative weight.
     assert_eq!(idf_weight(0, 10), 1.0);
 }
 
 #[test]
 fn idf_weight_prefers_rare_matches() {
-    // Build a corpus where "refactor" appears in every mission (df=3/3)
-    // while "lifehash" only appears in mis-001 (df=1/3). With plain
-    // Jaccard, a mission matching "refactor" against a common term would
-    // score similarly to one matching a rare term; with IDF weighting, the
-    // rare-term match is ranked strictly higher.
-    let root = temp_workspace("mm-idf-rare-wins");
+    // Corpus where "refactor" appears in every mission (df=3/3) and
+    // "lifehash" only appears in mis-001 (df=1/3). Plain Jaccard would tie
+    // common/rare matches; IDF weighting must rank the rare match higher.
+    let root = temp_dir("mm-idf-rare-wins");
     write_fixture_mission(
         &root,
         "mis-001",
@@ -320,12 +323,12 @@ fn idf_weight_prefers_rare_matches() {
         &["crates/nit-core/src/genome_report.rs"],
         &["tuned report"],
     );
+
     let idx = build_index(&root);
-    // Query carries the rare term: IDF should pull mis-001 to the top.
     let hits = retrieve_similar(&idx, "lifehash refactor", &[], &[], 5);
+
     assert!(!hits.is_empty());
     assert_eq!(hits[0].mission.mission_id, "mis-001");
-    // And mis-001's margin over the others should be meaningful (>0.01).
     if hits.len() >= 2 {
         assert!(
             hits[0].score > hits[1].score + 0.01,

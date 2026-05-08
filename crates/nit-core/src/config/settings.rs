@@ -4,6 +4,9 @@ use super::gol::GolConfig;
 use super::highlight::HighlightConfig;
 use super::swarm::SwarmConfig;
 
+/// Top-level merged config — global TOML layered with the per-workspace
+/// override. `#[serde(default)]` on the optional sub-blocks lets older config
+/// files that predate a section keep deserializing.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub highlight: HighlightConfig,
@@ -13,10 +16,9 @@ pub struct Settings {
     pub genome: AgentGenomeConfig,
     #[serde(default)]
     pub swarm: SwarmConfig,
-    /// LLM-based "intake" agent runs before each chat dispatch to classify
-    /// the prompt and decide whether to append a FILE CHECKLIST. Defaults
-    /// on; set `NIT_INTAKE_DISABLED=1` for the runtime kill switch, or
-    /// `intake_enabled = false` in config to opt out persistently.
+    /// LLM intake classifier — runs before each chat dispatch to decide
+    /// whether a FILE CHECKLIST is appended. Override at runtime with
+    /// `NIT_INTAKE_DISABLED=1`, or persist `intake_enabled = false`.
     #[serde(default = "super::default_true")]
     pub intake_enabled: bool,
 }

@@ -1,10 +1,10 @@
-/// Vim-style in-editor search state.
-///
-/// Tracks the active search term, whether it was started by `*` / `#` (which
-/// implies whole-word matching), and the last direction (so `n` repeats in
-/// the same direction and `N` reverses it). The state is shared across all
-/// editor buffers, matching vim's behaviour where the last search pattern is
-/// global to the editor.
+//! Single-line text input widgets shared between the editor's `/` search
+//! prompt and the `:` command line.
+
+/// Vim-style in-editor search state. Tracks the active term, whether `*`/`#`
+/// started it (which forces whole-word matching), and the last direction so
+/// `n` repeats it and `N` reverses. Shared across editor buffers, matching
+/// vim's globally-scoped last-search pattern.
 #[derive(Clone, Debug, Default)]
 pub struct EditorSearch {
     pub term: Option<String>,
@@ -23,7 +23,6 @@ impl EditorSearch {
     }
 }
 
-/// `/` search prompt input state. Mirrors `CommandLine` but for buffer search.
 #[derive(Clone, Debug, Default)]
 pub struct SearchPrompt {
     pub input: String,
@@ -36,25 +35,15 @@ impl SearchPrompt {
     }
 
     pub fn insert(&mut self, ch: char) {
-        let idx = char_idx_to_byte(&self.input, self.cursor);
-        self.input.insert(idx, ch);
-        self.cursor = self.cursor.saturating_add(1);
+        insert_char_at_cursor(&mut self.input, &mut self.cursor, ch);
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let end = char_idx_to_byte(&self.input, self.cursor);
-        let start = char_idx_to_byte(&self.input, self.cursor.saturating_sub(1));
-        if start < end {
-            self.input.replace_range(start..end, "");
-            self.cursor = self.cursor.saturating_sub(1);
-        }
+        backspace_at_cursor(&mut self.input, &mut self.cursor);
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CommandLine {
     pub input: String,
     pub cursor: usize,
@@ -62,28 +51,15 @@ pub struct CommandLine {
 
 impl CommandLine {
     pub fn new() -> Self {
-        Self {
-            input: String::new(),
-            cursor: 0,
-        }
+        Self::default()
     }
 
     pub fn insert(&mut self, ch: char) {
-        let idx = char_idx_to_byte(&self.input, self.cursor);
-        self.input.insert(idx, ch);
-        self.cursor = self.cursor.saturating_add(1);
+        insert_char_at_cursor(&mut self.input, &mut self.cursor, ch);
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let end = char_idx_to_byte(&self.input, self.cursor);
-        let start = char_idx_to_byte(&self.input, self.cursor.saturating_sub(1));
-        if start < end {
-            self.input.replace_range(start..end, "");
-            self.cursor = self.cursor.saturating_sub(1);
-        }
+        backspace_at_cursor(&mut self.input, &mut self.cursor);
     }
 
     pub fn move_left(&mut self) {
@@ -100,9 +76,21 @@ impl CommandLine {
     }
 }
 
-impl Default for CommandLine {
-    fn default() -> Self {
-        Self::new()
+fn insert_char_at_cursor(input: &mut String, cursor: &mut usize, ch: char) {
+    let byte_idx = char_idx_to_byte(input, *cursor);
+    input.insert(byte_idx, ch);
+    *cursor = cursor.saturating_add(1);
+}
+
+fn backspace_at_cursor(input: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let end = char_idx_to_byte(input, *cursor);
+    let start = char_idx_to_byte(input, cursor.saturating_sub(1));
+    if start < end {
+        input.replace_range(start..end, "");
+        *cursor = cursor.saturating_sub(1);
     }
 }
 
@@ -110,10 +98,8 @@ fn char_idx_to_byte(s: &str, idx: usize) -> usize {
     if idx == 0 {
         return 0;
     }
-    for (count, (byte_idx, _)) in s.char_indices().enumerate() {
-        if count == idx {
-            return byte_idx;
-        }
-    }
-    s.len()
+    s.char_indices()
+        .nth(idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
 }

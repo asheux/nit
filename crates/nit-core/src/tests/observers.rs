@@ -1,3 +1,6 @@
+//! Observer pipeline: framework registration, repeat-failure threshold,
+//! sparse-plan unresolved-dep detection, and persistence after `TurnCompleted`.
+
 use super::*;
 use crate::agent_bus::AgentBusEvent;
 use crate::test_helpers::{add_codex_agent, inject_warning, test_state};
@@ -42,7 +45,7 @@ fn repeat_failure_self_silencing() {
     inject_warning(&mut state, "a1", 0, 0);
     inject_warning(&mut state, "a1", 0, 1);
 
-    // Pre-existing HelpNeeded from the observer should silence re-emission.
+    // A pre-existing observer-emitted HelpNeeded must silence re-emission.
     state.substrate.emit_signal(Signal {
         id: "0-observer:repeat_failure-0".into(),
         kind: SignalKind::HelpNeeded,
@@ -78,8 +81,7 @@ fn turn_completed_integration_runs_observers_and_persists() {
     let mut state = AppState::new(dir.clone(), editor, notes);
     add_codex_agent(&mut state, "gpt-test");
 
-    // Pre-seed two Warnings posted_by="a1" at gen=0 so the repeat_failure
-    // observer fires on the next TurnCompleted tick.
+    // Pre-seed two warnings so the observer fires on the next TurnCompleted tick.
     inject_warning(&mut state, "a1", 0, 0);
     inject_warning(&mut state, "a1", 0, 1);
 
@@ -102,7 +104,7 @@ fn turn_completed_integration_runs_observers_and_persists() {
         .collect();
     assert!(
         !observer_signals.is_empty(),
-        "expected at least one observer:repeat_failure signal, got {:?}",
+        "expected observer:repeat_failure signal, got {:?}",
         reloaded.signals.values().collect::<Vec<_>>()
     );
     let obs = observer_signals[0];
@@ -151,6 +153,7 @@ fn sparse_plan_emits_help_needed_at_threshold() {
     inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 0);
     inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 1);
     inject_unresolved_dep_warning(&mut state, "alice", "review", 0, 2);
+
     let emissions = (sparse_plan::OBSERVER.run)(&state);
     assert_eq!(emissions.len(), 1);
     let em = &emissions[0];
