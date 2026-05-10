@@ -6081,6 +6081,102 @@ fn lab_template_unaffected_by_verifier_repair() {
 }
 
 #[test]
+fn cycle_self_loop_detected() {
+    // Strict-mode validation reaches the detector with self-loops intact;
+    // the repair-mode `dedupe_and_drop_unknown_deps` strips dep==self_id
+    // earlier, so this test guards the analyze-only path.
+    let tasks = vec![dag_task("t1", "propose", vec!["t1"], false)];
+    let cycle = find_swarm_cycle_path(&tasks).expect("self-loop must be reported");
+    assert_eq!(cycle, vec!["t1".to_string(), "t1".to_string()]);
+}
+
+#[test]
+fn cycle_two_node_loop_detected() {
+    let tasks = vec![
+        dag_task("t1", "propose", vec!["t2"], false),
+        dag_task("t2", "propose", vec!["t1"], false),
+    ];
+    let cycle = find_swarm_cycle_path(&tasks).expect("2-cycle must be reported");
+    assert_eq!(
+        cycle.len(),
+        3,
+        "closed path repeats start vertex; got {cycle:?}"
+    );
+    assert_eq!(cycle.first(), cycle.last());
+    let mut members: Vec<&str> = cycle.iter().take(2).map(String::as_str).collect();
+    members.sort();
+    assert_eq!(members, vec!["t1", "t2"]);
+}
+
+#[test]
+fn cycle_in_disjoint_subgraph_isolated() {
+    // Acyclic {chain_root -> chain_leaf} plus cyclic {loop_first <-> loop_second}.
+    // The outer for-loop must resume from a fresh White root after the acyclic
+    // component finishes, and the reported cycle must NOT mention the chain ids.
+    let tasks = vec![
+        dag_task("chain_root", "propose", vec![], false),
+        dag_task("chain_leaf", "research", vec!["chain_root"], false),
+        dag_task("loop_first", "judge", vec!["loop_second"], false),
+        dag_task("loop_second", "review", vec!["loop_first"], false),
+    ];
+    let cycle = find_swarm_cycle_path(&tasks).expect("disjoint cycle must be reported");
+    let chain_leak = cycle
+        .iter()
+        .any(|node| node == "chain_root" || node == "chain_leaf");
+    assert!(!chain_leak, "acyclic ids leaked into cycle: {cycle:?}");
+    assert!(cycle.iter().any(|node| node == "loop_first"));
+    assert!(cycle.iter().any(|node| node == "loop_second"));
+}
+
+#[test]
+fn parallel_diamond_no_cycle() {
+    // Branching then joining is not a cycle — guards against detectors that
+    // flag any vertex with multiple predecessors (naive in-degree counting).
+    let tasks = vec![
+        dag_task("planner_root", "propose", vec![], false),
+        dag_task("left_branch", "research", vec!["planner_root"], false),
+        dag_task("right_branch", "judge", vec!["planner_root"], false),
+        dag_task(
+            "join_sink",
+            "integrate",
+            vec!["left_branch", "right_branch"],
+            true,
+        ),
+    ];
+    assert!(find_swarm_cycle_path(&tasks).is_none());
+}
+
+#[test]
+fn unknown_dep_does_not_create_phantom_cycle() {
+    // analyze_swarm_dag must keep cycle: None when the only oddity is an
+    // unknown dep — unknown_deps is the dedicated channel for that report.
+    let tasks = vec![dag_task("t1", "propose", vec!["ghost"], false)];
+    let issues = analyze_swarm_dag(&tasks);
+    assert!(issues.cycle.is_none());
+    assert_eq!(
+        issues.unknown_deps,
+        vec![("t1".to_string(), "ghost".to_string())]
+    );
+}
+
+#[test]
+fn repair_breaks_two_cycle_via_back_edge() {
+    // Integration test for find_swarm_cycle_back_edge through repair_swarm_dag:
+    // the back-edge primitive must still produce the (task_idx, dep_id) payload
+    // that break_dependency_cycles consumes after the walker consolidation.
+    let mut tasks = vec![
+        dag_task("t1", "propose", vec!["t2"], false),
+        dag_task("t2", "propose", vec!["t1"], false),
+    ];
+    let warnings = repair_swarm_dag(&mut tasks);
+    assert!(
+        warnings.iter().any(|w| w.contains("break cycle")),
+        "expected a cycle-break warning, got {warnings:?}"
+    );
+    assert!(analyze_swarm_dag(&tasks).is_empty());
+}
+
+#[test]
 fn ceiling_saturates_at_max_when_fds_abundant() {
     assert_eq!(compute_effective_max_swarm_size(65_536), MAX_SWARM_SIZE);
     assert_eq!(compute_effective_max_swarm_size(usize::MAX), MAX_SWARM_SIZE);

@@ -77,110 +77,123 @@ pub(super) fn analyze_swarm_dag(tasks: &[SwarmTask]) -> SwarmDagIssues {
     issues
 }
 
+// Three-color DFS shared by every cycle inspection in this module.
+// White = unvisited, Gray = on the current DFS path, Black = fully explored.
+// A back edge to a Gray vertex is a cycle; the slice of the path stack from
+// that vertex to the top of the stack is the cycle in DFS-discovery order.
+#[derive(Clone, Copy, PartialEq)]
+enum Color {
+    White,
+    Gray,
+    Black,
+}
+
+#[derive(Clone, Copy)]
+enum CycleWant {
+    Path,
+    BackEdge,
+}
+
+enum CycleReport {
+    Path(Vec<String>),
+    BackEdge(usize, String),
+}
+
 pub(super) fn find_swarm_cycle_path(tasks: &[SwarmTask]) -> Option<Vec<String>> {
+    match walk_for_cycle(tasks, CycleWant::Path)? {
+        CycleReport::Path(path) => Some(path),
+        CycleReport::BackEdge(..) => None,
+    }
+}
+
+fn find_swarm_cycle_back_edge(tasks: &[SwarmTask]) -> Option<(usize, String)> {
+    match walk_for_cycle(tasks, CycleWant::BackEdge)? {
+        CycleReport::BackEdge(idx, dep) => Some((idx, dep)),
+        CycleReport::Path(..) => None,
+    }
+}
+
+fn walk_for_cycle(tasks: &[SwarmTask], want: CycleWant) -> Option<CycleReport> {
     if tasks.is_empty() {
         return None;
     }
     let idx_by_id = build_idx_by_id(tasks);
-    let mut state = vec![0u8; tasks.len()];
+    let mut color = vec![Color::White; tasks.len()];
     let mut stack: Vec<usize> = Vec::new();
-    let mut on_stack = vec![false; tasks.len()];
 
-    fn dfs(
-        v: usize,
-        tasks: &[SwarmTask],
-        idx_by_id: &HashMap<&str, usize>,
-        state: &mut [u8],
-        stack: &mut Vec<usize>,
-        on_stack: &mut [bool],
-    ) -> Option<Vec<String>> {
-        state[v] = 1;
-        stack.push(v);
-        on_stack[v] = true;
-
-        for dep in tasks[v].deps.iter() {
-            let Some(&u) = idx_by_id.get(dep.as_str()) else {
-                continue;
-            };
-            if state[u] == 0 {
-                if let Some(cycle) = dfs(u, tasks, idx_by_id, state, stack, on_stack) {
-                    return Some(cycle);
-                }
-            } else if on_stack[u] {
-                let Some(pos) = stack.iter().position(|&idx| idx == u) else {
-                    continue;
-                };
-                let mut cycle = stack[pos..]
-                    .iter()
-                    .map(|&idx| tasks[idx].id.clone())
-                    .collect::<Vec<_>>();
-                cycle.push(tasks[u].id.clone());
-                return Some(cycle);
-            }
-        }
-
-        stack.pop();
-        on_stack[v] = false;
-        state[v] = 2;
-        None
-    }
-
-    for v in 0..tasks.len() {
-        if state[v] != 0 {
+    for root in 0..tasks.len() {
+        if color[root] != Color::White {
             continue;
         }
-        if let Some(cycle) = dfs(v, tasks, &idx_by_id, &mut state, &mut stack, &mut on_stack) {
-            return Some(cycle);
+        if let Some(report) = dfs_walk(root, tasks, &idx_by_id, &mut color, &mut stack, want) {
+            return Some(report);
         }
     }
     None
 }
 
-fn find_swarm_cycle_back_edge(tasks: &[SwarmTask]) -> Option<(usize, String)> {
-    if tasks.is_empty() {
-        return None;
-    }
-    let idx_by_id = build_idx_by_id(tasks);
-    let mut state = vec![0u8; tasks.len()];
-    let mut on_stack = vec![false; tasks.len()];
+fn dfs_walk(
+    vertex: usize,
+    tasks: &[SwarmTask],
+    idx_by_id: &HashMap<&str, usize>,
+    color: &mut [Color],
+    stack: &mut Vec<usize>,
+    want: CycleWant,
+) -> Option<CycleReport> {
+    color[vertex] = Color::Gray;
+    stack.push(vertex);
 
-    fn dfs(
-        v: usize,
-        tasks: &[SwarmTask],
-        idx_by_id: &HashMap<&str, usize>,
-        state: &mut [u8],
-        on_stack: &mut [bool],
-    ) -> Option<(usize, String)> {
-        state[v] = 1;
-        on_stack[v] = true;
-
-        for dep in tasks[v].deps.iter() {
-            let Some(&u) = idx_by_id.get(dep.as_str()) else {
-                continue;
-            };
-            if state[u] == 0 {
-                if let Some(edge) = dfs(u, tasks, idx_by_id, state, on_stack) {
-                    return Some(edge);
-                }
-            } else if on_stack[u] {
-                return Some((v, dep.clone()));
-            }
-        }
-
-        on_stack[v] = false;
-        state[v] = 2;
-        None
-    }
-
-    for v in 0..tasks.len() {
-        if state[v] != 0 {
+    for dep in tasks[vertex].deps.iter() {
+        let Some(&neighbor) = idx_by_id.get(dep.as_str()) else {
             continue;
-        }
-        if let Some(edge) = dfs(v, tasks, &idx_by_id, &mut state, &mut on_stack) {
-            return Some(edge);
+        };
+        match color[neighbor] {
+            Color::White => {
+                if let Some(report) = dfs_walk(neighbor, tasks, idx_by_id, color, stack, want) {
+                    return Some(report);
+                }
+            }
+            Color::Gray => {
+                return Some(build_cycle_report(
+                    want, vertex, neighbor, dep, tasks, stack,
+                ));
+            }
+            Color::Black => {}
         }
     }
+
+    stack.pop();
+    color[vertex] = Color::Black;
     None
+}
+
+fn build_cycle_report(
+    want: CycleWant,
+    from_vertex: usize,
+    gray_vertex: usize,
+    dep_id: &str,
+    tasks: &[SwarmTask],
+    path_stack: &[usize],
+) -> CycleReport {
+    match want {
+        CycleWant::BackEdge => CycleReport::BackEdge(from_vertex, dep_id.to_string()),
+        CycleWant::Path => {
+            // Closed-path invariant: the start vertex is repeated at the end so
+            // callers can render `a -> b -> a`. Gray ↔ on-stack is enforced by
+            // the walker, so the position lookup always succeeds; the fallback
+            // is purely defensive against future regressions of that invariant.
+            let start = path_stack
+                .iter()
+                .position(|&i| i == gray_vertex)
+                .unwrap_or(0);
+            let mut path: Vec<String> = path_stack[start..]
+                .iter()
+                .map(|&i| tasks[i].id.clone())
+                .collect();
+            path.push(tasks[gray_vertex].id.clone());
+            CycleReport::Path(path)
+        }
+    }
 }
 
 fn build_idx_by_id(tasks: &[SwarmTask]) -> HashMap<&str, usize> {
