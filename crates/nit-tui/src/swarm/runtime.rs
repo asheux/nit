@@ -54,7 +54,7 @@ impl SwarmRuntime {
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
-                        prompt: build_verify_prompt(run),
+                        prompt: build_verify_prompt(state, run),
                         task_role: None,
                     });
                 }
@@ -75,7 +75,7 @@ impl SwarmRuntime {
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
-                        prompt: build_verify_prompt(run),
+                        prompt: build_verify_prompt(state, run),
                         task_role: None,
                     });
                 }
@@ -239,7 +239,11 @@ impl SwarmRuntime {
         true
     }
 
-    pub fn swarm_dashboard(&self, mission_id: &str) -> Option<SwarmDashboardView> {
+    pub fn swarm_dashboard(
+        &self,
+        state: &AppState,
+        mission_id: &str,
+    ) -> Option<SwarmDashboardView> {
         let run = self.run_for_mission(mission_id)?;
         let tasks = run
             .tasks
@@ -272,7 +276,7 @@ impl SwarmRuntime {
             pending: counts.pending,
             tasks,
             gate_bundle: run_gates_label(run),
-            gates: dashboard_gate_rows(run),
+            gates: dashboard_gate_rows(state, run),
         })
     }
 

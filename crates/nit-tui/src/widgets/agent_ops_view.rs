@@ -1239,7 +1239,7 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                     let (mission_id, _suffix) = swarm_clone_label_parts(agent.id.as_str())?;
                     let dashboard = swarm_dash_by_mission_id
                         .entry(mission_id.to_string())
-                        .or_insert_with(|| swarm.swarm_dashboard(mission_id));
+                        .or_insert_with(|| swarm.swarm_dashboard(state, mission_id));
                     let dashboard = dashboard.as_ref()?;
                     swarm_assigned_roles_for_agent(dashboard, agent.id.as_str())
                 })();
@@ -1669,7 +1669,7 @@ fn dag_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Ve
         out.push(" Swarm runtime unavailable.".into());
         return out;
     };
-    let Some(dashboard) = swarm.swarm_dashboard(mission_id) else {
+    let Some(dashboard) = swarm.swarm_dashboard(state, mission_id) else {
         out.push(" No DAG data for this mission yet.".into());
         return out;
     };

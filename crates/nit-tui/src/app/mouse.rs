@@ -1261,14 +1261,14 @@ pub(super) fn handle_mouse_down_with_swarm(
         if mouse.row == layout.gate.y {
             let col_in_rect = mouse.column.saturating_sub(layout.gate.x);
             // Compute the title prefix length to find button positions.
-            let prefix_len = if let Some(report) = state
+            let prefix_len = if let Some(cached_report) = state
                 .editor_buffer()
                 .path()
                 .and_then(|p| state.genome_reports.get(p))
             {
                 format!(
                     " CODE STRUCTURAL QUALITY [{}x{}] ",
-                    report.grid_size, report.grid_size
+                    cached_report.grid_size, cached_report.grid_size
                 )
                 .len() as u16
             } else {

@@ -2,15 +2,16 @@ use nit_core::{AppState, MissionPhase};
 
 use super::mission::{update_mission_phase, update_mission_status};
 use super::{
-    derive_cargo_packages, extract_json_code_block, extract_json_code_blocks,
-    push_system_message_to_mission, run_effective_gates, tasks_terminal_count, GateBundle,
-    GateReport, GateReportGate, SwarmDispatch, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState,
-    NO_REVERT_CLAUSE,
+    derive_cargo_packages, effective_scope_files, extract_json_code_block,
+    extract_json_code_blocks, push_system_message_to_mission, run_effective_gates,
+    tasks_terminal_count, GateBundle, GateReport, GateReportGate, SwarmDispatch, SwarmRun,
+    SwarmStage, SwarmTask, SwarmTaskState, NO_REVERT_CLAUSE,
 };
 
-pub(super) fn build_verify_prompt(run: &SwarmRun) -> String {
-    let effective = run_effective_gates(run);
-    let cargo_packages = derive_cargo_packages(&run.scope_files, run.spawn_cwd.as_path());
+pub(super) fn build_verify_prompt(state: &AppState, run: &SwarmRun) -> String {
+    let effective = run_effective_gates(state, run);
+    let scope = effective_scope_files(state, run);
+    let cargo_packages = derive_cargo_packages(&scope, run.spawn_cwd.as_path());
     let bundle_label = run
         .gate_custom
         .as_ref()
@@ -20,7 +21,7 @@ pub(super) fn build_verify_prompt(run: &SwarmRun) -> String {
 
     let mut out = String::new();
     push_verify_preamble(&mut out, run, &bundle_label);
-    push_verify_scope(&mut out, run, &cargo_packages);
+    push_verify_scope(&mut out, run, &cargo_packages, &scope);
     for gate in effective.iter() {
         out.push_str(&format!("- {}: `{}`\n", gate.name, gate.command));
     }
@@ -51,21 +52,28 @@ fn push_verify_preamble(out: &mut String, run: &SwarmRun, bundle_label: &str) {
 // Node / Python / Go (or no bundle) lean on the rendered gate commands for
 // their scope signal, so emitting "did not map to cargo packages" against
 // them would just leak Rust framing into unrelated workspaces.
-fn push_verify_scope(out: &mut String, run: &SwarmRun, cargo_packages: &[String]) {
+fn push_verify_scope(
+    out: &mut String,
+    run: &SwarmRun,
+    cargo_packages: &[String],
+    effective_scope: &[String],
+) {
     if !matches!(run.gate_bundle, Some(GateBundle::Rust)) {
         return;
     }
     if !cargo_packages.is_empty() {
         out.push_str(&format!(
-            "Scope: cargo packages {} (derived from scope_files — only these packages were touched; do not widen to --workspace)\n",
+            "Scope: cargo packages {} (derived from files actually modified by this mission — only these packages were touched; do not widen to --workspace)\n",
             cargo_packages.join(", ")
         ));
-    } else if !run.scope_files.is_empty() {
+    } else if !effective_scope.is_empty() {
         out.push_str(
-            "Scope: scope_files did not map to cargo packages — running full-workspace commands.\n",
+            "Scope: modified files did not map to cargo packages — running full-workspace commands.\n",
         );
     } else {
-        out.push_str("Scope: (no scope_files declared — running full-workspace commands)\n");
+        out.push_str(
+            "Scope: (no modified files yet and no scope_files declared — running full-workspace commands)\n",
+        );
     }
 }
 

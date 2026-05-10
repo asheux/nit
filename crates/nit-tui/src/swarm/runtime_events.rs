@@ -707,7 +707,7 @@ fn handle_completed_verifying(
     outcome.dispatches.push(SwarmDispatch {
         agent_id: run.planner_agent_id.clone(),
         mission_id: run.mission_id.clone(),
-        prompt: build_synthesis_prompt(run),
+        prompt: build_synthesis_prompt(state, run),
         task_role: None,
     });
     RunFate::Active
@@ -896,7 +896,7 @@ fn handle_failed_verifying(
     outcome.dispatches.push(SwarmDispatch {
         agent_id: run.planner_agent_id.clone(),
         mission_id: run.mission_id.clone(),
-        prompt: build_synthesis_prompt(run),
+        prompt: build_synthesis_prompt(state, run),
         task_role: None,
     });
     RunFate::Active
@@ -1000,7 +1000,7 @@ fn transition_after_tasks(
             outcome.dispatches.push(SwarmDispatch {
                 agent_id: verifier,
                 mission_id: run.mission_id.clone(),
-                prompt: build_verify_prompt(run),
+                prompt: build_verify_prompt(state, run),
                 task_role: None,
             });
         }
@@ -1011,7 +1011,7 @@ fn transition_after_tasks(
         outcome.dispatches.push(SwarmDispatch {
             agent_id: run.planner_agent_id.clone(),
             mission_id: run.mission_id.clone(),
-            prompt: build_synthesis_prompt(run),
+            prompt: build_synthesis_prompt(state, run),
             task_role: None,
         });
     }

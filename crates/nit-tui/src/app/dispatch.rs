@@ -1069,14 +1069,8 @@ pub(crate) fn build_propose_genome_landscape(
     }
 
     // Workspace-wide tier counts for context.
-    let mut counts = [0usize; 5];
-    for report in state.genome_reports.values() {
-        let idx = report.tier as usize;
-        if idx < counts.len() {
-            counts[idx] = counts[idx].saturating_add(1);
-        }
-    }
-    let total: usize = counts.iter().sum();
+    let counts = nit_core::tier_histogram(&state.genome_reports);
+    let total: u32 = counts.iter().sum();
     if total > 0 {
         out.push_str(&format!(
             "\nWorkspace tier distribution ({total} files): I={} II={} III={} IV={} V={}\n",

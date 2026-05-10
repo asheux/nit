@@ -13,7 +13,13 @@ unicode-width = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# `blake3` powers `nit_utils::hashing::stable_hash_bytes`, used by the
+# genome report cache for shard selection and the collision-suffix on
+# encoded report filenames (see `genome_storage::schema`).
 blake3 = { workspace = true }
+# `nit-utils` provides `fs::write_atomic` (tmp+fsync+rename) — required by
+# the genome report cache to avoid the half-write hole that a crash
+# mid-persist would otherwise leave behind.
 nit-utils = { path = "../nit-utils" }
 nit-gol = { path = "../nit-gol" }
 nit-games = { path = "../nit-games" }

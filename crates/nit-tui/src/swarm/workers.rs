@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
-use nit_core::AppState;
+use nit_core::{AppState, GenomeReportMap};
 
 use super::{GenomeReviewPending, SwarmRun};
 
@@ -9,7 +9,7 @@ struct GenomeReviewInput {
     files_to_eval: Vec<std::path::PathBuf>,
     /// Baselines captured at turn start, keyed by file path. Used as the
     /// "before" side of the genome diff so the reviewer sees real change.
-    baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+    baselines: GenomeReportMap,
 }
 
 pub(super) fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
@@ -30,7 +30,7 @@ pub(super) fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
 fn spawn_genome_review_prompt(
     state: &AppState,
     mission_id: &str,
-    mission_baselines: &HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+    mission_baselines: &GenomeReportMap,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 
@@ -40,7 +40,7 @@ fn spawn_genome_review_prompt(
     // `state.genome_baselines` is per-turn and gets cleared/re-captured
     // between agents, so by the time the review runs it equals current
     // state and `compute_genome_diff` returns +0.00 for every encoder.
-    let baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport> = files_to_eval
+    let baselines: GenomeReportMap = files_to_eval
         .iter()
         .filter_map(|p| mission_baselines.get(p).map(|r| (p.clone(), r.clone())))
         .collect();
@@ -142,7 +142,7 @@ struct GenomeGateInput {
 pub(super) fn spawn_genome_gate_eval(
     state: &AppState,
     mission_id: &str,
-    mission_baselines: &HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+    mission_baselines: &GenomeReportMap,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 

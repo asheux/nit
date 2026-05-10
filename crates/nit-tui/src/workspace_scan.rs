@@ -169,6 +169,9 @@ impl WorkspaceScanRuntime {
             nit_core::agent_bus::delete_genome_report(&workspace_root, &path);
         }
 
+        // Sweep legacy layout + enforce size caps once per launch.
+        nit_core::agent_bus::gc_genome_cache(&workspace_root);
+
         // Merge into state. The map is cleared at startup so no conflicts
         // exist, but `insert` honors the newest report on follow-up sessions
         // if both memory and disk ever disagree (cache is authoritative).

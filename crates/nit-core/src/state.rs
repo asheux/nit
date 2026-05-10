@@ -257,9 +257,11 @@ pub struct AppState {
     pub protocol_picker: ProtocolPickerState,
     #[serde(skip)]
     pub rule_persistence: crate::rule_config::RulePersistence,
-    /// Cached genome reports per file path; loaded from `.nit/genome/`.
+    /// In-memory hot tier of the genome report cache, hydrated at launch from
+    /// the file-per-report disk tier under `.nit/genome/v1/<shard>/`. Read by
+    /// the agent ops UI, dispatch landscape builder, and retry comparator.
     #[serde(skip)]
-    pub genome_reports: HashMap<PathBuf, crate::genome_report::GenomeReport>,
+    pub genome_reports: crate::genome_report_cache::GenomeReportMap,
     /// Last genome diff text — surfaced to agents in retry prompts.
     #[serde(skip)]
     pub last_genome_diff: Option<String>,
@@ -272,7 +274,7 @@ pub struct AppState {
     /// otherwise an agent that swings between equally bad shapes would
     /// never trip the regression check.
     #[serde(skip)]
-    pub genome_baselines: HashMap<PathBuf, crate::genome_report::GenomeReport>,
+    pub genome_baselines: crate::genome_report_cache::GenomeReportMap,
     /// Files modified during each agent's current turn.
     #[serde(skip)]
     pub genome_turn_modified: HashMap<String, HashSet<PathBuf>>,

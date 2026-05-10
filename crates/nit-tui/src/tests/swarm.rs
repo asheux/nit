@@ -2500,7 +2500,10 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
     let mut runtime = SwarmRuntime::default();
     runtime.runs.insert("mis-001".into(), run);
 
-    let dashboard = runtime.swarm_dashboard("mis-001").expect("dashboard");
+    let state = new_state();
+    let dashboard = runtime
+        .swarm_dashboard(&state, "mis-001")
+        .expect("dashboard");
     assert_eq!(dashboard.pending, 1);
     assert_eq!(dashboard.queued, 1);
     assert_eq!(dashboard.skipped, 1);
@@ -2667,15 +2670,32 @@ fn derive_cargo_packages_collects_unique_crate_names() {
 }
 
 #[test]
-fn derive_cargo_packages_returns_empty_when_any_file_is_outside_crates_dir() {
-    // A file outside `crates/` (e.g., workspace-root file) means the scope is
-    // mixed and we cannot safely run scoped cargo commands — fall back to the
-    // full workspace.
+fn derive_cargo_packages_drops_non_crates_paths_keeps_clean_ones() {
+    // A file outside `crates/` (e.g., workspace-root `Cargo.lock`, `CLAUDE.md`)
+    // shouldn't poison the scope of every other path. Drop what we can't map
+    // and keep the cargo packages we can. The earlier rule that bailed the
+    // entire list on any non-crates path collapsed legitimate scopes into
+    // `--workspace` whenever a swarm touched even one root file.
     let files = vec![
         "crates/nit-tui/src/swarm.rs".to_string(),
         "Cargo.toml".to_string(),
+        "crates/nit-core/src/state.rs".to_string(),
+        "CLAUDE.md".to_string(),
     ];
-    let cwd = cargo_workspace_fixture("mixed_scope");
+    let cwd = cargo_workspace_fixture("mixed_scope_filter");
+    let pkgs = derive_cargo_packages(&files, cwd.as_path());
+    assert_eq!(pkgs, vec!["nit-tui".to_string(), "nit-core".to_string()]);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn derive_cargo_packages_returns_empty_when_no_path_maps_to_a_crate() {
+    // The "fall back to --workspace" behavior is preserved for the case it
+    // was actually designed for: a scope that contains *only* root-level
+    // files. Without any cargo-mappable paths, scoping is meaningless and
+    // gate renderers should keep emitting workspace-wide commands.
+    let files = vec!["Cargo.toml".to_string(), "deny.toml".to_string()];
+    let cwd = cargo_workspace_fixture("only_root_files");
     assert!(derive_cargo_packages(&files, cwd.as_path()).is_empty());
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -2685,6 +2705,128 @@ fn derive_cargo_packages_empty_scope_returns_empty() {
     let cwd = cargo_workspace_fixture("empty_scope");
     assert!(derive_cargo_packages(&[], cwd.as_path()).is_empty());
     let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn effective_scope_files_prefers_mission_modified_over_spawn_time_prediction() {
+    // Spawn-time `scope_files` is a prediction (prompt path tokens or stale
+    // git-diff). Once the swarm starts writing, the runtime tracks real
+    // writes in `state.genome_mission_modified[mission_id]`. Once that's
+    // populated, gate scoping must read from it — otherwise the prediction
+    // freezes scoping at swarm-start and the user keeps seeing `--workspace`
+    // even after agents have clearly touched specific crates.
+    let mut state = new_state();
+    let cwd = state.workspace_root.clone();
+    let mut run = test_run("mis-eff-1", cwd.clone());
+    run.scope_files = vec!["crates/nit-stale/src/lib.rs".to_string()];
+
+    let mut modified = std::collections::HashSet::new();
+    modified.insert(cwd.join("crates/nit-tui/src/swarm/mod.rs"));
+    modified.insert(cwd.join("crates/nit-core/src/state.rs"));
+    state
+        .genome_mission_modified
+        .insert("mis-eff-1".to_string(), modified);
+
+    let scope = effective_scope_files(&state, &run);
+    // Sorted, de-duped, relative-to-spawn-cwd. Stale `nit-stale` from
+    // `scope_files` must NOT appear once the modified set has content.
+    assert_eq!(
+        scope,
+        vec![
+            "crates/nit-core/src/state.rs".to_string(),
+            "crates/nit-tui/src/swarm/mod.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn effective_scope_files_falls_back_to_spawn_scope_when_no_writes_yet() {
+    // Before any task finalises, `genome_mission_modified` is empty. The
+    // dashboard preview / planner-time gate render still need a scope, so
+    // fall back to the spawn-time `run.scope_files` prediction. This is the
+    // pre-write window — about as good as we can do without knowing what
+    // will be written.
+    let state = new_state();
+    let cwd = state.workspace_root.clone();
+    let mut run = test_run("mis-eff-2", cwd);
+    run.scope_files = vec!["crates/nit-tui/src/lib.rs".to_string()];
+
+    let scope = effective_scope_files(&state, &run);
+    assert_eq!(scope, vec!["crates/nit-tui/src/lib.rs".to_string()]);
+}
+
+#[test]
+fn effective_scope_files_returns_empty_when_no_writes_and_no_prediction() {
+    // Worst case: clean tree at swarm spawn, prompt with no path tokens, no
+    // writes yet. Returning empty signals "no scope available" so callers
+    // emit unscoped commands rather than fabricate a scope.
+    let state = new_state();
+    let cwd = state.workspace_root.clone();
+    let run = test_run("mis-eff-3", cwd);
+
+    let scope = effective_scope_files(&state, &run);
+    assert!(scope.is_empty());
+}
+
+#[test]
+fn effective_scope_files_is_language_agnostic() {
+    // The helper itself doesn't know about Rust — it just produces relative
+    // paths from absolute writes. Rust-specific scoping happens downstream
+    // in `derive_cargo_packages`. A swarm in a Node project that writes
+    // `packages/foo/index.ts` should surface that path verbatim from
+    // `effective_scope_files`; downstream renderers stay generic because
+    // non-Rust gate bundles have `scoped_command = None` and just emit
+    // their full commands.
+    let mut state = new_state();
+    let cwd = state.workspace_root.clone();
+    let run = test_run("mis-eff-4", cwd.clone());
+
+    let mut modified = std::collections::HashSet::new();
+    modified.insert(cwd.join("packages/foo/index.ts"));
+    modified.insert(cwd.join("scripts/build.sh"));
+    state
+        .genome_mission_modified
+        .insert("mis-eff-4".to_string(), modified);
+
+    let scope = effective_scope_files(&state, &run);
+    assert_eq!(
+        scope,
+        vec![
+            "packages/foo/index.ts".to_string(),
+            "scripts/build.sh".to_string(),
+        ]
+    );
+}
+
+fn test_run(mission_id: &str, spawn_cwd: std::path::PathBuf) -> SwarmRun {
+    SwarmRun {
+        mission_id: mission_id.to_string(),
+        root_prompt: String::new(),
+        template: SwarmTemplate::Lab,
+        mission_kind: SwarmMissionKind::General,
+        spawn_cwd,
+        planner_agent_id: "planner".into(),
+        integrator_agent_id: None,
+        integrator_locked: false,
+        verifier_agent_id: None,
+        gate_bundle: None,
+        gate_custom: None,
+        gate_selection: "auto:none".into(),
+        agent_ids: Vec::new(),
+        stage: SwarmStage::Executing,
+        tasks: Vec::new(),
+        synthesis_prompt: None,
+        gate_output: None,
+        gate_report: None,
+        genome_gate_results: None,
+        genome_gate_pending: None,
+        genome_review_pending: None,
+        report_status: None,
+        report_output: None,
+        scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
+    }
 }
 
 #[test]

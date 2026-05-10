@@ -1247,21 +1247,24 @@ fn build_lines_filescores(state: &AppState, theme: &Theme, width: usize) -> Vec<
     }
 
     // 3. All persisted genome reports — these persist across turns.
-    for (path, report) in &state.genome_reports {
-        if is_gitignored(path) {
+    for (file_path, cached_report) in &state.genome_reports {
+        if is_gitignored(file_path) {
             continue;
         }
-        let name = relative_file_path(path, &state.workspace_root);
+        let name = relative_file_path(file_path, &state.workspace_root);
         if !seen.insert(name.clone()) {
             continue;
         }
         file_rows.push(FileScoreRow {
             name,
-            tier_ord: report.tier as u8,
-            tier: report.tier.numeral().to_string(),
-            quality: quality_with_reason(report),
-            consistency: cons_with_target(report.tier, report.cross_encoder_consistency),
-            delta: compute_delta(path, report.tier).to_string(),
+            tier_ord: cached_report.tier as u8,
+            tier: cached_report.tier.numeral().to_string(),
+            quality: quality_with_reason(cached_report),
+            consistency: cons_with_target(
+                cached_report.tier,
+                cached_report.cross_encoder_consistency,
+            ),
+            delta: compute_delta(file_path, cached_report.tier).to_string(),
             is_shadow: false,
         });
     }

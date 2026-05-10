@@ -52,11 +52,11 @@ pub(super) fn handle_turn_started(
         .unwrap_or(0)
         == 0;
     if fresh_turn {
-        for (path, report) in state.genome_reports.iter() {
+        for (file_path, cached_report) in state.genome_reports.iter() {
             state
                 .genome_baselines
-                .entry(path.clone())
-                .or_insert_with(|| report.clone());
+                .entry(file_path.clone())
+                .or_insert_with(|| cached_report.clone());
         }
     }
     state

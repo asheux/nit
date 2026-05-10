@@ -1,28 +1,66 @@
 use std::path::Path;
 
+use nit_core::AppState;
+
 use super::{
     is_cargo_workspace, Gate, GateBundle, SwarmGateDashboardRow, SwarmRun, SwarmStage, SwarmTask,
     SwarmTaskState,
 };
 
+/// Source of truth for "which files does this mission care about, *now*".
+///
+/// `run.scope_files` is a spawn-time prediction (from prompt path tokens or a
+/// `git diff` against the merge-base). It's frozen the moment the swarm
+/// starts, so it can't see anything the agents actually modify. For prompts
+/// like "fix the regression" against a clean tree it's empty, which then
+/// collapses gate commands to `cargo test --workspace`.
+///
+/// Once tasks start writing, `state.genome_mission_modified[mission_id]`
+/// holds the real per-mission write set (populated in
+/// `claude_runner` / `codex_runner` via the agent bus). Prefer that as soon
+/// as it has content; fall back to the prediction only when nothing has been
+/// written yet (e.g., during `Planning` or before any task finalises).
+pub(super) fn effective_scope_files(state: &AppState, run: &SwarmRun) -> Vec<String> {
+    let modified = state.genome_mission_modified.get(&run.mission_id);
+    let Some(modified) = modified.filter(|set| !set.is_empty()) else {
+        return run.scope_files.clone();
+    };
+    let spawn_cwd = run.spawn_cwd.as_path();
+    let mut rel: Vec<String> = modified
+        .iter()
+        .map(|abs| {
+            abs.strip_prefix(spawn_cwd)
+                .unwrap_or(abs.as_path())
+                .display()
+                .to_string()
+        })
+        .collect();
+    rel.sort();
+    rel.dedup();
+    rel
+}
+
 pub(super) fn derive_cargo_packages(scope_files: &[String], spawn_cwd: &Path) -> Vec<String> {
     if scope_files.is_empty() || !is_cargo_workspace(spawn_cwd) {
         return Vec::new();
     }
+    // Filter (don't bail) on non-`crates/` paths. The earlier "any miss → bail
+    // to --workspace" rule was too pessimistic: a swarm touching `crates/X/...`
+    // alongside a root-level file like `Cargo.lock` or `CLAUDE.md` would lose
+    // *all* scoping, even though the cargo packages it touched are perfectly
+    // identifiable. Drop paths we can't map and keep the ones we can; only
+    // bail when nothing maps.
     let mut packages: Vec<String> = Vec::new();
     for path in scope_files {
         let normalized = path.replace('\\', "/");
-        // File sits outside `crates/` → scope is mixed or unknown; bail out
-        // so callers fall back to full-workspace commands rather than a
-        // misleading partial scope.
         let Some(rest) = normalized.strip_prefix("crates/") else {
-            return Vec::new();
+            continue;
         };
         let Some(pkg) = rest.split('/').next() else {
-            return Vec::new();
+            continue;
         };
         if pkg.is_empty() {
-            return Vec::new();
+            continue;
         }
         let pkg = pkg.to_string();
         if !packages.contains(&pkg) {
@@ -76,8 +114,15 @@ pub(super) fn run_gates_label(run: &SwarmRun) -> Option<String> {
 // bundle's default gates. The result is rendered against the run's cargo
 // packages so each command is correctly scoped (or full-workspace when the
 // scope can't be derived cleanly).
-pub(super) fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
-    let cargo_packages = derive_cargo_packages(&run.scope_files, run.spawn_cwd.as_path());
+//
+// Cargo-specific scoping kicks in only on Rust workspaces (`is_cargo_workspace`
+// is the gate inside `derive_cargo_packages`). Node / Python / Go bundles
+// have `scoped_command = None` on their `Gate` entries, so `rendered_command`
+// returns the unscoped form regardless of what `effective_scope_files` finds —
+// language-agnostic by construction.
+pub(super) fn run_effective_gates(state: &AppState, run: &SwarmRun) -> Vec<Gate> {
+    let scope = effective_scope_files(state, run);
+    let cargo_packages = derive_cargo_packages(&scope, run.spawn_cwd.as_path());
     let base_gates = if let Some(custom) = run.gate_custom.as_ref() {
         custom.clone()
     } else if let Some(bundle) = run.gate_bundle.as_ref() {
@@ -95,8 +140,8 @@ pub(super) fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
         .collect()
 }
 
-pub(super) fn dashboard_gate_rows(run: &SwarmRun) -> Vec<SwarmGateDashboardRow> {
-    let mut rows: Vec<SwarmGateDashboardRow> = run_effective_gates(run)
+pub(super) fn dashboard_gate_rows(state: &AppState, run: &SwarmRun) -> Vec<SwarmGateDashboardRow> {
+    let mut rows: Vec<SwarmGateDashboardRow> = run_effective_gates(state, run)
         .into_iter()
         .map(|gate| SwarmGateDashboardRow {
             name: gate.name,

@@ -133,8 +133,9 @@ use constants::{
 };
 use dag::{analyze_swarm_dag, ensure_deps_resolve, find_swarm_cycle_path, repair_swarm_dag};
 use dashboard::{
-    blocked_on, dashboard_gate_rows, derive_cargo_packages, gate_bundle_label, run_effective_gates,
-    run_gates_label, stage_label, task_state_dashboard_label,
+    blocked_on, dashboard_gate_rows, derive_cargo_packages, effective_scope_files,
+    gate_bundle_label, run_effective_gates, run_gates_label, stage_label,
+    task_state_dashboard_label,
 };
 use fallback::fallback_tasks;
 use gate_retry::{build_verify_prompt, parse_gate_report, truncate_chars, try_dispatch_gate_retry};

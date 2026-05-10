@@ -3,7 +3,9 @@ use crate::state::{
     CONSOLE_SCROLL_BOTTOM,
 };
 
-pub use crate::genome_storage::{delete_genome_report, load_genome_reports, persist_genome_report};
+pub use crate::genome_storage::{
+    delete_genome_report, gc_genome_cache, load_genome_reports, persist_genome_report,
+};
 
 mod claims_signals;
 mod file_ops;

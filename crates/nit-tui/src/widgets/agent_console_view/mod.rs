@@ -3262,7 +3262,7 @@ pub(super) fn swarm_exec_label<'a>(
         if let (Some(swarm), Some(mid)) = (swarm, swarm_clone_mission_id(id)) {
             let dash = dash_by_mission
                 .entry(mid.to_string())
-                .or_insert_with(|| swarm.swarm_dashboard(mid))
+                .or_insert_with(|| swarm.swarm_dashboard(state, mid))
                 .clone();
             if let Some(dash) = dash {
                 for task in dash

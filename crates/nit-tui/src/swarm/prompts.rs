@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use nit_core::AppState;
+
 use super::{
     dashboard_gate_rows, enumerate_scope_files, is_cargo_workspace, normalize_role_label,
     run_gates_label, task_artifacts_summary_for_prompt, truncate_chars, SwarmMissionKind, SwarmRun,
@@ -1015,7 +1017,7 @@ fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
     }
 }
 
-pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
+pub(super) fn build_synthesis_prompt(state: &AppState, run: &SwarmRun) -> String {
     let has_reviewer = run_has_reviewer_role(run);
     let mut out = String::new();
     append_synthesis_constraints(&mut out, has_reviewer);
@@ -1025,7 +1027,7 @@ pub(super) fn build_synthesis_prompt(run: &SwarmRun) -> String {
     for task in run.tasks.iter() {
         append_synthesis_agent_output(&mut out, run, task);
     }
-    append_synthesis_gates(&mut out, run);
+    append_synthesis_gates(&mut out, state, run);
     if let Some(genome_results) = run.genome_gate_results.as_deref() {
         out.push_str("\n\nGenome quality review:\n");
         out.push_str(genome_results);
@@ -1130,13 +1132,13 @@ fn task_state_synthesis_label(state: SwarmTaskState) -> &'static str {
     }
 }
 
-fn append_synthesis_gates(out: &mut String, run: &SwarmRun) {
+fn append_synthesis_gates(out: &mut String, state: &AppState, run: &SwarmRun) {
     let Some(label) = run_gates_label(run) else {
         return;
     };
     out.push_str("\n\nVerification gates:\n");
     out.push_str(&format!("Bundle: {label}\n"));
-    for gate in dashboard_gate_rows(run).iter() {
+    for gate in dashboard_gate_rows(state, run).iter() {
         out.push_str(&format!(
             "- {}: {} ({})\n",
             gate.name, gate.status, gate.command

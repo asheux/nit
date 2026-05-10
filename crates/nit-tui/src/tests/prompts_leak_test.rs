@@ -273,7 +273,10 @@ fn no_nit_literals_in_dotfiles_workspace() {
     // build_verify_prompt for a non-Rust bundle (here: no bundle, simulating
     // a dotfiles repo where auto-detect returned None).
     let run = make_run(cwd.as_path(), None, vec!["crates/foo/bar.rs".into()]);
-    let verify = build_verify_prompt(&run);
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let state = AppState::new(cwd.clone(), editor, notes);
+    let verify = build_verify_prompt(&state, &run);
     assert!(
         !verify.contains("cargo packages"),
         "build_verify_prompt leaked 'cargo packages' for non-Rust bundle:\n{verify}"

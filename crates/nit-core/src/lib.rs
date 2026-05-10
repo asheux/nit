@@ -9,6 +9,7 @@ pub mod buffer;
 pub mod config;
 pub mod cursor;
 pub mod genome_report;
+pub mod genome_report_cache;
 pub mod genome_storage;
 pub mod gol_rules;
 pub mod io;
@@ -50,6 +51,7 @@ pub use genome_report::{
     EncoderDiff, EncoderScore, GenomeDiff, GenomeRecommendation, GenomeReport, GenomeTier,
     GrowthClass, ParsimonyInfo, RecommendationSeverity, GENOME_AGENT_INSTRUCTIONS,
 };
+pub use genome_report_cache::{count_at_or_above, tier_histogram, GenomeReportMap};
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use io::{load_to_string, save_buffer};
 pub use lab::{AppKind, LabId, LabSpec};
