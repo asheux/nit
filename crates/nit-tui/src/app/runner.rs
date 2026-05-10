@@ -234,6 +234,10 @@ pub(super) fn run_loop(
     let _mcp_backchannel_keepalive = mcp_backchannel;
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
+    // Idle-sleep guard: held while at least one agent turn is in flight so
+    // macOS doesn't hibernate mid-swarm and SIGSTOP the runner subprocesses.
+    // Released on Drop, so a panic / hard-exit can't leave caffeinate behind.
+    let mut idle_sleep_guard = crate::power::IdleSleepGuard::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let (mut seed_runtime, mut gol_petri, mut games_petri, mut games_config_preview) =
         spawn_app_runtimes(state);
@@ -693,6 +697,15 @@ pub(super) fn run_loop(
         if last_job.elapsed() >= JOB_TICK {
             state.tick_job(0.03);
             tick_agent_turn_liveness(state);
+            // Sync the idle-sleep guard with the current in-flight count.
+            // 120ms cadence is plenty fast — the worst case is "turn started
+            // 119ms ago and the system has already begun the idle-sleep
+            // countdown", which the assertion still cancels in time. Costs
+            // nothing when the count and setting haven't changed.
+            idle_sleep_guard.sync(
+                state.settings.power.prevent_idle_sleep_during_turns,
+                state.agents.active_turns.len(),
+            );
             last_job = Instant::now();
             needs_redraw = true;
         }

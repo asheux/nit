@@ -10,6 +10,7 @@ pub mod editor;
 pub mod genome;
 pub mod gol;
 pub mod highlight;
+pub mod power;
 pub mod settings;
 pub mod swarm;
 
@@ -20,6 +21,7 @@ pub use gol::{
     GolSnapshotsConfig, GolUserRule, SnapshotPrunePolicy,
 };
 pub use highlight::{HighlightConfig, HighlightEngine};
+pub use power::PowerConfig;
 pub use settings::Settings;
 pub use swarm::SwarmConfig;
 

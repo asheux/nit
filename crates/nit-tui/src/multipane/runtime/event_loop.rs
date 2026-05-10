@@ -44,6 +44,10 @@ pub fn run_loop(
     let mut swarm = SwarmRuntime::default();
     let mut shadow = ShadowRuntime::default();
     let mut vitals = VitalsState::default();
+    // Idle-sleep guard mirrors the single-pane runner so multipane sessions
+    // also survive the macOS inactivity timer mid-swarm. See
+    // `crate::power::IdleSleepGuard`.
+    let mut idle_sleep_guard = crate::power::IdleSleepGuard::default();
     clear_chat_esc_state();
     let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
 
@@ -140,6 +144,15 @@ pub fn run_loop(
         for event in dir_search_runner.events.try_iter() {
             apply_dir_search_event(state, event);
         }
+
+        // Reconcile the idle-sleep guard with the current in-flight count.
+        // Cheap when nothing changed; covers the multipane case where
+        // several panes can have parallel turns but each pane's
+        // TurnStarted/Completed flows through the same `active_turns` map.
+        idle_sleep_guard.sync(
+            state.settings.power.prevent_idle_sleep_during_turns,
+            state.agents.active_turns.len(),
+        );
 
         // Poll background genome work the same way the single-pane
         // runner does (`app/runner.rs`). Without these, the per-pane

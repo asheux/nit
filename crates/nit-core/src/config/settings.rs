@@ -2,6 +2,7 @@ use super::editor::EditorConfig;
 use super::genome::AgentGenomeConfig;
 use super::gol::GolConfig;
 use super::highlight::HighlightConfig;
+use super::power::PowerConfig;
 use super::swarm::SwarmConfig;
 
 /// Top-level merged config — global TOML layered with the per-workspace
@@ -16,6 +17,8 @@ pub struct Settings {
     pub genome: AgentGenomeConfig,
     #[serde(default)]
     pub swarm: SwarmConfig,
+    #[serde(default)]
+    pub power: PowerConfig,
     /// LLM intake classifier — runs before each chat dispatch to decide
     /// whether a FILE CHECKLIST is appended. Override at runtime with
     /// `NIT_INTAKE_DISABLED=1`, or persist `intake_enabled = false`.
@@ -31,6 +34,7 @@ impl Default for Settings {
             gol: GolConfig::default(),
             genome: AgentGenomeConfig::default(),
             swarm: SwarmConfig::default(),
+            power: PowerConfig::default(),
             intake_enabled: super::default_true(),
         }
     }
