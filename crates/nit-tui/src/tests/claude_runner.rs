@@ -360,6 +360,85 @@ fn is_stream_result_event_matches_only_result_type() {
     assert!(!is_stream_result_event(&wrong_kind));
 }
 
+#[test]
+fn turn_supports_pool_only_when_all_vanilla_inputs() {
+    assert!(super::turn_supports_pool(&None, true, &None, None));
+    // Any non-default knob disqualifies the pool path.
+    assert!(!super::turn_supports_pool(
+        &Some("session-abc".into()),
+        true,
+        &None,
+        None
+    ));
+    assert!(!super::turn_supports_pool(&None, false, &None, None));
+    assert!(!super::turn_supports_pool(
+        &None,
+        true,
+        &Some("high".into()),
+        None
+    ));
+    assert!(!super::turn_supports_pool(&None, true, &None, Some(500)));
+}
+
+#[test]
+fn cold_spawn_args_unchanged_by_pool_addition() {
+    // Pin propose-judge requirement: `NIT_CLAUDE_POOL=0` keeps the cold-spawn
+    // argv list byte-identical. The pool-specific flag `--input-format
+    // stream-json` MUST NOT leak into the cold path.
+    let config = ClaudeRunnerConfig::default();
+    let args = build_claude_args(
+        "claude-opus-4-7",
+        Path::new("/tmp/project"),
+        true,
+        None,
+        Path::new("/tmp/out.txt"),
+        None,
+        false,
+        None,
+        &config,
+    );
+    assert!(!has_arg(&args, "--input-format"));
+    assert!(has_arg(&args, "stream-json"));
+    assert_eq!(
+        args.iter().filter(|a| a.as_str() == "stream-json").count(),
+        1,
+        "cold path only carries `--output-format stream-json`"
+    );
+}
+
+#[test]
+fn pool_worker_args_carry_stream_json_input_format() {
+    let config = ClaudeRunnerConfig::default();
+    let key = crate::claude_pool::WorkerKey::new(
+        "claude-opus-4-7",
+        std::path::PathBuf::from("/tmp/work"),
+        false,
+    );
+    let args = super::build_pool_worker_args(&key, &config);
+    assert!(has_arg(&args, "--input-format"));
+    assert_eq!(
+        args.iter().filter(|a| a.as_str() == "stream-json").count(),
+        2,
+        "pool worker carries both --input-format and --output-format stream-json"
+    );
+    assert!(has_arg(&args, "--no-session-persistence"));
+}
+
+#[test]
+fn pool_worker_args_honour_read_only_tool_allowlist() {
+    let config = ClaudeRunnerConfig::default();
+    let key = crate::claude_pool::WorkerKey::new(
+        "claude-opus-4-7",
+        std::path::PathBuf::from("/tmp/work"),
+        true,
+    );
+    let args = super::build_pool_worker_args(&key, &config);
+    assert!(args.contains(&"Read,Glob,Grep".to_string()));
+    assert!(!args
+        .iter()
+        .any(|a| a.contains("Write") || a.contains("Edit") || a.contains("Bash")));
+}
+
 // `claude_turn_idle_timeout` reads a process-wide env var, so this test
 // must serialize against any other test that touches the same var. The
 // LOCK mutex pairs with Drop-restore at the bottom.

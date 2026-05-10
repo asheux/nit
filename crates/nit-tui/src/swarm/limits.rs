@@ -51,6 +51,12 @@ pub(crate) fn is_light_planner(agent_id: &str) -> bool {
         .any(|tok| matches!(tok, "haiku" | "mini" | "nano" | "flash"))
 }
 
+// Pool sizing: a fraction of the effective swarm ceiling, so a tight
+// `ulimit -n` drops pool size in lock-step.
+const CLAUDE_POOL_DEFAULT_FLOOR: usize = 2;
+const CLAUDE_POOL_DEFAULT_CEILING: usize = 8;
+const CLAUDE_POOL_FRACTION_DIVISOR: usize = 4;
+
 // On unix this is `RLIMIT_NOFILE.rlim_cur`; on other platforms there's no
 // FD-based limit so we report a value high enough that the budget formula
 // saturates at `MAX_SWARM_SIZE`.
@@ -78,7 +84,9 @@ pub(crate) fn current_fd_soft_limit() -> usize {
 
 // Effective swarm-size ceiling clamped to whatever the host's FD budget can
 // actually support. Always at least 1, never above `MAX_SWARM_SIZE`. `pub`
-// because the `nit` binary calls this directly to scale multipane.
+// because the `nit` binary calls this directly to scale multipane. When the
+// Claude warm pool is enabled, `pool_size` slots also consume ~4 fds each;
+// see CLAUDE.md "Swarm size limits".
 pub fn effective_max_swarm_size() -> usize {
     compute_effective_max_swarm_size(current_fd_soft_limit())
 }
@@ -89,6 +97,15 @@ pub fn effective_max_swarm_size() -> usize {
 pub(crate) fn compute_effective_max_swarm_size(fd_limit: usize) -> usize {
     let budget = fd_limit.saturating_sub(NIT_BASELINE_FDS) / FDS_PER_AGENT;
     budget.clamp(1, MAX_SWARM_SIZE)
+}
+
+pub fn default_claude_pool_size() -> usize {
+    compute_default_claude_pool_size(effective_max_swarm_size())
+}
+
+pub(crate) fn compute_default_claude_pool_size(effective_max: usize) -> usize {
+    let quarter = effective_max / CLAUDE_POOL_FRACTION_DIVISOR;
+    quarter.clamp(CLAUDE_POOL_DEFAULT_FLOOR, CLAUDE_POOL_DEFAULT_CEILING)
 }
 
 // On a host with abundant fds this is the static

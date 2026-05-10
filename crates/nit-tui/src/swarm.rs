@@ -16,7 +16,7 @@ mod fallback;
 mod gate_retry;
 mod graph_exec;
 mod json;
-mod limits;
+pub(crate) mod limits;
 mod mission;
 mod plan_parser;
 mod prompts;
@@ -93,6 +93,7 @@ pub fn ensure_swarm_agents_for_followup(
 
 // `pub` so the `nit` binary can scale multipane concurrency without exposing
 // `limits` internals directly.
+pub use limits::default_claude_pool_size;
 pub use limits::effective_max_swarm_size;
 
 use artifacts::{

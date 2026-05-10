@@ -10,7 +10,13 @@ use std::time::{Duration, Instant};
 
 use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
 
+use crate::claude_pool::{
+    build_stream_json_envelope, pool_enabled_from_env, pool_size_from_env, ClaudePool, PoolWorker,
+    RecycleReason, SpawnedChild, WorkerKey, WorkerSpawn,
+};
 use crate::swarm::is_provider_quota_exhausted_in_result;
+
+const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct ClaudeRunnerConfig {
@@ -83,13 +89,27 @@ pub struct ClaudeRunner {
 
 impl ClaudeRunner {
     pub fn spawn(config: ClaudeRunnerConfig) -> Self {
+        let pool = if pool_enabled_from_env() {
+            let cap = pool_size_from_env();
+            let spawner: Box<dyn WorkerSpawn> = Box::new(ClaudeCliSpawner::new(config.clone()));
+            Some(ClaudePool::new(cap, spawner))
+        } else {
+            None
+        };
+        Self::spawn_with_pool(config, pool)
+    }
+
+    pub(crate) fn spawn_with_pool(
+        config: ClaudeRunnerConfig,
+        pool: Option<Arc<ClaudePool>>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_worker = Arc::clone(&shutdown);
         let handle = thread::Builder::new()
             .name("nit-claude".into())
-            .spawn(move || runner_loop(config, shutdown_worker, cmd_rx, event_tx))
+            .spawn(move || runner_loop(config, shutdown_worker, cmd_rx, event_tx, pool))
             .expect("spawn claude runner");
         Self {
             cmd_tx,
@@ -133,6 +153,7 @@ fn runner_loop(
     _shutdown: Arc<AtomicBool>,
     cmd_rx: Receiver<ClaudeCommand>,
     event_tx: Sender<AgentBusEvent>,
+    pool: Option<Arc<ClaudePool>>,
 ) {
     let mut seq = 0u64;
     let mut queue: VecDeque<ClaudeCommand> = VecDeque::new();
@@ -260,6 +281,7 @@ fn runner_loop(
                     read_only,
                     max_turns,
                     config.clone(),
+                    pool.clone(),
                 ));
             }
         }
@@ -277,6 +299,10 @@ fn runner_loop(
                 }
             }
         }
+    }
+
+    if let Some(pool) = pool {
+        pool.shutdown();
     }
 }
 
@@ -380,6 +406,7 @@ fn spawn_turn_worker(
     read_only: bool,
     max_turns: Option<u32>,
     config: ClaudeRunnerConfig,
+    pool: Option<Arc<ClaudePool>>,
 ) -> ActiveTurn {
     let agent_id = model.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -389,7 +416,7 @@ fn spawn_turn_worker(
     let handle = thread::Builder::new()
         .name(format!("nit-claude-turn-{seq}"))
         .spawn(move || {
-            run_turn(
+            dispatch_turn(
                 &event_tx,
                 seq,
                 model,
@@ -402,6 +429,7 @@ fn spawn_turn_worker(
                 read_only,
                 max_turns,
                 config,
+                pool,
                 cancel_worker,
             );
             let _ = done_tx.send(());
@@ -413,6 +441,72 @@ fn spawn_turn_worker(
         done_rx,
         handle,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_turn(
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    persist_session: bool,
+    effort: Option<String>,
+    prompt: String,
+    read_only: bool,
+    max_turns: Option<u32>,
+    config: ClaudeRunnerConfig,
+    pool: Option<Arc<ClaudePool>>,
+    cancel: Arc<AtomicBool>,
+) {
+    if let Some(pool) = pool.as_ref() {
+        if turn_supports_pool(&resume_session_id, persist_session, &effort, max_turns) {
+            let key = WorkerKey::new(
+                claude_model_slug_for_agent_id(&model).to_string(),
+                cwd.clone(),
+                read_only,
+            );
+            if let Some(worker) = pool.checkout(&key, model.as_str(), POOL_CHECKOUT_TIMEOUT) {
+                run_turn_pooled(
+                    event_tx,
+                    worker,
+                    seq,
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_session_id,
+                    prompt,
+                    cancel,
+                );
+                return;
+            }
+        }
+    }
+    run_turn(
+        event_tx,
+        seq,
+        model,
+        cwd,
+        mission_id,
+        resume_session_id,
+        persist_session,
+        effort,
+        prompt,
+        read_only,
+        max_turns,
+        config,
+        cancel,
+    );
+}
+
+fn turn_supports_pool(
+    resume_session_id: &Option<String>,
+    persist_session: bool,
+    effort: &Option<String>,
+    max_turns: Option<u32>,
+) -> bool {
+    resume_session_id.is_none() && persist_session && effort.is_none() && max_turns.is_none()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -508,6 +602,7 @@ fn run_turn(
         let event_tx = event_tx.clone();
         let model = model.clone();
         let mission_id = mission_id.clone();
+        let cwd = cwd.clone();
         let last_stdout_at = Arc::clone(&last_stdout_at);
         let result_seen = Arc::clone(&result_seen);
         let turn_did_writes = Arc::clone(&turn_did_writes);
@@ -523,172 +618,30 @@ fn run_turn(
                 loop {
                     line.clear();
                     match reader.read_line(&mut line) {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            // Bump on every successful read so the wait
-                            // loop's idle reaper measures stream silence,
-                            // not heartbeat cadence.
-                            if let Ok(mut guard) = last_stdout_at.lock() {
-                                *guard = Instant::now();
-                            }
-                            append_stdout_line_capped(&mut buf, line.as_bytes());
-                            let raw = line.trim();
-                            if raw.is_empty() {
-                                continue;
-                            }
-                            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-                                let _ = event_tx.send(AgentBusEvent::TurnLog {
-                                    agent_id: model.clone(),
-                                    message: raw.to_string(),
-                                });
-                                continue;
-                            };
-
-                            // Stream-json `result` is the canonical
-                            // end-of-turn marker. Flag it so the wait
-                            // loop can exit even if the Claude CLI is
-                            // still alive holding open backgrounded
-                            // subshells.
-                            if is_stream_result_event(&value) {
-                                result_seen.store(true, Ordering::Release);
-                            }
-
-                            // Extract token usage from Claude stream-json events.
-                            if let Some(token_count) = claude_token_count_from_value(&value) {
-                                let _ = event_tx.send(AgentBusEvent::TokenCount {
-                                    agent_id: model.clone(),
-                                    mission_id: mission_id.clone(),
-                                    token_count,
-                                });
-                            }
-
-                            // Claude stream-json uses "type" at top level.
-                            let kind = value.get("type").and_then(|v| v.as_str());
-                            if let Some(kind) = kind {
-                                let stage = match kind {
-                                    "assistant" => {
-                                        let subtype = value
-                                            .get("subtype")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("text");
-                                        format!("assistant({subtype})")
-                                    }
-                                    "content_block_start" => {
-                                        let block_type = value
-                                            .get("content_block")
-                                            .and_then(|b| b.get("type"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        match block_type {
-                                            "tool_use" => {
-                                                let name = value
-                                                    .get("content_block")
-                                                    .and_then(|b| b.get("name"))
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("tool");
-                                                format!("tool_use({name})")
-                                            }
-                                            _ => format!("content({block_type})"),
-                                        }
-                                    }
-                                    "tool_use" | "tool_result" => {
-                                        let tool_name = value
-                                            .get("tool")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        format!("{kind}({tool_name})")
-                                    }
-                                    _ => kind.to_string(),
-                                };
-                                let is_interesting = matches!(
-                                    kind,
-                                    "system"
-                                        | "assistant"
-                                        | "content_block_start"
-                                        | "tool_use"
-                                        | "tool_result"
-                                        | "result"
-                                        | "error"
-                                );
-                                if is_interesting
-                                    && (last_stage.as_deref() != Some(stage.as_str())
-                                        || last_stage_sent_at.elapsed() >= Duration::from_secs(1))
-                                {
-                                    last_stage = Some(stage.clone());
-                                    last_stage_sent_at = Instant::now();
-                                    let _ = event_tx.send(AgentBusEvent::TurnStage {
-                                        agent_id: model.clone(),
-                                        mission_id: mission_id.clone(),
-                                        stage,
-                                    });
-                                }
-                            }
-                            if kind == Some("error") {
-                                let msg = value
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| value.get("message").and_then(|v| v.as_str()));
-                                if let Some(msg) = msg {
-                                    push_json_error_capped(&mut json_errors, msg.to_string());
-                                    let _ = event_tx.send(AgentBusEvent::TurnLog {
-                                        agent_id: model.clone(),
-                                        message: msg.to_string(),
-                                    });
-                                }
-                            }
-                            // Detect productive tool use for two purposes:
-                            //   1. Flag the turn as a writer so the idle reaper
-                            //      skips it (covers Write/Edit/MultiEdit/
-                            //      NotebookEdit, write-like Bash commands, and
-                            //      mcp__*__(create|update|write|upload|edit|put)
-                            //      tools — the bare four-tool allowlist used to
-                            //      kill long `cargo build` runs and any swarm
-                            //      relying on MCP write tools).
-                            //   2. Emit FileWrite for genome attribution where a
-                            //      path is recoverable from the input. Bash and
-                            //      MCP writes have no canonical path key, so they
-                            //      set the writer flag without a FileWrite event.
-                            if kind == Some("assistant") {
-                                if let Some(content) = value
-                                    .get("message")
-                                    .and_then(|m| m.get("content"))
-                                    .and_then(|c| c.as_array())
-                                {
-                                    for block in content {
-                                        let block_type = block.get("type").and_then(|v| v.as_str());
-                                        if block_type != Some("tool_use") {
-                                            continue;
-                                        }
-                                        let tool_name = block.get("name").and_then(|v| v.as_str());
-                                        let input = block.get("input");
-                                        if !tool_invokes_writes(tool_name, input) {
-                                            continue;
-                                        }
-                                        turn_did_writes.store(true, Ordering::Release);
-                                        for key in ["file_path", "path", "file"] {
-                                            if let Some(p) = input
-                                                .and_then(|v| v.get(key))
-                                                .and_then(|v| v.as_str())
-                                            {
-                                                let path = if std::path::Path::new(p).is_absolute()
-                                                {
-                                                    std::path::PathBuf::from(p)
-                                                } else {
-                                                    cwd.join(p)
-                                                };
-                                                let _ = event_tx.send(AgentBusEvent::FileWrite {
-                                                    agent_id: model.clone(),
-                                                    mission_id: mission_id.clone(),
-                                                    path,
-                                                });
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => break,
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    // Bump on every successful read so the wait loop's idle
+                    // reaper measures stream silence, not heartbeat cadence.
+                    if let Ok(mut guard) = last_stdout_at.lock() {
+                        *guard = Instant::now();
+                    }
+                    let obs = process_stream_json_line(
+                        &line,
+                        &mut buf,
+                        &mut json_errors,
+                        &mut last_stage,
+                        &mut last_stage_sent_at,
+                        &event_tx,
+                        &model,
+                        &mission_id,
+                        &cwd,
+                    );
+                    if obs.result_seen {
+                        result_seen.store(true, Ordering::Release);
+                    }
+                    if obs.turn_did_writes {
+                        turn_did_writes.store(true, Ordering::Release);
                     }
                 }
                 StdoutCapture {
@@ -1332,6 +1285,566 @@ fn claude_turn_idle_timeout() -> Option<Duration> {
 /// envelope — the canonical end-of-turn marker.
 fn is_stream_result_event(value: &serde_json::Value) -> bool {
     value.get("type").and_then(|v| v.as_str()) == Some("result")
+}
+
+/// Production [`WorkerSpawn`] that boots a real `claude` CLI process with the
+/// long-lived `--input-format stream-json --output-format stream-json` pair.
+///
+/// Pool slots are baked at default `--max-turns` / no `--effort` /
+/// `--no-session-persistence` — only "vanilla" turns are eligible (see
+/// [`turn_supports_pool`]). Specialised turns (integrators with custom
+/// `--max-turns`, resumed sessions, custom effort levels) bypass the pool
+/// entirely and take the cold-spawn path.
+pub(crate) struct ClaudeCliSpawner {
+    config: ClaudeRunnerConfig,
+}
+
+impl ClaudeCliSpawner {
+    pub(crate) fn new(config: ClaudeRunnerConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl WorkerSpawn for ClaudeCliSpawner {
+    fn spawn(&self, key: &WorkerKey, _agent_id: &str) -> std::io::Result<SpawnedChild> {
+        let mut cmd = Command::new("claude");
+        cmd.current_dir(&key.cwd)
+            .args(build_pool_worker_args(key, &self.config))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("pool: missing stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("pool: missing stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("pool: missing stderr"))?;
+        Ok(SpawnedChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+fn build_pool_worker_args(key: &WorkerKey, config: &ClaudeRunnerConfig) -> Vec<String> {
+    let mut args = vec![
+        "-p".into(),
+        "--verbose".into(),
+        "--input-format".into(),
+        "stream-json".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--model".into(),
+        key.model_slug.clone(),
+        "--add-dir".into(),
+        key.cwd.to_string_lossy().to_string(),
+        "--no-session-persistence".into(),
+    ];
+    if key.read_only {
+        args.push("--allowedTools".into());
+        args.push("Read,Glob,Grep".into());
+    } else if let Some(mode) = config
+        .permission_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--permission-mode".into());
+        args.push(mode.to_string());
+    } else {
+        args.push("--allowedTools".into());
+        args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
+    }
+    args.push("--max-turns".into());
+    args.push(DEFAULT_MAX_TURNS.to_string());
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_turn_pooled(
+    event_tx: &Sender<AgentBusEvent>,
+    mut worker: PoolWorker,
+    _seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    prompt: String,
+    cancel: Arc<AtomicBool>,
+) {
+    let started_at = Instant::now();
+    let endpoint = claude_endpoint_label(&model, resume_session_id.as_deref());
+    let envelope = build_stream_json_envelope(&prompt);
+
+    if let Err(err) = worker.write_envelope(envelope.as_bytes()) {
+        worker.recycle(RecycleReason::BrokenPipe);
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Error,
+                endpoint,
+                latency_ms: None,
+                last_error: Some(format!("pool envelope write failed: {err}")),
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: resume_session_id,
+            token_count: None,
+            message: format!("Claude pool: envelope write failed: {err}"),
+        });
+        return;
+    }
+
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Connected,
+            endpoint: endpoint.clone(),
+            latency_ms: None,
+            last_error: None,
+        },
+    });
+
+    let mut state = PooledTurnState::new();
+    let idle_timeout = claude_turn_idle_timeout();
+    let mut kill_reason: Option<TurnKillReason> = None;
+    let mut last_heartbeat_at = Instant::now();
+    let mut last_stdout_at = Instant::now();
+
+    loop {
+        if kill_reason.is_none() && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+            let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
+                agent_id: model.clone(),
+                mission_id: mission_id.clone(),
+            });
+            last_heartbeat_at = Instant::now();
+        }
+
+        if kill_reason.is_none() {
+            if cancel.load(Ordering::Relaxed) {
+                worker.kill_child();
+                kill_reason = Some(TurnKillReason::OperatorCancel);
+            } else if state.result_seen {
+                break;
+            } else if worker.is_dead() {
+                kill_reason = Some(TurnKillReason::ResultSeen);
+                break;
+            } else if let Some(timeout) = idle_timeout {
+                if !state.turn_did_writes && last_stdout_at.elapsed() >= timeout {
+                    worker.kill_child();
+                    kill_reason = Some(TurnKillReason::IdleTimeout);
+                }
+            }
+        }
+
+        if kill_reason.is_some() {
+            break;
+        }
+
+        let Some(line) = worker.recv_timeout(Duration::from_millis(50)) else {
+            continue;
+        };
+        last_stdout_at = Instant::now();
+        let obs = process_stream_json_line(
+            &line.raw,
+            &mut state.stdout_buf,
+            &mut state.json_errors,
+            &mut state.last_stage,
+            &mut state.last_stage_sent_at,
+            event_tx,
+            &model,
+            &mission_id,
+            &cwd,
+        );
+        state.result_seen |= obs.result_seen;
+        state.turn_did_writes |= obs.turn_did_writes;
+    }
+
+    let stdout = std::mem::take(&mut state.stdout_buf);
+    let json_errors = std::mem::take(&mut state.json_errors);
+    let stderr = worker.stderr_snapshot();
+
+    let unhealthy = matches!(
+        kill_reason,
+        Some(TurnKillReason::IdleTimeout) | Some(TurnKillReason::OperatorCancel)
+    ) || worker.is_dead();
+    let result_only = matches!(kill_reason, Some(TurnKillReason::ResultSeen)) && !worker.is_dead();
+    if unhealthy {
+        worker.recycle(match kill_reason {
+            Some(TurnKillReason::OperatorCancel) => RecycleReason::Cancel,
+            Some(TurnKillReason::IdleTimeout) => RecycleReason::IdleTimeout,
+            _ => RecycleReason::NonZeroExit,
+        });
+    } else if result_only {
+        // Worker still alive after `result` — return slot for reuse. CLI
+        // protocol may or may not actually serve another turn; the next
+        // checkout validates via try_wait and recycles on failure.
+        worker.check_in();
+    } else {
+        // Reached the break via `state.result_seen`, worker alive.
+        worker.check_in();
+    }
+
+    if kill_reason == Some(TurnKillReason::OperatorCancel) {
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: resume_session_id,
+            token_count: None,
+            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+        });
+        return;
+    }
+
+    if let Some(reason) = kill_reason {
+        let elapsed_secs = started_at.elapsed().as_secs();
+        let msg = match reason {
+            TurnKillReason::ResultSeen => format!(
+                "Claude pool turn closed after `result` event ({elapsed_secs}s)"
+            ),
+            TurnKillReason::IdleTimeout => format!(
+                "Claude pool turn killed by idle timeout after {}s of stream silence; attempting to recover the final message from buffered stream-json",
+                idle_timeout.map(|d| d.as_secs()).unwrap_or_default(),
+            ),
+            TurnKillReason::OperatorCancel => unreachable!(),
+        };
+        let _ = event_tx.send(AgentBusEvent::TurnLog {
+            agent_id: model.clone(),
+            message: msg,
+        });
+    }
+
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    for line in stderr_text.lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            let _ = event_tx.send(AgentBusEvent::TurnLog {
+                agent_id: model.clone(),
+                message: line.to_string(),
+            });
+        }
+    }
+
+    let message = extract_result_text_from_jsonl(&stdout).unwrap_or_default();
+    if message.is_empty() {
+        let session_id = extract_session_id_from_jsonl(&stdout);
+        let token_count = extract_token_count_from_jsonl(&stdout);
+        let failure_message = match kill_reason {
+            Some(TurnKillReason::IdleTimeout) => format!(
+                "Claude pool turn killed by idle timeout after {}s of stream silence; no extractable result.",
+                idle_timeout.map(|d| d.as_secs()).unwrap_or_default(),
+            ),
+            _ => {
+                if !json_errors.is_empty() {
+                    json_errors.join(" | ")
+                } else if !stderr_text.trim().is_empty() {
+                    stderr_text.trim().to_string()
+                } else {
+                    "Claude pool turn finished but produced an empty last message.".into()
+                }
+            }
+        };
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Error,
+                endpoint,
+                latency_ms: Some(elapsed_ms(started_at)),
+                last_error: Some(failure_message.clone()),
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: session_id,
+            token_count,
+            message: failure_message,
+        });
+        return;
+    }
+
+    let session_id = extract_session_id_from_jsonl(&stdout);
+    let token_count = extract_token_count_from_jsonl(&stdout);
+
+    if is_provider_quota_exhausted_in_result(&message) {
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Error,
+                endpoint,
+                latency_ms: Some(elapsed_ms(started_at)),
+                last_error: Some(message.clone()),
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: session_id,
+            token_count,
+            message,
+        });
+        return;
+    }
+
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Connected,
+            endpoint,
+            latency_ms: Some(elapsed_ms(started_at)),
+            last_error: None,
+        },
+    });
+    let _ = event_tx.send(AgentBusEvent::TurnCompleted {
+        agent_id: model,
+        mission_id,
+        thread_id: session_id,
+        token_count,
+        message,
+    });
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+struct PooledTurnState {
+    result_seen: bool,
+    turn_did_writes: bool,
+    stdout_buf: Vec<u8>,
+    json_errors: Vec<String>,
+    last_stage: Option<String>,
+    last_stage_sent_at: Instant,
+}
+
+impl PooledTurnState {
+    fn new() -> Self {
+        Self {
+            result_seen: false,
+            turn_did_writes: false,
+            stdout_buf: Vec::new(),
+            json_errors: Vec::new(),
+            last_stage: None,
+            last_stage_sent_at: Instant::now(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StreamObservations {
+    result_seen: bool,
+    turn_did_writes: bool,
+}
+
+// Shared per-line stream-json processor used by both the cold-spawn reader
+// thread and the pool-path main loop. Callers thread their own
+// `result_seen`/`turn_did_writes` storage (AtomicBool for the cold path,
+// plain bool on `PooledTurnState` for the pool path) and merge from the
+// returned `StreamObservations`.
+#[allow(clippy::too_many_arguments)]
+fn process_stream_json_line(
+    raw_line: &str,
+    stdout_buf: &mut Vec<u8>,
+    json_errors: &mut Vec<String>,
+    last_stage: &mut Option<String>,
+    last_stage_sent_at: &mut Instant,
+    event_tx: &Sender<AgentBusEvent>,
+    model: &str,
+    mission_id: &Option<String>,
+    cwd: &Path,
+) -> StreamObservations {
+    let mut obs = StreamObservations::default();
+    append_stdout_line_capped(stdout_buf, raw_line.as_bytes());
+    let trimmed = raw_line.trim();
+    if trimmed.is_empty() {
+        return obs;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        let _ = event_tx.send(AgentBusEvent::TurnLog {
+            agent_id: model.to_string(),
+            message: trimmed.to_string(),
+        });
+        return obs;
+    };
+
+    if is_stream_result_event(&value) {
+        obs.result_seen = true;
+    }
+
+    if let Some(token_count) = claude_token_count_from_value(&value) {
+        let _ = event_tx.send(AgentBusEvent::TokenCount {
+            agent_id: model.to_string(),
+            mission_id: mission_id.clone(),
+            token_count,
+        });
+    }
+
+    let kind = value.get("type").and_then(|v| v.as_str());
+    if let Some(kind) = kind {
+        emit_stage_event_if_changed(
+            kind,
+            &value,
+            last_stage,
+            last_stage_sent_at,
+            event_tx,
+            model,
+            mission_id,
+        );
+    }
+
+    if kind == Some("error") {
+        if let Some(msg) = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("message").and_then(|v| v.as_str()))
+        {
+            push_json_error_capped(json_errors, msg.to_string());
+            let _ = event_tx.send(AgentBusEvent::TurnLog {
+                agent_id: model.to_string(),
+                message: msg.to_string(),
+            });
+        }
+    }
+
+    if kind == Some("assistant") {
+        scan_assistant_tool_uses(&value, &mut obs, event_tx, model, mission_id, cwd);
+    }
+
+    obs
+}
+
+fn emit_stage_event_if_changed(
+    kind: &str,
+    value: &serde_json::Value,
+    last_stage: &mut Option<String>,
+    last_stage_sent_at: &mut Instant,
+    event_tx: &Sender<AgentBusEvent>,
+    model: &str,
+    mission_id: &Option<String>,
+) {
+    let is_interesting = matches!(
+        kind,
+        "system"
+            | "assistant"
+            | "content_block_start"
+            | "tool_use"
+            | "tool_result"
+            | "result"
+            | "error"
+    );
+    if !is_interesting {
+        return;
+    }
+    let stage = derive_stage_label(kind, value);
+    let stage_changed = last_stage.as_deref() != Some(stage.as_str());
+    if !stage_changed && last_stage_sent_at.elapsed() < Duration::from_secs(1) {
+        return;
+    }
+    *last_stage = Some(stage.clone());
+    *last_stage_sent_at = Instant::now();
+    let _ = event_tx.send(AgentBusEvent::TurnStage {
+        agent_id: model.to_string(),
+        mission_id: mission_id.clone(),
+        stage,
+    });
+}
+
+fn scan_assistant_tool_uses(
+    value: &serde_json::Value,
+    obs: &mut StreamObservations,
+    event_tx: &Sender<AgentBusEvent>,
+    model: &str,
+    mission_id: &Option<String>,
+    cwd: &Path,
+) {
+    let Some(content) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return;
+    };
+    for block in content {
+        if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+            continue;
+        }
+        let tool_name = block.get("name").and_then(|v| v.as_str());
+        let input = block.get("input");
+        if !tool_invokes_writes(tool_name, input) {
+            continue;
+        }
+        obs.turn_did_writes = true;
+        emit_file_write_if_path_present(input, event_tx, model, mission_id, cwd);
+    }
+}
+
+fn emit_file_write_if_path_present(
+    input: Option<&serde_json::Value>,
+    event_tx: &Sender<AgentBusEvent>,
+    model: &str,
+    mission_id: &Option<String>,
+    cwd: &Path,
+) {
+    for key in ["file_path", "path", "file"] {
+        let Some(raw) = input.and_then(|v| v.get(key)).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let path = if std::path::Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            cwd.join(raw)
+        };
+        let _ = event_tx.send(AgentBusEvent::FileWrite {
+            agent_id: model.to_string(),
+            mission_id: mission_id.clone(),
+            path,
+        });
+        return;
+    }
+}
+
+fn derive_stage_label(kind: &str, value: &serde_json::Value) -> String {
+    match kind {
+        "assistant" => {
+            let subtype = value
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text");
+            format!("assistant({subtype})")
+        }
+        "content_block_start" => {
+            let block_type = value
+                .get("content_block")
+                .and_then(|b| b.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            match block_type {
+                "tool_use" => {
+                    let name = value
+                        .get("content_block")
+                        .and_then(|b| b.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    format!("tool_use({name})")
+                }
+                _ => format!("content({block_type})"),
+            }
+        }
+        "tool_use" | "tool_result" => {
+            let tool_name = value
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("{kind}({tool_name})")
+        }
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

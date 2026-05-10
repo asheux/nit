@@ -880,6 +880,11 @@ pub(super) fn maybe_dispatch_claude_turn(
             }
         });
     let cwd = resolve_dispatch_cwd(state, &model);
+    // The dispatch call site stays unchanged regardless of whether
+    // `NIT_CLAUDE_POOL` is enabled — see `claude_pool.rs`. The pool sits
+    // entirely behind `ClaudeRunner`'s worker thread; specialised turns
+    // (custom `effort`, `max_turns`, resumed sessions) automatically take
+    // the cold-spawn fallback inside the runner.
     let ok = claude.send(ClaudeCommand::RunTurn {
         model: model.clone(),
         cwd,
