@@ -30,12 +30,12 @@ pub(super) fn handle_turn_started(
     }
 
     if let Some(mid) = mission_id.as_deref() {
-        if let Some(mission) = state
+        let mission_match = state
             .agents
             .missions
             .iter_mut()
-            .find(|mission| mission.id == mid)
-        {
+            .find(|mission| mission.id == mid);
+        if let Some(mission) = mission_match {
             mission.status = "RUNNING".into();
             mission.updated_at = at;
         }

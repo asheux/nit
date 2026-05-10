@@ -63,6 +63,13 @@ pub fn run_loop(
     let mut last_save = Instant::now();
     let mut last_focused = state.multipane.as_ref().map(|mp| mp.focused);
     let save_debounce = Duration::from_secs(1);
+    // Mirror the single-pane runner's frame-rate cap so a high-volume
+    // bus burst can't repaint faster than the terminal compositor. Resolved
+    // once via the same `NIT_TUI_FPS` env knob the single-pane path uses.
+    let frame_interval = crate::app::frame_interval();
+    let mut last_render = Instant::now()
+        .checked_sub(frame_interval)
+        .unwrap_or_else(Instant::now);
 
     loop {
         // Drain any already-buffered input BEFORE the agent-bus drain so
@@ -98,29 +105,37 @@ pub fn run_loop(
         // propose/judge/review never run), breathers stick on
         // "Waiting…", and queued turns never drain. Genome retries are
         // disabled in multipane v1 (genome_worker = None).
-        for event in codex.events.try_iter() {
-            crate::app::event_drain::drain_codex_event(
-                state,
-                &mut vitals,
-                &codex,
-                &claude,
-                &mut swarm,
-                &mut shadow,
-                None,
-                event,
-            );
+        let mut codex_batch: Vec<nit_core::AgentBusEvent> = codex.events.try_iter().collect();
+        if !codex_batch.is_empty() {
+            crate::app::event_coalesce::coalesce_heartbeats(&mut codex_batch);
+            for event in codex_batch {
+                crate::app::event_drain::drain_codex_event(
+                    state,
+                    &mut vitals,
+                    &codex,
+                    &claude,
+                    &mut swarm,
+                    &mut shadow,
+                    None,
+                    event,
+                );
+            }
         }
-        for event in claude.events.try_iter() {
-            crate::app::event_drain::drain_claude_event(
-                state,
-                &mut vitals,
-                &codex,
-                &claude,
-                &mut swarm,
-                &mut shadow,
-                None,
-                event,
-            );
+        let mut claude_batch: Vec<nit_core::AgentBusEvent> = claude.events.try_iter().collect();
+        if !claude_batch.is_empty() {
+            crate::app::event_coalesce::coalesce_heartbeats(&mut claude_batch);
+            for event in claude_batch {
+                crate::app::event_drain::drain_claude_event(
+                    state,
+                    &mut vitals,
+                    &codex,
+                    &claude,
+                    &mut swarm,
+                    &mut shadow,
+                    None,
+                    event,
+                );
+            }
         }
         for event in dir_search_runner.events.try_iter() {
             apply_dir_search_event(state, event);
@@ -162,38 +177,49 @@ pub fn run_loop(
 
         capture_pane_mission_ids(state);
 
-        // Animate the breather. The single-pane runner ticks
-        // `frame_count` in `app/draw.rs:408`; multipane has its own draw
-        // path so we have to do it explicitly. Without this, the
-        // histogram glyph next to "Working ..." / "Verifying ..." stays
-        // frozen on a single frame regardless of how long an agent
-        // runs.
-        state.metrics.frame_count = state.metrics.frame_count.wrapping_add(1);
+        // Render only when the per-frame minimum interval has elapsed.
+        // `frame_count` advances INSIDE the gate so the breather phase
+        // tracks real frames rather than loop iterations — without this,
+        // a high-event-rate burst would visibly speed up the histogram
+        // glyph next to "Working …" / "Verifying …" relative to the
+        // single-pane path.
+        if last_render.elapsed() >= frame_interval {
+            state.metrics.frame_count = state.metrics.frame_count.wrapping_add(1);
 
-        terminal.draw(|frame| {
-            let area = frame.size();
-            let cursor = render_grid(frame, area, state, &swarm, theme);
-            if state.agents.artifacts_popup_open {
-                let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
-                artifacts_popup::render(frame, popup_area, state, &swarm, theme);
-            }
-            if let Some(c) = cursor {
-                frame.set_cursor(c.x, c.y);
-            }
-        })?;
-        // Match the single-pane chat-input caret shape so the operator
-        // sees the same thin steady bar across both modes; without
-        // this, multipane inherits whatever the terminal's default is
-        // (usually a wide block) and the caret looks fat/inconsistent.
-        // The bar is "steady" — the visible blink comes from gating
-        // `frame.set_cursor` on `cursor_visible(state)` (a frame-counter
-        // pulse), exactly like single-pane.
-        let _ = crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::cursor::SetCursorStyle::SteadyBar
-        );
+            terminal.draw(|frame| {
+                let area = frame.size();
+                let cursor = render_grid(frame, area, state, &swarm, theme);
+                if state.agents.artifacts_popup_open {
+                    let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
+                    artifacts_popup::render(frame, popup_area, state, &swarm, theme);
+                }
+                if let Some(c) = cursor {
+                    frame.set_cursor(c.x, c.y);
+                }
+            })?;
+            // Match the single-pane chat-input caret shape so the operator
+            // sees the same thin steady bar across both modes; the visible
+            // blink comes from gating `frame.set_cursor` on
+            // `cursor_visible(state)` (a frame-counter pulse), exactly
+            // like single-pane.
+            let _ = crossterm::execute!(
+                terminal.backend_mut(),
+                crossterm::cursor::SetCursorStyle::SteadyBar
+            );
 
-        if !event::poll(TICK_RATE)? {
+            last_render = Instant::now();
+        }
+
+        // Adaptive idle wait: when the next frame is closer than
+        // `TICK_RATE`, wake at the frame boundary instead of the full
+        // 50 ms tick so a deferred render fires promptly. The 1 ms
+        // floor avoids degenerate sub-millisecond polls that some
+        // terminals reduce to a busy-spin.
+        let wait = frame_interval
+            .saturating_sub(last_render.elapsed())
+            .min(TICK_RATE)
+            .max(Duration::from_millis(1));
+        if !event::poll(wait)? {
             continue;
         }
         let area = terminal_size(terminal)?;

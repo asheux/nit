@@ -31,11 +31,11 @@ mod workers;
 mod test_fixtures;
 
 #[cfg(test)]
-#[path = "../tests/swarm.rs"]
+#[path = "tests/swarm.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "../tests/prompts_leak_test.rs"]
+#[path = "tests/prompts_leak_test.rs"]
 mod prompts_leak_test;
 
 #[derive(Default)]

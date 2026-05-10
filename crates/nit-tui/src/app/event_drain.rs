@@ -1,12 +1,14 @@
 //! Per-event side-effect pipeline shared by the single-pane runner and
-//! the multipane runtime. The single-pane path historically inlined this
-//! work for codex and claude bus events; multipane was missing every step
-//! after `event.apply(state)`, leaving swarms stuck after the planner
-//! turn and breathers locked on "Waiting…". Centralizing the pipeline
-//! here is the only practical way to keep the two surfaces converged.
+//! the multipane runtime. Centralising the pipeline here is the only
+//! practical way to keep the two surfaces converged after a multipane
+//! regression that left swarms stuck post-planner because every step
+//! after `event.apply(state)` was being skipped.
 //!
-//! The ordering is load-bearing — see comments inline. `genome_worker`
-//! is `None` for multipane (no genome retries in v1).
+//! Callers hand events in one at a time after `super::event_coalesce`
+//! has dropped dominated heartbeats from the per-tick batch. The
+//! pipeline ordering is load-bearing — see inline comments. The
+//! `genome_worker` argument is `None` for multipane (no genome retries
+//! in v1).
 use nit_core::{AgentBusEvent, AgentChannel, AppState};
 
 use super::dispatch::{
@@ -31,13 +33,10 @@ use crate::swarm::{create_chat_clone, is_agent_busy, is_agent_family_busy, Swarm
 use crate::vitals::VitalsState;
 use crate::widgets::agent_ops_view;
 
-/// `drain_codex_event` / `drain_claude_event` consume one bus event and
-/// run the full side-effect pipeline (vitals, popup snapshot, invalid
-/// context clearing, apply, claim/intervention drains, swarm dispatch
-/// loop, shadow dispatch loop, finished-event queue drains, popup
-/// re-resolve). Returns `EventDrainOutcome { redraw: true }` so the
-/// caller can mark the next render dirty without inspecting the event
-/// kind.
+/// Whether the caller should mark the next render dirty after this
+/// drain. Today every drain returns `redraw: true`; the field exists so
+/// future variants (e.g. a no-op event class) can opt out without
+/// changing the signature.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EventDrainOutcome {
     pub redraw: bool,

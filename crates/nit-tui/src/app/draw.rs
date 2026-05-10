@@ -354,14 +354,14 @@ pub(super) fn draw(
         }
     })?;
     // Apply cursor style after draw so ratatui's cursor-show/hide logic has run,
-    // but the two are now in the same flush window (no visible frame gap).
-    let cursor_style = if state.agents.artifacts_popup_open || state.focus == PaneId::Notes {
+    // but inside the same flush window (no visible frame gap).
+    let bar_caret = state.agents.artifacts_popup_open
+        || state.focus == PaneId::Notes
+        || matches!(state.mode, Mode::Insert);
+    let cursor_style = if bar_caret {
         SetCursorStyle::SteadyBar
     } else {
-        match state.mode {
-            Mode::Insert => SetCursorStyle::SteadyBar,
-            Mode::Normal | Mode::Visual => SetCursorStyle::SteadyBlock,
-        }
+        SetCursorStyle::SteadyBlock
     };
     execute!(terminal.backend_mut(), cursor_style)?;
     state.metrics.last_render_ms = start.elapsed().as_millis();

@@ -38,8 +38,7 @@ pub use arbiters::{
     Arbiter, ArbiterFn, InterventionKind, InterventionProposal, InterventionTarget,
     ARBITER_INITIAL_STRENGTH, ARBITER_RETRY_LIMIT, REGISTERED_ARBITERS,
 };
-pub use buffer::Buffer;
-pub use buffer::{BufferEdit, BufferPoint, LineDiffStatus};
+pub use buffer::{Buffer, BufferEdit, BufferPoint, LineDiffStatus};
 pub use config::{
     AgentGenomeConfig, EditorConfig, GenomeGateConfig, GolConfig, GolRuleConfig, GolRulesConfig,
     GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig, GolUserRule,

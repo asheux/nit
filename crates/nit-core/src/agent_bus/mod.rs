@@ -313,8 +313,8 @@ impl AgentBusEvent {
             }
         }
 
-        // Drives the Agent ECG/criticality sampling and makes backend activity
-        // visible in the UI.
+        // Bumps `event_epoch` so the runner's vitals sampler counts this
+        // event toward the ECG / criticality histogram.
         state.agents.note_event();
     }
 }

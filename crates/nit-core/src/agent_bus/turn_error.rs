@@ -149,16 +149,17 @@ fn push_error_records(
         "local" => "Local",
         _ => "Codex",
     };
+    let prefixed = format!("[{agent_id}] {message}");
     state.agents.alerts.push(AgentAlert {
         severity: AgentAlertSeverity::Error,
         source: source.into(),
-        message: format!("[{agent_id}] {message}"),
+        message: prefixed.clone(),
         at: at.to_string(),
     });
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Error,
         source: source.into(),
-        message: format!("[{agent_id}] {message}"),
+        message: prefixed,
         at: at.to_string(),
     });
     state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;

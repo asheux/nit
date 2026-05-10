@@ -12,8 +12,7 @@ use crate::{
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
-use nit_gol::Rule;
-use nit_gol::{AttractorEvent, AutoStopPolicy};
+use nit_gol::{AttractorEvent, AutoStopPolicy, Rule};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};

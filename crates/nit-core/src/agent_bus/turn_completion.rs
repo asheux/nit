@@ -89,15 +89,15 @@ fn update_provenance_and_threads(
             mission.status = "LIVE".into();
             mission.updated_at = at.to_string();
         }
-    } else if let Some(thread_id) = thread_id {
+        return;
+    }
+    if let Some(thread_id) = thread_id {
         state
             .agents
             .codex_thread_ids
             .insert(agent_id.to_string(), thread_id.to_string());
-        mark_ad_hoc_provenance_dirty(state, agent_id);
-    } else {
-        mark_ad_hoc_provenance_dirty(state, agent_id);
     }
+    mark_ad_hoc_provenance_dirty(state, agent_id);
 }
 
 fn bump_mission_token_estimate(state: &mut AppState, mission_id: Option<&str>, message: &str) {

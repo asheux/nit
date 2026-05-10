@@ -320,28 +320,30 @@ impl AgentsState {
         self.event_epoch = self.event_epoch.wrapping_add(1);
     }
 
-    /// O(1) lookup via `agents_index`, with a linear-scan fallback when the
-    /// cached index is stale (test code that mutates `agents` directly is the
-    /// usual culprit — the next event-handler call to `rebuild_agents_index`
-    /// repairs the cache).
+    /// O(1) lookup via `agents_index`, falling back to a linear scan when
+    /// the cached index is stale. Test code that mutates `agents` directly
+    /// is the usual culprit; the next event-handler call to
+    /// `rebuild_agents_index` repairs the cache.
     pub fn agents_get(&self, id: &str) -> Option<&AgentLane> {
-        if let Some(&idx) = self.agents_index.get(id) {
-            if let Some(lane) = self.agents.get(idx) {
-                if lane.id == id {
-                    return Some(lane);
-                }
-            }
+        if let Some(idx) = self.cached_agent_index(id) {
+            return self.agents.get(idx);
         }
         self.agents.iter().find(|a| a.id == id)
     }
 
     pub fn agents_get_mut(&mut self, id: &str) -> Option<&mut AgentLane> {
-        if let Some(&idx) = self.agents_index.get(id) {
-            if matches!(self.agents.get(idx), Some(lane) if lane.id == id) {
-                return self.agents.get_mut(idx);
-            }
+        if let Some(idx) = self.cached_agent_index(id) {
+            return self.agents.get_mut(idx);
         }
         self.agents.iter_mut().find(|a| a.id == id)
+    }
+
+    fn cached_agent_index(&self, id: &str) -> Option<usize> {
+        let &idx = self.agents_index.get(id)?;
+        self.agents
+            .get(idx)
+            .filter(|lane| lane.id == id)
+            .map(|_| idx)
     }
 
     /// Repopulate `agents_index` after a bulk mutation that bypassed

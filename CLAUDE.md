@@ -54,6 +54,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Override the log file path |
+| `NIT_TUI_FPS` | `60` (16 ms) | Redraw cap for both the single-pane and multipane event loops. Clamped to `15..=120`; out-of-range values fall back to the default. The cap gates `terminal.draw` so a high-volume agent-bus burst can't repaint faster than the terminal compositor (input handling and bus event apply remain unthrottled). Resolved once at run start, not in the hot loop. |
 | `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the agent ops UI |
 | `NIT_ROSTER_NO_TRUNCATE` | unset | Disable per-backend / per-mission / chat-pane breather row truncation. Set to `1`/`true` to inspect every clone in large swarms. |
 | `NIT_SNAPSHOT_QUEUE` | `64` | Snapshot writer channel capacity |

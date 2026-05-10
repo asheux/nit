@@ -79,6 +79,7 @@ mod agent_station;
 mod chat_cursor;
 mod chords;
 mod draw;
+pub(crate) mod event_coalesce;
 mod file_tree_fuzzy;
 mod fuzzy_runtime;
 mod games_config_preview;
@@ -97,6 +98,7 @@ mod terminal;
 mod ui_selection;
 mod vitals_log;
 
+pub(crate) use runner::frame_interval;
 pub use runner::run;
 
 pub(crate) use artifacts_popup_handler::*;

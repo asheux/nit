@@ -29,6 +29,12 @@ use super::*;
 
 pub(super) const TICK_RATE: Duration = Duration::from_millis(50);
 
+/// Minimum interval between full-screen redraws (~60 fps default). The
+/// runner gates `terminal.draw` on this so a high-volume agent-bus burst
+/// can't repaint faster than the terminal's compositor can absorb.
+/// Operator override: `NIT_TUI_FPS` (clamped to 15..=120).
+pub(crate) const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
 pub(super) const JOB_TICK: Duration = Duration::from_millis(120);
 
 pub(super) const BUSY_PULSE_INTERVAL: Duration = Duration::from_millis(550);
@@ -116,6 +122,20 @@ pub fn run(
     result
 }
 
+/// Resolve the redraw cap. Out-of-range values (or anything unparseable)
+/// fall back to `DEFAULT_FRAME_INTERVAL` silently — there's no panic
+/// path for a typo'd env var. Called once at run start so the env read
+/// stays out of the hot loop.
+pub(crate) fn frame_interval() -> Duration {
+    match std::env::var("NIT_TUI_FPS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(fps) if (15..=120).contains(&fps) => Duration::from_millis(1000 / fps),
+        _ => DEFAULT_FRAME_INTERVAL,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -127,7 +147,17 @@ pub(super) fn run_loop(
     codex_config: CodexRunnerConfig,
     claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
+    let frame_interval = frame_interval();
     let mut last_tick = Instant::now();
+    // Underflow-safe init that also lets the very first redraw fire
+    // immediately (no startup blank): if the host clock is too young to
+    // subtract `frame_interval`, fall back to `app_start`-equivalent
+    // (which is "now", same effect — the gate sees `elapsed() == 0`
+    // only on the very first iteration and the existing `needs_redraw =
+    // true` initialisation forces the draw anyway).
+    let mut last_render = Instant::now()
+        .checked_sub(frame_interval)
+        .unwrap_or_else(Instant::now);
     let mut last_job = Instant::now();
     let mut last_metabolism = Instant::now();
     let mut last_vitals_sample = Instant::now();
@@ -255,8 +285,18 @@ pub(super) fn run_loop(
             continue;
         }
 
-        // Poll input with tick fallback (check stashed events from scroll coalescing first)
-        let timeout = TICK_RATE;
+        // Poll input with tick fallback (check stashed events from scroll coalescing first).
+        // When a redraw is already pending but the frame cap deferred it, shrink the
+        // wait to the remaining frame budget so the loop wakes at the next frame
+        // boundary instead of busy-spinning. The 1 ms floor avoids degenerate
+        // sub-millisecond timeouts that some terminals reduce to a busy poll.
+        let timeout = if needs_redraw {
+            frame_interval
+                .saturating_sub(last_render.elapsed())
+                .max(Duration::from_millis(1))
+        } else {
+            TICK_RATE
+        };
         let mut handled_input = false;
         let next_event = match stashed_event.take() {
             Some(e) => Some(e),
@@ -728,37 +768,48 @@ pub(super) fn run_loop(
             }
         }
 
-        // codex runner events
-        while let Ok(event) = codex_runner.events.try_recv() {
-            let outcome = super::event_drain::drain_codex_event(
-                state,
-                &mut vitals,
-                &codex_runner,
-                &claude_runner,
-                &mut swarm,
-                &mut shadow,
-                Some(&genome_worker),
-                event,
-            );
-            if outcome.redraw {
-                needs_redraw = true;
+        // codex runner events: collect this tick's batch first so the
+        // heartbeat coalescer can drop dominated heartbeats before the
+        // per-event side-effect pipeline runs. Other variants are
+        // preserved verbatim (see crate::app::event_coalesce docs).
+        let mut codex_batch: Vec<AgentBusEvent> = codex_runner.events.try_iter().collect();
+        if !codex_batch.is_empty() {
+            super::event_coalesce::coalesce_heartbeats(&mut codex_batch);
+            for event in codex_batch {
+                let outcome = super::event_drain::drain_codex_event(
+                    state,
+                    &mut vitals,
+                    &codex_runner,
+                    &claude_runner,
+                    &mut swarm,
+                    &mut shadow,
+                    Some(&genome_worker),
+                    event,
+                );
+                if outcome.redraw {
+                    needs_redraw = true;
+                }
             }
         }
 
         // claude runner events
-        while let Ok(event) = claude_runner.events.try_recv() {
-            let outcome = super::event_drain::drain_claude_event(
-                state,
-                &mut vitals,
-                &codex_runner,
-                &claude_runner,
-                &mut swarm,
-                &mut shadow,
-                Some(&genome_worker),
-                event,
-            );
-            if outcome.redraw {
-                needs_redraw = true;
+        let mut claude_batch: Vec<AgentBusEvent> = claude_runner.events.try_iter().collect();
+        if !claude_batch.is_empty() {
+            super::event_coalesce::coalesce_heartbeats(&mut claude_batch);
+            for event in claude_batch {
+                let outcome = super::event_drain::drain_claude_event(
+                    state,
+                    &mut vitals,
+                    &codex_runner,
+                    &claude_runner,
+                    &mut swarm,
+                    &mut shadow,
+                    Some(&genome_worker),
+                    event,
+                );
+                if outcome.redraw {
+                    needs_redraw = true;
+                }
             }
         }
 
@@ -899,8 +950,13 @@ pub(super) fn run_loop(
             vitals.record_diag_event(now, DiagSeverity::Warn);
         }
 
-        // redraw
-        if needs_redraw || last_tick.elapsed() >= TICK_RATE {
+        // redraw — gated on the per-frame minimum interval so high-volume
+        // bus bursts can't repaint faster than the terminal compositor.
+        // `needs_redraw` is left true on a deferred redraw so the next
+        // iteration wakes at the frame boundary (see input-poll timeout).
+        if (needs_redraw || last_tick.elapsed() >= TICK_RATE)
+            && last_render.elapsed() >= frame_interval
+        {
             if let Ok(screen) = terminal.size() {
                 let size = (screen.width, screen.height);
                 if Some(size) != last_screen_size {
@@ -1030,6 +1086,7 @@ pub(super) fn run_loop(
             )?;
             needs_redraw = false;
             last_tick = Instant::now();
+            last_render = Instant::now();
         }
     }
     file_tree_runner.shutdown();

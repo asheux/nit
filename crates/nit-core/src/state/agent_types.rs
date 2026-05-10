@@ -88,7 +88,6 @@ impl AgentOpsTab {
             AgentOpsTab::Evidence => AgentOpsTab::Mcp,
             AgentOpsTab::Mcp => AgentOpsTab::Alerts,
             AgentOpsTab::Alerts => AgentOpsTab::Diagnostics,
-            // Legacy/hidden patch tab: skip forward into Artifacts.
             AgentOpsTab::Patch => AgentOpsTab::Evidence,
             AgentOpsTab::Diagnostics => AgentOpsTab::Scratchpad,
             AgentOpsTab::Scratchpad => AgentOpsTab::Roster,
@@ -103,7 +102,6 @@ impl AgentOpsTab {
             AgentOpsTab::Evidence => AgentOpsTab::Dag,
             AgentOpsTab::Mcp => AgentOpsTab::Evidence,
             AgentOpsTab::Alerts => AgentOpsTab::Mcp,
-            // Legacy/hidden patch tab: skip backward into Alerts.
             AgentOpsTab::Patch => AgentOpsTab::Alerts,
             AgentOpsTab::Diagnostics => AgentOpsTab::Alerts,
             AgentOpsTab::Scratchpad => AgentOpsTab::Diagnostics,

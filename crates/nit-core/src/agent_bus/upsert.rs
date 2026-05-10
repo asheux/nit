@@ -64,30 +64,16 @@ pub(super) fn upsert_mission(state: &mut AppState, mission: MissionRecord) {
         .min(state.agents.missions.len().saturating_sub(1));
 }
 
-pub(super) fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
-    if state
-        .agents
-        .pending_provenance_mission_ids
-        .iter()
-        .all(|id| id != mission_id)
-    {
-        state
-            .agents
-            .pending_provenance_mission_ids
-            .push(mission_id.to_string());
+fn push_unique_id(queue: &mut Vec<String>, id: &str) {
+    if queue.iter().all(|existing| existing != id) {
+        queue.push(id.to_string());
     }
 }
 
+pub(super) fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
+    push_unique_id(&mut state.agents.pending_provenance_mission_ids, mission_id);
+}
+
 pub(super) fn mark_ad_hoc_provenance_dirty(state: &mut AppState, agent_id: &str) {
-    if state
-        .agents
-        .pending_provenance_agent_ids
-        .iter()
-        .all(|id| id != agent_id)
-    {
-        state
-            .agents
-            .pending_provenance_agent_ids
-            .push(agent_id.to_string());
-    }
+    push_unique_id(&mut state.agents.pending_provenance_agent_ids, agent_id);
 }

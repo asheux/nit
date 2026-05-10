@@ -160,8 +160,8 @@ fn apply_token_count_claude(
     }
 }
 
-// Rounded percentage of remaining context, with banker-style mid-point bias
-// (`+denom/2`) to avoid systematic flooring at 99% vs 100%.
+// Banker-style mid-point bias (`+denom/2`) avoids systematic flooring
+// at 99% vs 100% when integer-dividing.
 fn remaining_pct(context_window: u32, used: u32) -> u8 {
     let remaining = context_window.saturating_sub(used);
     let denom = context_window as u64;
