@@ -2,9 +2,7 @@ use crate::seed::grid_types::{SeedEncoder, SeedInput, SeedValueGrid};
 use crate::seed::utils::{apply_structural_noise, hilbert_index_to_xy, normalize_grid};
 use crate::seed::view_modes::SeedEncoderId;
 
-use super::structural::{
-    byte_category_value, seed_highlight_bytes, seed_highlight_to_value, seed_parse,
-};
+use super::ast_features::{compute_ast_features, RoleBand};
 
 pub(crate) struct TokenSpectrumEncoder;
 
@@ -18,29 +16,20 @@ impl SeedEncoder for TokenSpectrumEncoder {
         let size = 1usize << order;
         let total = size * size;
         let mut grid = SeedValueGrid::new(size, size);
-        let bytes = input.text.as_bytes();
 
-        if bytes.is_empty() {
+        // One value per AST node, never per source byte. The old per-byte
+        // fan-out scaled with identifier length / comment volume, so longer
+        // names or extra comments shifted the chunk boundaries and moved
+        // every cell. With one value per node, the projection is identifier-
+        // and comment-invariant.
+        let Some(features) = compute_ast_features(input.text, input.file_path) else {
             return grid;
-        }
-
-        // Per-byte values from tree-sitter highlight groups (or fallback),
-        // filtering whitespace so only meaningful tokens fill the grid.
-        let values: Vec<u8> = match seed_parse(input.text, input.file_path) {
-            Some((tree, lang)) => {
-                let groups = seed_highlight_bytes(input.text, lang, &tree);
-                groups
-                    .iter()
-                    .filter(|g| g.is_some())
-                    .map(|g| seed_highlight_to_value(*g))
-                    .collect()
-            }
-            None => bytes
-                .iter()
-                .filter(|&&b| !matches!(b, b'\n' | b'\r' | b'\t' | b' '))
-                .map(|&b| byte_category_value(b))
-                .collect(),
         };
+        let values: Vec<u8> = features
+            .nodes
+            .iter()
+            .map(|node| role_band_to_value(node.role_band))
+            .collect();
 
         if values.is_empty() {
             return grid;
@@ -60,8 +49,25 @@ impl SeedEncoder for TokenSpectrumEncoder {
         }
 
         normalize_grid(&mut grid);
-        apply_structural_noise(&mut grid, size, seed_nonce, bytes, variant);
+        apply_structural_noise(&mut grid, size, seed_nonce, features.feature_hash, variant);
 
         grid
+    }
+}
+
+// Map the 7 semantic bands onto contiguous 0-255 slices. The exact band
+// values are arbitrary — the encoder's behaviour comes from the *spread*
+// of values across grid chunks, not from any particular numeric meaning.
+// Picked at ~32-unit intervals so each band lands in a distinct quadrant
+// of the dynamic range, leaving headroom for `normalize_grid` to rescale.
+fn role_band_to_value(band: RoleBand) -> u8 {
+    match band {
+        RoleBand::Declaration => 240,
+        RoleBand::ControlFlow => 200,
+        RoleBand::Expression => 160,
+        RoleBand::Statement => 130,
+        RoleBand::Type => 95,
+        RoleBand::Literal => 60,
+        RoleBand::Other => 25,
     }
 }

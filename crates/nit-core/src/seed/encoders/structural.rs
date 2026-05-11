@@ -9,22 +9,13 @@
 
 use std::path::Path;
 
-use tree_sitter::{Parser, Query, QueryCursor, Tree};
+use tree_sitter::{Parser, Tree};
 
 use crate::seed::grid_types::{SeedEncoder, SeedInput, SeedValueGrid};
 use crate::seed::utils::{apply_structural_noise, hilbert_index_to_xy, normalize_grid};
 use crate::seed::view_modes::SeedEncoderId;
 
-const ROLE_COMMENT: u8 = 0;
-const ROLE_PUNCTUATION: u8 = 1;
-const ROLE_OPERATOR: u8 = 2;
-const ROLE_KEYWORD: u8 = 3;
-const ROLE_VARIABLE: u8 = 4;
-const ROLE_TYPE: u8 = 5;
-const ROLE_STRING: u8 = 6;
-const ROLE_FUNCTION: u8 = 7;
-const ROLE_MACRO: u8 = 8;
-const ROLE_COUNT: usize = 9;
+use super::ast_features::{compute_ast_features, AstFeatures, ROLE_BAND_COUNT};
 
 const STRUCTURAL_ROLE_NGRAM: usize = 4;
 const STRUCTURAL_ROLE_NGRAM_SEARCH: usize = 256;
@@ -41,16 +32,16 @@ impl SeedEncoder for StructuralEncoder {
         let size = 1usize << order;
         let total = size * size;
         let mut grid = SeedValueGrid::new(size, size);
-        let bytes = input.text.as_bytes();
 
-        if bytes.is_empty() {
+        // No byte fallback — encoders only run when tree-sitter can parse.
+        // The old byte path was the easiest avenue for gaming the score
+        // (every comment / identifier character moved a cell). Returning a
+        // uniform grid here is the right "unknown" signal; callers see
+        // `density = 0` and treat it as no information.
+        let Some(features) = compute_ast_features(input.text, input.file_path) else {
             return grid;
-        }
-
-        let tokens = match seed_parse(input.text, input.file_path) {
-            Some((tree, lang)) => extract_semantic_tokens(input.text, &tree, lang),
-            None => extract_byte_tokens(bytes),
         };
+        let tokens = tokens_from_features(&features);
 
         if tokens.is_empty() {
             return grid;
@@ -76,123 +67,37 @@ impl SeedEncoder for StructuralEncoder {
         }
 
         normalize_grid(&mut grid);
-        apply_structural_noise(&mut grid, size, seed_nonce, bytes, variant);
+        // Hash-based noise driven by the canonical AST features, not raw
+        // source bytes. Same purpose (deterministic per-seed perturbation),
+        // immune to comment / identifier / whitespace changes.
+        apply_structural_noise(&mut grid, size, seed_nonce, features.feature_hash, variant);
         grid
     }
 }
 
-struct SemanticToken {
-    role: u8,
-    depth: u8,
-}
-
-fn highlight_to_role(h: SeedHighlight) -> u8 {
-    match h {
-        SeedHighlight::Comment => ROLE_COMMENT,
-        SeedHighlight::Punctuation => ROLE_PUNCTUATION,
-        SeedHighlight::Operator => ROLE_OPERATOR,
-        SeedHighlight::Keyword => ROLE_KEYWORD,
-        SeedHighlight::Variable => ROLE_VARIABLE,
-        SeedHighlight::Type => ROLE_TYPE,
-        SeedHighlight::StringLiteral => ROLE_STRING,
-        SeedHighlight::Function => ROLE_FUNCTION,
-        SeedHighlight::Macro => ROLE_MACRO,
-    }
-}
-
-// Whitespace-free sequence of (role, AST depth) pairs. A "token run" is a
-// contiguous span of bytes sharing one highlight group; we collapse each run
-// to a single entry tagged with the maximum AST depth observed within it.
-fn extract_semantic_tokens(text: &str, tree: &Tree, lang: SeedLanguage) -> Vec<SemanticToken> {
-    let groups = seed_highlight_bytes(text, lang, tree);
-    let byte_depths = ast_depth_per_byte(tree, text.len());
-
-    let mut tokens = Vec::with_capacity(text.len() / 4);
-    let mut i = 0;
-    while i < groups.len() {
-        let group = match groups[i] {
-            Some(g) => g,
-            None => {
-                i += 1;
-                continue;
-            }
-        };
-        let start = i;
-        while i < groups.len() && groups[i] == Some(group) {
-            i += 1;
-        }
-        let max_d = byte_depths[start..i].iter().copied().max().unwrap_or(0);
-        tokens.push(SemanticToken {
-            role: highlight_to_role(group),
-            depth: max_d,
-        });
-    }
-    tokens
-}
-
-fn ast_depth_per_byte(tree: &Tree, byte_count: usize) -> Vec<u8> {
-    let mut depths = vec![0u32; byte_count];
-    let mut max_depth = 0u32;
-    let mut stack = vec![(tree.root_node(), 0u32)];
-    while let Some((node, depth)) = stack.pop() {
-        let start = node.start_byte().min(byte_count);
-        let end = node.end_byte().min(byte_count);
-        for d in depths[start..end].iter_mut() {
-            *d = (*d).max(depth);
-        }
-        max_depth = max_depth.max(depth);
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push((child, depth + 1));
-        }
-    }
+/// Convert canonical AST features into the (role, depth) token stream the
+/// Structural encoder's helpers expect. Depth is rescaled to 0-255 to match
+/// the prior behaviour of `ast_depth_per_byte`.
+fn tokens_from_features(features: &AstFeatures) -> Vec<SemanticToken> {
+    let max_depth = features.nodes.iter().map(|n| n.depth).max().unwrap_or(0);
     let scale = if max_depth > 0 {
         255.0 / max_depth as f32
     } else {
         0.0
     };
-    depths
+    features
+        .nodes
         .iter()
-        .map(|&d| (d as f32 * scale).round().min(255.0) as u8)
+        .map(|node| SemanticToken {
+            role: node.role_band.as_u8(),
+            depth: (node.depth as f32 * scale).round().min(255.0) as u8,
+        })
         .collect()
 }
 
-// Fallback for files tree-sitter cannot parse: classify raw bytes by ASCII
-// category, tracking nesting via bracket characters.
-fn extract_byte_tokens(bytes: &[u8]) -> Vec<SemanticToken> {
-    let mut tokens = Vec::with_capacity(bytes.len() / 2);
-    let mut depth: u8 = 0;
-    let mut max_depth: u8 = 0;
-    for &b in bytes {
-        match b {
-            b'\n' | b'\r' | b'\t' | b' ' => continue,
-            b'(' | b'{' | b'[' => {
-                depth = depth.saturating_add(1);
-                max_depth = max_depth.max(depth);
-            }
-            b')' | b'}' | b']' => {
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-        let role = match b {
-            b'a'..=b'z' | b'_' => ROLE_VARIABLE,
-            b'A'..=b'Z' => ROLE_TYPE,
-            b'0'..=b'9' => ROLE_STRING,
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => ROLE_PUNCTUATION,
-            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' => ROLE_OPERATOR,
-            b'"' | b'\'' | b'`' => ROLE_STRING,
-            _ => ROLE_PUNCTUATION,
-        };
-        tokens.push(SemanticToken { role, depth });
-    }
-    if max_depth > 0 {
-        let scale = 255.0 / max_depth as f32;
-        for t in &mut tokens {
-            t.depth = (t.depth as f32 * scale).round().min(255.0) as u8;
-        }
-    }
-    tokens
+struct SemanticToken {
+    role: u8,
+    depth: u8,
 }
 
 fn chunked_token_map(
@@ -215,14 +120,14 @@ fn chunked_token_map(
 
 fn role_diversity(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
     chunked_token_map(tokens, grid_cells, |chunk| {
-        let mut seen = [false; ROLE_COUNT];
+        let mut seen = [false; ROLE_BAND_COUNT];
         for t in chunk {
-            if (t.role as usize) < ROLE_COUNT {
+            if (t.role as usize) < ROLE_BAND_COUNT {
                 seen[t.role as usize] = true;
             }
         }
         let distinct = seen.iter().filter(|&&s| s).count();
-        (distinct as f32 / ROLE_COUNT as f32 * 255.0).min(255.0)
+        (distinct as f32 / ROLE_BAND_COUNT as f32 * 255.0).min(255.0)
     })
 }
 
@@ -235,12 +140,12 @@ fn token_depth_gradient(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32>
 }
 
 fn role_entropy(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
-    let max_entropy = (ROLE_COUNT as f32).log2();
+    let max_entropy = (ROLE_BAND_COUNT as f32).log2();
     chunked_token_map(tokens, grid_cells, |chunk| {
         let n = chunk.len() as f32;
-        let mut freq = [0u32; ROLE_COUNT];
+        let mut freq = [0u32; ROLE_BAND_COUNT];
         for t in chunk {
-            if (t.role as usize) < ROLE_COUNT {
+            if (t.role as usize) < ROLE_BAND_COUNT {
                 freq[t.role as usize] += 1;
             }
         }
@@ -347,24 +252,6 @@ impl SeedLanguage {
             Self::Bash => tree_sitter_bash::language(),
         }
     }
-
-    fn highlights_query(self) -> &'static str {
-        match self {
-            Self::Rust => include_str!("../../../../nit-syntax/queries/rust/highlights.scm"),
-            Self::Python => tree_sitter_python::HIGHLIGHT_QUERY,
-            Self::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
-            Self::TypeScript => tree_sitter_typescript::HIGHLIGHT_QUERY,
-            Self::Markdown => {
-                include_str!("../../../../nit-syntax/queries/markdown/highlights.scm")
-            }
-            Self::Html => tree_sitter_html::HIGHLIGHT_QUERY,
-            Self::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
-            Self::Json => tree_sitter_json::HIGHLIGHT_QUERY,
-            Self::Toml => tree_sitter_toml::HIGHLIGHT_QUERY,
-            Self::Yaml => include_str!("../../../../nit-syntax/queries/yaml/highlights.scm"),
-            Self::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
-        }
-    }
 }
 
 pub(super) fn seed_parse(text: &str, file_path: Option<&Path>) -> Option<(Tree, SeedLanguage)> {
@@ -373,100 +260,6 @@ pub(super) fn seed_parse(text: &str, file_path: Option<&Path>) -> Option<(Tree, 
     parser.set_language(lang.ts_language()).ok()?;
     let tree = parser.parse(text, None)?;
     Some((tree, lang))
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum SeedHighlight {
-    Comment,
-    Punctuation,
-    Operator,
-    Keyword,
-    Variable,
-    Type,
-    StringLiteral,
-    Function,
-    Macro,
-}
-
-pub(super) fn seed_highlight_bytes(
-    text: &str,
-    lang: SeedLanguage,
-    tree: &Tree,
-) -> Vec<Option<SeedHighlight>> {
-    let mut result = vec![None; text.len()];
-    let ts_lang = lang.ts_language();
-    let query_src = lang.highlights_query();
-    let query = match Query::new(ts_lang, query_src) {
-        Ok(q) => q,
-        Err(_) => return result,
-    };
-
-    let groups = map_seed_capture_groups(&query);
-    let mut cursor = QueryCursor::new();
-    let root = tree.root_node();
-    let source = text.as_bytes();
-
-    let mut spans: Vec<(usize, usize, SeedHighlight, usize)> = Vec::new();
-    for m in cursor.matches(&query, root, source) {
-        for capture in m.captures {
-            if let Some(group) = groups.get(capture.index as usize).and_then(|g| *g) {
-                let start = capture.node.start_byte();
-                let end = capture.node.end_byte();
-                if end > start && end <= text.len() {
-                    spans.push((start, end, group, m.pattern_index));
-                }
-            }
-        }
-    }
-
-    spans.sort_by_key(|s| s.3);
-
-    for (start, end, group, _) in spans {
-        for byte in &mut result[start..end] {
-            *byte = Some(group);
-        }
-    }
-
-    result
-}
-
-fn map_seed_capture_groups(query: &Query) -> Vec<Option<SeedHighlight>> {
-    query
-        .capture_names()
-        .iter()
-        .map(|name| {
-            let name = name.as_str();
-            let base = name.split('.').next().unwrap_or(name);
-            match name {
-                "comment" | "comment.documentation" => Some(SeedHighlight::Comment),
-                "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => {
-                    Some(SeedHighlight::Punctuation)
-                }
-                "operator" | "keyword.operator" => Some(SeedHighlight::Operator),
-                "keyword" | "keyword.control" | "label" => Some(SeedHighlight::Keyword),
-                "variable" | "variable.builtin" | "variable.parameter" | "parameter"
-                | "property" => Some(SeedHighlight::Variable),
-                "type" | "type.builtin" | "constructor" | "namespace" => Some(SeedHighlight::Type),
-                "string" | "string.special" | "character" | "number" | "boolean"
-                | "constant.builtin" | "escape" => Some(SeedHighlight::StringLiteral),
-                "function" | "function.macro" | "function.method" | "method" => {
-                    Some(SeedHighlight::Function)
-                }
-                "macro" | "attribute" | "constant" => Some(SeedHighlight::Macro),
-                _ => match base {
-                    "comment" => Some(SeedHighlight::Comment),
-                    "string" => Some(SeedHighlight::StringLiteral),
-                    "keyword" => Some(SeedHighlight::Keyword),
-                    "type" => Some(SeedHighlight::Type),
-                    "function" => Some(SeedHighlight::Function),
-                    "variable" => Some(SeedHighlight::Variable),
-                    "punctuation" => Some(SeedHighlight::Punctuation),
-                    "constant" => Some(SeedHighlight::Macro),
-                    _ => None,
-                },
-            }
-        })
-        .collect()
 }
 
 // Deterministic semantic mapping of an AST node kind to a 0-255 weight.
@@ -523,38 +316,4 @@ pub(super) fn ast_node_class(kind: &str) -> u8 {
         return 50;
     }
     100
-}
-
-// Bands chosen so each highlight group maps to a contiguous, non-overlapping
-// 25-30-unit slice of the 0-255 range. Whitespace gets the lowest band.
-pub(super) fn seed_highlight_to_value(group: Option<SeedHighlight>) -> u8 {
-    match group {
-        None => 10,
-        Some(g) => match g {
-            SeedHighlight::Comment => 35,
-            SeedHighlight::Punctuation => 65,
-            SeedHighlight::Operator => 95,
-            SeedHighlight::Keyword => 125,
-            SeedHighlight::Variable => 153,
-            SeedHighlight::Type => 178,
-            SeedHighlight::StringLiteral => 203,
-            SeedHighlight::Function => 228,
-            SeedHighlight::Macro => 248,
-        },
-    }
-}
-
-// Byte-category fallback for TokenSpectrum when tree-sitter is unavailable.
-pub(super) fn byte_category_value(b: u8) -> u8 {
-    match b {
-        b'\n' | b'\r' | b'\t' | b' ' => 10,
-        b'/' => 35,
-        b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => 65,
-        b'+' | b'-' | b'*' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' | b'^' | b'%' => 95,
-        b'"' | b'\'' | b'`' => 203,
-        b'0'..=b'9' => 203,
-        b'A'..=b'Z' => 178,
-        b'a'..=b'z' | b'_' => 153,
-        _ => 65,
-    }
 }

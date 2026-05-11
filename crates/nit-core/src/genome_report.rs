@@ -254,7 +254,7 @@ fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u3
         return small_file_report(file_path, significant_lines);
     }
 
-    let grid_size = simulation::adaptive_grid_size(text.len());
+    let grid_size = simulation::adaptive_grid_size(significant_lines);
     let encoder_scores = run_encoders(text, file_path, grid_size, max_generations);
     let cross_encoder_consistency = simulation::compute_consistency(&encoder_scores);
 

@@ -222,6 +222,414 @@ fn unsupported_language_fallback_still_produces_output() {
     }
 }
 
+/// Behaviour-equivalent rewrites the agents can use to game the genome
+/// score: comments, whitespace, identifier renames. The class-level fix
+/// (encode AST features only, no source-text bytes) makes all of these
+/// produce byte-identical encoder grids. These tests are the invariant —
+/// they fail today and must pass once the AST-only refactor lands.
+mod invariance {
+    use super::*;
+
+    fn path() -> Option<&'static Path> {
+        Some(Path::new("test.rs"))
+    }
+
+    const WITH_COMMENTS: &str = r#"
+// Top-level doc summary explaining what this module does
+fn compute(x: i32) -> i32 {
+    // Step 1: square the input
+    let squared = x * x;
+    /* Step 2: add a constant offset before returning.
+       Multi-line block comment for emphasis. */
+    let result = squared + 42;
+    result
+}
+
+// Helper used by callers in the integration tests
+fn helper(a: &str) -> usize {
+    a.len() // inline trailing comment
+}
+"#;
+
+    const NO_COMMENTS: &str = r#"
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+fn helper(a: &str) -> usize {
+    a.len()
+}
+"#;
+
+    const NAMES_A: &str = r#"
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+fn helper(a: &str) -> usize {
+    a.len()
+}
+"#;
+
+    const NAMES_B: &str = r#"
+fn alpha(q: i32) -> i32 {
+    let beta = q * q;
+    let gamma = beta + 42;
+    gamma
+}
+
+fn delta(epsilon: &str) -> usize {
+    epsilon.len()
+}
+"#;
+
+    const NORMAL_WHITESPACE: &str = r#"
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+fn helper(a: &str) -> usize {
+    a.len()
+}
+"#;
+
+    // Same AST, different whitespace. Extra blank lines, indentation
+    // shifted from 4 spaces to 2 spaces, padding spaces around operators.
+    const SHIFTED_WHITESPACE: &str = "
+fn compute( x : i32 ) -> i32 {
+
+  let squared = x * x ;
+
+
+  let result = squared + 42 ;
+  result
+}
+
+
+fn helper( a : &str ) -> usize {
+  a . len()
+}
+";
+
+    fn grid_diff_count(a: &SeedValueGrid, b: &SeedValueGrid) -> usize {
+        assert_eq!(a.width(), b.width());
+        assert_eq!(a.height(), b.height());
+        a.data()
+            .iter()
+            .zip(b.data().iter())
+            .filter(|(x, y)| x != y)
+            .count()
+    }
+
+    fn encode_all(text_a: &str, text_b: &str) -> Vec<(SeedValueGrid, SeedValueGrid, &'static str)> {
+        // Drive the *full* `encode_seed` pipeline — same path as
+        // `compute_genome_report` and the running TUI. The earlier
+        // version of these tests called each encoder's `.encode()`
+        // directly and bypassed `apply_jitter`, which silently let a
+        // byte-hash leak survive in production while passing here.
+        let in_a = make_input(text_a, path());
+        let in_b = make_input(text_b, path());
+        let params = SeedParams::default();
+        let ids = [
+            (SeedEncoderId::TokenSpectrum, "TokenSpectrum"),
+            (SeedEncoderId::AstStructure, "AstStructure"),
+            (SeedEncoderId::ComplexityField, "ComplexityField"),
+            (SeedEncoderId::Structural, "Structural"),
+        ];
+        ids.into_iter()
+            .map(|(id, label)| {
+                let a = encode_seed(&in_a, id, &params, 0, 0, GRID_SIDE, GRID_SIDE).base_values;
+                let b = encode_seed(&in_b, id, &params, 0, 0, GRID_SIDE, GRID_SIDE).base_values;
+                (a, b, label)
+            })
+            .collect()
+    }
+
+    fn assert_all_identical(grids: Vec<(SeedValueGrid, SeedValueGrid, &'static str)>, kind: &str) {
+        let mut failures: Vec<String> = Vec::new();
+        for (a, b, label) in grids {
+            let diffs = grid_diff_count(&a, &b);
+            if diffs > 0 {
+                failures.push(format!("{label}={diffs}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{kind}: encoder grids differ for {} — behaviour-equivalent source should yield identical AST features",
+            failures.join(", "),
+        );
+    }
+
+    #[test]
+    fn comment_only_diff_yields_identical_grid() {
+        assert_all_identical(encode_all(WITH_COMMENTS, NO_COMMENTS), "comment-only diff");
+    }
+
+    // End-to-end invariance via `compute_genome_report` — the actual entry
+    // point the TUI / agents hit. Catches leaks anywhere downstream of the
+    // encoders (adaptive_grid_size, jitter seed, parsimony-via-tier, etc.)
+    // that per-encoder tests would miss. If an agent adding comments to a
+    // file ever changes the tier or generations, this test fails first.
+    #[test]
+    fn comment_only_diff_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(WITH_COMMENTS, p);
+        let b = compute_genome_report(NO_COMMENTS, p);
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "comment-only edit must not move tier / generations / grid_size",
+        );
+    }
+
+    #[test]
+    fn identifier_rename_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(NAMES_A, p);
+        let b = compute_genome_report(NAMES_B, p);
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "identifier-only rename must not move tier / generations / grid_size",
+        );
+    }
+
+    // Three more behaviour-equivalent levers an agent could reach for after
+    // the comment / rename / whitespace path was closed:
+    //
+    // - attributes — `#[derive(...)]`, `#[allow(...)]` adds AST nodes
+    //   without changing behaviour. The fix: skip attribute nodes the same
+    //   way we skip comments.
+    // - macro arguments — `dbg!("anything you want here")` is one
+    //   `macro_invocation` but the token-tree inside it expands to many
+    //   AST nodes. The fix: collapse macro_invocations to one feature
+    //   regardless of what's in the args.
+    // - top-level item order — swapping two `fn` items is structurally
+    //   equivalent in Rust but currently changes the walk order. The fix:
+    //   sort top-level items by their structural signature.
+    //
+    // These tests fail today; closing the levers makes them pass.
+
+    const NO_ATTRIBUTES: &str = r#"
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+struct Wrapper {
+    inner: i32,
+}
+"#;
+
+    const WITH_ATTRIBUTES: &str = r#"
+#[inline]
+#[allow(dead_code)]
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Wrapper {
+    inner: i32,
+}
+"#;
+
+    const MACRO_SHORT: &str = r#"
+fn report() {
+    println!("ok");
+    dbg!();
+}
+"#;
+
+    const MACRO_LONG: &str = r#"
+fn report() {
+    println!("a much longer string that an agent could swell to perturb the seed without changing what the program does at all");
+    dbg!("padding", 1, 2, 3, vec![1, 2, 3, 4, 5]);
+}
+"#;
+
+    const FUNCS_ORDER_A: &str = r#"
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+
+fn helper(a: &str) -> usize {
+    a.len()
+}
+"#;
+
+    const FUNCS_ORDER_B: &str = r#"
+fn helper(a: &str) -> usize {
+    a.len()
+}
+
+fn compute(x: i32) -> i32 {
+    let squared = x * x;
+    let result = squared + 42;
+    result
+}
+"#;
+
+    #[test]
+    fn attribute_addition_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(NO_ATTRIBUTES, p);
+        let b = compute_genome_report(WITH_ATTRIBUTES, p);
+        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "adding #[derive] / #[inline] / #[allow] must not move tier / generations / grid_size",
+        );
+    }
+
+    #[test]
+    fn macro_argument_change_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(MACRO_SHORT, p);
+        let b = compute_genome_report(MACRO_LONG, p);
+        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "stuffing the args of `println!` / `dbg!` must not move tier / generations / grid_size",
+        );
+    }
+
+    // Strictest level: assert the encoder grids themselves are byte-
+    // identical. Catches *any* drift even if the GoL simulation would have
+    // averaged the difference out before reaching tier/generations.
+    #[test]
+    fn attribute_addition_yields_identical_grid() {
+        assert_all_identical(
+            encode_all(NO_ATTRIBUTES, WITH_ATTRIBUTES),
+            "attribute addition",
+        );
+    }
+
+    #[test]
+    fn macro_argument_change_yields_identical_grid() {
+        assert_all_identical(encode_all(MACRO_SHORT, MACRO_LONG), "macro argument change");
+    }
+
+    #[test]
+    fn function_reorder_yields_identical_grid() {
+        assert_all_identical(encode_all(FUNCS_ORDER_A, FUNCS_ORDER_B), "function reorder");
+    }
+
+    #[test]
+    fn function_reorder_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(FUNCS_ORDER_A, p);
+        let b = compute_genome_report(FUNCS_ORDER_B, p);
+        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "swapping two top-level fn items must not move tier / generations / grid_size",
+        );
+    }
+
+    #[test]
+    fn whitespace_only_diff_yields_identical_genome_report() {
+        use crate::compute_genome_report;
+        let p = std::path::Path::new("test.rs");
+        let a = compute_genome_report(NORMAL_WHITESPACE, p);
+        let b = compute_genome_report(SHIFTED_WHITESPACE, p);
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        assert_eq!(
+            (a.tier, &gens_a, a.grid_size),
+            (b.tier, &gens_b, b.grid_size),
+            "whitespace-only reformatting must not move tier / generations / grid_size",
+        );
+    }
+
+    // Lower-level invariant: the canonical AST feature vector (and its
+    // hash) must be identical across all three behaviour-equivalent
+    // rewrites. `significant_rows` is allowed to differ — it's positional
+    // metadata reflecting which source rows host significant nodes, and
+    // is intentionally excluded from the hash for that reason.
+    #[test]
+    fn behavior_equivalent_rewrites_yield_identical_feature_hash() {
+        use super::super::encoders::ast_features::compute_ast_features;
+        let cases = [
+            (WITH_COMMENTS, NO_COMMENTS, "comments"),
+            (NAMES_A, NAMES_B, "identifier rename"),
+            (NORMAL_WHITESPACE, SHIFTED_WHITESPACE, "whitespace"),
+        ];
+        for (a_text, b_text, label) in cases {
+            let a = compute_ast_features(a_text, path()).expect("parse A");
+            let b = compute_ast_features(b_text, path()).expect("parse B");
+            assert_eq!(
+                (a.feature_hash, a.nodes.len()),
+                (b.feature_hash, b.nodes.len()),
+                "{label}: feature_hash + node count must match"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_rename_yields_identical_grid() {
+        assert_all_identical(encode_all(NAMES_A, NAMES_B), "identifier rename");
+    }
+
+    #[test]
+    fn whitespace_only_diff_yields_identical_grid() {
+        assert_all_identical(
+            encode_all(NORMAL_WHITESPACE, SHIFTED_WHITESPACE),
+            "whitespace-only diff",
+        );
+    }
+}
+
 #[test]
 fn seed_encoder_id_from_str_roundtrip() {
     let ids = [

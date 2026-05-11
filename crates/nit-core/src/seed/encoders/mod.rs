@@ -8,6 +8,8 @@ use super::utils::{
 use super::view_modes::SeedEncoderId;
 
 mod ascii;
+pub(super) mod ast_features;
+use ast_features::compute_ast_features;
 mod ast_structure;
 mod complexity;
 mod hilbert;
@@ -33,7 +35,17 @@ pub fn encode_seed(
     target_width: usize,
     target_height: usize,
 ) -> EncodedSeed {
-    let input_hash = stable_hash_bytes(input.text.as_bytes());
+    // `apply_jitter` below uses this hash to perturb the post-encoder grid.
+    // The original `stable_hash_bytes(input.text.as_bytes())` was the last
+    // source-byte leak in the pipeline: even though the encoders themselves
+    // are AST-only now, jitter keyed off raw bytes still moved every cell
+    // when an agent added a comment / renamed an identifier / reflowed
+    // whitespace. Prefer the canonical AST feature hash. Fall back to the
+    // byte hash only when tree-sitter can't parse (unknown extension /
+    // plain text) — in that mode we can't do better.
+    let input_hash = compute_ast_features(input.text, input.file_path)
+        .map(|f| f.feature_hash)
+        .unwrap_or_else(|| stable_hash_bytes(input.text.as_bytes()));
     let base_values = encode_with(encoder, input, seed_nonce, variant);
     let mut values = base_values.clone();
     apply_jitter(

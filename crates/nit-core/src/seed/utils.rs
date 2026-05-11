@@ -1,5 +1,4 @@
 use nit_gol::Grid;
-use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::rng::SplitMix64;
 
 use super::grid_types::{Grid2D, SeedBits, SeedValueGrid};
@@ -300,18 +299,21 @@ pub(super) fn normalize_grid(grid: &mut SeedValueGrid) {
     }
 }
 
-// Tiny per-cell perturbation so that two encodings of structurally equivalent
-// inputs don't collapse to the exact same grid.
+// Tiny per-cell perturbation so two encodings of structurally equivalent
+// inputs don't collapse to the exact same grid. Driven by an opaque
+// `structure_hash` (callers pass `AstFeatures::feature_hash` — never raw
+// source bytes, since byte hashing would re-introduce the comment /
+// identifier / whitespace leak the canonical features were designed to
+// close).
 pub(super) fn apply_structural_noise(
     grid: &mut SeedValueGrid,
     size: usize,
     seed_nonce: u64,
-    bytes: &[u8],
+    structure_hash: u64,
     variant: u8,
 ) {
     let total = size * size;
-    let mut rng =
-        SplitMix64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x57ac_u64);
+    let mut rng = SplitMix64::new(seed_nonce ^ structure_hash ^ (variant as u64) ^ 0x57ac_u64);
     for idx in 0..total {
         let x = idx % size;
         let y = idx / size;
@@ -319,16 +321,6 @@ pub(super) fn apply_structural_noise(
         let noise = ((rng.next_u64() >> 56) as i16).wrapping_sub(128) / 10;
         grid.set(x, y, (base + noise).clamp(0, 255) as u8);
     }
-}
-
-pub(super) fn compute_line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0usize];
-    for (idx, b) in text.bytes().enumerate() {
-        if b == b'\n' {
-            starts.push(idx + 1);
-        }
-    }
-    starts
 }
 
 pub(super) fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {

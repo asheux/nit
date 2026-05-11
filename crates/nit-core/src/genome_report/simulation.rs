@@ -15,14 +15,22 @@ pub(super) const SOFT_BOTTLENECK_MAX_LIFT: u32 = 200;
 
 /// Adaptive grid sizing rule: small files get a small grid so structure isn't
 /// drowned in empty cells; large files get more room so distinct components
-/// don't merge. Thresholds are tuned against the median crate file size
-/// (~3 KB) and the long tail (>10 KB).
+/// don't merge.
+///
+/// Thresholds are expressed in *significant code lines*, not byte length.
+/// Byte length is directly gameable — adding a few comment lines lengthens
+/// the file and can push it across a threshold, swapping the entire grid
+/// (32 → 48 → 64) under the agent without changing any code. Significant
+/// lines (comment-only and blank lines filtered out by
+/// `count_significant_lines`) approximate "real code size" and don't shift
+/// when an agent sprinkles comments. Calibration follows the prior byte
+/// thresholds at ~80 bytes/line: 2 KB ≈ 25 lines, 10 KB ≈ 128 lines.
 struct GridConfig {
     grid_min: usize,
     grid_mid: usize,
     grid_max: usize,
-    small_file_bytes: usize,
-    medium_file_bytes: usize,
+    small_file_lines: usize,
+    medium_file_lines: usize,
 }
 
 impl GridConfig {
@@ -31,16 +39,16 @@ impl GridConfig {
             grid_min: 32,
             grid_mid: 48,
             grid_max: 64,
-            small_file_bytes: 2048,
-            medium_file_bytes: 10240,
+            small_file_lines: 25,
+            medium_file_lines: 128,
         }
     }
 
-    const fn size_for(&self, file_bytes: usize) -> usize {
-        if file_bytes <= self.small_file_bytes {
+    const fn size_for(&self, significant_lines: usize) -> usize {
+        if significant_lines <= self.small_file_lines {
             return self.grid_min;
         }
-        if file_bytes <= self.medium_file_bytes {
+        if significant_lines <= self.medium_file_lines {
             return self.grid_mid;
         }
         self.grid_max
@@ -77,8 +85,8 @@ pub(super) const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
     SeedEncoderId::Structural,
 ];
 
-pub(super) fn adaptive_grid_size(file_bytes: usize) -> usize {
-    GRID.size_for(file_bytes)
+pub(super) fn adaptive_grid_size(significant_lines: usize) -> usize {
+    GRID.size_for(significant_lines)
 }
 
 enum StepOutcome {
