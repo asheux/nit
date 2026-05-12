@@ -4038,6 +4038,80 @@ fn gate_pass_does_not_retry() {
     assert_eq!(run.gate_retry_count, 0);
 }
 
+// Pins the synth-wins-race fix that left the breather stuck on
+// `Synthesizing (genome review) …` after the run was already terminal.
+fn make_synth_run_with_pending_review(mission_id: &str) -> SwarmRun {
+    let (_tx, rx) = std::sync::mpsc::channel::<String>();
+    SwarmRun {
+        mission_id: mission_id.into(),
+        verifier_agent_id: Some("verify".into()),
+        agent_ids: vec!["planner".into(), "verify".into()],
+        stage: SwarmStage::Synthesizing,
+        genome_review_pending: Some(GenomeReviewPending {
+            rx,
+            reviewer_id: "verify".into(),
+        }),
+        ..make_run_with_tasks(SwarmTemplate::Lab, Vec::new())
+    }
+}
+
+fn assert_synth_terminal_drops_pending_review(mission_id: &str, event: AgentBusEvent) {
+    let mut state = make_state_for_retry();
+    let run = make_synth_run_with_pending_review(mission_id);
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert(mission_id.into(), run);
+
+    assert_eq!(runtime.swarm_stage_hint(mission_id), Some("genome review"));
+    let _ = runtime.handle_event_outcome(&mut state, &event);
+    assert!(!runtime.runs.contains_key(mission_id));
+    assert_eq!(runtime.swarm_stage_hint(mission_id), None);
+
+    let saw_skip_notice = state.agents.messages.iter().any(|msg| {
+        msg.mission_id.as_deref() == Some(mission_id)
+            && msg.text.contains("Genome review skipped (synth completed first)")
+    });
+    assert!(
+        saw_skip_notice,
+        "expected 'Genome review skipped' breadcrumb on synth-terminal path; messages = {:#?}",
+        state.agents.messages
+    );
+}
+
+macro_rules! synth_terminal_test {
+    ($name:ident, $mid:expr, $event:expr) => {
+        #[test]
+        fn $name() {
+            let mission_id = $mid;
+            let event = $event(mission_id);
+            assert_synth_terminal_drops_pending_review(mission_id, event);
+        }
+    };
+}
+
+synth_terminal_test!(
+    synth_completion_drops_pending_genome_review_and_clears_stage_hint,
+    "mis-synth-race",
+    |mid: &str| AgentBusEvent::TurnCompleted {
+        agent_id: "planner".into(),
+        mission_id: Some(mid.into()),
+        thread_id: None,
+        token_count: None,
+        message: "synth report body".into(),
+    }
+);
+
+synth_terminal_test!(
+    synth_failure_drops_pending_genome_review_and_clears_stage_hint,
+    "mis-synth-fail-race",
+    |mid: &str| AgentBusEvent::TurnFailed {
+        agent_id: "planner".into(),
+        mission_id: Some(mid.into()),
+        thread_id: None,
+        token_count: None,
+        message: "synth crashed".into(),
+    }
+);
+
 fn make_run_with_tasks(template: SwarmTemplate, tasks: Vec<SwarmTask>) -> SwarmRun {
     SwarmRun {
         mission_id: "mis-test".into(),
