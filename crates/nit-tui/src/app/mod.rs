@@ -128,4 +128,5 @@ pub(crate) use ui_selection::*;
 pub(crate) use vitals_log::*;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

@@ -392,3 +392,7 @@ pub fn forget_report(state: &mut AppState, path: &Path) {
 #[cfg(test)]
 #[path = "tests/workspace_scan.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/workspace_scan_events.rs"]
+mod tests_events;

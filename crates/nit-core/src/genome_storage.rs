@@ -16,6 +16,13 @@ mod schema;
 pub use cache::{delete_genome_report, load_genome_reports, persist_genome_report};
 pub use migrations::gc_genome_cache;
 
+// `#[path]` already disambiguates between tests/genome_storage.rs and
+// tests/genome_storage/mod.rs — the test mod always loads the flat parent
+// file.
 #[cfg(test)]
 #[path = "tests/genome_storage.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/genome_storage_gc.rs"]
+mod tests_gc;

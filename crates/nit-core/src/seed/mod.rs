@@ -4,7 +4,7 @@
 //! deterministic `EncodedSeed` containing the value grid, packed bits, and
 //! resulting GoL `Grid` plus stats.
 
-mod encoders;
+pub(crate) mod encoders;
 mod grid_types;
 mod params;
 mod utils;

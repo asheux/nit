@@ -15,6 +15,8 @@ use nit_gol::Rule;
 use crate::config::GolSeedSource;
 use crate::seed::{encode_seed, SeedEncoderId, SeedInput, SeedParams};
 
+mod format;
+mod function_scores;
 mod instructions;
 mod outlier;
 mod parsimony;
@@ -22,6 +24,8 @@ mod recommendations;
 mod simulation;
 mod source_scan;
 
+pub use format::{format_genome_diff, format_genome_report};
+use function_scores::{compute_function_scores, surface_top_offender_recommendation};
 pub use instructions::GENOME_AGENT_INSTRUCTIONS;
 pub use recommendations::generate_recommendations;
 
@@ -47,6 +51,33 @@ pub struct GenomeReport {
     /// Parsimony analysis — detects over-engineered code that games genome scores.
     #[serde(default)]
     pub parsimony: ParsimonyInfo,
+    /// Per-function structural scores, sorted by `cognitive` descending —
+    /// the worst-offender first. Surfaces the *specific* function an
+    /// agent or operator should refactor, instead of the file-level
+    /// average that today's `tier` averages away. Empty when no
+    /// function-like nodes were found (data files, declarations-only
+    /// modules).
+    #[serde(default)]
+    pub function_scores: Vec<FunctionScore>,
+}
+
+/// Per-function structural metrics surfaced by the agent-retry prompt:
+/// where the function lives, its size, cognitive complexity, peak depth.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FunctionScore {
+    pub kind: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub node_count: u32,
+    pub max_depth: u8,
+    /// Cognitive complexity (Sonar): sum of `1 + cf_depth` over every
+    /// control-flow node. Penalises nested ladders that plain cyclomatic
+    /// treats as linear branch count.
+    pub cognitive: u32,
+    /// Plain cyclomatic equivalent — count of `RoleBand::ControlFlow`
+    /// nodes inside the function. Retained alongside `cognitive` so
+    /// callers can compare the two.
+    pub cyclomatic: u32,
 }
 
 /// Parsimony analysis: measures whether code structure is proportional to purpose.
@@ -249,20 +280,32 @@ pub fn compute_genome_report_fast(text: &str, file_path: &Path) -> GenomeReport 
 }
 
 fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u32) -> GenomeReport {
-    let significant_lines = count_significant_lines(text);
+    let significant_lines = count_significant_lines(text, Some(file_path));
+    // Parsimony runs FIRST regardless of file size — its job is to catch
+    // comment-bloat / duplicate-doc patterns, and those can exist in
+    // small files too. Auto-passing a small file shouldn't silently
+    // suppress the bloat detector (an agent could dump a file full of
+    // duplicate `///` lines and a small body, and we'd miss it).
+    let parsimony_info = parsimony::compute_parsimony(text, file_path, significant_lines);
+    let function_scores = compute_function_scores(text, file_path);
     if significant_lines < GENOME_MIN_SIGNIFICANT_LINES {
-        return small_file_report(file_path, significant_lines);
+        return small_file_report(
+            file_path,
+            significant_lines,
+            parsimony_info,
+            function_scores,
+        );
     }
 
     let grid_size = simulation::adaptive_grid_size(significant_lines);
     let encoder_scores = run_encoders(text, file_path, grid_size, max_generations);
     let cross_encoder_consistency = simulation::compute_consistency(&encoder_scores);
 
-    let parsimony_info = parsimony::compute_parsimony(text, file_path, significant_lines);
     let tier = compute_tier(&encoder_scores, parsimony_info.bloat_detected);
 
     let mut recommendations = generate_recommendations(text, file_path, &encoder_scores);
     parsimony::generate_parsimony_recommendations(&parsimony_info, &mut recommendations);
+    surface_top_offender_recommendation(&function_scores, &mut recommendations);
 
     GenomeReport {
         file_path: file_path.to_path_buf(),
@@ -273,10 +316,20 @@ fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u3
         timestamp_ms: now_millis(),
         grid_size,
         parsimony: parsimony_info,
+        function_scores,
     }
 }
 
-fn count_significant_lines(text: &str) -> usize {
+fn count_significant_lines(text: &str, file_path: Option<&Path>) -> usize {
+    // Prefer AST-derived row count when tree-sitter can parse — sprinkling
+    // attributes / docs doesn't move this count, so the small-file
+    // threshold can't be gamed by padding. The regex fallback only runs
+    // on unparseable files (unknown extension / missing grammar).
+    if let Some(features) =
+        crate::seed::encoders::ast_features::compute_ast_features(text, file_path)
+    {
+        return features.significant_rows;
+    }
     text.lines()
         .filter(|line| {
             let trimmed = line.trim();
@@ -347,23 +400,43 @@ fn compute_tier(scores: &[EncoderScore], bloat_detected: bool) -> GenomeTier {
     }
 }
 
-fn small_file_report(file_path: &Path, significant_lines: usize) -> GenomeReport {
+fn small_file_report(
+    file_path: &Path,
+    significant_lines: usize,
+    parsimony: ParsimonyInfo,
+    function_scores: Vec<FunctionScore>,
+) -> GenomeReport {
+    // Bloat (e.g., duplicate doc comments) still caps the auto-pass tier
+    // even for small files — otherwise stuffing a 10-line file with
+    // duplicate `///` blocks would silently slip through.
+    let tier = if parsimony.bloat_detected {
+        GenomeTier::Methuselah
+    } else {
+        GenomeTier::Spaceship
+    };
+    let mut recommendations = vec![GenomeRecommendation {
+        metric: "file_size".into(),
+        severity: RecommendationSeverity::Info,
+        message: format!(
+            "Trivial file ({significant_lines} significant lines < {GENOME_MIN_SIGNIFICANT_LINES}): auto-pass. Do not pad small files to boost scores."
+        ),
+        location: None,
+    }];
+    // Surface parsimony-derived recommendations (duplicate comments,
+    // comment-bloat ratio, over-split functions). The encoder path won't
+    // run on small files, but the parsimony detector did — its findings
+    // should still reach the operator.
+    parsimony::generate_parsimony_recommendations(&parsimony, &mut recommendations);
     GenomeReport {
         file_path: file_path.to_path_buf(),
         encoder_scores: Vec::new(),
         cross_encoder_consistency: 1.0,
-        tier: GenomeTier::Spaceship,
-        recommendations: vec![GenomeRecommendation {
-            metric: "file_size".into(),
-            severity: RecommendationSeverity::Info,
-            message: format!(
-                "Trivial file ({significant_lines} significant lines < {GENOME_MIN_SIGNIFICANT_LINES}): auto-pass. Do not pad small files to boost scores."
-            ),
-            location: None,
-        }],
+        tier,
+        recommendations,
         timestamp_ms: now_millis(),
         grid_size: 0,
-        parsimony: ParsimonyInfo::default(),
+        parsimony,
+        function_scores,
     }
 }
 
@@ -416,135 +489,6 @@ fn diff_encoder(before: &GenomeReport, after_score: &EncoderScore) -> EncoderDif
     }
 }
 
-pub fn format_genome_report(report: &GenomeReport) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("[genome report] {}\n", report.file_path.display()));
-    out.push_str(&format!(
-        "Quality: {} (tier {}, consistency {:.2})\n",
-        report.quality_level(),
-        report.tier.numeral(),
-        report.cross_encoder_consistency
-    ));
-    out.push_str(&format!(
-        "Tier: {} ({}) [grid {}x{}]\n",
-        report.tier.numeral(),
-        report.tier.name(),
-        report.grid_size,
-        report.grid_size,
-    ));
-    out.push_str(&format!(
-        "Cross-encoder consistency: {:.2}\n",
-        report.cross_encoder_consistency
-    ));
-    if let Some(line) = format_parsimony_line(&report.parsimony) {
-        out.push_str(&line);
-    }
-    out.push('\n');
-
-    out.push_str("Encoder scores:\n");
-    for score in &report.encoder_scores {
-        out.push_str(&format_encoder_block(score));
-    }
-
-    if !report.recommendations.is_empty() {
-        out.push_str("\nRecommendations:\n");
-        for rec in &report.recommendations {
-            out.push_str(&format!(
-                "  [{}] {}\n",
-                severity_label(rec.severity),
-                rec.message
-            ));
-        }
-    }
-    out
-}
-
-fn format_parsimony_line(p: &ParsimonyInfo) -> Option<String> {
-    if p.fn_count == 0 && p.comment_ratio == 0.0 {
-        return None;
-    }
-    let bloat_tag = if p.bloat_detected {
-        " [BLOAT — tier capped]"
-    } else {
-        ""
-    };
-    Some(format!(
-        "Parsimony: {} fns, avg {:.1} lines/fn, {:.0}% tiny, {:.0}% comments{}\n",
-        p.fn_count,
-        p.avg_fn_body_lines,
-        p.tiny_fn_fraction * 100.0,
-        p.comment_ratio * 100.0,
-        bloat_tag,
-    ))
-}
-
-fn format_encoder_block(score: &EncoderScore) -> String {
-    let cycle = match score.cycle_period {
-        Some(p) => format!(", cycle={p}"),
-        None => String::new(),
-    };
-    format!(
-        "  {}: density={:.2}, components={}, generations={}, peak_pop={}, growth={}{}\n",
-        score.encoder.label(),
-        score.density,
-        score.components,
-        score.generations_survived,
-        score.peak_population,
-        score.growth_class.label(),
-        cycle,
-    )
-}
-
-fn severity_label(severity: RecommendationSeverity) -> &'static str {
-    match severity {
-        RecommendationSeverity::Critical => "CRITICAL",
-        RecommendationSeverity::Warning => "WARNING",
-        RecommendationSeverity::Info => "INFO",
-    }
-}
-
-pub fn format_genome_diff(diff: &GenomeDiff) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("[genome diff] {}\n", diff.file_path.display()));
-
-    let tier_arrow = match diff.tier_after.cmp(&diff.tier_before) {
-        std::cmp::Ordering::Greater => "upgraded",
-        std::cmp::Ordering::Less => "regressed",
-        std::cmp::Ordering::Equal => "unchanged",
-    };
-    out.push_str(&format!(
-        "Tier: {} -> {} ({})\n",
-        diff.tier_before.numeral(),
-        diff.tier_after.numeral(),
-        tier_arrow,
-    ));
-
-    let consistency_delta = diff.consistency_after - diff.consistency_before;
-    out.push_str(&format!(
-        "Consistency: {:.2} -> {:.2} ({:+.2})\n\n",
-        diff.consistency_before, diff.consistency_after, consistency_delta,
-    ));
-
-    out.push_str(&format!(
-        "{:<20} {:>10} {:>10} {:>10}\n",
-        "Encoder", "Density", "Components", "Generations"
-    ));
-    for ed in &diff.encoder_diffs {
-        out.push_str(&format_delta_line(ed));
-    }
-    out
-}
-
-fn format_delta_line(ed: &EncoderDiff) -> String {
-    format!(
-        "{:<20} {:>+10.2} {:>+10} {:>+10}\n",
-        ed.encoder.label(),
-        ed.density_delta,
-        ed.components_delta,
-        ed.generations_delta,
-    )
-}
-
 #[cfg(test)]
 #[path = "tests/genome_report.rs"]
 mod tests;
@@ -552,3 +496,19 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/genome_check.rs"]
 mod genome_check;
+
+#[cfg(test)]
+#[path = "tests/genome_function_scores.rs"]
+mod function_scores_tests;
+
+#[cfg(test)]
+#[path = "tests/genome_parsimony.rs"]
+mod parsimony_tests;
+
+#[cfg(test)]
+#[path = "tests/genome_adversarial.rs"]
+mod adversarial;
+
+#[cfg(test)]
+#[path = "tests/genome_proptest.rs"]
+mod proptest;

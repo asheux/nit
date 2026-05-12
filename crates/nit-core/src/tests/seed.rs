@@ -509,8 +509,16 @@ fn compute(x: i32) -> i32 {
         let p = std::path::Path::new("test.rs");
         let a = compute_genome_report(NO_ATTRIBUTES, p);
         let b = compute_genome_report(WITH_ATTRIBUTES, p);
-        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
-        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
         assert_eq!(
             (a.tier, &gens_a, a.grid_size),
             (b.tier, &gens_b, b.grid_size),
@@ -524,8 +532,16 @@ fn compute(x: i32) -> i32 {
         let p = std::path::Path::new("test.rs");
         let a = compute_genome_report(MACRO_SHORT, p);
         let b = compute_genome_report(MACRO_LONG, p);
-        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
-        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
         assert_eq!(
             (a.tier, &gens_a, a.grid_size),
             (b.tier, &gens_b, b.grid_size),
@@ -560,8 +576,16 @@ fn compute(x: i32) -> i32 {
         let p = std::path::Path::new("test.rs");
         let a = compute_genome_report(FUNCS_ORDER_A, p);
         let b = compute_genome_report(FUNCS_ORDER_B, p);
-        let gens_a: Vec<u32> = a.encoder_scores.iter().map(|s| s.generations_survived).collect();
-        let gens_b: Vec<u32> = b.encoder_scores.iter().map(|s| s.generations_survived).collect();
+        let gens_a: Vec<u32> = a
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
+        let gens_b: Vec<u32> = b
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .collect();
         assert_eq!(
             (a.tier, &gens_a, a.grid_size),
             (b.tier, &gens_b, b.grid_size),
