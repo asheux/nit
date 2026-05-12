@@ -676,6 +676,11 @@ pub struct SwarmTask {
 }
 
 impl SwarmTask {
+    #[doc(hidden)]
+    pub fn set_parsed_artifacts_for_test(&mut self, artifacts: SwarmTaskArtifacts) {
+        self.parsed_artifacts = Some(artifacts);
+    }
+
     /// Test-only builder. Production paths construct `SwarmTask` directly in
     /// the swarm planner; this exists so integration tests can synthesize
     /// minimal plans without depending on planner internals.
@@ -793,4 +798,12 @@ pub(super) struct SwarmRun {
     /// across rounds) and force-fallback when the planner stops making
     /// progress.
     pub(super) prior_violations: Vec<super::validator::Violation>,
+    /// Snapshot of the runtime's `NIT_PROMPT_TIERS` / `NIT_PROMPT_BUDGET_*`
+    /// resolution taken at `start()`. Frozen for the lifetime of this run so
+    /// a mid-mission env flip cannot shift dispatch sizes between turns.
+    pub(super) prompt_budget_defaults: super::budgets::PromptBudgets,
+    /// Per-mission `budget=ROLE:N` overrides parsed from `@swarm` command
+    /// tokens. Consulted before falling back to `prompt_budget_defaults` so
+    /// operators can stretch or shrink a specific role for one mission.
+    pub(super) prompt_budgets: std::collections::HashMap<String, usize>,
 }

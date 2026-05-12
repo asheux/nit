@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use nit_core::AppState;
 
+use super::budgets::{apply_prompt_budget, stage3_diag_message};
 use super::{
     dependency_payload_text, dependency_payload_text_full, find_swarm_cycle_path,
     merge_task_artifacts, normalize_role_label, parse_task_artifacts, partition_files_for_shard,
@@ -676,7 +677,7 @@ fn build_task_prompt(
         run.scope_files.clone()
     };
     let proposers_skipped = integrate_proposers_skipped(run, task);
-    wrap_task_prompt(
+    let mut prompt = wrap_task_prompt(
         &run.root_prompt,
         run.mission_kind,
         task,
@@ -685,7 +686,58 @@ fn build_task_prompt(
         run.spawn_cwd.as_path(),
         shard_slice,
         proposers_skipped,
-    )
+    );
+    enforce_prompt_budget(run, task, &mut prompt);
+    prompt
+}
+
+// Single chokepoint for the three-stage truncation: halve per-dep payloads
+// → drop proposer (then judge) payloads → shrink the GENOME LANDSCAPE block.
+// Invariants intentionally NEVER dropped: FILE CHECKLIST, role contract,
+// operator request, SIGN-OFF sentinel. Hooked here so retry continuations,
+// `reactivate_for_followup` re-plans, and genome-retry re-dispatches all
+// pass through the same enforcement point. Stage 3 only fires when the
+// landscape has already been appended (e.g. genome-retry paths); the
+// dispatch-time landscape augmentation runs after this hook and is
+// independently bounded by `build_propose_genome_landscape`.
+fn enforce_prompt_budget(run: &SwarmRun, task: &SwarmTask, prompt: &mut String) {
+    let role = task.role.as_deref();
+    let budget =
+        run.prompt_budget_defaults
+            .effective_budget(role, task.writes, &run.prompt_budgets);
+    if budget == usize::MAX {
+        return;
+    }
+    let effective_dep_count = effective_dep_count_for_payload(run, task);
+    if let Some(diag) = apply_prompt_budget(prompt, budget, task, effective_dep_count) {
+        if let Some(msg) = stage3_diag_message(&diag) {
+            tracing::warn!(mission_id = %run.mission_id, task_id = %task.id, "{msg}");
+        }
+    }
+}
+
+pub(super) fn effective_dep_count_for_payload(run: &SwarmRun, task: &SwarmTask) -> usize {
+    let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
+    let skip_proposers = needs_full_output && judge_with_artifacts_in_deps(run, task);
+    if !skip_proposers {
+        return task.deps.len();
+    }
+    task.deps
+        .iter()
+        .filter(|dep_id| {
+            run.tasks
+                .iter()
+                .find(|t| &t.id == *dep_id)
+                .map(|dep| {
+                    dep.role
+                        .as_deref()
+                        .and_then(normalize_role_label)
+                        .as_deref()
+                        != Some("propose")
+                })
+                .unwrap_or(true)
+        })
+        .count()
 }
 
 // Returns the propose/judge-declared files for an integrate task's FILE
@@ -825,29 +877,7 @@ pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> 
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
     let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
     let skip_proposers = needs_full_output && judge_with_artifacts_in_deps(run, task);
-
-    // Re-count after filtering so the per-dep budget is computed against
-    // the actual payload count (more headroom for the deps that survive).
-    let effective_dep_count = if skip_proposers {
-        task.deps
-            .iter()
-            .filter(|dep_id| {
-                run.tasks
-                    .iter()
-                    .find(|t| &t.id == *dep_id)
-                    .map(|dep| {
-                        dep.role
-                            .as_deref()
-                            .and_then(normalize_role_label)
-                            .as_deref()
-                            != Some("propose")
-                    })
-                    .unwrap_or(true)
-            })
-            .count()
-    } else {
-        task.deps.len()
-    };
+    let effective_dep_count = effective_dep_count_for_payload(run, task);
     let per_dep_cap = per_dep_budget(task.role.as_deref(), task.writes, effective_dep_count);
 
     let mut out = Vec::new();

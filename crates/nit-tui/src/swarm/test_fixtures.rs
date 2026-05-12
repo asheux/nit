@@ -95,6 +95,8 @@ pub(crate) fn test_runtime_with_running_tasks_and_template(
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
+        prompt_budget_defaults: runtime.prompt_budgets.clone(),
+        prompt_budgets: HashMap::new(),
     };
     runtime.runs.insert(mission_id.to_string(), run);
     runtime

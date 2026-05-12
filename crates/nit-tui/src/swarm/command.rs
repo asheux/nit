@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use super::budgets::parse_override_token;
 use super::{parse_swarm_mission_kind, SwarmMissionKind, SwarmSize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6,11 +9,14 @@ pub struct SwarmCommand {
     pub template: Option<String>,
     pub mission_kind: Option<SwarmMissionKind>,
     pub prompt: String,
+    /// Per-mission `budget=ROLE:N` overrides parsed from the `@swarm`
+    /// command line. Keyed by canonical role label; values are byte
+    /// ceilings forwarded to `SwarmRun.prompt_budgets`. Unrecognised tokens
+    /// are dropped silently so an operator typo can't kill the dispatch.
+    pub prompt_budgets: HashMap<String, usize>,
 }
 
 pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
-    // Require whitespace after `@swarm` so we don't match `@swarmies`,
-    // `@swarmlet`, etc. as the prefix.
     let after = raw.trim_start().strip_prefix("@swarm")?;
     if after.is_empty() || !after.starts_with(char::is_whitespace) {
         return None;
@@ -21,7 +27,7 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
     }
 
     let size = parse_size_token(&mut rest);
-    let (template, mission_kind) = parse_named_args(&mut rest);
+    let (template, mission_kind, prompt_budgets) = parse_named_args(&mut rest);
 
     let prompt = rest.trim().to_string();
     if prompt.is_empty() {
@@ -32,6 +38,7 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
         template,
         mission_kind,
         prompt,
+        prompt_budgets,
     })
 }
 
@@ -52,9 +59,16 @@ fn parse_size_token(rest: &mut &str) -> SwarmSize {
     SwarmSize::Default
 }
 
-fn parse_named_args(rest: &mut &str) -> (Option<String>, Option<SwarmMissionKind>) {
+fn parse_named_args(
+    rest: &mut &str,
+) -> (
+    Option<String>,
+    Option<SwarmMissionKind>,
+    HashMap<String, usize>,
+) {
     let mut template = None;
     let mut mission_kind = None;
+    let mut prompt_budgets: HashMap<String, usize> = HashMap::new();
     while let Some(next) = rest.split_whitespace().next() {
         if let Some(value) = strip_kv_prefix(next, &["template=", "t="]) {
             let value = value.trim();
@@ -65,11 +79,16 @@ fn parse_named_args(rest: &mut &str) -> (Option<String>, Option<SwarmMissionKind
         } else if let Some(value) = strip_kv_prefix(next, &["mission=", "m="]) {
             mission_kind = parse_swarm_mission_kind(Some(value));
             consume_token(rest, next);
+        } else if let Some(value) = strip_kv_prefix(next, &["budget="]) {
+            if let Ok((role, bytes)) = parse_override_token(value) {
+                prompt_budgets.insert(role, bytes);
+            }
+            consume_token(rest, next);
         } else {
             break;
         }
     }
-    (template, mission_kind)
+    (template, mission_kind, prompt_budgets)
 }
 
 fn strip_kv_prefix<'a>(token: &'a str, prefixes: &[&str]) -> Option<&'a str> {

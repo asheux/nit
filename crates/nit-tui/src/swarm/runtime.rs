@@ -334,6 +334,30 @@ impl SwarmRuntime {
         mission_kind: Option<SwarmMissionKind>,
         root_prompt: String,
     ) -> Option<(String, Vec<SwarmDispatch>)> {
+        self.start_with_budget_overrides(
+            state,
+            planner_agent_id,
+            agent_ids,
+            size,
+            template,
+            mission_kind,
+            root_prompt,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_budget_overrides(
+        &mut self,
+        state: &mut AppState,
+        planner_agent_id: String,
+        agent_ids: Vec<String>,
+        size: SwarmSize,
+        template: Option<String>,
+        mission_kind: Option<SwarmMissionKind>,
+        root_prompt: String,
+        prompt_budgets: std::collections::HashMap<String, usize>,
+    ) -> Option<(String, Vec<SwarmDispatch>)> {
         let mut agents = filter_dispatchable_agents(state, &planner_agent_id, agent_ids);
 
         let template_kind = super::parse_swarm_template(template.as_deref());
@@ -464,6 +488,8 @@ impl SwarmRuntime {
                 repair_round: 0,
                 last_plan_json: None,
                 prior_violations: Vec::new(),
+                prompt_budget_defaults: self.prompt_budgets.clone(),
+                prompt_budgets,
             },
         );
 

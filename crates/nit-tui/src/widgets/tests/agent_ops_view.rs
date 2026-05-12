@@ -1214,6 +1214,95 @@ fn roster_running_priority_orders_states_correctly() {
     assert_eq!(roster_running_priority(&state, 3), 4);
 }
 
+// Pins the bug where swarm clones from a non-first parent lane rendered
+// directly under a sibling base lane in the truncated roster view,
+// because the priority sort placed an idle sibling between the running
+// parent and its idle clones. The two-arrow clone glyph (`↳ ↳`) made
+// them look like children of the wrong lane.
+#[test]
+fn roster_groups_swarm_clones_with_their_parent_under_truncation() {
+    use crate::swarm::SWARM_CLONE_INFIX;
+
+    let mut state = AppState::new(
+        std::env::temp_dir(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
+    );
+    state.agents.agents.clear();
+    // Roster shape that reproduces the bug: an idle base lane (haiku) is
+    // inserted BEFORE the planner (opus), then opus, then 10 idle clones
+    // of opus, then one more base lane (sonnet). 13 total > 12 cap so
+    // truncation kicks in.
+    state.agents.agents.push(idle_lane(
+        "claude-haiku-4-5",
+        "claude",
+        AgentLaneKind::Claude,
+    ));
+    state.agents.agents.push(idle_lane(
+        "claude-opus-4-7",
+        "claude",
+        AgentLaneKind::Claude,
+    ));
+    for i in 1..=10 {
+        let clone_id = format!("claude-opus-4-7{SWARM_CLONE_INFIX}mis-001-clone-{i:02}");
+        state
+            .agents
+            .agents
+            .push(idle_lane(&clone_id, "claude", AgentLaneKind::Claude));
+    }
+    state.agents.agents.push(idle_lane(
+        "claude-sonnet-4-6",
+        "claude",
+        AgentLaneKind::Claude,
+    ));
+    // opus is the running planner.
+    state
+        .agents
+        .active_turns
+        .insert("claude-opus-4-7".to_string(), fake_active_turn());
+
+    let groups = roster_grouped_agent_indices(&state);
+    let claude = &groups
+        .iter()
+        .find(|(kind, _)| *kind == AgentLaneKind::Claude)
+        .expect("claude group present")
+        .1;
+    assert_eq!(claude.len(), ROSTER_VISIBLE_AGENTS_PER_BACKEND);
+
+    // Translate the visible-index sequence back into agent ids so the
+    // assertion failure prints a readable order on regression.
+    let visible_ids: Vec<&str> = claude
+        .iter()
+        .map(|idx| state.agents.agents[*idx].id.as_str())
+        .collect();
+
+    // Opus is the running planner, so it must be first (running priority
+    // outranks any idle base lane).
+    assert_eq!(
+        visible_ids[0], "claude-opus-4-7",
+        "running planner must lead; got {visible_ids:?}"
+    );
+
+    // The 10 clones of opus must immediately follow opus, NOT be
+    // separated from it by haiku or any other base lane.
+    for (i, id) in visible_ids.iter().enumerate().skip(1).take(10) {
+        let expected = format!("claude-opus-4-7{SWARM_CLONE_INFIX}mis-001-clone-{i:02}");
+        assert_eq!(
+            *id, expected.as_str(),
+            "clones must sit adjacent to their parent; row {i} = {id:?}, expected {expected:?}, full order = {visible_ids:?}"
+        );
+    }
+
+    // The remaining visible row is a non-clone Claude base lane (the
+    // other idle siblings) — verifies that base lanes still appear after
+    // the clone group rather than getting promoted ahead of it.
+    let tail = visible_ids[11];
+    assert!(
+        tail == "claude-haiku-4-5" || tail == "claude-sonnet-4-6",
+        "tail row must be a sibling base lane; got {tail:?} in {visible_ids:?}"
+    );
+}
+
 #[test]
 fn mission_visible_agent_lines_caps_above_threshold() {
     let mut mission = MissionRecord {

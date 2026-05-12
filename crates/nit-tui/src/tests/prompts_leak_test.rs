@@ -203,6 +203,8 @@ fn make_run(spawn_cwd: &Path, gate_bundle: Option<GateBundle>, scope: Vec<String
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
+        prompt_budget_defaults: super::budgets::PromptBudgets::default(),
+        prompt_budgets: std::collections::HashMap::new(),
     }
 }
 
