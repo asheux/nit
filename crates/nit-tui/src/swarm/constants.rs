@@ -18,6 +18,27 @@ pub(super) const REPAIR_RETRY_LIMIT: u8 = 2;
 // byte-identical to the pre-validator behaviour.
 pub(super) const NIT_PLANNER_LEGACY_ENV: &str = "NIT_PLANNER_LEGACY";
 
+// Per-role total-prompt ceilings (bytes) enforced after `wrap_task_prompt`
+// assembles a dispatch. Sized against Claude's 200K-token window (~800K
+// chars) with ~120K reserved for system framing and turn-time
+// tool_use/tool_result accumulation. Integrate/judge get the larger tail
+// because they receive full-output dep payloads (`SWARM_DEP_OUTPUT_*_FULL`).
+// Propose/review/test sit under the warm-pool worker's safe envelope so
+// pool slots can't be poisoned by oversized vanilla prompts.
+pub(crate) const PROMPT_BUDGET_INTEGRATE: usize = 480_000;
+pub(crate) const PROMPT_BUDGET_JUDGE: usize = 320_000;
+pub(crate) const PROMPT_BUDGET_RESEARCH: usize = 240_000;
+pub(crate) const PROMPT_BUDGET_PROPOSE: usize = 160_000;
+pub(crate) const PROMPT_BUDGET_REVIEW: usize = 120_000;
+pub(crate) const PROMPT_BUDGET_TEST: usize = 96_000;
+pub(crate) const PROMPT_BUDGET_DEFAULT: usize = 96_000;
+
+// Setting any of `0`/`false`/`no`/`off` (case-insensitive) returns
+// `usize::MAX` from `PromptBudgets::for_role`, making `apply_prompt_budget`
+// a no-op short-circuit. The off-path stays in the code as the rollback
+// pattern documented for `NIT_CLAUDE_POOL=0` and `NIT_PLANNER_LEGACY=1`.
+pub(crate) const NIT_PROMPT_TIERS_ENV: &str = "NIT_PROMPT_TIERS";
+
 // Warn well before subprocess spawn starts hitting `EMFILE` on Linux's
 // 1024-fd default.
 pub(crate) const LARGE_SWARM_WARN_THRESHOLD: usize = 64;

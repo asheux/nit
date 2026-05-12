@@ -1803,6 +1803,7 @@ fn detect_implicit_swarm_command(state: &AppState, raw: &str) -> Option<SwarmCom
         template: Some(template),
         mission_kind: effective_swarm_mission_kind(state, raw, None),
         prompt: raw.to_string(),
+        prompt_budgets: std::collections::HashMap::new(),
     })
 }
 

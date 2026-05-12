@@ -5,6 +5,7 @@ use nit_core::AppState;
 use nit_core::{AgentBusEvent, AgentStatus, MissionPhase};
 
 mod artifacts;
+mod budgets;
 mod bulk_plan;
 mod clones;
 mod command;
@@ -40,6 +41,10 @@ mod tests;
 #[path = "tests/prompts_leak_test.rs"]
 mod prompts_leak_test;
 
+#[cfg(test)]
+#[path = "tests/swarm_budgets.rs"]
+mod swarm_budgets_tests;
+
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
@@ -49,6 +54,11 @@ pub struct SwarmRuntime {
     /// runtime rather than re-read per turn so a mid-mission env change
     /// can't flip behaviour halfway through a planning round.
     pub(super) legacy_planner: bool,
+    /// Resolved once at construction from `NIT_PROMPT_TIERS` and the
+    /// per-role `NIT_PROMPT_BUDGET_*` envs. Each new `SwarmRun` snapshots
+    /// these defaults at `start()` so a mid-mission env flip cannot widen
+    /// or shrink budgets between dispatches.
+    pub(super) prompt_budgets: budgets::PromptBudgets,
 }
 
 impl Default for SwarmRuntime {
@@ -57,6 +67,7 @@ impl Default for SwarmRuntime {
             runs: HashMap::new(),
             completed_runs: HashMap::new(),
             legacy_planner: read_legacy_planner_env(),
+            prompt_budgets: budgets::PromptBudgets::from_env(),
         }
     }
 }
