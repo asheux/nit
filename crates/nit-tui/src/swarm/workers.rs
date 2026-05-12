@@ -120,8 +120,17 @@ fn build_genome_review_prompt_bg(input: &GenomeReviewInput) -> String {
         return String::new();
     }
 
+    // Inject the measurement-attribution primer before the review task so
+    // the reviewer interprets tier deltas correctly — without this, a
+    // reviewer comparing two reports can mistake AST-stable rendering
+    // drift (shifted recommendation line numbers, comment-only edits) for
+    // a real structural regression and recommend useless reverts.
+    prompt.push('\n');
+    prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    prompt.push_str("\n\n");
+
     prompt.push_str(
-        "\nProduce a structured review:\n\
+        "Produce a structured review:\n\
          1. Which files improved in structural quality and which regressed\n\
          2. The most critical structural issues remaining\n\
          3. Specific refactoring recommendations for the worst-scoring files\n\
