@@ -455,6 +455,21 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.gate_monitor_scroll = 0;
             }
         }
+        Action::WorkspaceScanStart => {
+            // The runner picks this up on the next tick, calls rescan, and
+            // sets the status based on the actual outcome (walk found work
+            // vs. cache already clean). Setting an eager "evaluating…"
+            // status here would stick when the cache is fully fresh and
+            // nothing gets queued.
+            state.agents.workspace_scan_requested = true;
+            // Auto-jump to FILESCORES so the operator can watch tiers
+            // update as the scan progresses. No-op if they're already
+            // looking at it (mirrors the GateMonitorSetSubView guard).
+            if state.gate_monitor_sub_view != crate::state::GateMonitorSubView::FileScores {
+                state.gate_monitor_sub_view = crate::state::GateMonitorSubView::FileScores;
+                state.gate_monitor_scroll = 0;
+            }
+        }
         Action::ShowSubstrate => {
             state.show_substrate_overlay = true;
             state.substrate_overlay_scroll = 0;

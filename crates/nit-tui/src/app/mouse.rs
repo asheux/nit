@@ -1257,7 +1257,7 @@ pub(super) fn handle_mouse_down_with_swarm(
                 return true;
             }
         }
-        // Gate monitor title buttons (STATS / FILESCORES).
+        // Gate monitor title buttons (STATS / FILESCORES / LIVE / EVAL).
         if mouse.row == layout.gate.y {
             let col_in_rect = mouse.column.saturating_sub(layout.gate.x);
             // Compute the title prefix length to find button positions.
@@ -1274,7 +1274,11 @@ pub(super) fn handle_mouse_down_with_swarm(
             } else {
                 " CODE STRUCTURAL QUALITY ".len() as u16
             };
-            if let Some(action) = gate_monitor_view::title_button_hit(col_in_rect, prefix_len) {
+            let eval_label_width =
+                gate_monitor_view::display_width(&gate_monitor_view::eval_button_label(state));
+            if let Some(action) =
+                gate_monitor_view::title_button_hit(col_in_rect, prefix_len, eval_label_width)
+            {
                 state.focus = PaneId::GateMonitor;
                 apply_action(state, action);
                 return true;

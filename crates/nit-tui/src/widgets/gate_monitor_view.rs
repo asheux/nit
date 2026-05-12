@@ -19,10 +19,17 @@ use crate::widgets::text_selection::apply_ui_selection;
 use crate::widgets::text_utils::truncate_with_ellipsis;
 use crate::workspace_scan::{WorkspaceScanItemState, WorkspaceScanRuntime};
 
-// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES " ++ " LIVE "
+// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES " ++ " LIVE " ++ "  EVALUATE GENOME  "
 const BTN_STATS_LABEL: &str = " STATS ";
 const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
 const BTN_LIVE_LABEL: &str = " LIVE ";
+// EVAL button uses an explicit verb-noun label so the operator knows the
+// click triggers a full-project genome evaluation (not a tab switch).
+// Counts ("stale/total") trail the verb so the operator can see at a
+// glance how much work the click would queue without doing it. The bare
+// labels are the fallback when no dry walk has run yet.
+const BTN_EVAL_LABEL_IDLE: &str = " ▶ EVALUATE GENOME ";
+const BTN_EVAL_LABEL_CLEAN: &str = " ✓ ALL EVALUATED ";
 
 const STATS_LABEL_WIDTH: usize = 12;
 const STATS_GAUGE_LABEL_WIDTH: usize = 14;
@@ -35,11 +42,19 @@ const GAUGE_MID_THRESHOLD: f32 = 0.3;
 const TIER_LEVELS: usize = 5;
 const LOADING_PERIOD_MS: f64 = 1600.0;
 
-// `title_prefix_len` is the byte length of the dynamic prefix (varies with
-// grid size). Each button returns a direct-set action — returning a single
-// "toggle" action for all three collapses to a cycle and takes the user to
-// the wrong tab when they click a non-adjacent one.
-pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Action> {
+// `title_prefix_len` is the display width of the dynamic prefix (varies
+// with grid size). `eval_label_width` is the display width of the EVAL
+// button's rendered label, which varies because it flips to
+// "EVALUATING N/M" while a scan is in flight and includes multibyte
+// glyphs (▶ / ⟳). Each button returns a direct-set action — returning a
+// single "toggle" action for the three sub-view tabs would collapse to a
+// cycle and take the user to the wrong tab when they click a non-adjacent
+// one.
+pub fn title_button_hit(
+    col_in_rect: u16,
+    title_prefix_len: u16,
+    eval_label_width: u16,
+) -> Option<Action> {
     let col = col_in_rect.saturating_sub(1); // border offset
     let stats_start = title_prefix_len + 1; // space separator
     let stats_end = stats_start + BTN_STATS_LABEL.len() as u16;
@@ -47,6 +62,10 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     let fs_end = fs_start + BTN_FILESCORES_LABEL.len() as u16;
     let live_start = fs_end + 1;
     let live_end = live_start + BTN_LIVE_LABEL.len() as u16;
+    // Double-space gap before EVAL to visually separate the action button
+    // from the sub-view tabs.
+    let eval_start = live_end + 2;
+    let eval_end = eval_start + eval_label_width;
     if (stats_start..stats_end).contains(&col) {
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
     } else if (fs_start..fs_end).contains(&col) {
@@ -55,9 +74,55 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
         ))
     } else if (live_start..live_end).contains(&col) {
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
+    } else if (eval_start..eval_end).contains(&col) {
+        Some(Action::WorkspaceScanStart)
     } else {
         None
     }
+}
+
+/// Renders the EVAL button label. Three states:
+/// - scanning: "⟳ EVALUATING done/queued" so the operator gets live
+///   feedback inside the button itself.
+/// - clean (dry walk found nothing stale, or scan just drained):
+///   "✓ ALL EVALUATED total" — visually muted, still clickable for
+///   re-verification.
+/// - idle: "▶ EVALUATE GENOME stale/total" — green; the trailing
+///   "stale/total" tells the operator how many files the click would
+///   queue before they commit.
+///
+/// Returns an owned String so the caller can use the character width for
+/// hit-testing without re-computing.
+pub fn eval_button_label(state: &AppState) -> String {
+    if let Some((done, queued)) = state.agents.workspace_scan_progress {
+        format!(" ⟳ EVALUATING {done}/{queued} ")
+    } else if state.agents.workspace_scan_clean {
+        let total = state.agents.workspace_scan_total_files;
+        if total > 0 {
+            format!(" ✓ ALL EVALUATED {total} ")
+        } else {
+            BTN_EVAL_LABEL_CLEAN.to_string()
+        }
+    } else {
+        let stale = state.agents.workspace_scan_stale_files;
+        let total = state.agents.workspace_scan_total_files;
+        if total > 0 {
+            format!(" ▶ EVALUATE GENOME {stale}/{total} ")
+        } else {
+            // No dry walk has run yet (or the workspace has no code files).
+            // Fall back to the bare verb so we don't render "0/0".
+            BTN_EVAL_LABEL_IDLE.to_string()
+        }
+    }
+}
+
+/// Display width (in terminal cells) of a string. Use this for hit-test
+/// math instead of `len()` — `len()` counts bytes, which over-counts
+/// multibyte glyphs like ▶ / ⟳ and would shift the EVAL button's hit
+/// region right by a few cells, breaking clicks on the trailing edge.
+pub fn display_width(s: &str) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    s.width() as u16
 }
 
 pub fn render(
@@ -127,6 +192,33 @@ pub fn render(
     } else {
         btn_inactive
     };
+    let eval_label = eval_button_label(state);
+    let scanning = state.agents.workspace_scan_progress.is_some();
+    let clean = !scanning && state.agents.workspace_scan_clean;
+    // EVAL button is intentionally distinct from the STATS / FILESCORES /
+    // LIVE sub-view tabs because it does something — kicks off a CPU-heavy
+    // genome scan of every file in the workspace — rather than just
+    // switching sub-views.
+    //   - amber (warning): scan in flight; "working, leave me alone"
+    //   - muted border-on-bg + DIM: cache is clean; clicking re-verifies
+    //     but probably finds nothing
+    //   - green (success): ready to evaluate; "click me to scan"
+    let eval_style = if scanning {
+        Style::default()
+            .fg(theme.background)
+            .bg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else if clean {
+        Style::default()
+            .fg(theme.border)
+            .bg(theme.background)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+            .fg(theme.background)
+            .bg(theme.success)
+            .add_modifier(Modifier::BOLD)
+    };
 
     let title = Line::from(vec![
         Span::styled(title_prefix, title_style),
@@ -136,6 +228,8 @@ pub fn render(
         Span::styled(BTN_FILESCORES_LABEL, fs_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_LIVE_LABEL, live_style),
+        Span::styled("  ", sep_style),
+        Span::styled(eval_label, eval_style),
     ]);
 
     let block = Block::default()

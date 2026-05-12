@@ -93,6 +93,10 @@ pub enum Action {
     VisualizerInspectJump(u64),
     GateMonitorToggleSubView,
     GateMonitorSetSubView(crate::state::GateMonitorSubView),
+    /// Operator clicked the EVALUATE button — kick off a full workspace
+    /// genome scan. The runner picks up `agents.workspace_scan_requested`
+    /// on the next tick and calls `WorkspaceScanRuntime::rescan`.
+    WorkspaceScanStart,
     ShowSubstrate,
     HideSubstrate,
     SubstrateOverlayToggleTab,

@@ -4,10 +4,13 @@ use super::outlier::analyze_structural_outlier;
 use super::source_scan::ts_parse;
 use super::{EncoderScore, GenomeRecommendation};
 
+pub(crate) mod dedupe;
 mod density;
 mod entropy;
 mod function;
 mod nesting;
+#[cfg(test)]
+mod tests;
 mod thresholds;
 
 pub fn generate_recommendations(
@@ -32,6 +35,8 @@ pub fn generate_recommendations(
     function::walk_top_level(text, &lines, &root, &mut recs);
     nesting::analyze(text, &root, &mut recs);
     entropy::analyze(text, &lines, &root, &mut recs);
+
+    dedupe::demote_findings_inside_critical_fns(&mut recs);
 
     recs
 }

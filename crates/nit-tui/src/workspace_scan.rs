@@ -1,19 +1,23 @@
 //! Workspace-wide genome scan driver.
 //!
-//! At launch the runtime hydrates `state.genome_reports` from the on-disk
-//! cache in `.nit/genome/`, purges entries whose files no longer exist, then
-//! walks the workspace to enqueue missing or stale reports. File-watcher
-//! events feed the same pending queue so cached reports stay in sync with
-//! the filesystem without gating agent dispatch.
+//! At launch the runtime calls [`WorkspaceScanRuntime::load_cache`] to hydrate
+//! `state.genome_reports` from the on-disk cache in `.nit/genome/` and purge
+//! entries whose files no longer exist. The expensive part — walking the
+//! workspace and queueing every stale/missing code file for evaluation — is
+//! deferred to an explicit operator trigger (the EVALUATE button in the gate
+//! monitor's FILESCORES sub-view) so opening a multi-thousand-file project
+//! doesn't burn the laptop's CPU on launch.
 //!
-//! The runtime is non-blocking: the walk runs once at hydration and every
-//! eval spawns a short-lived worker thread (`GenomeWorker`). The in-flight
-//! cap adapts to `available_parallelism()` so nit uses the machine's cores
-//! without freezing the UI.
+//! File-watcher events feed the same pending queue so any individual file
+//! the operator edits stays in sync without re-walking the workspace.
+//!
+//! The runtime is non-blocking: the walk runs once per operator click and
+//! every eval spawns a short-lived worker thread (`GenomeWorker`). The
+//! in-flight cap adapts to `available_parallelism()` so nit uses the
+//! machine's cores without freezing the UI.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::thread::available_parallelism;
 use std::time::UNIX_EPOCH;
 
 use nit_core::AppState;
@@ -21,66 +25,12 @@ use nit_core::AppState;
 use crate::file_watcher::{is_excluded_directory, walk_source_files, IGNORED_DIRS};
 use crate::genome_worker::GenomeWorker;
 
-/// Absolute ceiling on concurrent scan threads. Each eval needs a 2 MB
-/// stack and saturates a core during tree-sitter + GoL simulation; beyond
-/// ~16 we start contending for memory bandwidth without meaningful speedup.
-const WORKSPACE_SCAN_MAX_CAP: usize = 16;
+mod scope;
 
-/// Minimum concurrency. On single/dual-core boxes we still want enough
-/// parallelism to hide I/O waits.
-const WORKSPACE_SCAN_MIN_CAP: usize = 4;
-
-/// Returns the adaptive in-flight cap for the workspace scan. Uses
-/// `available_parallelism() - 1` (reserve one core for the main loop)
-/// clamped to `[WORKSPACE_SCAN_MIN_CAP, WORKSPACE_SCAN_MAX_CAP]`. Falls back
-/// to `WORKSPACE_SCAN_MIN_CAP` when the OS refuses to report.
-pub fn workspace_scan_max_in_flight() -> usize {
-    available_parallelism()
-        .map(|n| n.get().saturating_sub(1))
-        .unwrap_or(WORKSPACE_SCAN_MIN_CAP)
-        .clamp(WORKSPACE_SCAN_MIN_CAP, WORKSPACE_SCAN_MAX_CAP)
-}
-
-/// Extensions the genome scan actually evaluates. This is a narrower subset
-/// of `file_watcher::SOURCE_EXTENSIONS` — the genome computation is only
-/// meaningful for code, so evaluating markdown/toml/yaml/json/txt is wasted
-/// work (tree-sitter has no parser for most of them and the GoL landscape
-/// for a README isn't actionable). Keep this list tight: every extension
-/// here costs ~100–500 ms of CPU per file on the background scan.
-pub const CODE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "kt", "scala", "cs", "rb",
-    "c", "cpp", "h", "hpp", "swift", "sh", "bash", "zsh", "sql", "html", "htm", "css",
-];
-
-/// True for paths whose extension is in `CODE_EXTENSIONS`. File-watcher's
-/// broader `is_trackable_source` stays intact for buffer-reload purposes
-/// (which legitimately care about markdown/config changes); the scan uses
-/// this narrower predicate so the background eval queue only touches code.
-pub fn is_code_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|raw| raw.to_str())
-        .is_some_and(|ext| CODE_EXTENSIONS.contains(&ext))
-}
-
-/// State of a file in the workspace-scan pipeline. Surfaces in the LIVE
-/// sub-view of the gate monitor so the operator can see what's being
-/// evaluated right now vs what's queued.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum WorkspaceScanItemState {
-    /// File sits in `pending`, waiting for an in-flight slot.
-    Queued,
-    /// A worker thread is currently computing the report for this file.
-    Evaluating,
-}
-
-impl WorkspaceScanItemState {
-    pub fn label(self) -> &'static str {
-        match self {
-            WorkspaceScanItemState::Queued => "queued",
-            WorkspaceScanItemState::Evaluating => "evaluating",
-        }
-    }
-}
+pub use scope::{
+    is_code_file, workspace_scan_max_in_flight, WorkspaceScanItemState, CODE_EXTENSIONS,
+    WORKSPACE_SCAN_MAX_CAP, WORKSPACE_SCAN_MIN_CAP,
+};
 
 /// Driver for the background genome scan. One instance lives in `run_loop`
 /// alongside `GenomeWorker`; the main loop calls `hydrate` once at startup,
@@ -97,11 +47,16 @@ pub struct WorkspaceScanRuntime {
     /// UI progress line.
     total: usize,
     /// Files whose result has landed. Resets to zero when a new scan is
-    /// seeded (e.g. initial hydration); incremented on every `note_completed`.
+    /// seeded (e.g. operator-triggered rescan); incremented on every
+    /// `note_completed`.
     done: usize,
-    /// Guards against re-running the launch walk. Session-lifetime flag —
-    /// once hydrated, we don't re-walk the workspace.
-    hydrated: bool,
+    /// True once the disk-cache load has run. Cache load is cheap (just
+    /// reading JSON files); idempotent guard so repeated `load_cache` calls
+    /// are no-ops within a session.
+    cache_loaded: bool,
+    /// True once the workspace walk has run. Reset by [`rescan`] so the
+    /// EVALUATE button can re-walk the workspace and re-queue stale files.
+    walked: bool,
     /// Max concurrent eval threads — computed once at construction so tests
     /// can override via `with_max_in_flight` without touching globals.
     max_in_flight: usize,
@@ -114,7 +69,8 @@ impl Default for WorkspaceScanRuntime {
             dispatched: HashSet::new(),
             total: 0,
             done: 0,
-            hydrated: false,
+            cache_loaded: false,
+            walked: false,
             max_in_flight: workspace_scan_max_in_flight(),
         }
     }
@@ -133,19 +89,18 @@ impl WorkspaceScanRuntime {
         }
     }
 
-    /// Launch-time hydration. Reads any cached genome reports from
-    /// `.nit/genome/`, drops entries whose files no longer exist (including
-    /// the on-disk JSON), then walks the workspace for source files and
-    /// enqueues anything missing or stale against `GenomeReport::timestamp_ms`.
+    /// Launch-time cache load. Reads cached genome reports from
+    /// `.nit/genome/` into `state.genome_reports` and drops entries whose
+    /// files no longer exist (including their on-disk JSON). Does NOT walk
+    /// the workspace or queue any evaluations — that's deferred to
+    /// [`hydrate`] / [`rescan`], which the EVALUATE button triggers.
     ///
-    /// Idempotent: subsequent calls are no-ops. Silent no-op when
-    /// `genome_context_enabled` is off — no reports are loaded and nothing
-    /// is scanned.
-    pub fn hydrate(&mut self, state: &mut AppState) {
-        if self.hydrated {
+    /// Idempotent + silent no-op when `genome_context_enabled` is off.
+    pub fn load_cache(&mut self, state: &mut AppState) {
+        if self.cache_loaded {
             return;
         }
-        self.hydrated = true;
+        self.cache_loaded = true;
 
         if !state.settings.genome.genome_context_enabled {
             return;
@@ -178,23 +133,46 @@ impl WorkspaceScanRuntime {
         for (path, report) in loaded {
             state.genome_reports.insert(path, report);
         }
+    }
 
-        // 3. Walk the workspace for source files honoring gitignore, then
-        //    narrow to code files only. `walk_source_files` is the broad
-        //    predicate the file watcher uses (covers md/toml/yaml/json for
-        //    buffer-reload hooks); here we strip that down to code since
-        //    evaluating a README against GoL gives no signal.
+    /// Full hydrate: ensure the disk cache is loaded, then walk the
+    /// workspace and queue every code file whose cached report is missing
+    /// or stale. Idempotent — the walk runs at most once per session unless
+    /// [`rescan`] is called first.
+    ///
+    /// Silent no-op when `genome_context_enabled` is off.
+    pub fn hydrate(&mut self, state: &mut AppState) {
+        if self.walked {
+            return;
+        }
+        self.walked = true;
+
+        if !state.settings.genome.genome_context_enabled {
+            return;
+        }
+
+        // Cheap, idempotent — covers callers that want the cache loaded
+        // on the same call.
+        self.load_cache(state);
+
+        let workspace_root = state.workspace_root.clone();
+
+        // Walk the workspace for source files honoring gitignore, then
+        // narrow to code files only. `walk_source_files` is the broad
+        // predicate the file watcher uses (covers md/toml/yaml/json for
+        // buffer-reload hooks); here we strip that down to code since
+        // evaluating a README against GoL gives no signal.
         let gitignored = state.gitignored_dirs.clone();
         let files = walk_source_files(&workspace_root, &gitignored);
 
-        // 4. Queue everything missing or stale (mtime newer than the
-        //    cached report's timestamp). The launch-time backfill is
-        //    visible in LIVE as active (scan-evaluating / scan-queued)
-        //    while it runs, but intentionally does NOT populate
-        //    `session_touched`: the operator's mental model for LIVE is
-        //    "what nit is doing THIS session", and pre-session files
-        //    hydrate happens to re-evaluate should not look like
-        //    carry-over from a previous run.
+        // Queue everything missing or stale (mtime newer than the
+        // cached report's timestamp). The walk-time backfill is
+        // visible in LIVE as active (scan-evaluating / scan-queued)
+        // while it runs, but intentionally does NOT populate
+        // `session_touched`: the operator's mental model for LIVE is
+        // "what nit is doing THIS session", and pre-session files
+        // the rescan happens to re-evaluate should not look like
+        // carry-over from a previous run.
         for path in files {
             if !is_code_file(&path) {
                 continue;
@@ -204,6 +182,52 @@ impl WorkspaceScanRuntime {
             }
         }
         self.total = self.pending.len();
+    }
+
+    /// Operator-triggered rescan: reset the walked guard, clear progress
+    /// counters, and re-run [`hydrate`] so the entire workspace is re-
+    /// walked and any stale/missing reports are re-queued. Wired to the
+    /// EVALUATE button in the gate monitor's FILESCORES sub-view via
+    /// `Action::WorkspaceScanStart`.
+    ///
+    /// No-op while a previous scan is still in flight — clicking again
+    /// during a scan shouldn't re-queue files that are already pending
+    /// or dispatched (the dedup guard in `drive` would just discard them,
+    /// but the progress counter would over-count).
+    pub fn rescan(&mut self, state: &mut AppState) {
+        if self.is_scanning() {
+            return;
+        }
+        self.walked = false;
+        self.done = 0;
+        self.total = 0;
+        self.hydrate(state);
+    }
+
+    /// Dry workspace walk: count total code files and how many lack a
+    /// fresh cached report. Does NOT queue any evaluations or mutate the
+    /// runtime — it's cheap (walking + mtime lookups, no tree-sitter or
+    /// GoL) and runs at startup so the EVAL button can show "stale/total"
+    /// counts before the operator clicks.
+    ///
+    /// Silent no-op when `genome_context_enabled` is off — returns `(0, 0)`.
+    pub fn count_workspace(state: &AppState) -> (usize, usize) {
+        if !state.settings.genome.genome_context_enabled {
+            return (0, 0);
+        }
+        let files = walk_source_files(&state.workspace_root, &state.gitignored_dirs);
+        let mut total = 0usize;
+        let mut stale = 0usize;
+        for path in files {
+            if !is_code_file(&path) {
+                continue;
+            }
+            total += 1;
+            if Self::needs_eval(state, &path) {
+                stale += 1;
+            }
+        }
+        (stale, total)
     }
 
     /// Returns `true` when the cached report for `path` is absent or older
@@ -336,7 +360,7 @@ impl WorkspaceScanRuntime {
 
     #[cfg(test)]
     pub fn hydrated(&self) -> bool {
-        self.hydrated
+        self.walked
     }
 }
 

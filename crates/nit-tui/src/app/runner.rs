@@ -175,11 +175,26 @@ pub(super) fn run_loop(
     let mut workspace_scan = crate::workspace_scan::WorkspaceScanRuntime::new();
     // Parse .gitignore for directory exclusions (shared with file watcher and FILESCORES view).
     state.gitignored_dirs = crate::file_watcher::parse_gitignore_dirs(&state.workspace_root);
-    // Hydrate genome report cache from disk and seed the workspace scan
-    // before the UI loop starts. The walk itself is synchronous (bounded by
-    // the file count) but each eval runs on a short-lived thread via
-    // `GenomeWorker`, so hydration never blocks on tree-sitter or GoL.
-    workspace_scan.hydrate(state);
+    // Load any previously-cached genome reports from disk so FILESCORES has
+    // something to show on launch. The expensive workspace walk + per-file
+    // eval is deferred — large projects (~2500 files) would otherwise pin
+    // the CPU at boot and risk crashing low-power laptops. The operator
+    // triggers the walk via the EVALUATE button in the gate monitor's
+    // FILESCORES sub-view (`Action::WorkspaceScanStart`).
+    workspace_scan.load_cache(state);
+    // Dry walk: count code files + stale reports so the EVAL button can
+    // show "stale/total" before the operator clicks. This walk is cheap
+    // (filesystem traversal + mtime lookups, no tree-sitter or GoL) — the
+    // CPU cost we were avoiding lives in the per-file genome eval, not in
+    // the walk itself.
+    let (stale, total) = crate::workspace_scan::WorkspaceScanRuntime::count_workspace(state);
+    state.agents.workspace_scan_stale_files = stale;
+    state.agents.workspace_scan_total_files = total;
+    // Pre-seed `workspace_scan_clean` based on the dry walk so the button
+    // renders correctly on first frame: if total > 0 and stale == 0, the
+    // cache is already complete and the button should read "✓ ALL
+    // EVALUATED" without the operator having to click first.
+    state.agents.workspace_scan_clean = total > 0 && stale == 0;
     // Watch the entire workspace for agent-created/modified files.
     file_watcher.watch_workspace(state.workspace_root.clone());
     let mut last_watched_path = state.editor_buffer().path().cloned();
@@ -1022,18 +1037,46 @@ pub(super) fn run_loop(
                 &codex_runner,
                 &claude_runner,
             );
-            // Non-blocking background scan: refill in-flight eval slots
-            // from the pending queue. The runtime's cap adapts to
-            // `available_parallelism()` so the scan uses idle cores
-            // without starving the UI.
+            // EVALUATE click → walk + queue stale files. `rescan` no-ops
+            // while a scan is in flight, so a stuck flag can't double-queue.
+            if state.agents.workspace_scan_requested {
+                state.agents.workspace_scan_requested = false;
+                workspace_scan.rescan(state);
+                let (_done, queued) = workspace_scan.progress();
+                // Refresh dry-walk counts (total may have drifted from external
+                // edits; stale = whatever rescan just queued).
+                let (_stale, total) =
+                    crate::workspace_scan::WorkspaceScanRuntime::count_workspace(state);
+                state.agents.workspace_scan_total_files = total;
+                state.agents.workspace_scan_stale_files = queued;
+                if queued == 0 {
+                    // Cache fully fresh — surface "up to date" instead of
+                    // leaving a misleading "evaluating…" status on screen.
+                    state.status =
+                        Some("Genome cache up to date — no files need re-evaluation".into());
+                    state.agents.workspace_scan_clean = true;
+                } else {
+                    state.status = Some(format!("Evaluating genome for {queued} files…"));
+                    state.agents.workspace_scan_clean = false;
+                }
+            }
+            // Non-blocking background scan; cap adapts to available_parallelism().
             workspace_scan.drive(&genome_worker);
-            // Surface progress to the agent-console breather. None when
-            // idle so the indicator auto-hides on completion.
-            state.agents.workspace_scan_progress = if workspace_scan.is_scanning() {
+            // Surface progress to the agent-console breather; None when idle so
+            // the indicator auto-hides. Detect scanning→idle to flip clean.
+            let was_scanning = state.agents.workspace_scan_progress.is_some();
+            let is_scanning_now = workspace_scan.is_scanning();
+            state.agents.workspace_scan_progress = if is_scanning_now {
                 Some(workspace_scan.progress())
             } else {
                 None
             };
+            if was_scanning && !is_scanning_now {
+                // Scan just drained — every queued file has a fresh report
+                // now, so stale drops to 0 and the cache is clean.
+                state.agents.workspace_scan_clean = true;
+                state.agents.workspace_scan_stale_files = 0;
+            }
 
             // Dispatch save-triggered genome evaluation to background worker.
             // Non-code files (markdown, config, plaintext) skip evaluation —

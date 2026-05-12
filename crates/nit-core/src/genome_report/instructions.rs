@@ -64,6 +64,21 @@ the weakest encoder matters most, but strong performance on other encoders \
 provides a modest lift. Focus on balanced, natural code rather than \
 obsessing over one encoder.\n\
 \n\
+ATTRIBUTION — what can and cannot move your score:\n\
+The encoders project source through tree-sitter and DROP comment, \
+doc-string, and attribute subtrees before measurement. They chunk by AST \
+node index, not source line. Consequence: comment adds or trims, \
+doc-string edits, blank-line shuffles, and identifier renames that \
+preserve AST shape CANNOT move tier, generations-survived, or \
+cross-encoder consistency. If a retry prompt reports DEGRADED and the \
+most visible change in your diff is a comment edit, the actual cause \
+is a semantic change elsewhere in the same edit pass — look at control \
+flow, function boundaries, type signatures, and expression structure. \
+Recommendation line numbers (e.g., `fn_name:120-180`) shift when you \
+add or remove lines above them; a shifted location is not a new finding. \
+Do NOT revert comment changes hoping to fix the regression; reverting \
+comments removes signal humans rely on and will not move the score.\n\
+\n\
 ENCODER GUIDE (what each measures → how to improve naturally):\n\
 \n\
 AST-driven encoders (determine the overall tier):\n\

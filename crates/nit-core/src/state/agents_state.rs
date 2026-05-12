@@ -225,6 +225,30 @@ pub struct AgentsState {
     /// breather in the agent console.
     #[serde(skip)]
     pub workspace_scan_progress: Option<(usize, usize)>,
+    /// Set to `true` when the operator clicks the EVALUATE button in the
+    /// gate monitor's FILESCORES sub-view. The runner consumes the flag on
+    /// the next tick, calls `WorkspaceScanRuntime::rescan`, and resets it
+    /// to `false`. Avoids running the expensive workspace walk on launch
+    /// for large projects.
+    #[serde(skip)]
+    pub workspace_scan_requested: bool,
+    /// `true` after a workspace walk found nothing to re-evaluate (cache
+    /// covers every code file with fresh mtimes) or after an in-flight scan
+    /// drained to empty. Drives the "✓ ALL EVALUATED" muted state of the
+    /// EVAL button so the operator knows clicking won't find new work. The
+    /// button stays clickable in this state — clicking re-walks the
+    /// workspace to re-verify.
+    #[serde(skip)]
+    pub workspace_scan_clean: bool,
+    /// Total code files discovered by the most recent dry workspace walk.
+    /// Populated at startup (after the disk cache loads) and refreshed on
+    /// scan transitions. Drives the "N/T" counter inside the EVAL button.
+    #[serde(skip)]
+    pub workspace_scan_total_files: usize,
+    /// Files whose cached genome report is missing or older than the file's
+    /// mtime, per the most recent dry walk. `0` means nothing to evaluate.
+    #[serde(skip)]
+    pub workspace_scan_stale_files: usize,
     // --- CLI availability (read at startup for the roster's backend inventory) ---
     #[serde(skip)]
     pub codex_cli_available: bool,
@@ -444,6 +468,10 @@ impl Default for AgentsState {
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),
             workspace_scan_progress: None,
+            workspace_scan_requested: false,
+            workspace_scan_clean: false,
+            workspace_scan_total_files: 0,
+            workspace_scan_stale_files: 0,
             codex_cli_available: false,
             claude_cli_available: false,
             gemini_cli_available: false,

@@ -115,6 +115,10 @@ pub(super) fn surface_top_offender_recommendation(
             worst.cyclomatic,
             worst.max_depth,
         ),
-        location: Some(format!("{}:{}", worst.start_line, worst.end_line)),
+        // Use the `start-end` separator so the recommendations dedupe pass
+        // (in `recommendations.rs::demote_findings_inside_critical_fns`)
+        // can parse the range. A colon would have left this rec to slip
+        // past the dedupe.
+        location: Some(format!("{}-{}", worst.start_line, worst.end_line)),
     });
 }

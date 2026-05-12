@@ -119,27 +119,37 @@ fn gate_monitor_tab_clicks_set_target_sub_view_directly() {
     // through the cycle rather than jumping to the target. Each button now
     // returns the correct direct-set action, and applying it from any
     // starting state lands on the requested tab.
-    use crate::widgets::gate_monitor_view::title_button_hit;
+    use crate::widgets::gate_monitor_view::{display_width, title_button_hit};
     use nit_core::{Action, GateMonitorSubView};
 
     let prefix = " CODE STRUCTURAL QUALITY ".len() as u16;
     let stats_col = prefix + 1 + 3;
     let fs_col = prefix + 1 + 7 + 1 + 5;
     let live_col = prefix + 1 + 7 + 1 + 12 + 1 + 2;
+    // display_width counts the multibyte ▶ glyph as one cell, matching render.
+    let eval_label_width = display_width(" ▶ EVALUATE GENOME ");
 
     assert_eq!(
-        title_button_hit(stats_col + 1, prefix),
+        title_button_hit(stats_col + 1, prefix, eval_label_width),
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
     );
     assert_eq!(
-        title_button_hit(fs_col + 1, prefix),
+        title_button_hit(fs_col + 1, prefix, eval_label_width),
         Some(Action::GateMonitorSetSubView(
             GateMonitorSubView::FileScores
         ))
     );
     assert_eq!(
-        title_button_hit(live_col + 1, prefix),
+        title_button_hit(live_col + 1, prefix, eval_label_width),
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
+    );
+    // EVAL hit-test: button starts at live_end + 2 (gap), spans
+    // `eval_label_width` cells. Pick a column a few cells in from the
+    // start so we hit the button regardless of label-width drift.
+    let eval_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 2 + 3;
+    assert_eq!(
+        title_button_hit(eval_col + 1, prefix, eval_label_width),
+        Some(Action::WorkspaceScanStart)
     );
 
     let root = temp_workspace();
