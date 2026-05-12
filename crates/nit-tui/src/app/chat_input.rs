@@ -50,10 +50,6 @@ fn try_dispatch_swarm_command(
     cmd: &mut SwarmCommand,
     raw: &str,
 ) -> bool {
-    let auto_switch_ops_dag = cmd
-        .template
-        .as_deref()
-        .is_some_and(|t| matches!(t, "bulk" | "bo"));
     chat_history_remember(state, raw);
     let planner = state
         .agents
@@ -102,9 +98,6 @@ fn try_dispatch_swarm_command(
             cmd.mission_kind,
             cmd.prompt.clone(),
         ) {
-            if auto_switch_ops_dag {
-                state.agents.dock_tab = nit_core::AgentOpsTab::Dag;
-            }
             state.agents.chat_input = cmd.prompt.clone();
             sync_cursor_to_input_end(state);
             let _ = push_chat_message(state);

@@ -66,6 +66,9 @@ fn index_one_mission(dir: &Path, mission_id: &str) -> Option<IndexedMission> {
     Some(m)
 }
 
+// Returns untyped Value so the index survives schema drift across nit
+// versions without nit-core taking a dependency on nit-tui's swarm types.
+// JSON on-disk format is locked: see docs/SWARM.md "Serialization format".
 fn read_json(path: &Path) -> Option<serde_json::Value> {
     fs::read(path)
         .ok()

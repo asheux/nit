@@ -664,6 +664,42 @@ If a task declares artifacts but no parseable JSON block is found, nit emits a m
 
 - `Swarm artifacts: task 'integrate' declared artifacts but no parseable swarm_artifacts JSON block was found.`
 
+### Serialization format
+
+Swarm artifacts and on-disk task state use **pretty-printed JSON** (`serde_json::to_vec_pretty`).
+The format was evaluated against MessagePack, CBOR, custom-binary, and sqlite-json; JSON won on a
+2× weighting of debuggability and migration cost over disk size and parse cost.
+
+Reasons the weighting favors JSON:
+
+- **Operator inspection.** `.nit/swarm/<mission>/` trees are routinely read with `cat`, `jq`,
+  `grep -r`, and `git diff`. Pretty-print keeps diffs line-readable; binary forks break all of
+  these workflows and would require a new `nit dump-artifact` CLI to restore parity.
+- **LLM agent self-read.** The on-disk artifact path `.nit/swarm/<mission>/tasks/<id>/artifacts.json`
+  is embedded directly in downstream agent prompts (see `crates/nit-tui/src/swarm/artifacts.rs`),
+  so swarm successors read predecessor state straight off disk. The wire format is JSON
+  (unchangeable — LLMs emit/consume text); forking the disk format from the wire format would
+  break this property.
+- **Migration cost.** Status quo is zero source edits, zero new dependencies, zero rewriting of
+  existing operator `.nit/swarm/` trees.
+
+Decisions that stay rejected under this weighting:
+
+- **Do not switch `to_vec_pretty` → `to_vec`** at the artifact write sites in
+  `crates/nit-tui/src/app/provenance.rs`. The ~30–40% byte savings are not worth losing
+  line-based `git diff` readability over the swarm tree.
+- **Do not rename `artifacts.json` / `run.json` / `summary.json` / `gates/report.json`**.
+  These extensions are referenced in (a) the LLM prompt at
+  `crates/nit-tui/src/swarm/artifacts.rs`, (b) `crates/nit-tui/src/widgets/artifacts_popup.rs`
+  and `crates/nit-tui/src/widgets/agent_ops_view.rs`, and (c) `docs/SWARM.md` +
+  `docs/SMOKE_TEST.md`. Any future format/extension change must update all five sites in
+  lockstep.
+
+Revisit only if a future requirement provably cannot be served by the JSON tree — e.g.
+cross-mission analytical queries over 10⁵+ tasks or full-text search across artifacts. In that
+case, layer a derived, rebuildable `.nit/swarm/index.db` (sqlite-json) cache **on top of** the
+file tree; source of truth stays in JSON.
+
 ---
 
 ## MCP + Troubleshooting

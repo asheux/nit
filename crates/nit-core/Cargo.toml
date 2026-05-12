@@ -12,6 +12,9 @@ unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# serde_json drives the on-disk swarm artifact tree consumed by
+# `mission_memory` — format decision is recorded in
+# docs/SWARM.md "Serialization format" (do not swap to a binary format).
 serde_json = { workspace = true }
 # `blake3` powers `nit_utils::hashing::stable_hash_bytes`, used by the
 # genome report cache for shard selection and the collision-suffix on

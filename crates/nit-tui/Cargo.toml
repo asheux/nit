@@ -14,6 +14,8 @@ unicode-width = { workspace = true }
 
 # Serialization, logging, channels
 serde = { workspace = true, features = ["derive"] }
+# serde_json writes `.nit/swarm/<id>/{run,summary,tasks,gates/report}.json`
+# (pretty-printed). Format decision: docs/SWARM.md "Serialization format".
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

@@ -218,6 +218,10 @@ pub(super) fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> i
     Ok(())
 }
 
+// `to_vec_pretty` is intentional across every write in this function:
+// `.nit/swarm/<id>/` trees are inspected with cat/jq/grep/git-diff and the
+// artifact paths are embedded in downstream LLM prompts. Do not swap to
+// `to_vec` for byte savings — see docs/SWARM.md "Serialization format".
 pub(super) fn write_swarm_run_provenance(
     state: &AppState,
     swarm: &SwarmRuntime,

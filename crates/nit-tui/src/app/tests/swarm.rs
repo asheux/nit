@@ -4,7 +4,12 @@
 use super::*;
 
 #[test]
-fn swarm_bulk_auto_switches_ops_to_dag() {
+fn swarm_bulk_preserves_operator_selected_ops_tab() {
+    // The bulk template used to auto-switch the Agent Ops dock to DAG on
+    // dispatch — operators reported that as a surprise that yanked focus
+    // away from the tab they were watching. The dispatch now leaves
+    // dock_tab alone; operators can switch to DAG themselves if they want
+    // to watch the graph build.
     let mut state = state_for_test();
     state.focus = PaneId::Notes;
     state.agents.dock_tab = AgentOpsTab::Roster;
@@ -45,7 +50,7 @@ fn swarm_bulk_auto_switches_ops_to_dag() {
         None,
         &mut swarm
     ));
-    assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+    assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
 }
 
 #[test]
@@ -142,7 +147,7 @@ fn swarm_auto_detects_swarm_role_and_uses_default_template() {
         None,
         &mut swarm
     ));
-    assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+    assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
     assert!(state
         .agents
         .missions
@@ -193,7 +198,7 @@ fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
         None,
         &mut swarm
     ));
-    assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+    assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
     assert!(state
         .agents
         .missions
