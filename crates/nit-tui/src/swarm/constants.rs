@@ -6,6 +6,18 @@ pub(crate) const DEFAULT_SWARM_SIZE: usize = 4;
 // real limit; nit warns at `LARGE_SWARM_WARN_THRESHOLD`.
 pub(super) const MAX_SWARM_SIZE: usize = 256;
 
+// Bounded LLM repair attempts when the validator finds structural defects
+// in a parsed plan. Two retries = three planner calls worst case (1 initial
+// + 2 repairs). Past this we fall back to the deterministic template or
+// abort, rather than burn unbounded planner tokens on a stuck plan.
+pub(super) const REPAIR_RETRY_LIMIT: u8 = 2;
+
+// Operator-facing rollback for the deterministic plan validator + repair
+// loop. Accepted truthy values: `1`, `true`, `yes`, `on` (case-insensitive).
+// Resolved once at `SwarmRuntime::new`; when set, the planner stage stays
+// byte-identical to the pre-validator behaviour.
+pub(super) const NIT_PLANNER_LEGACY_ENV: &str = "NIT_PLANNER_LEGACY";
+
 // Warn well before subprocess spawn starts hitting `EMFILE` on Linux's
 // 1024-fd default.
 pub(crate) const LARGE_SWARM_WARN_THRESHOLD: usize = 64;

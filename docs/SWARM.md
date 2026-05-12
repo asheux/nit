@@ -86,9 +86,17 @@ Tip: if you temporarily don’t want implicit swarm launches, switch the roster 
 Swarm is a mission-scoped orchestration loop:
 
 1) **Planning**: a planner agent creates a plan (JSON DAG).
-2) **Execution**: tasks run in parallel when dependencies are satisfied.
-3) **Verification** (optional): a verifier runs a detected gate bundle (e.g. `rust-ci`).
-4) **Synthesis**: the planner produces a final cohesive report.
+2) **Validation + repair** (default): the parsed plan runs through a deterministic
+   validator (`crates/nit-tui/src/swarm/validator.rs`) before dispatch. `MustFix`
+   defects trigger a bounded LLM repair loop (`swarm/repair.rs`, capped at
+   `REPAIR_RETRY_LIMIT = 2` rounds) that only proceeds while the planner is
+   making concrete progress (strict improvement or proper subset). The
+   validator + repair pair can be disabled with `NIT_PLANNER_LEGACY=1` for a
+   one-release rollback escape hatch — once set, the planner LLM call runs
+   once and the parsed plan goes straight to `finalize_plan`.
+3) **Execution**: tasks run in parallel when dependencies are satisfied.
+4) **Verification** (optional): a verifier runs a detected gate bundle (e.g. `rust-ci`).
+5) **Synthesis**: the planner produces a final cohesive report.
 
 Where to watch it:
 
@@ -587,7 +595,7 @@ scoped_command = "pnpm --filter {packages} test"
 > operator's prompt scope maps cleanly onto the `crates/<pkg>/` layout. For
 > non-Rust projects, the current scope derivation won't populate packages,
 > so `scoped_command` will never fire unless you also extend scope detection
-> (see `derive_cargo_packages` in `crates/nit-tui/src/swarm.rs` — open to
+> (see `derive_cargo_packages` in `crates/nit-tui/src/swarm/dashboard.rs` — open to
 > contributions for language-agnostic scope mapping).
 
 ### Config resolution order
@@ -639,8 +647,8 @@ Supported shape (recommended):
   "task_id": "integrate",
   "summary": "What changed / why",
   "artifacts": {
-    "files": [{ "path": "crates/nit-tui/src/app.rs", "notes": "…" }],
-    "diffs": [{ "path": "crates/nit-tui/src/app.rs", "summary": "…" }],
+    "files": [{ "path": "crates/nit-tui/src/app/mod.rs", "notes": "…" }],
+    "diffs": [{ "path": "crates/nit-tui/src/app/mod.rs", "summary": "…" }],
     "commands": [{ "cmd": "cargo test -p nit-tui", "purpose": "…" }],
     "risks": [{ "level": "med", "item": "…", "mitigation": "…" }],
     "notes": ["…"]

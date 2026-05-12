@@ -2,37 +2,45 @@
 
 ## Overview
 
-nit is a terminal-first editor organized as **nine modules across six layers**.
-Each module owns a single concern; the layers describe how they fit together.
+nit is a terminal-first editor + agent station organized as **nine workspace
+crates across six layers**. Each crate owns a single concern; the layers
+describe how they fit together.
 
 ### Foundation
 
 - **`nit-core`** — application state, actions, text buffers, config, agent bus,
-  and substrate primitives (signals, claims, assumptions, mood). Pure logic; no
-  terminal dependencies.
-- **`nit-utils`** — shared filesystem helpers, BLAKE3 hashing, and workspace
-  path utilities used across every other module.
+  and substrate primitives (signals, claims, assumptions, mood, generation
+  counter, mission memory, observers, arbiters, metabolism, genome reports +
+  on-disk cache, seed encoders). Pure logic; no terminal dependencies. Most
+  former single-file modules (`agent_bus.rs`, `substrate.rs`, `seed.rs`,
+  `state.rs`, `genome_report.rs`, `genome_storage.rs`) are now directories
+  with the same module path.
+- **`nit-utils`** — shared filesystem helpers (atomic writes), BLAKE3 hashing
+  (`stable_hash_bytes`, `SplitMix64`), and workspace path utilities used
+  across every other module.
 
 ### Interface
 
-- **`nit-tui`** — rendering, layout, event loop, key mapping, agent runners
-  (Codex + Claude), and swarm orchestration. Built on ratatui + crossterm.
-  This is the visible layer.
+- **`nit-tui`** — rendering, layout, event loop, key/mouse dispatch, agent
+  runners (Codex + Claude + warm Claude pool), swarm orchestration, multipane
+  grid, shadow + intake support agents. Built on ratatui + crossterm. This
+  is the visible layer.
 - **`nit-syntax`** — tree-sitter syntax highlighting engine and language
   registry, with a fallback path for unsupported languages.
 
 ### Lab engines
 
 - **`nit-gol`** — Conway's Game of Life engine: rule evaluation, grid
-  evolution, and snapshot encoding.
+  evolution, attractor detection, snapshot encoding.
 - **`nit-games`** — game theory tournament engine and strategy implementations
-  (FSM Moore machines, cellular automata, one-sided Turing machines).
+  (FSM Moore machines, cellular automata, one-sided Turing machines), with an
+  analytical fast evaluator for deterministic FSMs.
 
 ### Agent integration
 
 - **`nit-mcp`** — MCP stdio JSON-RPC server (`nit-mcp-server` binary) that
   exposes substrate tools (`emit_signal`, `assert_claim`, `assert_assumption`)
-  to the spawned `codex` process over a back-channel.
+  to the spawned `codex` process over a Unix-domain back-channel.
 
 ### Acceleration
 
@@ -42,7 +50,9 @@ Each module owns a single concern; the layers describe how they fit together.
 
 ### Entry point
 
-- **`nit`** — the CLI binary that wires arguments, tracing, and TUI bootstrap.
+- **`nit`** — the CLI binary that wires arguments, tracing, lab dispatch, and
+  TUI bootstrap, including the headless `games` subcommand tree and multipane
+  launch wiring.
 
 ## Data Flow
 
@@ -107,7 +117,7 @@ Codex (MCP or exec runtime), Claude (subprocess per turn), and a local mock lane
 
 ### Agent Ops tabs
 
-Agent Ops exposes **eight** tabs in the UI (defined in `crates/nit-core/src/state.rs::AgentOpsTab` and rendered in `crates/nit-tui/src/widgets/agent_ops_view.rs`). The user-visible labels are:
+Agent Ops exposes **eight** tabs in the UI (defined in `crates/nit-core/src/state/` (`AgentOpsTab`) and rendered in `crates/nit-tui/src/widgets/agent_ops_view.rs`). The user-visible labels are:
 
 | Tab label     | Enum variant  | Purpose                                                       |
 |---------------|---------------|---------------------------------------------------------------|
@@ -139,7 +149,7 @@ Each `AgentLane` has an `id`, `kind`, `role`, `status`, `queue_len`, optional `c
 
 ### AgentBusEvent protocol
 
-Runners emit `AgentBusEvent` (see `crates/nit-core/src/agent_bus.rs`) which the TUI applies to `AppState`. Variants:
+Runners emit `AgentBusEvent` (see `crates/nit-core/src/agent_bus/`) which the TUI applies to `AppState`. Variants:
 
 | Variant              | Purpose                                                    |
 |----------------------|------------------------------------------------------------|
@@ -180,21 +190,36 @@ The Codex backend is implemented in `nit-tui` as a background `CodexRunner` thre
     compact progress “stages” in the UI.
   - Parallel turns: the runner can keep multiple turns in-flight across different agents by
     multiplexing JSON-RPC request ids (and routing `codex/event` updates via `_meta.requestId`).
-    Controlled by `--codex-max-parallel-turns` (default `2`).
+    Controlled by `--codex-max-parallel-turns` (alias `--codex-parallel`; default `8`, range
+    `1..=16`). The same cap is shared with the Claude runner.
 
 ### Claude runtime
 
 The Claude backend is implemented in `nit-tui` as a background `ClaudeRunner` thread that emits
 `AgentBusEvent` updates into the main TUI loop.
 
-- Spawns `claude -p --verbose --output-format stream-json` per turn.
-- Additional flags: `--model <slug>`, `--effort <level>`, `--add-dir <cwd>`, `--max-turns 50`.
+- Spawns `claude -p --verbose --output-format stream-json` per turn (cold-spawn path).
+- Additional flags: `--model <slug>`, `--effort <level>`, `--add-dir <cwd>`, `--max-turns 50`
+  (integrator turns lift this to `INTEGRATOR_MAX_TURNS=500`).
 - Session resumption: `--resume <session_id>` reuses a prior session.
-- Default allowed tools: `Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch`.
+- Default allowed tools: `Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch`. Read-only turns
+  (intake, shadow proposers/judge/review, read-only swarm tasks) drop down to
+  `Read,Glob,Grep` only.
 - Optional `--permission-mode` pass-through.
 - Parses NDJSON stream on stdout for stage updates, token counts, and results.
 - Session ids are tracked per agent (ad-hoc) and per mission+agent (swarm), mirroring the Codex
   thread-id pattern via `claude_session_ids` / `claude_mission_session_ids`.
+- Optional warm worker pool (`crates/nit-tui/src/claude_pool.rs`), gated by
+  `NIT_CLAUDE_POOL=1`. When enabled, "vanilla" turns (no resume, default
+  `--max-turns`, no custom `--effort`) check out a long-lived `claude -p
+  --input-format stream-json` worker, write one stream-json envelope to its
+  stdin, and check the slot back in after the `result` event. Specialised
+  turns (integrators, resumed sessions, custom `--effort`) always take the
+  cold-spawn path. The cold-spawn branch stays byte-identical to the
+  pre-pool runner and is kept as the rollback path.
+- Idle-output reaper (`NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS`, default `900`s)
+  applies on both paths; it fires only when the in-flight turn has not used
+  any write-capable tool, so productive writer turns never time out.
 
 ### Gemini (detection only)
 
@@ -213,7 +238,8 @@ Parallelism exists at two layers:
   `AppState.agents.queued_claude_turns` store prompts the operator submits while that same agent
   already has an active turn.
 - **Runner parallelism (across agents)**: `CodexRunner` and `ClaudeRunner` each execute up to
-  their configured `max_parallel_turns` (default `2`) concurrently **across different agent ids**.
+  their configured `max_parallel_turns` (default `8`, range `1..=16`; shared across both runners)
+  concurrently **across different agent ids**.
 
 Key rules:
 
@@ -344,6 +370,22 @@ Planner contract:
   1) a brief human-readable summary, and
   2) a JSON plan inside a ` ```json ` code block.
 
+Plan validation + repair:
+
+- Before dispatch, parsed plans run through a deterministic validator
+  (`crates/nit-tui/src/swarm/validator.rs`) that classifies structural defects
+  as `MustFix` or `Advisory`. `MustFix` violations trigger a bounded LLM
+  repair loop (`swarm/repair.rs`, capped at `REPAIR_RETRY_LIMIT = 2`) that
+  only continues while the planner is making concrete progress (strict
+  improvement or proper subset of the prior violation set — same-set
+  ping-pong stops the loop).
+- `NIT_PLANNER_LEGACY=1` (truthy values `1` / `true` / `yes` / `on`,
+  case-insensitive) disables the validator + repair flow entirely and reverts
+  the planner stage to the pre-validator behaviour. Resolved once at
+  `SwarmRuntime` construction and cached on `runtime.legacy_planner` so a
+  mid-mission env flip cannot change behaviour halfway through a planning
+  round.
+
 Plan schema (v2):
 
 ```json
@@ -427,24 +469,59 @@ Shadows are a complementary pattern to `@swarm`: instead of planning a DAG acros
 - Shadow turns run `read_only = true`, which in the Claude runner restricts `--allowedTools` to `Read,Glob,Grep` and in the Codex runner forwards the read-only sandbox flag.
 - Only one shadow run per main agent can be in flight at once; concurrent prompts to the same agent queue normally.
 
+#### Intake agent (hidden Claude-class preprocessor)
+
+Before every Claude-class chat dispatch (and only Claude-class — codex/gemini lanes are skipped with an `intake.skipped` diag), nit runs a hidden one-step intake turn that classifies the operator's intent and, on `write` / `mixed` classifications, appends a `## FILE CHECKLIST (non-negotiable)` block to the raw prompt. Operator guide: `docs/INTAKE.md`.
+
+- Implemented in `crates/nit-tui/src/intake.rs` — lifecycle mirrors shadows
+  (synthetic `<base>#intake-<run_id>` lane, `read_only = true`, single-stage
+  pipeline, stash-then-resume).
+- Settings + kill switch: `Settings::intake_enabled` (default `true`) and
+  `NIT_INTAKE_DISABLED=1` (read on every dispatch — flip without restarting).
+- Failures (timeout, JSON parse, prefix violation, runner exit, dispatch
+  enqueue failure) all fall back to **passthrough**: the operator's raw
+  prompt dispatches as-is. The chat never shows an error banner; diags land
+  in Agent Ops → DIAG.
+- Operator `/abort` (and siblings) cancels any pending intake turn via
+  `intake::cancel_pending_intake` and drops the deferred resume.
+
+#### Multipane mode (`nit multipane`)
+
+`nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid of N independent chat panes (default 8, range `1..=32`), each anchored at its own working directory. State lives in `MultipaneState` on `AppState` (`crates/nit-core/src/state/multipane.rs`); when `state.multipane` is `Some`, the TUI dispatches to `multipane::run_loop` instead of the standard event loop. Pane sessions persist to `<state_dir>/multipane/session-<workspace-hash>.json`.
+
+- Per-pane agent ids use the form `<base>#mp-pane-NN` so they coexist with
+  `#swarm-`, `#chat-clone-`, `#shadow-`, and `#intake-` conventions.
+- Editor / agent ops / visualizer / file tree are unavailable; only chat
+  dispatch + per-pane dir search are wired. Disallowed keys are silently
+  swallowed by `multipane::runtime::handle_key`.
+- Every pane runs the canonical `app::chat_input::submit_chat_input_and_dispatch`
+  via a Lens-B alias-and-restore wrapper (`multipane::dispatch::with_pane_aliased`),
+  so `@swarm` / `@shadow` / `@all` / `@new` / `@queue` / `/abort` / queueing /
+  swarm-followup re-activation all work per pane.
+
+Spec + keymap: `docs/MULTIPANE.md`.
+
 ### API wiring (CLI → TUI → runner)
 
 The wiring for Codex runtime configuration is intentionally explicit:
 
 - `crates/nit` (CLI) parses `--codex-runtime`, plus optional `--codex-sandbox`,
   `--codex-approval-policy`, and `--codex-max-parallel-turns`, into a
-  `nit_tui::codex_runner::CodexRunnerConfig`.
-- `crates/nit/src/main.rs` passes that config into `nit_tui::run(state, theme, log_rx, codex_runtime, codex_config)`.
-- `crates/nit-tui/src/app.rs` forwards the config into `run_loop(...)` and spawns the runner via
-  `CodexRunner::spawn(codex_runtime, codex_config)`.
-- `crates/nit-tui/src/codex_runner.rs` applies the config:
+  `nit_tui::codex_runner::CodexRunnerConfig` (assembled in `crates/nit/src/bootstrap.rs::build_runner_configs`).
+- `crates/nit/src/main.rs` passes that config — together with the parallel
+  `ClaudeRunnerConfig` — into `nit_tui::run(state, theme, log_rx,
+  codex_runtime, codex_config, claude_config)`.
+- `crates/nit-tui/src/app/runner.rs` forwards the config into `run_loop(...)`
+  and spawns the runners via `CodexRunner::spawn(...)` and
+  `ClaudeRunner::spawn(...)`.
+- `crates/nit-tui/src/codex_runner/` applies the config:
   - Exec runtime: adds `-a <policy>` and `-s <sandbox>` to `codex exec ...`.
   - MCP runtime: forwards `approval-policy` and `sandbox` only when starting new sessions via the
     `codex` tool (continuations via `codex-reply` resume the existing session settings).
 
 ### Genome feedback + auto-retry
 
-When an agent edits files (tracked via `AgentBusEvent::FileWrite`), nit re-runs the genome/parsimony analyzer on the changed files and compares tiers against a baseline captured before the turn. If quality degraded OR the parsimony detector flags bloat, `build_genome_retry_prompt` (in `crates/nit-tui/src/app/mod.rs`) re-dispatches a follow-up prompt to the writer. Constants live in the same file: `GENOME_RETRY_LIMIT = 3` and `GENOME_RETRY_MIN_LINES = 120` (files shorter than that are skipped to avoid over-engineering trivial modules). See `docs/SEEDS.md` for the parsimony rule and tier system.
+When an agent edits files (tracked via `AgentBusEvent::FileWrite`), nit re-runs the genome/parsimony analyzer on the changed files and compares tiers against a baseline captured before the turn. If quality degraded OR the parsimony detector flags bloat, `build_genome_retry_prompt` (in `crates/nit-tui/src/app/genome_retry.rs`) re-dispatches a follow-up prompt to the writer. Constants live in the same file: `GENOME_RETRY_LIMIT = 3` and `GENOME_RETRY_MIN_LINES = 120` (files shorter than that are skipped to avoid over-engineering trivial modules). See `docs/SEEDS.md` for the parsimony rule and tier system.
 
 ### Thread + mission context
 
@@ -519,8 +596,8 @@ and parallel logging behavior.
 
 ## Program Strategies (Phase 3E)
 
-- Strategy implementations live in `crates/nit-games/src/strategy.rs`:
-  FSM (Moore machine), CA (cellular automaton), and one‑sided TM (Turing machine).
+- Strategy implementations live in `crates/nit-games/src/strategy/`:
+  FSM (Moore machine), CA (`strategy/ca/`), and one‑sided TM (`strategy/tm/`).
 - Deterministic FSM/memory strategies have fast‑eval models in
   `crates/nit-games/src/fast_eval.rs` (cycle detection on combined state).
 - One‑sided TMs are deterministic but currently run through the simulator
@@ -531,7 +608,7 @@ and parallel logging behavior.
   and feeds both CLI (`nit games inspect/graph`) and the TUI `:games inspect`
   popup for downstream visualization workflows.
 - FSM enumeration + canonicalization utilities live in
-  `crates/nit-games/src/fsm_enum.rs`.
+  `crates/nit-games/src/fsm_enum/`.
 
 ## Rendering Discipline
 
@@ -605,7 +682,7 @@ and snapshot I/O) runs in a background worker thread.
 ### Seed Encoding System
 
 The seed encoding system converts editor text into a Game of Life genome (initial grid
-pattern). The pipeline lives in `nit-core/src/seed.rs` (encoding logic) and
+pattern). The pipeline lives in `nit-core/src/seed/` (encoder modules + utils) and
 `nit-tui/src/seed_runtime.rs` (runtime orchestration).
 
 **Encoding Pipeline**
@@ -696,7 +773,7 @@ Buttons are rendered as inverted-color spans and use column-based hit detection
 
 | File | Contents |
 |------|----------|
-| `nit-core/src/seed.rs` | Encoders, symmetry, jitter, thresholding, hashing, component counting |
+| `nit-core/src/seed/` | Encoders, symmetry, jitter, thresholding, hashing, component counting (`encoders/`, `params.rs`, `grid_types.rs`, `utils.rs`, `view_modes.rs`) |
 | `nit-tui/src/seed_runtime.rs` | Runtime loop, change detection, compute worker, search worker, snapshot dispatch |
 | `nit-tui/src/widgets/visualizer_view.rs` | Visualizer rendering, title bar buttons, click hit detection |
 | `nit-utils/src/hashing.rs` | SplitMix64 PRNG, BLAKE3 stable hashing |

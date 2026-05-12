@@ -661,7 +661,18 @@ fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> 
          - Landscape fit: does it target the lowest-tier / highest-leverage \
            files surfaced in the GENOME LANDSCAPE?\n\
          - Parsimony: does it avoid gaming metrics through over-engineering?\n\
-         - Blast radius: is the diff scoped to what the user asked for?\n\n\
+         - Blast radius: is the diff scoped to what the user asked for?\n\
+         - Robustness: does it handle the failure modes the user's request \
+           implies — real boundary inputs, partial failures, error returns \
+           from external calls — WITHOUT inventing defensive code for \
+           scenarios that can't actually happen? Penalise both under-handled \
+           real boundaries AND over-handled impossible ones.\n\
+         - Novelty: does it apply a fitting non-obvious abstraction, \
+           algorithm, or pattern rather than recycling boilerplate? Reward \
+           genuine structural novelty that solves the problem better; do NOT \
+           reward novelty added purely for token variety (new types / traits \
+           / wrappers without functional purpose) — that's already covered \
+           by parsimony, don't double-count.\n\n\
          Do NOT silently pick Proposal A (position bias is the most common \
          judge failure). If the proposals agree, identify risks neither \
          addressed. If they disagree, name the disagreement, name the axis, \

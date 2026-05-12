@@ -37,7 +37,7 @@ If you find a vulnerability, please open an issue or contact the maintainers pri
 - [ ] **Terminal escape sanitization (untrusted text rendering)**
   - [ ] Strip/neutralize ANSI escape sequences (ESC `\x1b` + CSI/OSC/etc) from:
     - editor buffer rendering (`crates/nit-tui/src/widgets/editor_view.rs`)
-    - agent output rendering (`crates/nit-tui/src/widgets/agent_console_view.rs`)
+    - agent output rendering (`crates/nit-tui/src/widgets/agent_console_view/`)
     - status lines / logs / diagnostics
   - [ ] Decide policy for control characters (`0x00..0x1f`, `0x7f`): drop vs render as visible glyphs.
   - [ ] Add tests with payloads like OSC 52, window title changes, cursor movement, etc.

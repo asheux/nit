@@ -126,6 +126,7 @@ pub(super) fn build_planner_prompt(
     out.push_str(
         "- Each task prompt should be specific about which files or areas to focus on, not generic. The more concrete the prompt, the better the agent output.\n",
     );
+    append_planner_validator_invariants(&mut out, template);
     append_planner_output_format(&mut out, template);
     append_planner_scope_section(&mut out, &scope_files);
     append_planner_memory_hits(&mut out, memory_hits, workspace_root);
@@ -388,6 +389,23 @@ fn append_template_specific_constraints(out: &mut String, template: SwarmTemplat
     }
 }
 
+// Pulls the validator's MustFix invariant list directly so the planner sees
+// the same rules the post-parse check enforces. Single source of truth:
+// editing `validator::planner_invariants_for_prompt` updates both the prompt
+// and the check.
+fn append_planner_validator_invariants(out: &mut String, template: SwarmTemplate) {
+    let lines = super::validator::planner_invariants_for_prompt(template);
+    if lines.is_empty() {
+        return;
+    }
+    out.push_str(
+        "\nDeterministic plan invariants (your output is auto-checked; failing plans are repaired and re-dispatched):\n",
+    );
+    for line in lines {
+        out.push_str(&format!("- {line}\n"));
+    }
+}
+
 fn append_planner_output_format(out: &mut String, template: SwarmTemplate) {
     out.push_str("\nOutput format:\n");
     out.push_str("1) 3-6 bullets summarizing the plan.\n");
@@ -510,6 +528,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Compare the dependency outputs and choose the best path forward.",
             "Produce a decisive recommendation, acceptance criteria, and verification steps.",
             "Do not edit the workspace or perform the final implementation.",
+            "DECISION AXES — rank every proposal against all six; name the axis when you rule for or against one: (1) Correctness: solves the user's request. (2) Landscape fit: targets the lowest-tier / highest-leverage files in the GENOME LANDSCAPE. (3) Parsimony: no metric-gaming over-engineering. (4) Blast radius: diff scoped to the ask. (5) Robustness: handles the failure modes the request implies (real boundary inputs, partial failures, error returns) WITHOUT inventing defensive code for impossible scenarios — penalise both under-handled real boundaries AND over-handled impossible ones. (6) Novelty: applies a fitting non-obvious abstraction rather than recycling boilerplate; reward genuine structural novelty, do NOT reward novelty added purely for token variety (that's already covered by parsimony — don't double-count). Position bias is the most common judge failure: do NOT silently pick the first proposal — when proposals agree, identify risks neither addressed; when they disagree, name the disagreement, name the axis, and rule with a cited reason.",
             "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, formatters, or any verification commands — text analysis only, based on the proposals and (if present) the GENOME LANDSCAPE below. List any commands you'd recommend as suggestions for the integrator/reviewer, not actions you take yourself. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
             "LANDSCAPE-AWARE JUDGING: if a GENOME LANDSCAPE or THRESHOLDS BREACHED section is attached below, your decision MUST be grounded in it. Prefer proposals whose recommendations target the lowest-tier / highest-leverage files (mega-files, parsimony-capped, low-density). Reject or downgrade proposals that recommend changes uncorrelated with the landscape (e.g. cosmetic tweaks on tier-IV files while tier-I/II files go untouched). Name the specific landscape metrics in your verdict.",
             "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",

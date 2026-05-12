@@ -84,7 +84,7 @@ parallel.
   `ShadowRuntime::start`.
 - `crates/nit-tui/src/app/mod.rs` — forwards `TurnCompleted` / `TurnFailed`
   events into `ShadowRuntime::handle_event_outcome`.
-- `crates/nit-tui/src/widgets/agent_console_view.rs` — derives the stage
+- `crates/nit-tui/src/widgets/agent_console_view/` — derives the stage
   label from live state via `shadow_stage_label_from_state` and hides
   shadow-agent messages from the chat view.
 - `crates/nit-tui/src/tests/shadow.rs` — DAG integration tests.

@@ -5,6 +5,15 @@ use std::collections::{HashMap, HashSet};
 
 use super::{IndexedMission, MissionHit, MissionMemoryIndex};
 
+// Score components beyond the Jaccard base. Tuned empirically: a single
+// title-term match should nudge ranking but never dominate the IDF-weighted
+// signal; same for path-stem overlap. Capping prevents long titles or wide
+// scope walks from drowning out genuinely relevant misses.
+const TITLE_BOOST_PER_TERM: f32 = 0.1;
+const TITLE_BOOST_CAP: f32 = 0.3;
+const PATH_BONUS_PER_STEM: f32 = 0.05;
+const PATH_BONUS_CAP: f32 = 0.2;
+
 pub(crate) const STOPWORDS: &[&str] = &[
     "the", "a", "an", "and", "or", "but", "of", "in", "to", "for", "with", "on", "at", "by",
     "from", "as", "is", "are", "was", "were", "be", "been", "this", "that", "these", "those", "it",
@@ -166,12 +175,12 @@ fn score_mission(
 
     let title_terms: HashSet<String> = tokenize(&m.title).into_iter().collect();
     let title_overlap = query_terms.intersection(&title_terms).count() as f32;
-    let title_boost = (title_overlap * 0.1).min(0.3);
+    let title_boost = (title_overlap * TITLE_BOOST_PER_TERM).min(TITLE_BOOST_CAP);
 
     let mission_path_stems: HashSet<String> =
         tokens_from_paths(&m.files_touched).into_iter().collect();
     let path_overlap = query_path_stems.intersection(&mission_path_stems).count() as f32;
-    let path_bonus = (path_overlap * 0.05).min(0.2);
+    let path_bonus = (path_overlap * PATH_BONUS_PER_STEM).min(PATH_BONUS_CAP);
 
     Some(MissionHit {
         mission: m.clone(),

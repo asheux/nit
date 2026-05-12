@@ -3,6 +3,10 @@ use super::{
     COMPUTATIONAL_RESEARCH_ROLE,
 };
 
+// Default lens framings cycled across proposers when the planner LLM call
+// fails entirely. Seven axes chosen to be genuinely orthogonal — diversity
+// here is what gives the judge meaningful candidates to weigh, not just
+// correlated samples of the same prompt.
 const PROPOSER_LENSES: [&str; 7] = [
     "minimal diff / safest change",
     "correctness & edge cases",
@@ -13,6 +17,10 @@ const PROPOSER_LENSES: [&str; 7] = [
     "security & failure modes",
 ];
 
+// Soft cap on bulk fallback proposers. The runtime hard cap in
+// `swarm/limits.rs` is `BULK_PRACTICAL_MAX = 12`; this lower number leaves
+// per-dep budget headroom so the judge sees thicker proposals on the
+// emergency path than on the LLM-planner happy path.
 const BULK_PROPOSER_CAP: usize = 8;
 
 pub(super) fn fallback_tasks(

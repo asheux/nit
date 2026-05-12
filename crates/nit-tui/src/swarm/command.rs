@@ -9,7 +9,8 @@ pub struct SwarmCommand {
 }
 
 pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
-    // Avoid treating "@swarmies" as "@swarm" with arguments.
+    // Require whitespace after `@swarm` so we don't match `@swarmies`,
+    // `@swarmlet`, etc. as the prefix.
     let after = raw.trim_start().strip_prefix("@swarm")?;
     if after.is_empty() || !after.starts_with(char::is_whitespace) {
         return None;
@@ -22,8 +23,8 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
     let size = parse_size_token(&mut rest);
     let (template, mission_kind) = parse_named_args(&mut rest);
 
-    let prompt = rest.to_string();
-    if prompt.trim().is_empty() {
+    let prompt = rest.trim().to_string();
+    if prompt.is_empty() {
         return None;
     }
     Some(SwarmCommand {

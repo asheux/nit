@@ -230,6 +230,9 @@ impl SwarmRuntime {
         run.report_status = None;
         run.report_output = None;
         run.gate_retry_count = 0;
+        run.repair_round = 0;
+        run.last_plan_json = None;
+        run.prior_violations.clear();
         // Re-anchor baselines so the follow-up's genome review and gate
         // measure deltas from THIS follow-up's work — not cumulative
         // deltas from the original swarm's starting point.
@@ -458,6 +461,9 @@ impl SwarmRuntime {
                 scope_files,
                 initial_genome_baselines: state.genome_reports.clone(),
                 gate_retry_count: 0,
+                repair_round: 0,
+                last_plan_json: None,
+                prior_violations: Vec::new(),
             },
         );
 

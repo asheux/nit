@@ -9,14 +9,18 @@ use nit_core::{io as core_io, AgentChannel, AppState};
 
 use super::chat_cursor::timestamp_label;
 
+// Verifier output is excerpted into the markdown provenance file at this
+// budget; long stdout/stderr blobs are truncated so the file stays human-
+// readable in `gh` diff views without forcing readers to scroll past a wall
+// of gate output. Full output remains on disk in the per-task artifacts.
 pub(super) const VERIFY_OUTPUT_MD_MAX_CHARS: usize = 4_000;
 
 pub(super) fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
     let buffer = state.notes_buffer();
-    if buffer.path().is_none() {
-        return Ok(());
-    }
-    if !buffer.is_dirty() {
+    // No path means the notes buffer was never attached to a file, so there
+    // is nothing to save. Dirty-flag check avoids redundant disk writes when
+    // the user exits without making any edits.
+    if buffer.path().is_none() || !buffer.is_dirty() {
         return Ok(());
     }
     core_io::save_buffer(buffer)

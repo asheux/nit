@@ -4,10 +4,10 @@
 //! retrieves similar past missions at planner time. Pure keyword-based
 //! retrieval — no embeddings, no new deps.
 //!
-//! On-disk persistence layout (`<workspace>/.nit/memory/index.json`)
+//! The on-disk persistence layout at `<workspace>/.nit/memory/index.json`
 //! and the serde fields on [`IndexedMission`] / [`MissionMemoryIndex`]
-//! are part of the inter-version contract; do not reshape without a
-//! coordinated migration.
+//! form part of the inter-version contract; reshape only via a coordinated
+//! migration so older nit installs can still read the file.
 
 use serde::{Deserialize, Serialize};
 

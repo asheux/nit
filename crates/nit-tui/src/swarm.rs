@@ -20,11 +20,13 @@ pub(crate) mod limits;
 mod mission;
 mod plan_parser;
 mod prompts;
+mod repair;
 mod runtime;
 mod runtime_events;
 mod scope;
 mod signals;
 mod types;
+pub mod validator;
 mod workers;
 
 #[cfg(test)]
@@ -38,10 +40,36 @@ mod tests;
 #[path = "tests/prompts_leak_test.rs"]
 mod prompts_leak_test;
 
-#[derive(Default)]
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
+    /// Resolved once at construction from `NIT_PLANNER_LEGACY`. When `true`,
+    /// the planner stage bypasses the validator + repair loop entirely and
+    /// stays byte-identical to the pre-G implementation. Cached on the
+    /// runtime rather than re-read per turn so a mid-mission env change
+    /// can't flip behaviour halfway through a planning round.
+    pub(super) legacy_planner: bool,
+}
+
+impl Default for SwarmRuntime {
+    fn default() -> Self {
+        Self {
+            runs: HashMap::new(),
+            completed_runs: HashMap::new(),
+            legacy_planner: read_legacy_planner_env(),
+        }
+    }
+}
+
+fn read_legacy_planner_env() -> bool {
+    std::env::var(constants::NIT_PLANNER_LEGACY_ENV)
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 // Captured at swarm start so follow-up dispatches re-launch with the same
@@ -129,7 +157,7 @@ pub(crate) use constants::{
 };
 use constants::{
     COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY, MAX_SWARM_SIZE,
-    SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
+    REPAIR_RETRY_LIMIT, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL, SWARM_VERIFY_MAX_CHARS,
 };
 use dag::{analyze_swarm_dag, ensure_deps_resolve, find_swarm_cycle_path, repair_swarm_dag};
@@ -194,14 +222,13 @@ pub(crate) use types::{
 };
 use types::{
     parse_swarm_template, FilePreState, Gate, GateBundle, GenomeGatePending, GenomeReviewPending,
-    SwarmDagValidationMode, SwarmRun, SwarmStage, SwarmTask, SwarmTaskState, SwarmTemplate,
-    DEFAULT_DAG_VALIDATION_MODE,
+    SwarmDagValidationMode, SwarmRun, SwarmStage, SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
 };
 pub use types::{
     GateReport, GateReportGate, SwarmArtifactCommand, SwarmArtifactDiff, SwarmArtifactFile,
     SwarmArtifactRisk, SwarmDashboardView, SwarmDispatch, SwarmGateDashboardRow, SwarmMissionKind,
-    SwarmPersistenceView, SwarmSize, SwarmTaskArtifacts, SwarmTaskDashboardRow,
-    SwarmTaskPersistenceView,
+    SwarmPersistenceView, SwarmSize, SwarmTask, SwarmTaskArtifacts, SwarmTaskDashboardRow,
+    SwarmTaskPersistenceView, SwarmTemplate,
 };
 use workers::{maybe_spawn_genome_review, spawn_genome_gate_eval};
 

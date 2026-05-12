@@ -152,10 +152,10 @@ Prior similar missions (read-only context — do not re-plan these, use as prece
 - mis-003 [parallel, DONE]: Refactor crates/nit-gol module
     * File-by-file refactor plan for all 18 nit-gol files …
     * Introduced snapshot trait at catalog boundary …
-    files: crates/nit-gol/src/analyze.rs, crates/nit-gol/src/catalog.rs, …
+    files: crates/nit-gol/src/analyze.rs, crates/nit-gol/src/catalog/mod.rs, …
 ```
 
-This is injected automatically by the planner at `crates/nit-tui/src/swarm.rs::build_planner_prompt`. No user action required.
+This is injected automatically by the planner at `crates/nit-tui/src/swarm/prompts.rs::build_planner_prompt`. No user action required.
 
 ### 3.6 Inspect substrate state directly
 
@@ -228,7 +228,7 @@ After apply, the substrate gains a Signal with `kind: Deadend`, `posted_by: "cod
     "kind": "exclusive_write",
     "target": {
       "kind": "region",
-      "path": "crates/nit-core/src/substrate.rs",
+      "path": "crates/nit-core/src/substrate/signals.rs",
       "start_line": 100,
       "end_line": 180
     },
@@ -254,7 +254,7 @@ Any subsequent FileWrite by another agent to that region (or the whole file) emi
   "arguments": {
     "target": {
       "kind": "file",
-      "path": "crates/nit-core/src/substrate.rs"
+      "path": "crates/nit-core/src/substrate/signals.rs"
     },
     "fact": {
       "kind": "api_signature",
@@ -266,7 +266,7 @@ Any subsequent FileWrite by another agent to that region (or the whole file) emi
 }
 ```
 
-If any other agent subsequently writes to `crates/nit-core/src/substrate.rs` before the assumption expires, the assumption is removed and a Warning signal is posted **to the original asserter** (`target: agent:codex-session`) with the full removed assumption in the payload — so the agent learns its world-model is stale.
+If any other agent subsequently writes to `crates/nit-core/src/substrate/signals.rs` before the assumption expires, the assumption is removed and a Warning signal is posted **to the original asserter** (`target: agent:codex-session`) with the full removed assumption in the payload — so the agent learns its world-model is stale.
 
 ### 4.4 Error shapes
 
@@ -428,7 +428,7 @@ Six tests cover: `initialize` handshake, `tools/list` returns three tools, each 
       "task_ids": ["propose-nit-gol-plan", "integrate-analysis", "review-nit-gol"],
       "task_titles": ["Survey nit-gol", "..."],
       "task_summaries": ["File-by-file refactor plan ...", "..."],
-      "files_touched": ["crates/nit-gol/src/analyze.rs", "crates/nit-gol/src/catalog.rs"],
+      "files_touched": ["crates/nit-gol/src/analyze.rs", "crates/nit-gol/src/catalog/mod.rs"],
       "tags": ["analyze", "catalog", "gol", "nit-gol", "refactor", "snapshot", "..."]
     }
   ]

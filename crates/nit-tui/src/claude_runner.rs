@@ -16,6 +16,9 @@ use crate::claude_pool::{
 };
 use crate::swarm::is_provider_quota_exhausted_in_result;
 
+// Worst-case time a pool checkout is allowed to wait before falling back
+// to a cold-spawn. The pool is a perf optimisation; if no worker is free in
+// 250ms it's cheaper to spawn a fresh process than block the dispatch loop.
 const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]

@@ -16,7 +16,7 @@ pub enum SwarmSize {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SwarmTemplate {
+pub enum SwarmTemplate {
     /// v1-style: keep tasks independent and preferably one per agent.
     Parallel,
     /// Read-only analysis/proposal/review feeding a single-writer integrator.
@@ -47,7 +47,7 @@ pub(super) fn parse_swarm_template(value: Option<&str>) -> SwarmTemplate {
 }
 
 impl SwarmTemplate {
-    pub(super) fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             SwarmTemplate::Parallel => "parallel",
             SwarmTemplate::Lab => "lab",
@@ -639,16 +639,16 @@ pub struct SwarmPersistenceView {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct SwarmTask {
-    pub(super) id: String,
-    pub(super) agent_id: String,
-    pub(super) role: Option<String>,
-    pub(super) title: String,
-    pub(super) task_prompt: String,
-    pub(super) deps: Vec<String>,
-    pub(super) writes: bool,
-    pub(super) artifacts: Vec<String>,
-    pub(super) done_when: Option<String>,
+pub struct SwarmTask {
+    pub id: String,
+    pub agent_id: String,
+    pub role: Option<String>,
+    pub title: String,
+    pub task_prompt: String,
+    pub deps: Vec<String>,
+    pub writes: bool,
+    pub artifacts: Vec<String>,
+    pub done_when: Option<String>,
     pub(super) state: SwarmTaskState,
     pub(super) output: Option<String>,
     pub(super) parsed_artifacts: Option<SwarmTaskArtifacts>,
@@ -673,6 +673,41 @@ pub(super) struct SwarmTask {
     /// declared "huge" source files (>1500 lines) to shrink meaningfully
     /// when same-stem-dir siblings get created.
     pub(super) pre_dispatch_file_state: HashMap<String, FilePreState>,
+}
+
+impl SwarmTask {
+    /// Test-only builder. Production paths construct `SwarmTask` directly in
+    /// the swarm planner; this exists so integration tests can synthesize
+    /// minimal plans without depending on planner internals.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        id: impl Into<String>,
+        agent_id: impl Into<String>,
+        role: Option<&str>,
+        deps: Vec<String>,
+        writes: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            agent_id: agent_id.into(),
+            role: role.map(str::to_string),
+            title: String::new(),
+            task_prompt: String::new(),
+            deps,
+            writes,
+            artifacts: Vec::new(),
+            done_when: None,
+            state: SwarmTaskState::Pending,
+            output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
+            failed: false,
+            retries: 0,
+            compliance_missing_files: Vec::new(),
+            shard_index: None,
+            pre_dispatch_file_state: HashMap::new(),
+        }
+    }
 }
 
 /// Snapshot of a file's state at integrate-task dispatch time. Used by the
@@ -744,4 +779,18 @@ pub(super) struct SwarmRun {
     /// (default 3). Each increment dispatches a fix task to the integrator
     /// and re-enters `Verifying`.
     pub(super) gate_retry_count: u8,
+    /// Repair rounds attempted on the planner output (validator → repair
+    /// prompt → planner). Capped by `REPAIR_RETRY_LIMIT`. Once the validator
+    /// passes or the cap is hit, the run leaves the planning stage and this
+    /// stays frozen as a record of how much repair was needed.
+    pub(super) repair_round: u8,
+    /// Last raw planner JSON that the v2 deserializer accepted. Kept across
+    /// repair rounds so the repair prompt can quote the prior plan verbatim
+    /// rather than asking the planner to remember its own previous output.
+    pub(super) last_plan_json: Option<String>,
+    /// MustFix violations from the previous repair round. Used by
+    /// `evaluate_repair_round` to detect ping-pong (same defect surviving
+    /// across rounds) and force-fallback when the planner stops making
+    /// progress.
+    pub(super) prior_violations: Vec<super::validator::Violation>,
 }

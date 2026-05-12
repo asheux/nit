@@ -8,14 +8,14 @@ This document is the roster. For the per-mission **task-role** catalog (what an 
 
 ## Substrate primitives (context)
 
-The substrate lives in `crates/nit-core/src/substrate.rs` and persists at `.nit/substrate/state.json`. Key primitives:
+The substrate lives in `crates/nit-core/src/substrate/` and persists at `.nit/substrate/state.json`. Key primitives:
 
 - **Signals** — stigmergic traces (`DoneMarker`, `Warning`, `ClaimViolation`, `InterventionEmitted`, etc.). Strength decays per-kind; pruned below threshold.
 - **Claims** — typed write-intent (`ExclusiveWrite | SharedRead | AppendOnly | Soft`) with TTL and a compatibility matrix. Auto-asserted on `FileWrite`; conflicts trigger retries.
 - **Assumptions** — typed read-dependencies. Auto-invalidated when a conflicting `FileWrite` lands; a Warning signal is emitted toward the assumption's poster.
 - **Generation counter** — advances on `TurnCompleted`, not wall-clock. Decay and expiry are generation-relative.
 - **Metabolism** — wall-clock tick every 5s (`crates/nit-core/src/metabolism.rs`). Expires past-TTL claims/assumptions, prunes decayed signals, runs observers and arbiters.
-- **Mission memory** — cross-mission retrieval (`crates/nit-core/src/mission_memory.rs`). Surfaces past similar missions to the planner.
+- **Mission memory** — cross-mission retrieval (`crates/nit-core/src/mission_memory/`). Surfaces past similar missions to the planner.
 - **nit-mcp — deliberate agent agency** — `crates/nit-mcp/` exposes three MCP tools (`emit_signal`, `assert_claim`, `assert_assumption`) that let subprocess Codex agents write directly into the substrate. nit-tui binds a per-process UDS listener; `codex mcp-server` is launched with a `-c mcp_servers.nit=...` override so the model can discover the nit tool set. Requests arrive as `AgentBusEvent::*Request` variants whose ids are minted atomically on the main thread (external processes never touch the counters). Unix-only in v1.
 
 ---
@@ -40,7 +40,7 @@ The substrate lives in `crates/nit-core/src/substrate.rs` and persists at `.nit/
 **Cadence:** turn-driven. Each agent turn is a step of work.
 
 **Substrate interactions:**
-- Signals: auto-emits `DoneMarker` on `TurnCompleted`, `Warning` on `TurnFailed` (via runtime derivation — see `crates/nit-core/src/agent_bus.rs`).
+- Signals: auto-emits `DoneMarker` on `TurnCompleted`, `Warning` on `TurnFailed` (via runtime derivation — see `crates/nit-core/src/agent_bus/`).
 - Claims: auto-asserts `ExclusiveWrite` on `FileWrite` (TTL 3 gens).
 - Assumptions / deliberate emission: available via `nit-mcp` — subprocess Codex agents can call `emit_signal`, `assert_claim`, and `assert_assumption` tools to interact with the substrate explicitly. See the *nit-mcp — deliberate agent agency* entry above under substrate primitives.
 
@@ -97,7 +97,7 @@ The substrate lives in `crates/nit-core/src/substrate.rs` and persists at `.nit/
 
 **Where it lives:** nit's current architecture does not have an explicit `Resolver` type. The role is distributed:
 
-- **`AgentBusEvent::apply()`** (`crates/nit-core/src/agent_bus.rs`) — resolves event-driven state changes (emit signal, assert claim/assumption, turn completion, etc.).
+- **`AgentBusEvent::apply()`** (`crates/nit-core/src/agent_bus/`) — resolves event-driven state changes (emit signal, assert claim/assumption, turn completion, etc.).
 - **`drain_pending_claim_retries` / `drain_pending_interventions`** (`crates/nit-tui/src/app/mod.rs`) — resolve queued corrective actions into agent dispatches.
 - **`write_swarm_run_provenance`** (`crates/nit-tui/src/app/mod.rs`) — resolves mission completion into durable `.nit/swarm/` artifacts.
 - **`SubstrateState::save`** — resolves in-memory substrate into `.nit/substrate/state.json`.
@@ -122,4 +122,6 @@ When introducing a new coordination primitive:
 
 - [`SWARM.md`](SWARM.md) — per-mission task-role catalog, DAG orchestration, template selection.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — overall nit architecture.
-- [`GENOME.md`](GENOME.md) — code-quality feedback loop (separate biological framing for file-structure analysis; distinct from the coordination-role framing here).
+- [`SEEDS.md`](SEEDS.md) — code-as-genome feedback loop (separate biological framing for file-structure analysis; distinct from the coordination-role framing here).
+- [`INTAKE.md`](INTAKE.md) — the hidden Claude-class intent classifier that runs in front of chat dispatches.
+- [`SHADOWS.md`](SHADOWS.md) — single-agent propose/judge/review pipeline (sibling to intake).

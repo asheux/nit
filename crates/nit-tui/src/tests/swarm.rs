@@ -1169,6 +1169,9 @@ fn dag_scheduler_dispatches_after_deps() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1284,6 +1287,9 @@ fn single_writer_limits_concurrent_write_tasks() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1397,6 +1403,9 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -2147,6 +2156,9 @@ fn deadlock_detection_skips_pending_tasks() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     };
     initialize_task_graph(&mut run);
     refresh_task_readiness(&mut run);
@@ -2496,6 +2508,9 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     };
     let mut runtime = SwarmRuntime::default();
     runtime.runs.insert("mis-001".into(), run);
@@ -2826,6 +2841,9 @@ fn test_run(mission_id: &str, spawn_cwd: std::path::PathBuf) -> SwarmRun {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     }
 }
 
@@ -3899,6 +3917,9 @@ fn make_verifying_run_with_fail_report() -> SwarmRun {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     }
 }
 
@@ -4045,6 +4066,9 @@ fn make_run_with_tasks(template: SwarmTemplate, tasks: Vec<SwarmTask>) -> SwarmR
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        repair_round: 0,
+        last_plan_json: None,
+        prior_violations: Vec::new(),
     }
 }
 

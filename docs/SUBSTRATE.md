@@ -33,7 +33,7 @@ Design principles:
 
 ## 2. Data model
 
-Defined in [`crates/nit-core/src/substrate.rs`](../crates/nit-core/src/substrate.rs).
+Defined in [`crates/nit-core/src/substrate/`](../crates/nit-core/src/substrate/) (split across `signals.rs`, `claims.rs`, `assumptions.rs`, `mod.rs` for `SubstrateState`).
 
 ### 2.1 `SubstrateState`
 
@@ -188,7 +188,7 @@ Let `pressure = count(ClaimViolation + Warning + HelpNeeded signals posted in la
 
 ## 3. Event system
 
-Defined in [`crates/nit-core/src/agent_bus.rs`](../crates/nit-core/src/agent_bus.rs).
+Defined in [`crates/nit-core/src/agent_bus/`](../crates/nit-core/src/agent_bus/) (split across `mod.rs`, `upsert.rs`, `turn_lifecycle.rs`, `turn_completion.rs`, `turn_error.rs`, `claims_signals.rs`, `file_ops.rs`, `mood_control.rs`, `token_count.rs`, `helpers.rs`).
 
 ### 3.1 Event taxonomy
 
@@ -312,7 +312,7 @@ pub fn apply_interventions(state, reduced);
 - Per-tick budget of `mood.arbiter_max_per_tick` (1 / 2 / 4 for Exploration / Consolidation / Defensive).
 - Downgrade to `EmitSignalOnly` when `state.genome_retry_count ≥ ARBITER_RETRY_LIMIT`.
 
-`apply_interventions` emits an `InterventionEmitted` signal per intervention AND pushes `Intervention` entries onto `state.pending_interventions`. nit-tui's `drain_pending_interventions` (in `crates/nit-tui/src/app/mod.rs`) pops each, consumes one slot of the shared `GENOME_RETRY_LIMIT` budget, and calls `dispatch_agent_prompt` with the escalated prompt.
+`apply_interventions` emits an `InterventionEmitted` signal per intervention AND pushes `Intervention` entries onto `state.pending_interventions`. nit-tui's `drain_pending_interventions` (in `crates/nit-tui/src/app/genome_retry.rs`) pops each, consumes one slot of the shared `GENOME_RETRY_LIMIT` budget, and calls `dispatch_agent_prompt` with the escalated prompt.
 
 **Current arbiter**: `persistent_conflict` — detects ≥3 mutual `ClaimViolation` signals between an agent pair within 10 gens and emits a "permanently yield" prompt targeting the lexicographically-larger agent.
 
@@ -320,7 +320,7 @@ pub fn apply_interventions(state, reduced);
 
 ## 7. Mission memory
 
-Defined in [`crates/nit-core/src/mission_memory.rs`](../crates/nit-core/src/mission_memory.rs).
+Defined in [`crates/nit-core/src/mission_memory/`](../crates/nit-core/src/mission_memory/) (split across `mod.rs`, `index.rs`, `io.rs`, `search.rs`).
 
 Indexes completed missions from `.nit/swarm/<mission-id>/` (title, template, task summaries, touched files, precomputed tags) into a single file at `.nit/memory/index.json`.
 
@@ -330,7 +330,7 @@ Indexes completed missions from `.nit/swarm/<mission-id>/` (title, template, tas
 - Add title-term boost (cap 0.3) and file-path overlap bonus (cap 0.2).
 - Filter exclude list, drop zero-score hits, sort descending, truncate to K.
 
-**Integration**: at swarm planner construction (`crates/nit-tui/src/swarm.rs::build_planner_prompt` and `build_followup_planner_prompt`), retrieves top-3 excluding the current mission and injects as a "Prior similar missions" section before "Operator request:". Bounded to ~1-2 KB added.
+**Integration**: at swarm planner construction (`crates/nit-tui/src/swarm/prompts.rs::build_planner_prompt` + `crates/nit-tui/src/swarm/runtime.rs::build_followup_planner_prompt`), retrieves top-3 excluding the current mission and injects as a "Prior similar missions" section before "Operator request:". Bounded to ~1-2 KB added.
 
 **Update**: `upsert_mission(workspace_root, mission_id)` called after `summary.json` is written in `write_swarm_run_provenance`. Best-effort (discards Result). Bootstrap: `load_or_build` on first query in a session.
 
@@ -409,24 +409,22 @@ APPLY / SEED / SNAP / SEARCH buttons in the Visualizer title remain always-visib
 
 | Concern                      | Crate / File                                                          |
 |------------------------------|-----------------------------------------------------------------------|
-| Substrate types              | `crates/nit-core/src/substrate.rs`                                    |
+| Substrate types              | `crates/nit-core/src/substrate/` (`signals.rs`, `claims.rs`, `assumptions.rs`, `mod.rs`) |
 | Mood                         | `crates/nit-core/src/mood.rs`                                         |
 | Metabolism                   | `crates/nit-core/src/metabolism.rs`                                   |
 | Observers (framework + two)  | `crates/nit-core/src/observers/`                                      |
 | Arbiters (framework + one)   | `crates/nit-core/src/arbiters/`                                       |
-| Mission memory               | `crates/nit-core/src/mission_memory.rs`                               |
-| Event bus + apply            | `crates/nit-core/src/agent_bus.rs`                                    |
-| AppState + drain queues      | `crates/nit-core/src/state.rs`                                        |
+| Mission memory               | `crates/nit-core/src/mission_memory/`                                 |
+| Event bus + apply            | `crates/nit-core/src/agent_bus/`                                      |
+| AppState + drain queues      | `crates/nit-core/src/state/`                                          |
 | Signals tab widget           | `crates/nit-tui/src/widgets/signals_view.rs`                          |
 | Claims tab widget            | `crates/nit-tui/src/widgets/claims_view.rs`                           |
 | Assumptions tab widget       | `crates/nit-tui/src/widgets/assumptions_view.rs`                      |
 | Visualizer pane              | `crates/nit-tui/src/widgets/visualizer_view.rs`                       |
 | Substrate overlay popup      | `crates/nit-tui/src/widgets/substrate_overlay.rs`                     |
-| Claim-retry drain            | `crates/nit-tui/src/app/mod.rs` (`drain_pending_claim_retries`)       |
-| Intervention drain           | `crates/nit-tui/src/app/mod.rs` (`drain_pending_interventions`)       |
-| Metabolism frame-time check  | `crates/nit-tui/src/app/mod.rs` (main loop)                           |
+| Claim-retry / intervention drains, metabolism tick | `crates/nit-tui/src/app/mod.rs` (`drain_pending_claim_retries`, `drain_pending_interventions`, main loop) |
 | MCP back-channel listener    | `crates/nit-tui/src/mcp_backchannel.rs`                               |
-| Codex runner MCP wiring      | `crates/nit-tui/src/codex_runner.rs`                                  |
+| Codex runner MCP wiring      | `crates/nit-tui/src/codex_runner/`                                    |
 | nit-mcp MCP server           | `crates/nit-mcp/src/server.rs`                                        |
 | nit-mcp protocol types       | `crates/nit-mcp/src/protocol.rs`                                      |
 | nit-mcp back-channel client  | `crates/nit-mcp/src/backchannel.rs`                                   |
@@ -449,7 +447,7 @@ APPLY / SEED / SNAP / SEARCH buttons in the Visualizer title remain always-visib
 ## 13. Extension points
 
 ### Adding a new signal kind
-1. Add variant to `SignalKind` in `crates/nit-core/src/substrate.rs`.
+1. Add variant to `SignalKind` in `crates/nit-core/src/substrate/signals.rs`.
 2. Add decay rate in `SignalKind::decay_rate()`.
 3. Update `signals_view.rs` for kind-label rendering.
 4. Update `LIVING_SYSTEM.md` if it represents a new coordination meaning.
@@ -474,7 +472,7 @@ Same shape as observer, but also:
 ### Adding a new tool to nit-mcp
 1. Extend `BackchannelRequest` in `crates/nit-mcp/src/protocol.rs`.
 2. Add tool schema + handler in `crates/nit-mcp/src/server.rs`.
-3. Add a matching `AgentBusEvent::*Request` in `crates/nit-core/src/agent_bus.rs` with an `apply` arm that mints IDs.
+3. Add a matching `AgentBusEvent::*Request` in `crates/nit-core/src/agent_bus/` (extend the relevant submodule and re-export from `mod.rs`) with an `apply` arm that mints IDs.
 4. Extend `mcp_backchannel.rs`'s `backchannel_to_event` function.
 
 ### Adding a new mood modulation

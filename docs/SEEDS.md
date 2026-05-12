@@ -239,17 +239,18 @@ Agents receive an equilibrium rule in their system prompt that explicitly lists 
 | `PARSIMONY_TINY_FN_MIN_COUNT` | 12 | Min fn count for tiny-fn flag |
 | `PARSIMONY_DUPLICATE_COMMENT_THRESHOLD` | 1 | Min duplicate comment lines before flag |
 | `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Max generation lift from soft bottleneck |
-| `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn (defined in `crates/nit-tui/src/app/mod.rs`) |
-| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility (defined in `crates/nit-tui/src/app/mod.rs`) |
+| `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn (defined in `crates/nit-tui/src/app/genome_retry.rs`) |
+| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility (defined in `crates/nit-tui/src/app/genome_retry.rs`) |
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `crates/nit-core/src/seed.rs` | All encoder implementations, symmetry, jitter, thresholding, hashing, component counting |
-| `crates/nit-core/src/genome_report.rs` | Genome tier, parsimony analysis, soft bottleneck, recommendations, agent instructions |
+| `crates/nit-core/src/seed/` | Encoder implementations + pipeline (`encoders/`, `params.rs`, `grid_types.rs`, `utils.rs`, `view_modes.rs`) — symmetry, jitter, thresholding, hashing, component counting |
+| `crates/nit-core/src/genome_report/` | Genome tier scoring, parsimony analysis, soft bottleneck, recommendations, agent instructions (split across `format.rs`, `function_scores.rs`, `instructions.rs`, `outlier.rs`, `parsimony.rs`, `recommendations/`, `simulation.rs`, `source_scan.rs`) |
+| `crates/nit-core/src/genome_storage/` | Disk-backed report cache (sharded, atomic writes, schema migrations) |
 | `crates/nit-tui/src/seed_runtime.rs` | Runtime orchestration, change detection, debounce, search worker, snapshot dispatch |
-| `crates/nit-tui/src/seed_render/genome.rs` | GENOME view rendering for all encoders |
-| `crates/nit-tui/src/seed_render/renderer.rs` | Render cache, component analysis, preview modes |
+| `crates/nit-tui/src/seed_render/` | GENOME view rendering, render cache, component analysis, preview modes |
 | `crates/nit-tui/src/seed_snapshot.rs` | Snapshot I/O, deduplication, metadata persistence |
-| `crates/nit-tui/src/app/mod.rs` | Retry logic, retry min-lines gate, genome worker drain |
+| `crates/nit-tui/src/genome_worker.rs` | Off-thread genome evaluation worker |
+| `crates/nit-tui/src/app/genome_retry.rs` | Retry-prompt builder + cap (`GENOME_RETRY_LIMIT = 3`, `GENOME_RETRY_MIN_LINES = 120`) |

@@ -1015,6 +1015,11 @@ fn format_role_ordering_summary(
     format!("Role ordering ({source}): {}.", parts.join(", "))
 }
 
+// Architecture G note: this function is unchanged by the validator + repair
+// loop. The validator runs AFTER this returns — see
+// `runtime_events::handle_completed_planning::dispatch_repair_or_finalize`.
+// Repair rounds re-enter through the same TurnCompleted path on subsequent
+// planner turns, so the parser itself stays oblivious to repair state.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_plan_from_planner(
     planner_message: &str,

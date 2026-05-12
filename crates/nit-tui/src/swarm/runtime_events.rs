@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use nit_core::{AgentBusEvent, AppState, MissionPhase};
 
+use super::repair::{build_repair_prompt, evaluate_repair_round};
+use super::validator::{must_fix, validate_plan, Severity, ValidationContext, Violation};
 use super::{
     abort_swarm_plan_preflight, analyze_swarm_dag, apply_role_dependency_ordering,
     build_synthesis_prompt, build_verify_prompt, cleanup_swarm_clones_for_mission,
@@ -15,7 +19,7 @@ use super::{
     tasks_terminal_count, try_dispatch_gate_retry, update_mission_final, update_mission_phase,
     update_mission_status, GenomeGatePending, ParsedSwarmPlan, SwarmArtifactFocus,
     SwarmDagValidationMode, SwarmDispatch, SwarmEventOutcome, SwarmRun, SwarmRuntime, SwarmStage,
-    SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
+    SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE, REPAIR_RETRY_LIMIT,
 };
 
 // Cap on re-dispatches when an output fails the sign-off check. Past this
@@ -92,9 +96,14 @@ impl SwarmRuntime {
             return;
         };
         let fate = match run.stage {
-            SwarmStage::Planning if agent_id == run.planner_agent_id => {
-                handle_completed_planning(state, outcome, &mut run, agent_id, message)
-            }
+            SwarmStage::Planning if agent_id == run.planner_agent_id => handle_completed_planning(
+                state,
+                outcome,
+                &mut run,
+                agent_id,
+                message,
+                self.legacy_planner,
+            ),
             SwarmStage::Executing => {
                 handle_completed_executing(state, outcome, &mut run, agent_id, message)
             }
@@ -177,6 +186,7 @@ fn handle_completed_planning(
     run: &mut SwarmRun,
     agent_id: &str,
     message: &str,
+    legacy_planner: bool,
 ) -> RunFate {
     tag_last_agent_message_kind(state, agent_id, &run.mission_id, "plan");
     let available = non_planner_agents(run);
@@ -191,7 +201,202 @@ fn handle_completed_planning(
         run.integrator_locked,
         multi_integrator,
     );
-    finalize_plan(state, outcome, run, parsed, &available, multi_integrator)
+
+    if legacy_planner {
+        return finalize_plan(state, outcome, run, parsed, &available, multi_integrator);
+    }
+
+    match dispatch_repair_or_finalize(state, run, message, &parsed, &available) {
+        RepairDecision::Finalize => {
+            finalize_plan(state, outcome, run, parsed, &available, multi_integrator)
+        }
+        RepairDecision::DispatchRepair(prompt) => {
+            outcome.dispatches.push(SwarmDispatch {
+                agent_id: run.planner_agent_id.clone(),
+                mission_id: run.mission_id.clone(),
+                prompt,
+                task_role: None,
+            });
+            RunFate::Active
+        }
+        RepairDecision::ExhaustedFallback => {
+            // The exhaustion branch already pushed a system message naming
+            // the surviving violation set; finalize with whatever the
+            // planner gave us so the swarm can still make progress.
+            finalize_plan(state, outcome, run, parsed, &available, multi_integrator)
+        }
+    }
+}
+
+enum RepairDecision {
+    Finalize,
+    DispatchRepair(String),
+    ExhaustedFallback,
+}
+
+// Stashes the raw planner JSON (when extractable) so the repair prompt can
+// quote the prior plan verbatim instead of asking the planner to remember
+// what it produced. Stored on the run, not in the closure, so a subsequent
+// failed planner turn doesn't lose the last good draft.
+fn stash_plan_json(run: &mut SwarmRun, planner_message: &str) {
+    if let Some(json) = super::extract_json_code_block(planner_message) {
+        run.last_plan_json = Some(json);
+    }
+}
+
+fn dispatch_repair_or_finalize(
+    state: &mut AppState,
+    run: &mut SwarmRun,
+    planner_message: &str,
+    parsed: &ParsedSwarmPlan,
+    available: &[String],
+) -> RepairDecision {
+    let role_hints = collect_role_hints(state, available);
+    let ctx = ValidationContext {
+        tasks: parsed.tasks.as_slice(),
+        available_agents: available,
+        integrator_agent_id: run.integrator_agent_id.as_deref(),
+        role_hints: &role_hints,
+        template: run.template,
+        mission_kind: run.mission_kind,
+        root_prompt: run.root_prompt.as_str(),
+    };
+    let all_violations = validate_plan(&ctx);
+    surface_advisory_violations(state, run, &all_violations);
+    let blockers = must_fix(&all_violations);
+    if blockers.is_empty() {
+        return RepairDecision::Finalize;
+    }
+
+    if run.repair_round >= REPAIR_RETRY_LIMIT {
+        announce_repair_exhausted(state, run, &blockers);
+        return RepairDecision::ExhaustedFallback;
+    }
+
+    if run.repair_round > 0 {
+        let outcome = evaluate_repair_round(&run.prior_violations, &blockers);
+        if !outcome.strictly_improved && outcome.same_violations_persist {
+            announce_repair_stuck(state, run, &blockers);
+            return RepairDecision::ExhaustedFallback;
+        }
+    }
+
+    stash_plan_json(run, planner_message);
+    let prior_json = run.last_plan_json.clone().unwrap_or_default();
+    let repair_prompt = build_repair_prompt(
+        run.root_prompt.as_str(),
+        prior_json.as_str(),
+        &blockers,
+        run.repair_round + 1,
+        REPAIR_RETRY_LIMIT,
+    );
+    run.repair_round = run.repair_round.saturating_add(1);
+    run.prior_violations = blockers.clone();
+    announce_repair_round(state, run, &blockers);
+    RepairDecision::DispatchRepair(repair_prompt)
+}
+
+fn collect_role_hints(state: &AppState, available: &[String]) -> HashMap<String, String> {
+    let mut hints: HashMap<String, String> = HashMap::new();
+    for agent_id in available.iter() {
+        let Some(raw) = state.agents.swarm_role_by_agent_id.get(agent_id) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        hints.insert(agent_id.clone(), trimmed.to_string());
+    }
+    hints
+}
+
+fn surface_advisory_violations(state: &mut AppState, run: &SwarmRun, all: &[Violation]) {
+    let advisories: Vec<&Violation> = all
+        .iter()
+        .filter(|v| matches!(v.severity, Severity::Advisory))
+        .collect();
+    if advisories.is_empty() {
+        return;
+    }
+    let preview: Vec<String> = advisories
+        .iter()
+        .take(3)
+        .map(|v| format!("[{}] {}", v.id, v.human))
+        .collect();
+    let more = if advisories.len() > preview.len() {
+        format!(" (+{} more)", advisories.len() - preview.len())
+    } else {
+        String::new()
+    };
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!(
+            "PLANNER advisories ({}): {}{more}",
+            advisories.len(),
+            preview.join("; "),
+        ),
+    );
+}
+
+fn announce_repair_round(state: &mut AppState, run: &SwarmRun, blockers: &[Violation]) {
+    let preview: Vec<String> = blockers
+        .iter()
+        .take(3)
+        .map(|v| format!("[{}] {}", v.id, v.human))
+        .collect();
+    let more = if blockers.len() > preview.len() {
+        format!(" (+{} more)", blockers.len() - preview.len())
+    } else {
+        String::new()
+    };
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!(
+            "PLAN repair {round}/{max}: {count} violation(s); re-dispatching planner. {preview}{more}",
+            round = run.repair_round + 1,
+            max = REPAIR_RETRY_LIMIT,
+            count = blockers.len(),
+            preview = preview.join("; "),
+        ),
+    );
+}
+
+fn announce_repair_exhausted(state: &mut AppState, run: &SwarmRun, blockers: &[Violation]) {
+    let preview: Vec<String> = blockers
+        .iter()
+        .take(3)
+        .map(|v| format!("[{}] {}", v.id, v.human))
+        .collect();
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!(
+            "PLAN repair: budget exhausted after {} round(s); accepting plan with {} residual violation(s): {}.",
+            REPAIR_RETRY_LIMIT,
+            blockers.len(),
+            preview.join("; "),
+        ),
+    );
+}
+
+fn announce_repair_stuck(state: &mut AppState, run: &SwarmRun, blockers: &[Violation]) {
+    let preview: Vec<String> = blockers
+        .iter()
+        .take(3)
+        .map(|v| format!("[{}] {}", v.id, v.human))
+        .collect();
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!(
+            "PLAN repair: planner stopped making progress (same violations across rounds). Accepting plan with {} residual violation(s): {}.",
+            blockers.len(),
+            preview.join("; "),
+        ),
+    );
 }
 
 fn handle_failed_planning(
