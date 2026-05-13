@@ -6404,6 +6404,7 @@ fn quota_exhausted_in_result_skips_assistant_prose() {
     ));
 }
 
+#[cfg(unix)]
 mod scope_tests {
     use super::*;
     use std::fs;

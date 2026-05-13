@@ -2,39 +2,146 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ "**" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
 jobs:
-  build:
+  lint:
+    name: Lint (fmt + clippy + doc + deny)
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-ubuntu-24.04
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: cargo doc
+        # Smoke test: catches doc compile errors but does not yet deny warnings,
+        # because the workspace currently emits broken-link warnings that are
+        # tracked as a separate cleanup. Flip to `-D warnings` once those are
+        # resolved.
+        run: cargo doc --workspace --no-deps --all-features --locked
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          log-level: warn
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [1.88.0, stable]
+        include:
+          - os: ubuntu-24.04
+            install_deps: true
+          - os: macos-14
+            install_deps: false
+          - os: windows-2022
+            install_deps: false
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tools
-        if: matrix.toolchain == '1.88.0'
+
+      - name: Install Linux system deps
+        if: matrix.install_deps
         run: |
-          cargo install cargo-deny --locked --version 0.14.24
-      - name: Fmt
-        if: matrix.toolchain == '1.88.0'
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        if: matrix.toolchain == '1.88.0'
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --all --locked --no-fail-fast
-      - name: Cargo deny
-        if: matrix.toolchain == '1.88.0'
-        run: cargo deny check
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+
+      - name: cargo build (tests)
+        run: cargo test --workspace --locked --no-run
+
+      - name: cargo test
+        env:
+          NIT_SNAPSHOT_QUEUE: "64"
+        run: cargo test --workspace --locked --no-fail-fast
+
+  msrv:
+    name: MSRV (1.88.0 build check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+
+      - name: cargo build --release
+        run: cargo build --workspace --release --locked
+
+  ci-pass:
+    name: CI Pass
+    if: always()
+    needs: [lint, test, msrv]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" || \
+                "${{ needs.test.result }}" != "success" || \
+                "${{ needs.msrv.result }}" != "success" ]]; then
+            echo "::error::One or more required jobs failed"
+            echo "  lint:  ${{ needs.lint.result }}"
+            echo "  test:  ${{ needs.test.result }}"
+            echo "  msrv:  ${{ needs.msrv.result }}"
+            exit 1
+          fi
