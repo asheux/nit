@@ -2,13 +2,53 @@
 
 A terminal-first, multi-pane TUI editor and **agent station** built in Rust. Secure-by-default, event-driven rendering, multi-backend agent orchestration (Codex + Claude), persistent stigmergic substrate, two built-in research labs (Conway's Game of Life, game-theory tournaments), and a multipane grid mode for driving N concurrent agent sessions from a single terminal.
 
+## Install
+
+**macOS, Linux, WSL:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/asheux/nit/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/asheux/nit/main/install.ps1 | iex
+```
+
+**Homebrew (macOS / Linux):**
+
+```bash
+brew install asheux/tap/nit
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/asheux/nit.git && cd nit
+cargo build --release
+# Binaries land at target/release/{nit, nit-mcp-server}
+```
+
+Prebuilt binaries for every release are also published on the [Releases page](https://github.com/asheux/nit/releases) with a `SHA256SUMS` file for verification.
+
+### Supported platforms
+
+| OS         | Architecture | Distribution                                    |
+|------------|--------------|-------------------------------------------------|
+| macOS      | arm64        | `install.sh`, Homebrew, GitHub Releases tarball |
+| macOS      | x86_64       | `install.sh`, Homebrew, GitHub Releases tarball |
+| Linux      | x86_64 (glibc) | `install.sh`, Homebrew, GitHub Releases tarball |
+| Windows    | x86_64 (MSVC)  | `install.ps1`, GitHub Releases zip              |
+
+`nit` requires external CLIs (`codex`, `claude`, `git`) on `PATH` to drive its agent runners.
+
 ## Quick start
 
 ```bash
-cd nit
-cargo run -- path/to/file
-cargo run -- games
-cargo run -- multipane
+nit path/to/file
+nit games
+nit multipane
 ```
 
 - `nit <file>` opens the file in the editor.
@@ -36,10 +76,27 @@ scripts/healthcheck.sh --deep
 
 ### Toolchain
 
-- Rust 1.88.0 (pinned via `rust-toolchain.toml`; CI also tests `stable`)
+- Rust 1.88.0 (pinned via `rust-toolchain.toml`)
 - ratatui + crossterm for UI/input
 - ropey, unicode-segmentation, unicode-width for text correctness
 - tree-sitter for syntax highlighting and AST-based seed encoders
+
+### Releasing
+
+Pushing a `v*` tag to GitHub kicks off `.github/workflows/release.yml`, which:
+
+1. Creates a draft GitHub Release with auto-generated notes.
+2. Builds `nit` + `nit-mcp-server` for macOS arm64/x86_64, Linux x86_64 (glibc), and Windows x86_64 in parallel.
+3. Uploads each archive plus a `.sha256` and an aggregated `SHA256SUMS`.
+4. Updates the Homebrew formula at `asheux/homebrew-tap` (requires the `HOMEBREW_TAP_TOKEN` secret — pre-release tags like `v0.1.0-rc1` skip this step).
+5. Promotes the draft Release to published.
+
+Cut a release with:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ### Reproducibility
 

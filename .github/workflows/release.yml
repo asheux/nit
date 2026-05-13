@@ -1,0 +1,327 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Tag must already exist."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: resolve
+        name: Resolve tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not a valid semver tag (expected vX.Y.Z[-pre])"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; reusing."
+          else
+            gh release create "$TAG" \
+              --draft \
+              --generate-notes \
+              --title "$TAG" \
+              --target "$GITHUB_SHA"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            archive: tar.gz
+            install_deps: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        if: matrix.install_deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          save-if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          cargo build --release --locked --workspace \
+            --target ${{ matrix.target }} \
+            --bin nit \
+            --bin nit-mcp-server
+
+      - name: Stage artifacts
+        id: stage
+        shell: bash
+        env:
+          TAG: ${{ needs.create-release.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          name="nit-${TAG}-${TARGET}"
+          stage="$(pwd)/dist/${name}"
+          mkdir -p "$stage"
+
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/${TARGET}/release/nit.exe" "$stage/"
+            cp "target/${TARGET}/release/nit-mcp-server.exe" "$stage/"
+          else
+            cp "target/${TARGET}/release/nit" "$stage/"
+            cp "target/${TARGET}/release/nit-mcp-server" "$stage/"
+            strip "$stage/nit" "$stage/nit-mcp-server" 2>/dev/null || true
+          fi
+
+          cp README.md LICENSE "$stage/"
+
+          cd dist
+          if [ "$ARCHIVE" = "zip" ]; then
+            7z a "${name}.zip" "${name}" >/dev/null
+            asset="${name}.zip"
+          else
+            tar czf "${name}.tar.gz" "${name}"
+            asset="${name}.tar.gz"
+          fi
+
+          # SHA256
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${asset}" > "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" > "${asset}.sha256"
+          fi
+
+          echo "asset=dist/${asset}" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${asset}.sha256" >> "$GITHUB_OUTPUT"
+          echo "sha=$(cut -d' ' -f1 "${asset}.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" \
+            "${{ steps.stage.outputs.asset }}" \
+            "${{ steps.stage.outputs.checksum }}" \
+            --clobber
+
+      - name: Export checksum for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksum-${{ matrix.target }}
+          path: ${{ steps.stage.outputs.checksum }}
+          retention-days: 1
+
+  checksums:
+    name: Aggregate SHA256SUMS
+    needs: [create-release, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: checksum-*
+          merge-multiple: true
+          path: sums
+
+      - name: Build SHA256SUMS
+        run: |
+          set -e
+          cd sums
+          # Each downloaded file is `<asset>.sha256` containing one line.
+          cat *.sha256 | sort > ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" \
+            SHA256SUMS \
+            --clobber
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: [create-release, build, checksums]
+    runs-on: ubuntu-24.04
+    if: ${{ !contains(needs.create-release.outputs.tag, '-') }}
+    steps:
+      - name: Check tap token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret not set; skipping tap update. Create asheux/homebrew-tap and add the PAT to enable."
+            echo "skip=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download SHA256SUMS
+        if: env.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ needs.create-release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "SHA256SUMS" \
+            --output SHA256SUMS
+
+      - name: Generate formula
+        if: env.skip != 'true'
+        env:
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Extract per-asset checksums.
+          get_sum() {
+            grep -E " +nit-${TAG}-$1\.tar\.gz$" SHA256SUMS | awk '{print $1}'
+          }
+          SHA_ARM="$(get_sum aarch64-apple-darwin)"
+          SHA_INTEL="$(get_sum x86_64-apple-darwin)"
+          SHA_LINUX="$(get_sum x86_64-unknown-linux-gnu)"
+
+          for v in "$SHA_ARM" "$SHA_INTEL" "$SHA_LINUX"; do
+            if [ -z "$v" ]; then
+              echo "::error::Missing SHA256 for one of the macOS/Linux assets"
+              exit 1
+            fi
+          done
+
+          mkdir -p Formula
+          cat > Formula/nit.rb <<EOF
+          # This file is auto-generated by .github/workflows/release.yml.
+          # Do not edit by hand; changes will be overwritten on the next release.
+          class Nit < Formula
+            desc "Terminal-native AI agent orchestrator with TUI"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM}"
+              end
+              on_intel do
+                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_INTEL}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "nit"
+              bin.install "nit-mcp-server"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/nit --version 2>&1", 0)
+            end
+          end
+          EOF
+          cat Formula/nit.rb
+
+      - name: Push formula to tap
+        if: env.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          TAP_REPO="asheux/homebrew-tap"
+          gh repo clone "$TAP_REPO" tap -- --depth=1
+          mkdir -p tap/Formula
+          cp Formula/nit.rb tap/Formula/nit.rb
+          cd tap
+          if git diff --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git add Formula/nit.rb
+          git commit -m "nit ${TAG}"
+          git push origin HEAD
+
+  publish-release:
+    name: Promote release
+    needs: [create-release, build, checksums, homebrew]
+    if: always() && needs.build.result == 'success' && needs.checksums.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Promote draft → published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ needs.create-release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false
