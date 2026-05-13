@@ -28,7 +28,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -84,7 +84,7 @@ jobs:
             os: windows-2022
             archive: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         if: matrix.install_deps
@@ -167,7 +167,7 @@ jobs:
             --clobber
 
       - name: Export checksum for downstream jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checksum-${{ matrix.target }}
           path: ${{ steps.stage.outputs.checksum }}
@@ -178,7 +178,7 @@ jobs:
     needs: [create-release, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: checksum-*
           merge-multiple: true

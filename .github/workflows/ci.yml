@@ -25,7 +25,7 @@ jobs:
     name: Lint (fmt + clippy + doc + deny)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         run: |
@@ -77,7 +77,7 @@ jobs:
           - os: windows-2022
             install_deps: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         if: matrix.install_deps
@@ -114,7 +114,7 @@ jobs:
     name: MSRV (1.88.0 build check)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         run: |
