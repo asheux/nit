@@ -449,11 +449,15 @@ jobs:
           mkdir -p tap/Formula
           cp Formula/nit.rb tap/Formula/nit.rb
           cd tap
-          if git diff --quiet; then
+          git add Formula/nit.rb
+          # `git diff --cached --quiet` returns 0 when the staging area is
+          # empty (no real change vs. HEAD). Using `--cached` (instead of the
+          # working-tree-only `git diff --quiet`) is what makes this work for
+          # a brand-new Formula/nit.rb that the tap repo has never seen.
+          if git diff --cached --quiet; then
             echo "Formula already up to date."
             exit 0
           fi
-          git add Formula/nit.rb
           git commit -m "nit ${TAG}"
           git push origin HEAD
 
