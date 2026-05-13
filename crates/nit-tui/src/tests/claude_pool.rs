@@ -338,11 +338,12 @@ fn gc_sweep_recycles_aged_idle_slots() {
     w.check_in();
     let (idle, _) = pool.snapshot_sizes();
     assert_eq!(idle, 1);
-    // Backdate the idle slot so the GC sweep retires it without waiting an
-    // hour — `check_in` resets `last_used_at` to now(), so the backdating
-    // must happen AFTER the check-in lands.
-    pool.backdate_idle_for_test(POOL_IDLE_MAX + Duration::from_secs(1));
-    pool.gc_sweep();
+    // Step the clock forward past POOL_IDLE_MAX instead of backdating the
+    // slot — forward-stepping always succeeds, whereas `checked_sub` on
+    // `Instant` can underflow on platforms whose monotonic clock anchors at
+    // boot and the test process is younger than POOL_IDLE_MAX (Windows CI).
+    let future = std::time::Instant::now() + POOL_IDLE_MAX + Duration::from_secs(1);
+    pool.gc_sweep_at(future);
     let (idle, busy) = pool.snapshot_sizes();
     assert_eq!(idle, 0, "GC must drop slots older than POOL_IDLE_MAX");
     assert_eq!(busy, 0);

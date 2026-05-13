@@ -46,7 +46,12 @@ fn global_archive_popup_enter_selects_archived_run() {
     });
     let run_dir = state
         .workspace_root
-        .join(".nit/agents/runs/mis-888/history/00000000000000000009");
+        .join(".nit")
+        .join("agents")
+        .join("runs")
+        .join("mis-888")
+        .join("history")
+        .join("00000000000000000009");
     fs::create_dir_all(&run_dir).expect("history dir");
     let run_path = run_dir.join("run.json");
     fs::write(

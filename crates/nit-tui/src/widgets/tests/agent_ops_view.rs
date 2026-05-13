@@ -1063,7 +1063,13 @@ fn artifacts_view_uses_selected_archived_run_over_live_context() {
         kind: None,
     });
 
-    let run_dir = workspace.join(".nit/agents/runs/mis-601/history/00000000000000000003");
+    let run_dir = workspace
+        .join(".nit")
+        .join("agents")
+        .join("runs")
+        .join("mis-601")
+        .join("history")
+        .join("00000000000000000003");
     fs::create_dir_all(&run_dir).expect("history dir");
     let archived_run = serde_json::json!({
         "id": "mis-601",
