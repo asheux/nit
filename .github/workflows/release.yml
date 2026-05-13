@@ -227,10 +227,13 @@ jobs:
       - name: Upload SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
+        # `--repo` is required because this job does not run `actions/checkout`,
+        # so gh can't infer the repository from a local .git directory.
         run: |
           gh release upload "${{ needs.create-release.outputs.tag }}" \
             SHA256SUMS \
-            --clobber
+            --clobber \
+            --repo "${{ github.repository }}"
 
   homebrew:
     name: Update Homebrew tap
