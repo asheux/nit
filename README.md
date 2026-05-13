@@ -34,12 +34,14 @@ Prebuilt binaries for every release are also published on the [Releases page](ht
 
 ### Supported platforms
 
-| OS         | Architecture | Distribution                                    |
-|------------|--------------|-------------------------------------------------|
-| macOS      | arm64        | `install.sh`, Homebrew, GitHub Releases tarball |
-| macOS      | x86_64       | `install.sh`, Homebrew, GitHub Releases tarball |
-| Linux      | x86_64 (glibc) | `install.sh`, Homebrew, GitHub Releases tarball |
-| Windows    | x86_64 (MSVC)  | `install.ps1`, GitHub Releases zip              |
+| OS         | Architecture            | Distribution                                    |
+|------------|-------------------------|-------------------------------------------------|
+| macOS      | arm64 + x86_64 (universal) | `install.sh`, Homebrew, GitHub Releases tarball |
+| Linux      | x86_64 (glibc)          | `install.sh`, Homebrew, GitHub Releases tarball |
+| Windows    | x86_64 (MSVC)           | `install.ps1`, GitHub Releases zip              |
+
+The macOS asset is a single universal Mach-O binary — Apple Silicon and
+Intel Macs both run native code from the same file (no Rosetta needed).
 
 `nit` requires external CLIs (`codex`, `claude`, `git`) on `PATH` to drive its agent runners.
 

@@ -38,8 +38,15 @@ detect_target() {
   os="$(uname -s)"
   arch="$(uname -m)"
 
+  # macOS ships a single universal Mach-O — both arm64 and Intel Macs use
+  # the same `universal-apple-darwin` asset, so we skip arch detection
+  # entirely on Darwin.
+  if [ "$os" = "Darwin" ]; then
+    echo "universal-apple-darwin"
+    return
+  fi
+
   case "$os" in
-    Darwin) os_tag="apple-darwin" ;;
     Linux)  os_tag="unknown-linux-gnu" ;;
     *)      err "Unsupported OS: $os. nit currently ships binaries for macOS and Linux." ;;
   esac
@@ -50,7 +57,6 @@ detect_target() {
     *)             err "Unsupported architecture: $arch." ;;
   esac
 
-  # Linux arm64 is not yet shipped; surface a friendly message.
   if [ "$os" = "Linux" ] && [ "$arch_tag" = "aarch64" ]; then
     err "Linux aarch64 prebuilt binaries are not yet published. Build from source: cargo build --release."
   fi

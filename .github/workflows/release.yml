@@ -74,12 +74,15 @@ jobs:
             os: ubuntu-24.04
             archive: tar.gz
             install_deps: true
-          - target: aarch64-apple-darwin
+          # Universal macOS binary: built on macos-14 (Apple Silicon
+          # runner), targets both aarch64 + x86_64, fused with `lipo` into a
+          # single fat Mach-O. Runs native on both archs without Rosetta.
+          # Avoids the macos-13 runner queue stall entirely.
+          - target: universal-apple-darwin
             os: macos-14
             archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            universal: true
           - target: x86_64-pc-windows-msvc
             os: windows-2022
             archive: zip
@@ -97,7 +100,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88.0"
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets || matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -107,10 +110,30 @@ jobs:
       - name: Build binaries
         shell: bash
         run: |
-          cargo build --release --locked --workspace \
-            --target ${{ matrix.target }} \
-            --bin nit \
-            --bin nit-mcp-server
+          set -euo pipefail
+          if [ "${{ matrix.universal || 'false' }}" = "true" ]; then
+            # Build both arch slices, then lipo into a universal binary.
+            for slice in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked --workspace \
+                --target "$slice" \
+                --bin nit \
+                --bin nit-mcp-server
+            done
+            mkdir -p "target/${{ matrix.target }}/release"
+            for bin in nit nit-mcp-server; do
+              lipo -create \
+                "target/aarch64-apple-darwin/release/$bin" \
+                "target/x86_64-apple-darwin/release/$bin" \
+                -output "target/${{ matrix.target }}/release/$bin"
+              # Sanity check: confirm the output really has both archs.
+              lipo -info "target/${{ matrix.target }}/release/$bin"
+            done
+          else
+            cargo build --release --locked --workspace \
+              --target ${{ matrix.target }} \
+              --bin nit \
+              --bin nit-mcp-server
+          fi
 
       - name: Stage artifacts
         id: stage
@@ -238,11 +261,10 @@ jobs:
           get_sum() {
             grep -E " +nit-${TAG}-$1\.tar\.gz$" SHA256SUMS | awk '{print $1}'
           }
-          SHA_ARM="$(get_sum aarch64-apple-darwin)"
-          SHA_INTEL="$(get_sum x86_64-apple-darwin)"
+          SHA_MAC="$(get_sum universal-apple-darwin)"
           SHA_LINUX="$(get_sum x86_64-unknown-linux-gnu)"
 
-          for v in "$SHA_ARM" "$SHA_INTEL" "$SHA_LINUX"; do
+          for v in "$SHA_MAC" "$SHA_LINUX"; do
             if [ -z "$v" ]; then
               echo "::error::Missing SHA256 for one of the macOS/Linux assets"
               exit 1
@@ -259,15 +281,10 @@ jobs:
             version "${VERSION}"
             license "MIT"
 
+            # Single universal Mach-O covers Apple Silicon and Intel Macs.
             on_macos do
-              on_arm do
-                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-aarch64-apple-darwin.tar.gz"
-                sha256 "${SHA_ARM}"
-              end
-              on_intel do
-                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-x86_64-apple-darwin.tar.gz"
-                sha256 "${SHA_INTEL}"
-              end
+              url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-universal-apple-darwin.tar.gz"
+              sha256 "${SHA_MAC}"
             end
 
             on_linux do
