@@ -469,6 +469,7 @@ k = 2
     assert_eq!(runtime.cpu_matches, 2);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn kernel_runtime_stats_report_metal_usage_when_available() {
     let src = r#"

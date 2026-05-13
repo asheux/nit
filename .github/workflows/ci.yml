@@ -102,6 +102,12 @@ jobs:
       - name: cargo test
         env:
           NIT_SNAPSHOT_QUEUE: "64"
+          # GitHub Actions macOS runners expose a Metal device but reject
+          # actual compute submissions ("command buffer reported error
+          # status"). The nit-games kernel + test helpers honor this env to
+          # take the CPU fallback path instead of crashing. No-op on
+          # Linux/Windows (metal code is cfg(target_os = "macos")).
+          NIT_GAMES_DISABLE_METAL: "1"
         run: cargo test --workspace --locked --no-fail-fast
 
   msrv:
