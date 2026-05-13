@@ -6,9 +6,11 @@
 //! `#[cfg(test)]` items into the production build.
 
 use crate::config::{NormalizedConfig, StrategySpec};
+#[cfg(target_os = "macos")]
+use crate::tournament::test_internals::try_metal_batch_outcomes_chunked_prepared;
 use crate::tournament::test_internals::{
-    encode_matchup_pairs, match_outcomes_from_scores, try_metal_batch_outcomes_chunked_prepared,
-    try_prepare_metal_batch, MatchOutcome, Matchup, PreparedMetalBatch,
+    encode_matchup_pairs, match_outcomes_from_scores, try_prepare_metal_batch, MatchOutcome,
+    Matchup, PreparedMetalBatch,
 };
 
 fn build_test_matchups(index_pairs: &[(usize, usize)]) -> Vec<Matchup> {
@@ -70,6 +72,7 @@ pub(super) fn metal_batch_totals_for_test(
     Ok(batch_outcomes.map(totals_from_outcomes))
 }
 
+#[cfg(target_os = "macos")]
 #[allow(clippy::type_complexity)]
 pub(super) fn metal_policy_probe_for_test(
     config: &NormalizedConfig,

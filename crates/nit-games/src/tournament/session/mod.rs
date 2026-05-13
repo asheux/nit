@@ -4,7 +4,7 @@ mod strategy_factory;
 pub(super) use round::{play_round_core, run_match_core, tm_metrics_from_stats};
 pub(super) use strategy_factory::{build_strategy_definitions, strategy_log_id};
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) use strategy_factory::build_strategy;
 
 use super::types::{MatchRole, MatchSession, Matchup, SeedDeriver};
