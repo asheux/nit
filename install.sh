@@ -114,7 +114,10 @@ main() {
   info "Install dir:   ${NIT_INSTALL_DIR}"
 
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  # `tmp_dir` is `local` to main(); by the time the EXIT trap fires the
+  # function has returned and the variable is out of scope. With `set -u`
+  # that's a fatal error — `:-` makes the trap a no-op in that window.
+  trap 'rm -rf "${tmp_dir:-}"' EXIT
 
   info "Downloading ${asset}..."
   fetch "$asset_url" "$tmp_dir/$asset" || err "Failed to download $asset_url"

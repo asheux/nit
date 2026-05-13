@@ -248,7 +248,11 @@ jobs:
           set -e
           cd sums
           # Each downloaded file is `<asset>.sha256` containing one line.
-          cat *.sha256 | sort > ../SHA256SUMS
+          # Normalize the binary-mode prefix (" *file") that GNU sha256sum
+          # emits on Windows into the text-mode form ("  file") used on
+          # macOS/Linux, so install.sh/install.ps1 can grep for ` +<asset>$`
+          # consistently across all three.
+          cat *.sha256 | sed 's/ \*/  /' | sort > ../SHA256SUMS
           cd ..
           cat SHA256SUMS
 
