@@ -393,7 +393,9 @@ fn format_tournament_elapsed_uses_readable_units() {
 fn finished_session_elapsed_stays_frozen() {
     let frozen = Duration::from_millis(12_345);
     let mut session = new_game_session(Some(frozen));
-    session.started_at = Instant::now() - Duration::from_secs(90);
+    session.started_at = Instant::now()
+        .checked_sub(Duration::from_secs(90))
+        .unwrap_or_else(Instant::now);
 
     assert_eq!(
         session.elapsed_at(Instant::now() + Duration::from_secs(30)),

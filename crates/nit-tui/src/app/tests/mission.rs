@@ -111,8 +111,15 @@ fn codex_dispatch_marks_turn_waiting_until_backend_starts() {
     assert_eq!(turn.stage.as_deref(), Some("queued"));
 
     // Liveness sampling should not treat queued turns as stalled (no heartbeats yet).
+    // `checked_sub` + fallback: Windows monotonic clock anchors at boot, and on a
+    // freshly-booted CI runner `Instant::now() - 600s` underflows. The test's
+    // assertion (`heartbeat_age_secs == 0` for queued turns) holds whether the
+    // heartbeat is 10 minutes stale or freshly now() — both confirm that queued
+    // turns are exempt from the liveness gate.
     if let Some(turn) = state.agents.active_turns.get_mut("gpt-test") {
-        turn.last_heartbeat_at = Instant::now() - Duration::from_secs(600);
+        turn.last_heartbeat_at = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap_or_else(Instant::now);
     }
     tick_agent_turn_liveness(&mut state);
     let agent = state
