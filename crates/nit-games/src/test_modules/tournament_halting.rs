@@ -4,12 +4,16 @@ use super::shared::{
     halting_tm_tournament_toml, ranked_strategy, run_tournament_from_toml,
     tm_family_1x2_reference_toml,
 };
-use crate::config::{AcceleratorMode, EngineMode, GamesConfig, NormalizedConfig};
+use crate::config::{AcceleratorMode, GamesConfig, NormalizedConfig};
 use crate::{
-    accelerator_preflight, select_halting_turing_machine_strategies,
-    try_select_halting_turing_machine_strategies,
+    select_halting_turing_machine_strategies, try_select_halting_turing_machine_strategies,
     try_select_halting_turing_machine_strategies_with_diagnostics, TmHaltingFilterBackend,
 };
+
+#[cfg(target_os = "macos")]
+use crate::accelerator_preflight;
+#[cfg(target_os = "macos")]
+use crate::config::EngineMode;
 
 fn strategy_ids(cfg: &NormalizedConfig) -> Vec<&str> {
     cfg.strategies.iter().map(|spec| spec.id.as_str()).collect()

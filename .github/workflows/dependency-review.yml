@@ -20,6 +20,7 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
         with:
-          comment-summary-in-pr: on-failure
           fail-on-severity: high
-          allow-licenses: MIT, Apache-2.0, BSD-3-Clause, BSD-2-Clause, BSL-1.0, ISC, Zlib, MPL-2.0, Unicode-3.0
+          # License enforcement lives in `deny.toml` (cargo-deny). Keep this
+          # action focused on vulnerability advisories so the two tools don't
+          # diverge on policy.

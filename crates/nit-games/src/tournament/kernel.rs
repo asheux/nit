@@ -125,6 +125,16 @@ impl TournamentKernel {
         {
             return None;
         }
+        // Escape hatch for environments where Metal "creates" but compute
+        // submissions fail (GitHub Actions macOS VMs). Setting
+        // NIT_GAMES_DISABLE_METAL=1 forces the CPU fallback path without
+        // attempting any GPU work.
+        if std::env::var_os("NIT_GAMES_DISABLE_METAL").is_some() {
+            runtime.note_metal_fallback_reason(
+                "Metal disabled via NIT_GAMES_DISABLE_METAL".to_string(),
+            );
+            return None;
+        }
         match try_prepare_metal_batch_for_workload(
             &self.config,
             &self.config.strategies,
@@ -139,14 +149,26 @@ impl TournamentKernel {
                     prepared.policy_cache_path.clone(),
                 );
                 let matchups = self.schedule.matchups(0, self.schedule.len());
-                let (outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
+                let (outcomes, batches) = match try_metal_batch_outcomes_chunked_prepared(
                     &self.config,
                     &self.config.strategies,
                     &prepared,
                     &matchups,
-                )
-                .expect("metal batch support should remain stable across chunks")
-                .expect("metal batch support should remain stable across chunks");
+                ) {
+                    Ok(Some(pair)) => pair,
+                    Ok(None) => {
+                        runtime.note_metal_fallback_reason(
+                            "Metal batch evaluator declined mid-run".to_string(),
+                        );
+                        return None;
+                    }
+                    Err(err) => {
+                        runtime.note_metal_fallback_reason(format!(
+                            "Metal backend error mid-run: {err}"
+                        ));
+                        return None;
+                    }
+                };
                 runtime.note_metal_batches(batches, self.schedule.len());
                 Some(outcomes)
             }
