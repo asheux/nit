@@ -319,20 +319,6 @@ impl ClaudePool {
         // exits on its own. Not joined here so shutdown stays prompt.
     }
 
-    #[cfg(test)]
-    pub(crate) fn backdate_idle_for_test(&self, by: Duration) {
-        let mut state = match self.state.lock() {
-            Ok(g) => g,
-            Err(err) => err.into_inner(),
-        };
-        for slot in state.idle.iter_mut() {
-            slot.last_used_at = slot
-                .last_used_at
-                .checked_sub(by)
-                .unwrap_or(slot.last_used_at);
-        }
-    }
-
     fn build_worker(
         self: &Arc<Self>,
         key: WorkerKey,
@@ -416,7 +402,14 @@ impl ClaudePool {
     }
 
     pub fn gc_sweep(self: &Arc<Self>) {
-        let now = Instant::now();
+        self.gc_sweep_at(Instant::now());
+    }
+
+    /// `gc_sweep` with an injectable "now", used by tests so they can step
+    /// the clock forward without relying on `Instant::checked_sub` (which
+    /// underflows on platforms where the monotonic clock is anchored at
+    /// boot and the process is only seconds old — e.g. CI Windows runners).
+    pub(crate) fn gc_sweep_at(self: &Arc<Self>, now: Instant) {
         let aged: Vec<Box<WorkerInner>> = {
             let mut state = match self.state.lock() {
                 Ok(s) => s,

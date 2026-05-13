@@ -29,7 +29,11 @@ pub(super) fn report_path(workspace_root: &Path, file_path: &Path) -> PathBuf {
     let hash = stable_hash_bytes(raw.as_bytes());
     let bucket = (hash & 0xff) as u8;
     let suffix = hash as u32;
-    let flattened = raw.replace(['/', '\\'], "__");
+    // Replace path separators AND Windows-reserved filename characters
+    // (`< > : " | ? *`) with `__`, since the flattened source path is used
+    // verbatim as a filename — e.g. `C:\Users\...` would otherwise produce
+    // a basename containing `:` and Windows rejects the write.
+    let flattened = raw.replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*'], "__");
     let basename = format!("{flattened}-{suffix:08x}.{REPORT_EXTENSION}");
     genome_dir(workspace_root)
         .join(format!("{bucket:02x}"))

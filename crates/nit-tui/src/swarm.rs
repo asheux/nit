@@ -218,7 +218,7 @@ use prompts::{
 pub(crate) use prompts::{is_provider_quota_exhausted_in_result, is_provider_rate_limit_failure};
 pub(crate) use scope::enumerate_scope_files;
 use scope::sanitize_for_filename;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use scope::{
     enumerate_scope_files_with_deadline, scope_walk_timeout, SCOPE_WALK_DEFAULT_TIMEOUT_MS,
     SCOPE_WALK_MAX_DEPTH, SCOPE_WALK_MAX_FILES,

@@ -65,7 +65,11 @@ fn shadow_main_agent_retry_fires_like_swarm_writer() {
     assert_eq!(degraded[0], file_path);
     assert!(prompt.contains("GENOME QUALITY DEGRADED"));
     assert!(prompt.contains("automatic retry 1/3"));
-    assert!(prompt.contains("src/big.rs"));
+    let needle = std::path::PathBuf::from("src").join("big.rs");
+    assert!(
+        prompt.contains(&*needle.to_string_lossy()),
+        "prompt should reference the degraded file path; got:\n{prompt}"
+    );
 
     // Budget advances per-agent, same as swarm.
     assert_eq!(
