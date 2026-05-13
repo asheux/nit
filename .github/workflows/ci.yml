@@ -91,6 +91,17 @@ jobs:
         with:
           toolchain: "1.88.0"
 
+      - name: Ensure cargo is on PATH (macOS runner image workaround)
+        if: runner.os == 'macOS'
+        shell: bash
+        # The macos-14 runner image (≥ 20260512.x) ships Homebrew's rustup
+        # at /opt/homebrew/bin/rustup but does NOT keep $HOME/.cargo/bin on
+        # PATH. dtolnay/rust-toolchain only adds $CARGO_HOME/bin when it
+        # has to install rustup fresh — when Homebrew's rustup is already
+        # present, that branch is skipped and `cargo` resolves to a stale
+        # shim that's actually rustup-init. Force the cargo bin dir first.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-${{ matrix.os }}
@@ -126,6 +137,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88.0"
+
+      - name: Ensure cargo is on PATH (macOS runner image workaround)
+        if: runner.os == 'macOS'
+        shell: bash
+        # The macos-14 runner image (≥ 20260512.x) ships Homebrew's rustup
+        # at /opt/homebrew/bin/rustup but does NOT keep $HOME/.cargo/bin on
+        # PATH. dtolnay/rust-toolchain only adds $CARGO_HOME/bin when it
+        # has to install rustup fresh — when Homebrew's rustup is already
+        # present, that branch is skipped and `cargo` resolves to a stale
+        # shim that's actually rustup-init. Force the cargo bin dir first.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:

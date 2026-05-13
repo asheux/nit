@@ -102,6 +102,14 @@ jobs:
           toolchain: "1.88.0"
           targets: ${{ matrix.rust_targets || matrix.target }}
 
+      - name: Ensure cargo is on PATH (macOS runner image workaround)
+        if: runner.os == 'macOS'
+        shell: bash
+        # See ci.yml — Homebrew's rustup on macos-14 (image ≥ 20260512.x)
+        # leaves $HOME/.cargo/bin off PATH and a shim resolves `cargo` to
+        # rustup-init. Force cargo bin to the front.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
