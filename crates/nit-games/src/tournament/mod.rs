@@ -35,7 +35,7 @@ pub use types::{
     TmHaltingFilterDiagnostics, TournamentProgress,
 };
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) use session::build_strategy;
 
 // Test-only re-exports so `test_modules/` files (which live OUTSIDE the
@@ -43,9 +43,10 @@ pub(crate) use session::build_strategy;
 // Removing these breaks the test build on macOS.
 #[cfg(test)]
 pub(crate) mod test_internals {
+    #[cfg(target_os = "macos")]
+    pub(crate) use super::metal::try_metal_batch_outcomes_chunked_prepared;
     pub(crate) use super::metal::{
-        encode_matchup_pairs, match_outcomes_from_scores,
-        try_metal_batch_outcomes_chunked_prepared, try_prepare_metal_batch,
+        encode_matchup_pairs, match_outcomes_from_scores, try_prepare_metal_batch,
     };
     pub(crate) use super::types::{MatchOutcome, Matchup, PreparedMetalBatch};
 }

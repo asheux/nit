@@ -1,25 +1,27 @@
 //! Shared helpers used by the per-topic test modules under `tests`.
 
-use crate::config::StrategySpec;
-use crate::game::{Action, PayoffMatrix};
+use crate::game::Action;
 use crate::history::History;
 use crate::output::{StrategyResult, TournamentResults};
-use crate::strategy::Strategy;
 use crate::tournament::{KernelRunMode, TournamentKernel};
 
 #[cfg(target_os = "macos")]
-use crate::config::{NormalizedConfig, StrategySpecKind};
+use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
 #[cfg(target_os = "macos")]
-use crate::strategy::InputMode;
+use crate::game::PayoffMatrix;
+#[cfg(target_os = "macos")]
+use crate::strategy::{InputMode, Strategy};
 
 pub(super) fn record_round(history: &mut History, a: Action, b: Action) {
     history.push(a, b);
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn strategy_from_spec(spec: &StrategySpec) -> Box<dyn Strategy> {
     crate::tournament::build_strategy(spec, 0)
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn simulate_match_from_specs(
     a_spec: &StrategySpec,
     b_spec: &StrategySpec,
