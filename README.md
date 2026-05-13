@@ -7,13 +7,13 @@ A terminal-first, multi-pane TUI editor and **agent station** built in Rust. Sec
 **macOS, Linux, WSL:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/asheux/nit/main/install.sh | bash
+curl -fsSL https://download.nit.tools/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/asheux/nit/main/install.ps1 | iex
+irm https://download.nit.tools/install.ps1 | iex
 ```
 
 **Homebrew (macOS / Linux):**
@@ -30,15 +30,15 @@ cargo build --release
 # Binaries land at target/release/{nit, nit-mcp-server}
 ```
 
-Prebuilt binaries for every release are also published on the [Releases page](https://github.com/asheux/nit/releases) with a `SHA256SUMS` file for verification.
+Binaries are distributed via `https://download.nit.tools/<tag>/`, backed by Amazon CloudFront. The bucket also hosts a `SHA256SUMS` file per release and `latest.json` for tag resolution.
 
 ### Supported platforms
 
-| OS         | Architecture            | Distribution                                    |
-|------------|-------------------------|-------------------------------------------------|
-| macOS      | arm64 + x86_64 (universal) | `install.sh`, Homebrew, GitHub Releases tarball |
-| Linux      | x86_64 (glibc)          | `install.sh`, Homebrew, GitHub Releases tarball |
-| Windows    | x86_64 (MSVC)           | `install.ps1`, GitHub Releases zip              |
+| OS         | Architecture            | Distribution                                |
+|------------|-------------------------|---------------------------------------------|
+| macOS      | arm64 + x86_64 (universal) | `install.sh`, Homebrew, direct tarball   |
+| Linux      | x86_64 (glibc)          | `install.sh`, Homebrew, direct tarball      |
+| Windows    | x86_64 (MSVC)           | `install.ps1`, direct zip                   |
 
 The macOS asset is a single universal Mach-O binary — Apple Silicon and
 Intel Macs both run native code from the same file (no Rosetta needed).
@@ -87,11 +87,13 @@ scripts/healthcheck.sh --deep
 
 Pushing a `v*` tag to GitHub kicks off `.github/workflows/release.yml`, which:
 
-1. Creates a draft GitHub Release with auto-generated notes.
-2. Builds `nit` + `nit-mcp-server` for macOS arm64/x86_64, Linux x86_64 (glibc), and Windows x86_64 in parallel.
-3. Uploads each archive plus a `.sha256` and an aggregated `SHA256SUMS`.
-4. Updates the Homebrew formula at `asheux/homebrew-tap` (requires the `HOMEBREW_TAP_TOKEN` secret — pre-release tags like `v0.1.0-rc1` skip this step).
-5. Promotes the draft Release to published.
+1. Creates a draft GitHub Release for human-readable notes.
+2. Builds `nit` + `nit-mcp-server` for macOS (universal), Linux x86_64 (glibc), and Windows x86_64 in parallel.
+3. Uploads each archive plus `.sha256` and an aggregated `SHA256SUMS` to `s3://download.nit.tools/<tag>/`.
+4. On non-prerelease tags only: writes `s3://download.nit.tools/latest.json` so `install.sh` can resolve `latest`.
+5. Re-uploads `install.sh` and `install.ps1` to the bucket root and invalidates the relevant CloudFront paths.
+6. Updates the Homebrew formula at `asheux/homebrew-tap` (pre-release tags skip this step).
+7. Promotes the draft Release to published; pre-release tags are marked as such.
 
 Cut a release with:
 
@@ -99,6 +101,8 @@ Cut a release with:
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+Required GitHub repo secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_CF_DISTRIBUTION_ID`, `HOMEBREW_TAP_TOKEN`.
 
 ### Reproducibility
 

@@ -1,19 +1,20 @@
 # nit installer for Windows.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/asheux/nit/main/install.ps1 | iex
+#   irm https://download.nit.tools/install.ps1 | iex
 #
 # Environment overrides:
-#   $env:NIT_VERSION       Tag to install (default: latest). Example: v0.1.0.
-#   $env:NIT_INSTALL_DIR   Where to put the binaries (default: $env:USERPROFILE\.nit\bin).
-#   $env:NIT_REPO          owner/repo (default: asheux/nit).
+#   $env:NIT_VERSION         Tag to install (default: latest). Example: v0.1.0.
+#   $env:NIT_INSTALL_DIR     Where to put the binaries (default: $env:USERPROFILE\.nit\bin).
+#   $env:NIT_DOWNLOAD_BASE   Override the download host (default: https://download.nit.tools).
+#                            Useful for staging buckets or air-gapped mirrors.
 #   $env:NIT_NO_MODIFY_PATH  Set to 1 to skip the PATH update.
 
 $ErrorActionPreference = "Stop"
 
-$Repo       = if ($env:NIT_REPO)        { $env:NIT_REPO }        else { "asheux/nit" }
-$Version    = if ($env:NIT_VERSION)     { $env:NIT_VERSION }     else { "latest" }
-$InstallDir = if ($env:NIT_INSTALL_DIR) { $env:NIT_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".nit\bin" }
+$Version      = if ($env:NIT_VERSION)       { $env:NIT_VERSION }       else { "latest" }
+$InstallDir   = if ($env:NIT_INSTALL_DIR)   { $env:NIT_INSTALL_DIR }   else { Join-Path $env:USERPROFILE ".nit\bin" }
+$DownloadBase = if ($env:NIT_DOWNLOAD_BASE) { $env:NIT_DOWNLOAD_BASE } else { "https://download.nit.tools" }
 
 function Write-Info($msg)  { Write-Host "info:  $msg" -ForegroundColor Cyan }
 function Write-Warn($msg)  { Write-Host "warn:  $msg" -ForegroundColor Yellow }
@@ -28,28 +29,30 @@ switch ($arch) {
 }
 $target = "$archTag-pc-windows-msvc"
 
-# Resolve tag.
+# Resolve tag: `latest.json` is published to the bucket by release.yml after
+# every non-prerelease ship. Shape: {"tag":"v0.1.0",...}. No GitHub API auth
+# required — works whether the source repo is public or private.
 if ($Version -eq "latest") {
-  $api = "https://api.github.com/repos/$Repo/releases/latest"
+  $manifestUrl = "$DownloadBase/latest.json"
   try {
-    $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "nit-installer" }
-    $tag = $rel.tag_name
+    $rel = Invoke-RestMethod -Uri $manifestUrl -Headers @{ "User-Agent" = "nit-installer" }
+    $tag = $rel.tag
   } catch {
-    Write-Err "Failed to query latest release from $api"
+    Write-Err "Failed to fetch $manifestUrl (no latest release published yet?)"
   }
-  if (-not $tag) { Write-Err "Could not parse latest release tag." }
+  if (-not $tag) { Write-Err "Could not parse 'tag' from $manifestUrl." }
 } else {
   $tag = $Version
 }
 
 $asset    = "nit-$tag-$target.zip"
-$assetUrl = "https://github.com/$Repo/releases/download/$tag/$asset"
-$sumsUrl  = "https://github.com/$Repo/releases/download/$tag/SHA256SUMS"
+$assetUrl = "$DownloadBase/$tag/$asset"
+$sumsUrl  = "$DownloadBase/$tag/SHA256SUMS"
 
-Write-Info "Repository:  $Repo"
-Write-Info "Tag:         $tag"
-Write-Info "Target:      $target"
-Write-Info "Install dir: $InstallDir"
+Write-Info "Tag:           $tag"
+Write-Info "Target:        $target"
+Write-Info "Download base: $DownloadBase"
+Write-Info "Install dir:   $InstallDir"
 
 $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP ("nit-install-" + [System.Guid]::NewGuid()))
 try {

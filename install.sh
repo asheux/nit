@@ -2,19 +2,20 @@
 # nit installer for macOS / Linux / WSL.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/asheux/nit/main/install.sh | bash
+#   curl -fsSL https://download.nit.tools/install.sh | bash
 #
 # Environment overrides:
-#   NIT_VERSION   Tag to install (default: latest). Example: v0.1.0.
-#   NIT_INSTALL_DIR  Where to put the binaries (default: $HOME/.nit/bin).
-#   NIT_REPO      owner/repo (default: asheux/nit).
+#   NIT_VERSION       Tag to install (default: latest). Example: v0.1.0.
+#   NIT_INSTALL_DIR   Where to put the binaries (default: $HOME/.nit/bin).
+#   NIT_DOWNLOAD_BASE Override the download host (default: https://download.nit.tools).
+#                     Useful for staging buckets or air-gapped mirrors.
 #   NIT_NO_MODIFY_PATH  Set to 1 to skip the PATH-export hint.
 
 set -euo pipefail
 
-NIT_REPO="${NIT_REPO:-asheux/nit}"
 NIT_VERSION="${NIT_VERSION:-latest}"
 NIT_INSTALL_DIR="${NIT_INSTALL_DIR:-$HOME/.nit/bin}"
+NIT_DOWNLOAD_BASE="${NIT_DOWNLOAD_BASE:-https://download.nit.tools}"
 
 err() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[1;34minfo:\033[0m  %s\n' "$*" >&2; }
@@ -69,15 +70,17 @@ resolve_tag() {
     echo "$NIT_VERSION"
     return
   fi
-  # GitHub API returns the latest non-prerelease release.
-  local api_url="https://api.github.com/repos/${NIT_REPO}/releases/latest"
+  # `latest.json` is published to the bucket by release.yml after every
+  # non-prerelease ship. Shape: {"tag":"v0.1.0","version":"0.1.0","published_at":"..."}.
+  # No GitHub API auth required — works whether the source repo is public or private.
+  local manifest_url="${NIT_DOWNLOAD_BASE}/latest.json"
   local tmp
   tmp="$(mktemp)"
-  fetch "$api_url" "$tmp" || err "Failed to query latest release from $api_url"
+  fetch "$manifest_url" "$tmp" || err "Failed to fetch ${manifest_url} (no latest release published yet?)"
   local tag
-  tag="$(grep -E '"tag_name":' "$tmp" | head -1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  tag="$(grep -E '"tag":' "$tmp" | head -1 | sed -E 's/.*"tag" *: *"([^"]+)".*/\1/')"
   rm -f "$tmp"
-  [ -n "$tag" ] || err "Could not parse latest release tag."
+  [ -n "$tag" ] || err "Could not parse 'tag' from ${manifest_url}."
   echo "$tag"
 }
 
@@ -102,12 +105,12 @@ main() {
   target="$(detect_target)"
   tag="$(resolve_tag)"
   asset="nit-${tag}-${target}.tar.gz"
-  asset_url="https://github.com/${NIT_REPO}/releases/download/${tag}/${asset}"
-  sums_url="https://github.com/${NIT_REPO}/releases/download/${tag}/SHA256SUMS"
+  asset_url="${NIT_DOWNLOAD_BASE}/${tag}/${asset}"
+  sums_url="${NIT_DOWNLOAD_BASE}/${tag}/SHA256SUMS"
 
-  info "Repository:    ${NIT_REPO}"
   info "Tag:           ${tag}"
   info "Target:        ${target}"
+  info "Download base: ${NIT_DOWNLOAD_BASE}"
   info "Install dir:   ${NIT_INSTALL_DIR}"
 
   tmp_dir="$(mktemp -d)"

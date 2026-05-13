@@ -11,7 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: write # gh release create / edit; tarballs ship to S3, not GH.
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +19,11 @@ env:
   CARGO_NET_RETRY: "10"
   RUSTUP_MAX_RETRIES: "10"
   RUST_BACKTRACE: "1"
+  # Public-facing download base. Backed by CloudFront in front of an S3
+  # bucket (download.nit.tools-…us-east-1-an). Path layout is
+  # `<base>/<tag>/<asset>` plus `<base>/latest.json` for tag resolution.
+  DOWNLOAD_BASE_URL: "https://download.nit.tools"
+  AWS_DEFAULT_REGION: us-east-1
 
 jobs:
   create-release:
@@ -27,6 +32,7 @@ jobs:
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
+      is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,8 +50,11 @@ jobs:
             echo "::error::Tag '$TAG' is not a valid semver tag (expected vX.Y.Z[-pre])"
             exit 1
           fi
+          IS_PRE="false"
+          [[ "$TAG" == *-* ]] && IS_PRE="true"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
 
       - name: Create or update draft release
         env:
@@ -184,18 +193,37 @@ jobs:
           fi
 
           echo "asset=dist/${asset}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${asset}" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/${asset}.sha256" >> "$GITHUB_OUTPUT"
           echo "sha=$(cut -d' ' -f1 "${asset}.sha256")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload to S3
         shell: bash
+        env:
+          TAG: ${{ needs.create-release.outputs.tag }}
+          BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
-          gh release upload "${{ needs.create-release.outputs.tag }}" \
-            "${{ steps.stage.outputs.asset }}" \
-            "${{ steps.stage.outputs.checksum }}" \
-            --clobber
+          set -euo pipefail
+          asset="${{ steps.stage.outputs.asset }}"
+          checksum="${{ steps.stage.outputs.checksum }}"
+          asset_name="${{ steps.stage.outputs.asset_name }}"
+
+          # Content-Type matters for browser downloads and curl progress bars.
+          case "$asset_name" in
+            *.tar.gz) content_type="application/gzip" ;;
+            *.zip)    content_type="application/zip"  ;;
+            *)        content_type="application/octet-stream" ;;
+          esac
+
+          aws s3 cp "$asset"    "s3://${BUCKET}/${TAG}/${asset_name}"        --content-type "$content_type"
+          aws s3 cp "$checksum" "s3://${BUCKET}/${TAG}/${asset_name}.sha256" --content-type "text/plain; charset=utf-8"
 
       - name: Export checksum for downstream jobs
         uses: actions/upload-artifact@v4
@@ -224,48 +252,133 @@ jobs:
           cd ..
           cat SHA256SUMS
 
-      - name: Upload SHA256SUMS
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload SHA256SUMS to S3
         env:
-          GH_TOKEN: ${{ github.token }}
-        # `--repo` is required because this job does not run `actions/checkout`,
-        # so gh can't infer the repository from a local .git directory.
+          TAG: ${{ needs.create-release.outputs.tag }}
+          BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
-          gh release upload "${{ needs.create-release.outputs.tag }}" \
-            SHA256SUMS \
-            --clobber \
-            --repo "${{ github.repository }}"
+          aws s3 cp SHA256SUMS "s3://${BUCKET}/${TAG}/SHA256SUMS" \
+            --content-type "text/plain; charset=utf-8"
+
+      - name: Re-export SHA256SUMS as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: SHA256SUMS
+          retention-days: 1
+
+  cdn-finalize:
+    name: Publish latest.json + install scripts + invalidate CloudFront
+    needs: [create-release, build, checksums]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload install scripts
+        env:
+          BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          # install.sh + install.ps1 live at the bucket root so the README
+          # one-liner (`curl -fsSL https://download.nit.tools/install.sh | bash`)
+          # resolves directly. Short cache lets a bug-fix in the installer
+          # propagate to users within minutes instead of hours.
+          aws s3 cp install.sh "s3://${BUCKET}/install.sh" \
+            --content-type "text/x-shellscript; charset=utf-8" \
+            --cache-control "max-age=300, public"
+          aws s3 cp install.ps1 "s3://${BUCKET}/install.ps1" \
+            --content-type "text/plain; charset=utf-8" \
+            --cache-control "max-age=300, public"
+
+      - name: Write latest.json
+        if: needs.create-release.outputs.is_prerelease == 'false'
+        env:
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          # `install.sh` curls latest.json to resolve the `latest` tag without
+          # needing GitHub API auth. We deliberately do not write it for
+          # pre-release tags so `latest` always points at a stable release.
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > latest.json <<EOF
+          {
+            "tag": "${TAG}",
+            "version": "${VERSION}",
+            "published_at": "${now}"
+          }
+          EOF
+          cat latest.json
+          # `no-cache` so a stale latest.json never lingers at the edge after
+          # an invalidation request lags. Files in /${TAG}/ keep default
+          # caching (immutable per-tag layout).
+          aws s3 cp latest.json "s3://${BUCKET}/latest.json" \
+            --content-type "application/json" \
+            --cache-control "no-cache, max-age=0"
+
+      - name: Invalidate CloudFront paths
+        env:
+          DIST_ID: ${{ secrets.AWS_CF_DISTRIBUTION_ID }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          IS_PRE: ${{ needs.create-release.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          # Always invalidate:
+          #   /${TAG}/*    — cheap insurance against partial mid-release uploads
+          #   /install.sh  — re-uploaded each run; cached for 5 min
+          #   /install.ps1 — re-uploaded each run; cached for 5 min
+          # Conditionally:
+          #   /latest.json — only when we actually rewrote it (non-prerelease)
+          paths="/${TAG}/* /install.sh /install.ps1"
+          if [ "${IS_PRE}" = "false" ]; then
+            paths="${paths} /latest.json"
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "${DIST_ID}" \
+            --paths ${paths}
 
   homebrew:
     name: Update Homebrew tap
-    needs: [create-release, build, checksums]
+    needs: [create-release, build, checksums, cdn-finalize]
     runs-on: ubuntu-24.04
-    if: ${{ !contains(needs.create-release.outputs.tag, '-') }}
+    if: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
     steps:
       - name: Check tap token
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "${TAP_TOKEN}" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN secret not set; skipping tap update. Create asheux/homebrew-tap and add the PAT to enable."
+            echo "::warning::HOMEBREW_TAP_TOKEN secret not set; skipping tap update."
             echo "skip=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Download SHA256SUMS
+      - name: Download aggregated SHA256SUMS
         if: env.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "${{ needs.create-release.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --pattern "SHA256SUMS" \
-            --output SHA256SUMS
+        uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
 
       - name: Generate formula
         if: env.skip != 'true'
         env:
           TAG: ${{ needs.create-release.outputs.tag }}
           VERSION: ${{ needs.create-release.outputs.version }}
-          REPO: ${{ github.repository }}
+          DOWNLOAD: ${{ env.DOWNLOAD_BASE_URL }}
         run: |
           set -euo pipefail
           # Extract per-asset checksums.
@@ -288,19 +401,19 @@ jobs:
           # Do not edit by hand; changes will be overwritten on the next release.
           class Nit < Formula
             desc "Terminal-native AI agent orchestrator with TUI"
-            homepage "https://github.com/${REPO}"
+            homepage "https://nit.tools"
             version "${VERSION}"
             license "MIT"
 
             # Single universal Mach-O covers Apple Silicon and Intel Macs.
             on_macos do
-              url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-universal-apple-darwin.tar.gz"
+              url "${DOWNLOAD}/${TAG}/nit-${TAG}-universal-apple-darwin.tar.gz"
               sha256 "${SHA_MAC}"
             end
 
             on_linux do
               on_intel do
-                url "https://github.com/${REPO}/releases/download/${TAG}/nit-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+                url "${DOWNLOAD}/${TAG}/nit-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_LINUX}"
               end
             end
@@ -342,14 +455,23 @@ jobs:
 
   publish-release:
     name: Promote release
-    needs: [create-release, build, checksums, homebrew]
-    if: always() && needs.build.result == 'success' && needs.checksums.result == 'success'
+    needs: [create-release, build, checksums, cdn-finalize, homebrew]
+    if: always() && needs.build.result == 'success' && needs.checksums.result == 'success' && needs.cdn-finalize.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - name: Promote draft → published
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          IS_PRE: ${{ needs.create-release.outputs.is_prerelease }}
         run: |
-          gh release edit "${{ needs.create-release.outputs.tag }}" \
+          # Mark the GitHub release page as prerelease if the tag has a
+          # `-rcN` etc. suffix, so it doesn't show up as the canonical
+          # latest release.
+          PRE_FLAG=""
+          if [ "${IS_PRE}" = "true" ]; then
+            PRE_FLAG="--prerelease"
+          fi
+          gh release edit "${TAG}" \
             --repo "${{ github.repository }}" \
-            --draft=false
+            --draft=false ${PRE_FLAG}
