@@ -86,6 +86,14 @@ async function awsCli(args, { decode = "utf8", input = null } = {}) {
 }
 
 async function loadExistingStats() {
+  // RESET=1 short-circuits the load and forces a from-scratch run.
+  // Cheaper than requiring the IAM policy to include s3:DeleteObject
+  // (only s3:PutObject is needed to overwrite later) and survives
+  // workflow re-runs without state cleanup.
+  if (process.env.RESET === "1") {
+    debug("RESET=1 — ignoring any existing stats.json and starting fresh");
+    return null;
+  }
   try {
     const body = await awsCli(["s3", "cp", `s3://${BUCKET}/${STATS_KEY}`, "-"]);
     return JSON.parse(body);

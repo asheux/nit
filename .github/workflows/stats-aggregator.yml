@@ -41,18 +41,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Reset stats.json (manual reset trigger only)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.reset }}
-        env:
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        # `|| true` so a missing stats.json (already wiped, first run, etc.)
-        # doesn't fail the job — the aggregator handles a missing file by
-        # starting fresh, which is exactly what we want.
-        run: aws s3 rm "s3://${AWS_S3_BUCKET}/stats.json" || true
-
       - name: Run aggregator
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
           AWS_CF_DISTRIBUTION_ID: ${{ secrets.AWS_CF_DISTRIBUTION_ID }}
+          # In-script reset: aggregator skips loading existing stats and
+          # processes every log from scratch. Uses only s3:PutObject (the
+          # ambient write permission) — no s3:DeleteObject IAM grant
+          # required.
+          RESET: ${{ (github.event_name == 'workflow_dispatch' && inputs.reset) && '1' || '0' }}
           DEBUG: "1"
         run: node scripts/aggregate-stats.mjs
