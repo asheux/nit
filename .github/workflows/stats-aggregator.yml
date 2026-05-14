@@ -15,6 +15,11 @@ on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      reset:
+        description: "Delete stats.json before aggregating (reprocess every log from scratch). Use after fixing a parser bug or schema change."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +40,15 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
+
+      - name: Reset stats.json (manual reset trigger only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.reset }}
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        # `|| true` so a missing stats.json (already wiped, first run, etc.)
+        # doesn't fail the job — the aggregator handles a missing file by
+        # starting fresh, which is exactly what we want.
+        run: aws s3 rm "s3://${AWS_S3_BUCKET}/stats.json" || true
 
       - name: Run aggregator
         env:

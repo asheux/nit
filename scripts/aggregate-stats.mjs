@@ -145,34 +145,60 @@ async function downloadLogGzipped(key) {
 }
 
 function parseLogBuffer(buf) {
-  // CloudFront standard log: tab-separated, two `#` comment header lines.
-  // Field positions (0-indexed) we care about:
-  //   1: time
-  //   5: cs-method
-  //   7: cs-uri-stem
-  //   8: sc-status
+  // CloudFront writes access logs in one of two formats depending on
+  // how the access-log delivery was configured:
+  //   - Plain Text (W3C-style): tab-separated rows, two `#` comment
+  //     header lines, field positions 5/7/8 = method / uri / status.
+  //   - JSON: one object per line with keys "cs-method", "cs-uri-stem",
+  //     "sc-status" (the new "Access log delivery" UI's default).
+  // Detect by sniffing the first non-blank, non-comment line. Mixing
+  // formats inside a single bucket prefix shouldn't happen, but we
+  // detect per-line anyway so it doesn't hard-fail if it does.
   const events = [];
   const text = buf.toString("utf8");
   for (const raw of text.split("\n")) {
     const line = raw.trimEnd();
     if (!line || line.startsWith("#")) continue;
-    const fields = line.split("\t");
-    if (fields.length < 9) continue;
-    const method = fields[5];
-    const uri = fields[7];
-    const status = fields[8];
-    if (method !== "GET") continue;
-    // Only 200; range responses (206) usually mean resumes/probes that
-    // overlap a 200 already counted. Counting only 200 avoids
-    // double-counting a single download.
-    if (status !== "200") continue;
-    const platform = platformFromUri(uri);
-    if (!platform) continue;
-    const tag = tagFromUri(uri);
-    if (!tag) continue;
-    events.push({ tag, platform });
+    const evt = line.startsWith("{") ? parseJsonLine(line) : parseTsvLine(line);
+    if (evt) events.push(evt);
   }
   return events;
+}
+
+function parseTsvLine(line) {
+  // Field positions (0-indexed): 5=cs-method, 7=cs-uri-stem, 8=sc-status.
+  const fields = line.split("\t");
+  if (fields.length < 9) return null;
+  return classifyAccessEvent(fields[5], fields[7], fields[8]);
+}
+
+function parseJsonLine(line) {
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  // CloudFront's JSON delivery uses the same field names as the W3C
+  // log: `cs-method`, `cs-uri-stem`, `sc-status`. Values are always
+  // strings; sc-status comes through as e.g. "200".
+  return classifyAccessEvent(obj["cs-method"], obj["cs-uri-stem"], obj["sc-status"]);
+}
+
+// Shared classification: returns { tag, platform } for a recognised
+// release-asset GET 200, or null otherwise.
+function classifyAccessEvent(method, uri, status) {
+  if (method !== "GET") return null;
+  // Only 200; range responses (206) usually mean resumes/probes that
+  // overlap a 200 already counted. Counting only 200 avoids
+  // double-counting a single download.
+  if (String(status) !== "200") return null;
+  if (typeof uri !== "string" || uri.length === 0) return null;
+  const platform = platformFromUri(uri);
+  if (!platform) return null;
+  const tag = tagFromUri(uri);
+  if (!tag) return null;
+  return { tag, platform };
 }
 
 async function findFirstReleaseAt() {
