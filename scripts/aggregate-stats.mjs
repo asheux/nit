@@ -1,0 +1,314 @@
+#!/usr/bin/env node
+// Daily download-stats aggregator.
+//
+// Reads CloudFront access logs from s3://${AWS_S3_BUCKET}/${LOG_PREFIX},
+// counts successful tarball/zip GETs by version + platform, accumulates
+// into s3://${AWS_S3_BUCKET}/stats.json. The website's prebuild script
+// pulls stats.json and renders the totals.
+//
+// LOG_PREFIX defaults to "AWSLogs/631371482467/CloudFront/" — the path
+// CloudFront's "Access log delivery" UI writes to when no custom prefix
+// is specified (the new UI doesn't expose a Prefix field, so we follow
+// the AWS default rather than trying to relocate logs).
+//
+// Idempotency: `last_processed_log_key` in stats.json marks the most
+// recent log file already counted. Subsequent runs only process logs
+// with keys strictly greater (CloudFront log keys are date-sortable).
+//
+// Reset / replay: delete stats.json from the bucket and rerun — the
+// script will process every log in the prefix from scratch.
+//
+// Env (required):
+//   AWS_S3_BUCKET            target bucket (incl. -<account>-<region>-an suffix)
+//   AWS_CF_DISTRIBUTION_ID   CloudFront distribution to invalidate /stats.json on
+//
+// Env (optional):
+//   LOG_PREFIX     default: "AWSLogs/631371482467/CloudFront/"
+//   STATS_KEY      default: "stats.json"
+//   DEBUG=1        verbose progress
+
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
+
+const exec = promisify(execFile);
+
+const BUCKET = required("AWS_S3_BUCKET");
+const DIST_ID = required("AWS_CF_DISTRIBUTION_ID");
+const LOG_PREFIX = process.env.LOG_PREFIX || "AWSLogs/631371482467/CloudFront/";
+const STATS_KEY = process.env.STATS_KEY || "stats.json";
+const DEBUG = process.env.DEBUG === "1";
+
+function required(name) {
+  const v = process.env[name];
+  if (!v) {
+    console.error(`[aggregate-stats] missing required env: ${name}`);
+    process.exit(2);
+  }
+  return v;
+}
+
+function debug(...args) {
+  if (DEBUG) console.error("[aggregate-stats]", ...args);
+}
+
+/// Maps an asset filename suffix to a coarse platform bucket.
+/// Anything that doesn't match (sha256 sidecars, install.sh, etc.) is
+/// dropped — we only count tarball/zip downloads.
+function platformFromUri(uri) {
+  if (uri.endsWith("-universal-apple-darwin.tar.gz")) return "macos";
+  if (uri.endsWith("-x86_64-unknown-linux-gnu.tar.gz")) return "linux";
+  if (uri.endsWith("-x86_64-pc-windows-msvc.zip")) return "windows";
+  return null;
+}
+
+/// Extracts the tag from a release-asset URI of the form
+/// `/v0.1.0/nit-v0.1.0-…tar.gz`. Returns null when the URI doesn't
+/// follow the convention.
+function tagFromUri(uri) {
+  const m = uri.match(/^\/v(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)\/nit-v\1-/);
+  return m ? `v${m[1]}` : null;
+}
+
+async function awsCli(args, { decode = "utf8", input = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = execFile("aws", args, { encoding: decode === "buffer" ? null : decode, maxBuffer: 512 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        err.stderr = stderr?.toString?.() ?? "";
+        return reject(err);
+      }
+      resolve(stdout);
+    });
+    if (input != null) {
+      child.stdin.end(input);
+    }
+  });
+}
+
+async function loadExistingStats() {
+  try {
+    const body = await awsCli(["s3", "cp", `s3://${BUCKET}/${STATS_KEY}`, "-"]);
+    return JSON.parse(body);
+  } catch (e) {
+    if (/NoSuchKey|does not exist|404/i.test(e.stderr || "")) {
+      debug("no existing stats.json; starting fresh");
+      return null;
+    }
+    throw e;
+  }
+}
+
+async function listLogKeys() {
+  // `aws s3 ls --recursive` prints `<date> <time>     <size> <key>` per line.
+  const out = await awsCli([
+    "s3",
+    "ls",
+    `s3://${BUCKET}/${LOG_PREFIX}`,
+    "--recursive",
+  ]);
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const parts = line.split(/\s+/);
+      // Key is the rest after `date time size`.
+      return parts.slice(3).join(" ");
+    })
+    .filter((key) => key.endsWith(".gz"))
+    .sort(); // log filenames begin with YYYY-MM-DD-HH so lex sort == chrono
+}
+
+async function downloadLogGzipped(key) {
+  // CloudFront access logs are gzipped; download as binary and decompress.
+  return new Promise((resolve, reject) => {
+    const buf = [];
+    const child = execFile(
+      "aws",
+      ["s3", "cp", `s3://${BUCKET}/${key}`, "-"],
+      { encoding: "buffer", maxBuffer: 512 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          err.stderr = stderr?.toString?.() ?? "";
+          return reject(err);
+        }
+        try {
+          resolve(gunzipSync(stdout));
+        } catch (e) {
+          reject(e);
+        }
+      },
+    );
+    void child;
+    void buf;
+  });
+}
+
+function parseLogBuffer(buf) {
+  // CloudFront standard log: tab-separated, two `#` comment header lines.
+  // Field positions (0-indexed) we care about:
+  //   1: time
+  //   5: cs-method
+  //   7: cs-uri-stem
+  //   8: sc-status
+  const events = [];
+  const text = buf.toString("utf8");
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line || line.startsWith("#")) continue;
+    const fields = line.split("\t");
+    if (fields.length < 9) continue;
+    const method = fields[5];
+    const uri = fields[7];
+    const status = fields[8];
+    if (method !== "GET") continue;
+    // Only 200; range responses (206) usually mean resumes/probes that
+    // overlap a 200 already counted. Counting only 200 avoids
+    // double-counting a single download.
+    if (status !== "200") continue;
+    const platform = platformFromUri(uri);
+    if (!platform) continue;
+    const tag = tagFromUri(uri);
+    if (!tag) continue;
+    events.push({ tag, platform });
+  }
+  return events;
+}
+
+async function findFirstReleaseAt() {
+  // Pull from latest.json — it has `published_at` for the current latest,
+  // but that's not the FIRST release. We approximate by reading the
+  // earliest tag dir's LastModified on the bucket; for the common case of
+  // a fresh project, latest.json is good-enough for the dashboard.
+  try {
+    const body = await awsCli(["s3", "cp", `s3://${BUCKET}/latest.json`, "-"]);
+    const manifest = JSON.parse(body);
+    return manifest.published_at || null;
+  } catch {
+    return null;
+  }
+}
+
+async function findLatestTag() {
+  try {
+    const body = await awsCli(["s3", "cp", `s3://${BUCKET}/latest.json`, "-"]);
+    const manifest = JSON.parse(body);
+    return manifest.tag || null;
+  } catch {
+    return null;
+  }
+}
+
+async function uploadStats(stats) {
+  const body = JSON.stringify(stats, null, 2);
+  // `aws s3 cp - s3://...` reads from stdin. Use spawnSync so we can pipe
+  // the body in cleanly without keeping the buffer in two places.
+  const result = spawnSync(
+    "aws",
+    [
+      "s3",
+      "cp",
+      "-",
+      `s3://${BUCKET}/${STATS_KEY}`,
+      "--content-type",
+      "application/json",
+      "--cache-control",
+      "public, max-age=600",
+    ],
+    { input: body, encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`aws s3 cp stats.json failed: ${result.stderr}`);
+  }
+}
+
+async function invalidateCloudFront() {
+  await awsCli([
+    "cloudfront",
+    "create-invalidation",
+    "--distribution-id",
+    DIST_ID,
+    "--paths",
+    `/${STATS_KEY}`,
+  ]);
+}
+
+async function main() {
+  console.log(`[aggregate-stats] bucket=${BUCKET} prefix=${LOG_PREFIX}`);
+
+  const prior = (await loadExistingStats()) ?? {
+    schema_version: 1,
+    updated_at: null,
+    first_release_at: null,
+    total_downloads: 0,
+    downloads_by_platform: { macos: 0, linux: 0, windows: 0 },
+    downloads_by_version: {},
+    latest_release: { tag: null, downloads: 0 },
+    last_processed_log_key: null,
+  };
+
+  const allKeys = await listLogKeys();
+  const cutoff = prior.last_processed_log_key;
+  const newKeys = cutoff
+    ? allKeys.filter((k) => k > cutoff)
+    : allKeys;
+
+  console.log(
+    `[aggregate-stats] found ${allKeys.length} total log files; ${newKeys.length} new since ${cutoff ?? "<empty>"}`,
+  );
+
+  // Mutable counters seeded from prior.
+  const byPlatform = { ...prior.downloads_by_platform };
+  const byVersion = { ...prior.downloads_by_version };
+  let total = prior.total_downloads;
+
+  let processed = 0;
+  for (const key of newKeys) {
+    let buf;
+    try {
+      buf = await downloadLogGzipped(key);
+    } catch (e) {
+      console.warn(`[aggregate-stats] skip ${key}: ${e.message}`);
+      continue;
+    }
+    const events = parseLogBuffer(buf);
+    for (const { tag, platform } of events) {
+      total += 1;
+      byPlatform[platform] = (byPlatform[platform] ?? 0) + 1;
+      byVersion[tag] = (byVersion[tag] ?? 0) + 1;
+    }
+    processed += 1;
+    if (processed % 25 === 0) {
+      debug(`processed ${processed}/${newKeys.length} files; running total ${total}`);
+    }
+  }
+
+  const latestTag = (await findLatestTag()) ?? prior.latest_release.tag;
+  const latestDownloads = latestTag ? byVersion[latestTag] ?? 0 : 0;
+  const firstReleaseAt =
+    prior.first_release_at ?? (await findFirstReleaseAt()) ?? null;
+
+  const next = {
+    schema_version: 1,
+    updated_at: new Date().toISOString(),
+    first_release_at: firstReleaseAt,
+    total_downloads: total,
+    downloads_by_platform: byPlatform,
+    downloads_by_version: byVersion,
+    latest_release: { tag: latestTag, downloads: latestDownloads },
+    last_processed_log_key:
+      newKeys.length > 0 ? newKeys[newKeys.length - 1] : cutoff,
+  };
+
+  console.log(`[aggregate-stats] writing stats.json: total=${total}, by_platform=${JSON.stringify(byPlatform)}, latest_release=${JSON.stringify(next.latest_release)}`);
+
+  await uploadStats(next);
+  await invalidateCloudFront();
+  console.log(`[aggregate-stats] done`);
+}
+
+main().catch((err) => {
+  console.error(`[aggregate-stats] FATAL: ${err.message}`);
+  if (err.stderr) console.error(err.stderr);
+  process.exit(1);
+});

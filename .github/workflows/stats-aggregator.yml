@@ -1,0 +1,44 @@
+name: Aggregate download stats
+
+# Daily aggregator that walks CloudFront access logs and updates the
+# website-facing stats.json. The site's prebuild script pulls stats.json
+# in its next deploy and renders the totals in the Stats block.
+#
+# Triggers:
+#   - Daily cron at 06:00 UTC (~midnight Pacific). CloudFront standard
+#     logging buffers up to ~24h; running once per day catches everything
+#     without paying for hourly invalidations.
+#   - workflow_dispatch for ad-hoc reruns after fixing schema bugs or
+#     priming the initial stats.json.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  aggregate:
+    name: Walk CloudFront logs + update stats.json
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Run aggregator
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_CF_DISTRIBUTION_ID: ${{ secrets.AWS_CF_DISTRIBUTION_ID }}
+          DEBUG: "1"
+        run: node scripts/aggregate-stats.mjs
