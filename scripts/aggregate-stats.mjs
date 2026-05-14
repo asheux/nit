@@ -226,15 +226,23 @@ async function findFirstReleaseAt() {
     if (res.ok) {
       const releases = await res.json();
       if (Array.isArray(releases) && releases.length > 0) {
-        // Releases default-sorted by created_at DESC; pick the oldest.
-        const oldest = releases
-          .filter((r) => r.published_at)
-          .sort(
-            (a, b) =>
-              new Date(a.published_at).getTime() - new Date(b.published_at).getTime(),
-          )[0];
+        // Releases default-sorted by created_at DESC. Filter out
+        // prereleases (RCs, betas) so `first_release_at` matches the
+        // public-facing launch narrative (v0.1.0, not v0.1.0-rc3).
+        // If only prereleases exist, fall back to the oldest of those
+        // so a project mid-RC-cycle still shows a date.
+        const candidates = releases.filter((r) => r.published_at);
+        const stable = candidates.filter((r) => !r.prerelease);
+        const pool = stable.length > 0 ? stable : candidates;
+        const oldest = pool.sort(
+          (a, b) =>
+            new Date(a.published_at).getTime() - new Date(b.published_at).getTime(),
+        )[0];
         if (oldest?.published_at) {
-          debug(`first release: ${oldest.tag_name} at ${oldest.published_at}`);
+          debug(
+            `first release: ${oldest.tag_name} at ${oldest.published_at}` +
+              (stable.length === 0 ? " (only prereleases found)" : ""),
+          );
           return oldest.published_at;
         }
       }
