@@ -1,27 +1,20 @@
 use std::path::Path;
 
-use tree_sitter::{Language, Parser, Tree};
+use tree_sitter::{Parser, Tree};
+
+use crate::seed::encoders::SeedLanguage;
 
 pub(super) fn ts_parse(text: &str, file_path: &Path) -> Option<Tree> {
-    let language = language_for_extension(file_path.extension()?.to_str()?)?;
+    // Resolve grammar through the central languages table so filename-keyed
+    // languages (Makefile, Gemfile, Dockerfile) are scanned alongside
+    // extension-keyed ones. `SeedLanguage::from_label` returns `None` for
+    // `dockerfile` (its grammar crate is wedged at an older ABI), so the
+    // scanner gracefully skips files the encoder cannot parse.
+    let info = crate::languages::detect_by_path(file_path)?;
+    let lang = SeedLanguage::from_label(info.label)?;
     let mut parser = Parser::new();
-    parser.set_language(language).ok()?;
+    parser.set_language(&lang.ts_language()).ok()?;
     parser.parse(text, None)
-}
-
-fn language_for_extension(ext: &str) -> Option<Language> {
-    Some(match ext {
-        "rs" => tree_sitter_rust::language(),
-        "py" => tree_sitter_python::language(),
-        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::language(),
-        "ts" | "tsx" => tree_sitter_typescript::language_typescript(),
-        "html" | "htm" => tree_sitter_html::language(),
-        "css" => tree_sitter_css::language(),
-        "json" => tree_sitter_json::language(),
-        "toml" => tree_sitter_toml::language(),
-        "sh" | "bash" => tree_sitter_bash::language(),
-        _ => return None,
-    })
 }
 
 /// True for a trimmed line that is syntactically a comment or comment

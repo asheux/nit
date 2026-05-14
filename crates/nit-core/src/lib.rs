@@ -14,6 +14,7 @@ pub mod genome_storage;
 pub mod gol_rules;
 pub mod io;
 pub mod lab;
+pub mod languages;
 pub mod metabolism;
 pub mod mission_memory;
 pub mod mode;

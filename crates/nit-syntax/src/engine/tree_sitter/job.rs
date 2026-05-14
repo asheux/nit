@@ -30,6 +30,35 @@ pub(super) struct BufferState {
     pub cursor: QueryCursor,
 }
 
+impl BufferState {
+    fn new(language: LanguageId) -> Self {
+        Self {
+            language,
+            parser: Parser::new(),
+            tree: None,
+            snapshot: None,
+            cursor: QueryCursor::new(),
+        }
+    }
+
+    // Resets cached parse state when the language flips, then loads the
+    // grammar onto the parser. `tree_sitter_language` returns `None` for
+    // variants without a shipped grammar (e.g. Dockerfile, PlainText); we
+    // leave the parser unset in that case and let the no-config branch
+    // upstream return a plain snapshot.
+    fn switch_language(&mut self, language: LanguageId) -> anyhow::Result<()> {
+        if self.language != language {
+            self.language = language;
+            self.tree = None;
+            self.snapshot = None;
+        }
+        if let Some(ts_lang) = LanguageRegistry::tree_sitter_language(language) {
+            self.parser.set_language(&ts_lang)?;
+        }
+        Ok(())
+    }
+}
+
 // Single-slot throttle: `f` runs at most once per `interval`. Seeded so the
 // first call always fires even before `interval` has elapsed at process start.
 // Recovers from lock poison so a panicked logger doesn't silently kill all
@@ -152,23 +181,10 @@ fn highlight_job(
         ));
     };
 
-    let state = buffers.entry(job.buffer_id).or_insert_with(|| BufferState {
-        language: lang,
-        parser: Parser::new(),
-        tree: None,
-        snapshot: None,
-        cursor: QueryCursor::new(),
-    });
-
-    if state.language != lang {
-        state.language = lang;
-        state.tree = None;
-        state.snapshot = None;
-    }
-
-    if let Some(ts_lang) = LanguageRegistry::tree_sitter_language(lang) {
-        state.parser.set_language(ts_lang)?;
-    }
+    let state = buffers
+        .entry(job.buffer_id)
+        .or_insert_with(|| BufferState::new(lang));
+    state.switch_language(lang)?;
 
     let (tree, edited_old) = parse_job_tree(state, job);
     let Some(tree) = tree else {

@@ -14,34 +14,22 @@ pub(super) const SCOPE_WALK_DEFAULT_TIMEOUT_MS: u64 = 200;
 const SCOPE_WALK_SKIP_DIRS: &[&str] = &["target", "node_modules"];
 
 fn is_source_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        "rs" | "toml"
-            | "ts"
-            | "js"
-            | "tsx"
-            | "jsx"
-            | "py"
-            | "go"
-            | "c"
-            | "h"
-            | "cpp"
-            | "hpp"
-            | "sh"
-            | "bash"
-            | "zsh"
-            | "fish"
-            | "lua"
-            | "rb"
-            | "conf"
-            | "md"
-    )
+    // Every registered language (code + markup/data/docs) plus `conf` for
+    // shell-rc style config files. `txt` is intentionally excluded — the
+    // swarm scope walker treats note files as irrelevant context, even
+    // though the file-watcher tracks them for buffer-reload.
+    nit_core::languages::is_supported_extension(ext) || ext == "conf"
 }
 
 // `Path::extension()` returns `None` for `.zshrc` (the whole basename is the
-// file name with no separate extension), so the leading-dot pattern is the
-// only reliable way to surface dotfile-style sources.
+// file name), so dotfile-style sources need a filename match. `Makefile` /
+// `Dockerfile` / `Cargo.toml` / `Gemfile` / `Rakefile` are already filename
+// entries in the central languages table; only the shell-rc set lives here.
 fn is_source_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if nit_core::languages::detect_by_filename(&lower).is_some() {
+        return true;
+    }
     matches!(
         name,
         ".zshrc"
@@ -53,8 +41,6 @@ fn is_source_filename(name: &str) -> bool {
             | ".tmux.conf"
             | ".vimrc"
             | ".gvimrc"
-            | "Makefile"
-            | "Dockerfile"
     )
 }
 

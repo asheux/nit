@@ -29,16 +29,39 @@ nit-games = { path = "../nit-games" }
 toml = { workspace = true }
 
 # Tree-sitter parsers (used by the seed encoders + genome report AST analysis).
-# Versions pinned for reproducibility; CI uses --locked.
-tree-sitter = "0.20.10"
-tree-sitter-bash = "0.20.3"
-tree-sitter-css = "0.20.0"
-tree-sitter-html = "0.19.0"
-tree-sitter-javascript = "0.20.4"
-tree-sitter-json = "0.20.2"
-tree-sitter-markdown-fork = "0.7.3"
-tree-sitter-python = "0.20.4"
-tree-sitter-rust = "0.20.4"
-tree-sitter-toml = "0.20.0"
-tree-sitter-typescript = "0.20.5"
-tree-sitter-yaml = "0.0.1"
+# Versions pinned for reproducibility; CI uses --locked. Workspace shares
+# the same tree-sitter 0.25 ABI as nit-syntax; the parser set mirrors the
+# master table in `src/languages.rs` so the genome system encodes every
+# language the editor can highlight (Dockerfile excepted — wedged at old
+# ABI). The central languages table itself adds no extra deps — it uses
+# only `std` for slice-based lookup.
+tree-sitter = "0.25"
+tree-sitter-bash = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-md = "0.3"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-yaml = "0.7"
+# Expanded language set — mirror of nit-syntax for genome coverage.
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-lua = "0.5"
+tree-sitter-php = "0.24"
+tree-sitter-ocaml = "0.25"
+tree-sitter-haskell = "0.23"
+tree-sitter-elixir = "0.3"
+tree-sitter-nix = "0.0.2"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-sequel = "0.3"
+tree-sitter-zig = "1.1"
+tree-sitter-make = "1.1"
+tree-sitter-lean4 = "0.3"
+tree-sitter-swift = "0.7"

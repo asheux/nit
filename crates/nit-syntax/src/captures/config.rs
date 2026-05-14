@@ -42,7 +42,6 @@ pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfigur
     for (lang, grammar, highlights) in grammar_entries() {
         let injections = LanguageRegistry::injections_query(lang);
         let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
-            // Both injection and bare modes failed; the language silently drops to plain.
             warn!("highlight config for {lang:?} failed (with and without injections)");
             continue;
         };
@@ -60,11 +59,14 @@ fn try_build_config(
     highlights: &str,
     injections: &str,
 ) -> Option<HighlightConfiguration> {
-    match HighlightConfiguration::new(grammar, highlights, injections, "") {
+    // tree-sitter-highlight 0.25 added a `name` parameter for diagnostics;
+    // we pass a generic "nit" label since the lang is logged at the
+    // call site anyway.
+    match HighlightConfiguration::new(grammar.clone(), "nit", highlights, injections, "") {
         Ok(cfg) => Some(cfg),
         Err(err) => {
             debug!("injections failed ({err}), retrying without");
-            HighlightConfiguration::new(grammar, highlights, "", "").ok()
+            HighlightConfiguration::new(grammar, "nit", highlights, "", "").ok()
         }
     }
 }
@@ -74,7 +76,7 @@ pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
     let mut configs = HashMap::with_capacity(LanguageId::ALL.len());
 
     for (lang, grammar, highlights) in grammar_entries() {
-        let Ok(query) = Query::new(grammar, highlights) else {
+        let Ok(query) = Query::new(&grammar, highlights) else {
             continue;
         };
         let highlight_groups = resolve_highlight_groups(&query, &groups);

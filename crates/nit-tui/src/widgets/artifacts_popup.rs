@@ -1,8 +1,5 @@
 use nit_core::{AgentMessage, AppState, GlobalArchiveEntry, UiSelectionPane};
-use nit_syntax::{
-    map_line_segments_to_chars, HighlightRequest, HighlightSnapshot, LanguageId, LanguageRegistry,
-    MappedLineSegment, SyntaxConfig, SyntaxEngine, SyntaxManager,
-};
+use nit_syntax::MappedLineSegment;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -10,112 +7,25 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
-use std::{
-    collections::{hash_map::DefaultHasher, VecDeque},
-    hash::{Hash, Hasher},
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::swarm::{
-    SwarmPersistenceView, SwarmRuntime, SwarmTaskArtifacts, SwarmTaskPersistenceView,
-};
+use crate::swarm::SwarmRuntime;
 use crate::theme::Theme;
 use crate::widgets::agent_console_view;
 use crate::widgets::agent_ops_view;
 use crate::widgets::text_selection::apply_ui_selection;
 
-const DOCUMENT_HIGHLIGHT_WAIT: Duration = Duration::from_millis(250);
-const DOCUMENT_HIGHLIGHT_CACHE_LIMIT: usize = 96;
+mod markdown;
+mod syntax;
+mod table;
+mod views;
 
-struct DocumentSyntaxHighlighter {
-    manager: SyntaxManager,
-    recent_buffer_ids: VecDeque<usize>,
-}
-
-impl DocumentSyntaxHighlighter {
-    fn new() -> Self {
-        Self {
-            manager: SyntaxManager::new(SyntaxConfig::default()),
-            recent_buffer_ids: VecDeque::new(),
-        }
-    }
-
-    fn highlight(&mut self, language: LanguageId, text: &str) -> Option<HighlightSnapshot> {
-        let (buffer_id, version) = syntax_cache_key(language, text);
-        if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, version) {
-            self.touch_buffer_id(buffer_id);
-            return Some(snapshot);
-        }
-
-        self.touch_buffer_id(buffer_id);
-        self.manager.schedule_rehighlight(HighlightRequest {
-            buffer_id,
-            version,
-            language,
-            text: text.to_string(),
-            edits: Vec::new(),
-            full_reparse: true,
-            max_spans_per_line: self.manager.config().max_spans_per_line,
-            viewport: None,
-        });
-        wait_for_document_snapshot(
-            &mut self.manager,
-            buffer_id,
-            version,
-            DOCUMENT_HIGHLIGHT_WAIT,
-        )
-    }
-
-    fn touch_buffer_id(&mut self, buffer_id: usize) {
-        if let Some(pos) = self
-            .recent_buffer_ids
-            .iter()
-            .position(|seen| *seen == buffer_id)
-        {
-            self.recent_buffer_ids.remove(pos);
-        }
-        self.recent_buffer_ids.push_back(buffer_id);
-        if self.recent_buffer_ids.len() > DOCUMENT_HIGHLIGHT_CACHE_LIMIT {
-            self.manager = SyntaxManager::new(SyntaxConfig::default());
-            self.recent_buffer_ids.clear();
-            self.recent_buffer_ids.push_back(buffer_id);
-        }
-    }
-}
-
-fn document_syntax_highlighter() -> &'static Mutex<DocumentSyntaxHighlighter> {
-    static DOCUMENT_SYNTAX_HIGHLIGHTER: OnceLock<Mutex<DocumentSyntaxHighlighter>> =
-        OnceLock::new();
-    DOCUMENT_SYNTAX_HIGHLIGHTER.get_or_init(|| Mutex::new(DocumentSyntaxHighlighter::new()))
-}
-
-fn syntax_cache_key(language: LanguageId, text: &str) -> (usize, u64) {
-    let mut hasher = DefaultHasher::new();
-    language.hash(&mut hasher);
-    text.hash(&mut hasher);
-    let hash = hasher.finish();
-    (hash as usize, hash)
-}
-
-fn wait_for_document_snapshot(
-    manager: &mut SyntaxManager,
-    buffer_id: usize,
-    version: u64,
-    timeout: Duration,
-) -> Option<HighlightSnapshot> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(snapshot) = manager.try_get_highlights(buffer_id, version) {
-            return Some(snapshot);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
+use markdown::render_markdown_document;
+use syntax::{is_json_code_lang, next_tab_width, syntax_highlighted_wrapped_segments};
+use views::{
+    run::{build_swarm_report_lines, build_swarm_verify_lines},
+    task::build_swarm_task_lines,
+};
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = (screen.width.saturating_sub(4)).clamp(40, 140);
@@ -824,315 +734,7 @@ fn build_persisted_evidence_lines(
     out
 }
 
-fn build_swarm_task_lines(
-    view: &SwarmPersistenceView,
-    task: &SwarmTaskPersistenceView,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    out.push(popup_title_line(
-        &format!(" TASK  {}  {}", task.agent_id, task.state),
-        theme,
-    ));
-    out.push(popup_rule_line(width, theme));
-    push_wrapped_detail_lines(
-        &mut out,
-        "task",
-        &format!("{}  {}", task.id, task.title),
-        theme,
-        width,
-    );
-    push_wrapped_detail_lines(&mut out, "mission", &view.mission_id, theme, width);
-    if let Some(role) = task.role.as_deref().filter(|role| !role.trim().is_empty()) {
-        push_wrapped_detail_lines(&mut out, "role", role, theme, width);
-    }
-    push_wrapped_detail_lines(
-        &mut out,
-        "writes",
-        if task.writes { "yes" } else { "no" },
-        theme,
-        width,
-    );
-    if let Some(done_when) = task
-        .done_when
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        push_wrapped_detail_lines(&mut out, "done_when", done_when, theme, width);
-    }
-    if !task.deps.is_empty() {
-        push_wrapped_detail_lines(&mut out, "deps", &task.deps.join(", "), theme, width);
-    }
-    if !task.blocked_on.is_empty() {
-        push_wrapped_detail_lines(
-            &mut out,
-            "blocked_on",
-            &task.blocked_on.join(", "),
-            theme,
-            width,
-        );
-    }
-    if !task.expected_artifacts.is_empty() {
-        push_wrapped_detail_lines(
-            &mut out,
-            "expected",
-            &task.expected_artifacts.join(", "),
-            theme,
-            width,
-        );
-    }
-    if task.expected_artifacts_missing {
-        out.push(popup_note_line(
-            " expected artifacts but no parseable swarm_artifacts JSON block was captured",
-            theme.warning,
-            theme,
-        ));
-    }
-    push_wrapped_detail_lines(
-        &mut out,
-        "artifact",
-        &format!(
-            ".nit/swarm/{}/tasks/{}/artifacts.json",
-            view.mission_id, task.id
-        ),
-        theme,
-        width,
-    );
-    if let Some(artifacts) = task.artifacts.as_ref() {
-        push_task_artifact_sections(&mut out, artifacts, theme, width);
-    }
-
-    out.push(Line::from(""));
-    out.push(popup_section_line(" Document", theme));
-    push_wrapped_detail_lines(
-        &mut out,
-        "output",
-        &format!(".nit/swarm/{}/tasks/{}/output.md", view.mission_id, task.id),
-        theme,
-        width,
-    );
-    if let Some(output) = task.output.as_deref() {
-        out.push(Line::from(""));
-        out.extend(render_markdown_document(output, theme, width));
-    } else {
-        out.push(popup_note_line(
-            " no captured task output",
-            theme.border,
-            theme,
-        ));
-    }
-    out
-}
-
-fn build_swarm_report_lines(
-    view: &SwarmPersistenceView,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let status = view.report_status.as_deref().unwrap_or("FINAL");
-    let agent_id = view.report_agent_id.as_deref().unwrap_or("planner");
-
-    let mut out = Vec::new();
-    out.push(popup_title_line(
-        &format!(" REPORT  {agent_id}  {status}"),
-        theme,
-    ));
-    out.push(popup_rule_line(width, theme));
-    push_wrapped_detail_lines(&mut out, "mission", &view.mission_id, theme, width);
-    push_wrapped_detail_lines(
-        &mut out,
-        "artifact",
-        &format!(".nit/swarm/{}/report/final.md", view.mission_id),
-        theme,
-        width,
-    );
-
-    out.push(Line::from(""));
-    out.push(popup_section_line(" Document", theme));
-    if let Some(output) = view.report_output.as_deref() {
-        out.push(Line::from(""));
-        out.extend(render_markdown_document(output, theme, width));
-    } else {
-        out.push(popup_note_line(
-            " no final synthesis output captured",
-            theme.border,
-            theme,
-        ));
-    }
-    out
-}
-
-fn build_swarm_verify_lines(
-    view: &SwarmPersistenceView,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let status = if let Some(report) = view.gate_report.as_ref() {
-        if report.overall_ok {
-            "PASS"
-        } else {
-            "FAIL"
-        }
-    } else if view.gate_bundle.is_some() {
-        "PENDING"
-    } else {
-        "--"
-    };
-
-    let mut out = Vec::new();
-    out.push(popup_title_line(
-        &format!(
-            " VERIFY  {}  {status}",
-            view.gate_bundle.as_deref().unwrap_or("none")
-        ),
-        theme,
-    ));
-    out.push(popup_rule_line(width, theme));
-    push_wrapped_detail_lines(&mut out, "mission", &view.mission_id, theme, width);
-    push_wrapped_detail_lines(&mut out, "template", &view.template, theme, width);
-    push_wrapped_detail_lines(
-        &mut out,
-        "artifact",
-        &format!(".nit/swarm/{}/gates/verify.md", view.mission_id),
-        theme,
-        width,
-    );
-    if view.gate_report.is_some() {
-        push_wrapped_detail_lines(
-            &mut out,
-            "report",
-            &format!(".nit/swarm/{}/gates/report.json", view.mission_id),
-            theme,
-            width,
-        );
-    }
-    if view.gate_output.is_some() {
-        push_wrapped_detail_lines(
-            &mut out,
-            "output",
-            &format!(".nit/swarm/{}/gates/output.txt", view.mission_id),
-            theme,
-            width,
-        );
-    }
-
-    if let Some(report) = view.gate_report.as_ref() {
-        out.push(Line::from(""));
-        out.push(popup_section_line(" Gates", theme));
-        for gate in report.gates.iter() {
-            push_wrapped_bullet(
-                &mut out,
-                &format!(
-                    "{} [{}] {}",
-                    gate.name,
-                    if gate.ok { "PASS" } else { "FAIL" },
-                    gate.command
-                ),
-                theme,
-                width,
-            );
-            if let Some(notes) = gate.notes.as_deref().filter(|text| !text.trim().is_empty()) {
-                push_wrapped_detail_lines(&mut out, "notes", notes, theme, width);
-            }
-        }
-    }
-
-    out.push(Line::from(""));
-    out.push(popup_section_line(" Document", theme));
-    if let Some(output) = view.gate_output.as_deref() {
-        out.push(Line::from(""));
-        out.extend(render_markdown_document(output, theme, width));
-    } else if view.gate_bundle.is_some() {
-        out.push(popup_note_line(
-            " verification has not completed yet",
-            theme.warning,
-            theme,
-        ));
-    } else {
-        out.push(popup_note_line(
-            " no verification output captured",
-            theme.border,
-            theme,
-        ));
-    }
-    out
-}
-
-fn push_task_artifact_sections(
-    out: &mut Vec<Line<'static>>,
-    artifacts: &SwarmTaskArtifacts,
-    theme: &Theme,
-    width: usize,
-) {
-    if artifacts.summary.is_none()
-        && artifacts.files.is_empty()
-        && artifacts.diffs.is_empty()
-        && artifacts.commands.is_empty()
-        && artifacts.risks.is_empty()
-        && artifacts.notes.is_empty()
-    {
-        return;
-    }
-
-    out.push(Line::from(""));
-    out.push(popup_section_line(" Artifacts", theme));
-    if let Some(summary) = artifacts
-        .summary
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        push_wrapped_detail_lines(out, "summary", summary, theme, width);
-    }
-    for file in artifacts.files.iter() {
-        let text = match file.notes.as_deref().filter(|text| !text.trim().is_empty()) {
-            Some(notes) => format!("{} ({})", file.path, notes.trim()),
-            None => file.path.clone(),
-        };
-        push_wrapped_bullet(out, &text, theme, width);
-    }
-    for diff in artifacts.diffs.iter() {
-        let text = match diff.path.as_deref().filter(|text| !text.trim().is_empty()) {
-            Some(path) => format!("{} ({})", diff.summary, path.trim()),
-            None => diff.summary.clone(),
-        };
-        push_wrapped_bullet(out, &text, theme, width);
-    }
-    for command in artifacts.commands.iter() {
-        let text = match command
-            .purpose
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-        {
-            Some(purpose) => format!("{} ({})", command.cmd, purpose.trim()),
-            None => command.cmd.clone(),
-        };
-        push_wrapped_bullet(out, &text, theme, width);
-    }
-    for risk in artifacts.risks.iter() {
-        let prefix = risk
-            .level
-            .as_deref()
-            .map(str::trim)
-            .filter(|level| !level.is_empty())
-            .map(|level| format!("[{level}] "))
-            .unwrap_or_default();
-        let text = match risk
-            .mitigation
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-        {
-            Some(mitigation) => format!("{prefix}{} -> {}", risk.item, mitigation.trim()),
-            None => format!("{prefix}{}", risk.item),
-        };
-        push_wrapped_bullet(out, &text, theme, width);
-    }
-    for note in artifacts.notes.iter() {
-        push_wrapped_bullet(out, note, theme, width);
-    }
-}
-
-fn popup_title_line(text: &str, theme: &Theme) -> Line<'static> {
+pub(super) fn popup_title_line(text: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         format!(" {text}"),
         Style::default()
@@ -1141,7 +743,7 @@ fn popup_title_line(text: &str, theme: &Theme) -> Line<'static> {
     ))
 }
 
-fn popup_rule_line(width: usize, theme: &Theme) -> Line<'static> {
+pub(super) fn popup_rule_line(width: usize, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width.min(240)),
         Style::default()
@@ -1150,7 +752,7 @@ fn popup_rule_line(width: usize, theme: &Theme) -> Line<'static> {
     ))
 }
 
-fn popup_section_line(text: &str, theme: &Theme) -> Line<'static> {
+pub(super) fn popup_section_line(text: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
         Style::default()
@@ -1159,7 +761,7 @@ fn popup_section_line(text: &str, theme: &Theme) -> Line<'static> {
     ))
 }
 
-fn popup_note_line(text: &str, color: Color, theme: &Theme) -> Line<'static> {
+pub(super) fn popup_note_line(text: &str, color: Color, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
         Style::default()
@@ -1168,7 +770,7 @@ fn popup_note_line(text: &str, color: Color, theme: &Theme) -> Line<'static> {
     ))
 }
 
-fn push_wrapped_detail_lines(
+pub(super) fn push_wrapped_detail_lines(
     out: &mut Vec<Line<'static>>,
     label: &str,
     value: &str,
@@ -1200,7 +802,7 @@ fn push_wrapped_detail_lines(
     }
 }
 
-fn push_wrapped_bullet(out: &mut Vec<Line<'static>>, value: &str, theme: &Theme, width: usize) {
+pub(super) fn push_wrapped_bullet(out: &mut Vec<Line<'static>>, value: &str, theme: &Theme, width: usize) {
     let bullet = " • ";
     let bullet_width = UnicodeWidthStr::width(bullet);
     let available = width.saturating_sub(bullet_width).max(8);
@@ -1228,608 +830,11 @@ fn push_wrapped_bullet(out: &mut Vec<Line<'static>>, value: &str, theme: &Theme,
     }
 }
 
-fn render_markdown_document(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    if let Some(json_lines) = maybe_render_json_document(text, theme, width) {
-        return json_lines;
-    }
-
-    let mut out = Vec::new();
-    let mut in_code_block = false;
-    let mut code_lang = String::new();
-    let mut code_lines: Vec<String> = Vec::new();
-    let mut math_block_end: Option<&'static str> = None;
-    let mut math_lines: Vec<String> = Vec::new();
-    let mut table_lines: Vec<String> = Vec::new();
-
-    for raw_line in text.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        let trimmed = line.trim();
-
-        if in_code_block {
-            if parse_code_fence(trimmed).is_some() {
-                out.extend(render_fenced_code_block(
-                    code_lang.as_str(),
-                    code_lines.as_slice(),
-                    theme,
-                    width,
-                ));
-                out.push(Line::from(""));
-                in_code_block = false;
-                code_lang.clear();
-                code_lines.clear();
-            } else {
-                code_lines.push(line.to_string());
-            }
-            continue;
-        }
-
-        if let Some(end_marker) = math_block_end {
-            if trimmed == end_marker {
-                out.extend(render_math_block(math_lines.as_slice(), theme, width));
-                out.push(Line::from(""));
-                math_block_end = None;
-                math_lines.clear();
-            } else {
-                math_lines.push(line.to_string());
-            }
-            continue;
-        }
-
-        if !in_code_block && is_markdown_table_candidate(trimmed) {
-            table_lines.push(trimmed.to_string());
-            continue;
-        }
-        if !table_lines.is_empty() {
-            flush_markdown_table(&mut out, &mut table_lines, theme, width);
-        }
-
-        if let Some(lang) = parse_code_fence(trimmed) {
-            in_code_block = true;
-            code_lang = lang.to_string();
-            code_lines.clear();
-            continue;
-        }
-
-        if let Some(end_marker) = parse_math_block_start(trimmed) {
-            math_block_end = Some(end_marker);
-            math_lines.clear();
-            continue;
-        }
-        if let Some(single_line_math) = extract_single_line_math_block(trimmed) {
-            out.extend(render_math_block(&[single_line_math], theme, width));
-            out.push(Line::from(""));
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            out.push(Line::from(""));
-            continue;
-        }
-        if is_thematic_rule(trimmed) {
-            out.push(popup_rule_line(width, theme));
-            continue;
-        }
-        if let Some((level, heading)) = parse_markdown_heading(trimmed) {
-            out.extend(render_markdown_heading(level, heading, theme, width));
-            continue;
-        }
-        if let Some(heading) = strong_only_heading_text(trimmed) {
-            out.extend(render_markdown_heading(2, &heading, theme, width));
-            continue;
-        }
-        if let Some(quote) = trimmed.strip_prefix('>').map(str::trim_start) {
-            out.extend(render_markdown_quote(quote, theme, width));
-            continue;
-        }
-        if let Some((marker, item)) = parse_list_marker(trimmed) {
-            out.extend(render_markdown_list_item(marker, item, theme, width));
-            continue;
-        }
-        out.extend(render_markdown_paragraph(trimmed, theme, width));
-    }
-
-    if in_code_block {
-        out.extend(render_fenced_code_block(
-            code_lang.as_str(),
-            code_lines.as_slice(),
-            theme,
-            width,
-        ));
-    }
-    if math_block_end.is_some() {
-        out.extend(render_math_block(math_lines.as_slice(), theme, width));
-    }
-    if !table_lines.is_empty() {
-        flush_markdown_table(&mut out, &mut table_lines, theme, width);
-    }
-    if out.is_empty() {
-        out.push(Line::from(""));
-    }
-    out
-}
-
-fn maybe_render_json_document(
-    text: &str,
-    theme: &Theme,
-    width: usize,
-) -> Option<Vec<Line<'static>>> {
-    let trimmed = text.trim();
-    if !matches!(trimmed.chars().next(), Some('{') | Some('[')) {
-        return None;
-    }
-    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    let pretty = serde_json::to_string_pretty(&value).ok()?;
-
-    let mut out = Vec::new();
-    out.push(popup_note_line(" json document", theme.accent, theme));
-    out.extend(render_fenced_code_block(
-        "json",
-        &pretty.lines().map(str::to_string).collect::<Vec<_>>(),
-        theme,
-        width,
-    ));
-    Some(out)
-}
-
-fn flush_markdown_table(
-    out: &mut Vec<Line<'static>>,
-    table_lines: &mut Vec<String>,
-    theme: &Theme,
-    width: usize,
-) {
-    if table_lines.is_empty() {
-        return;
-    }
-    out.extend(render_markdown_table(table_lines.as_slice(), theme, width));
-    table_lines.clear();
-}
-
-fn render_markdown_table(lines: &[String], theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    if lines.len() < 2 {
-        return lines
-            .iter()
-            .flat_map(|line| render_code_block_line(line, theme, width))
-            .collect();
-    }
-
-    let rows = lines
-        .iter()
-        .map(|line| split_markdown_table_cells(line))
-        .collect::<Vec<_>>();
-    if rows.len() < 2 || !is_markdown_table_separator(rows[1].as_slice()) {
-        return lines
-            .iter()
-            .flat_map(|line| render_code_block_line(line, theme, width))
-            .collect();
-    }
-
-    let headers = rows.first().cloned().unwrap_or_default();
-    let body = rows.iter().skip(2).cloned().collect::<Vec<Vec<String>>>();
-    let cols = headers
-        .len()
-        .max(body.iter().map(|row| row.len()).max().unwrap_or(0));
-    if cols == 0 {
-        return vec![Line::from("")];
-    }
-
-    let mut widths = vec![3usize; cols];
-    for (idx, cell) in headers.iter().enumerate() {
-        widths[idx] = widths[idx].max(UnicodeWidthStr::width(cell.as_str()));
-    }
-    for row in body.iter() {
-        for (idx, cell) in row.iter().enumerate() {
-            if idx < widths.len() {
-                widths[idx] = widths[idx].max(UnicodeWidthStr::width(cell.as_str()));
-            }
-        }
-    }
-
-    let chrome = cols.saturating_mul(3).saturating_add(1);
-    let available = width.saturating_sub(chrome).max(cols);
-    let max_col = available / cols;
-    for cell_width in widths.iter_mut() {
-        *cell_width = (*cell_width).min(max_col.max(6));
-    }
-    // Give remaining space to the last column so it fills the full width.
-    let used: usize = widths.iter().sum();
-    if used < available && cols > 0 {
-        widths[cols - 1] += available - used;
-    }
-
-    let border = format_table_border(widths.as_slice());
-    let border_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
-    let border_line = || Line::from(Span::styled(border.clone(), border_style));
-
-    let mut out = Vec::new();
-    out.push(border_line());
-    out.push(table_row_line(
-        headers.as_slice(),
-        widths.as_slice(),
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
-        theme,
-    ));
-    out.push(border_line());
-    for row in body.iter() {
-        out.push(table_row_line(
-            row.as_slice(),
-            widths.as_slice(),
-            Style::default().fg(theme.foreground),
-            theme,
-        ));
-    }
-    out.push(border_line());
-    out
-}
-
-fn table_row_line(
-    cells: &[String],
-    widths: &[usize],
-    cell_style: Style,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "|".to_string(),
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-    )];
-    for (idx, width) in widths.iter().enumerate() {
-        let cell = cells.get(idx).cloned().unwrap_or_default();
-        let cell = truncate_to_width(cell.as_str(), *width);
-        let pad = width.saturating_sub(UnicodeWidthStr::width(cell.as_str()));
-        spans.push(Span::styled(" ".to_string(), cell_style));
-        spans.push(Span::styled(cell, cell_style));
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), cell_style));
-        }
-        spans.push(Span::styled(" ".to_string(), cell_style));
-        spans.push(Span::styled(
-            "|".to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn render_markdown_heading(
-    level: usize,
-    heading: &str,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let (prefix, style) = match level {
-        1 => (
-            " § ",
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD),
-        ),
-        2 => (
-            " • ",
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
-        ),
-        _ => (
-            " · ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    };
-    let available = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(8);
-    wrap_visual_line(heading, available)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, segment)| {
-            let leading = if idx == 0 {
-                Span::styled(prefix.to_string(), style)
-            } else {
-                Span::styled(" ".repeat(UnicodeWidthStr::width(prefix)), style)
-            };
-            Line::from(vec![leading, Span::styled(segment, style)])
-        })
-        .collect()
-}
-
-fn render_markdown_quote(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let prefix = " │ ";
-    let available = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(8);
-    let quote_style = Style::default()
-        .fg(theme.border_focused)
-        .add_modifier(Modifier::ITALIC);
-    wrap_visual_line(text, available)
-        .into_iter()
-        .map(|segment| {
-            let mut spans = vec![Span::styled(
-                prefix.to_string(),
-                Style::default().fg(theme.border),
-            )];
-            spans.extend(styled_text_spans(segment.as_str(), quote_style, theme));
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn render_markdown_list_item(
-    marker: &str,
-    text: &str,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let prefix = format!(" {marker} ");
-    let available = width
-        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
-        .max(8);
-    let segments = wrap_visual_line(text, available);
-    let indent = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
-    let mut out = Vec::new();
-    for (idx, segment) in segments.iter().enumerate() {
-        let mut spans = Vec::new();
-        if idx == 0 {
-            spans.push(Span::styled(
-                prefix.clone(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(indent.clone(), Style::default()));
-        }
-        spans.extend(styled_text_spans(
-            segment,
-            Style::default().fg(theme.foreground),
-            theme,
-        ));
-        out.push(Line::from(spans));
-    }
-    out
-}
-
-fn render_markdown_paragraph(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let prefix = " ";
-    let available = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(8);
-    wrap_visual_line(text, available)
-        .into_iter()
-        .map(|segment| {
-            let mut spans = vec![Span::styled(prefix.to_string(), Style::default())];
-            spans.extend(styled_text_spans(
-                segment.as_str(),
-                Style::default().fg(theme.foreground),
-                theme,
-            ));
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn render_fenced_code_block(
-    code_lang: &str,
-    lines: &[String],
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let normalized = normalize_code_block_lines(lines, code_lang);
-    let code_lang = canonical_code_lang(code_lang);
-    let snapshot = highlight_code_block(code_lang.as_str(), normalized.as_slice());
-    let label = if code_lang.is_empty() {
-        " code block".to_string()
-    } else {
-        format!(" code block ({code_lang})")
-    };
-    let gutter_width = normalized.len().max(1).to_string().len();
-
-    let mut out = Vec::new();
-    out.push(popup_note_line(&label, theme.accent, theme));
-    for (idx, line) in normalized.iter().enumerate() {
-        let mapped = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.per_line.get(idx))
-            .and_then(|segments| map_line_segments_to_chars(line, segments).ok());
-        out.extend(render_numbered_code_line(
-            Some(idx + 1),
-            line,
-            code_lang.as_str(),
-            mapped.as_deref(),
-            theme,
-            width,
-            gutter_width,
-        ));
-    }
-    if normalized.is_empty() {
-        out.extend(render_numbered_code_line(
-            None,
-            "",
-            code_lang.as_str(),
-            None,
-            theme,
-            width,
-            gutter_width,
-        ));
-    }
-    out
-}
-
-fn render_code_block_line(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+pub(super) fn render_code_block_line(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     render_numbered_code_line(None, text, "", None, theme, width, 1)
 }
 
-fn normalize_code_block_lines(lines: &[String], code_lang: &str) -> Vec<String> {
-    let code_text = lines.join("\n");
-    if is_json_code_lang(code_lang)
-        || (code_lang.is_empty()
-            && matches!(code_text.trim().chars().next(), Some('{') | Some('[')))
-    {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(code_text.trim()) {
-            if let Ok(pretty) = serde_json::to_string_pretty(&value) {
-                return pretty.lines().map(str::to_string).collect();
-            }
-        }
-    }
-    lines.to_vec()
-}
-
-fn canonical_code_lang(code_lang: &str) -> String {
-    match code_lang.trim().to_ascii_lowercase().as_str() {
-        "js" => "javascript".into(),
-        "ts" => "typescript".into(),
-        "rs" => "rust".into(),
-        "py" => "python".into(),
-        other => other.to_string(),
-    }
-}
-
-fn is_json_code_lang(code_lang: &str) -> bool {
-    matches!(
-        canonical_code_lang(code_lang).as_str(),
-        "json" | "jsonc" | "geojson"
-    )
-}
-
-fn highlight_code_block(code_lang: &str, lines: &[String]) -> Option<HighlightSnapshot> {
-    let text = lines.join("\n");
-    let language = language_id_for_code_block(code_lang, text.as_str())?;
-    let mut highlighter = document_syntax_highlighter().lock().ok()?;
-    highlighter.highlight(language, text.as_str())
-}
-
-fn language_id_for_code_block(code_lang: &str, text: &str) -> Option<LanguageId> {
-    let normalized = canonical_code_lang(code_lang);
-    if normalized.is_empty() {
-        let trimmed = text.trim_start();
-        if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
-            return Some(LanguageId::Json);
-        }
-        return None;
-    }
-
-    match normalized.as_str() {
-        "jsonc" | "geojson" => Some(LanguageId::Json),
-        "zsh" | "fish" | "shell" | "shell-session" | "console" => Some(LanguageId::Bash),
-        "text" | "txt" | "plaintext" | "plain" => Some(LanguageId::PlainText),
-        _ => LanguageRegistry::from_injection_name(normalized.as_str()),
-    }
-}
-
-fn syntax_highlighted_wrapped_segments(
-    text: &str,
-    mapped: &[MappedLineSegment],
-    base: Style,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Vec<Span<'static>>> {
-    if text.is_empty() {
-        return vec![vec![Span::styled(String::new(), base)]];
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut styles = vec![base; chars.len()];
-    for seg in mapped {
-        if seg.start >= seg.end || seg.start >= styles.len() {
-            continue;
-        }
-        let style = base.patch(theme.highlight_style(seg.group));
-        for idx in seg.start..seg.end.min(styles.len()) {
-            styles[idx] = styles[idx].patch(style);
-        }
-    }
-
-    let width = width.max(1);
-    let mut out: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    let mut buffers: Vec<String> = vec![String::new()];
-    let mut current_styles = vec![styles[0]];
-    let mut current_width = 0usize;
-    let mut line_idx = 0usize;
-
-    let flush_buffer = |out: &mut Vec<Vec<Span<'static>>>,
-                        buffers: &mut Vec<String>,
-                        current_styles: &[Style],
-                        line_idx: usize| {
-        if !buffers[line_idx].is_empty() {
-            out[line_idx].push(Span::styled(
-                std::mem::take(&mut buffers[line_idx]),
-                current_styles[line_idx],
-            ));
-        }
-    };
-
-    let push_styled_char = |out: &mut Vec<Vec<Span<'static>>>,
-                            buffers: &mut Vec<String>,
-                            current_styles: &mut Vec<Style>,
-                            line_idx: usize,
-                            ch: char,
-                            style: Style| {
-        if style != current_styles[line_idx] && !buffers[line_idx].is_empty() {
-            out[line_idx].push(Span::styled(
-                std::mem::take(&mut buffers[line_idx]),
-                current_styles[line_idx],
-            ));
-        }
-        current_styles[line_idx] = style;
-        buffers[line_idx].push(ch);
-    };
-
-    for (idx, ch) in chars.iter().enumerate() {
-        let style = styles[idx];
-        if *ch == '\t' {
-            let tab_width = next_tab_width(current_width, width);
-            for _ in 0..tab_width {
-                if current_width + 1 > width && !buffers[line_idx].is_empty() {
-                    flush_buffer(&mut out, &mut buffers, &current_styles, line_idx);
-                    out.push(Vec::new());
-                    buffers.push(String::new());
-                    current_styles.push(style);
-                    line_idx += 1;
-                    current_width = 0;
-                }
-                push_styled_char(
-                    &mut out,
-                    &mut buffers,
-                    &mut current_styles,
-                    line_idx,
-                    ' ',
-                    style,
-                );
-                current_width += 1;
-            }
-            continue;
-        }
-
-        let ch_width = UnicodeWidthChar::width(*ch).unwrap_or(1).max(1);
-        if current_width + ch_width > width && !buffers[line_idx].is_empty() {
-            flush_buffer(&mut out, &mut buffers, &current_styles, line_idx);
-            out.push(Vec::new());
-            buffers.push(String::new());
-            current_styles.push(style);
-            line_idx += 1;
-            current_width = 0;
-        }
-        push_styled_char(
-            &mut out,
-            &mut buffers,
-            &mut current_styles,
-            line_idx,
-            *ch,
-            style,
-        );
-        current_width += ch_width;
-    }
-
-    flush_buffer(&mut out, &mut buffers, &current_styles, line_idx);
-    if out.is_empty() {
-        vec![vec![Span::styled(String::new(), base)]]
-    } else {
-        out
-    }
-}
-
-fn render_numbered_code_line(
+pub(super) fn render_numbered_code_line(
     line_no: Option<usize>,
     text: &str,
     code_lang: &str,
@@ -1881,168 +886,7 @@ fn render_numbered_code_line(
         .collect()
 }
 
-fn render_math_block(lines: &[String], theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let prefix = " ∑ ";
-    let continuation = "   ";
-    let available = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(8);
-    let math_style = Style::default().fg(theme.accent).bg(dim_bg_towards(
-        theme.cursor_line_bg,
-        theme.background,
-        40,
-    ));
-
-    let mut out = vec![popup_note_line(" equation", theme.accent, theme)];
-    if lines.is_empty() {
-        out.push(Line::from(vec![
-            Span::styled(prefix.to_string(), math_style.add_modifier(Modifier::BOLD)),
-            Span::styled(String::new(), math_style),
-        ]));
-        return out;
-    }
-
-    for (line_idx, line) in lines.iter().enumerate() {
-        let wrapped = wrap_visual_line(line.trim(), available);
-        for (segment_idx, segment) in wrapped.iter().enumerate() {
-            let leading = if line_idx == 0 && segment_idx == 0 {
-                prefix
-            } else {
-                continuation
-            };
-            let mut spans = vec![Span::styled(
-                leading.to_string(),
-                math_style.add_modifier(Modifier::BOLD),
-            )];
-            spans.extend(styled_math_spans(
-                segment,
-                math_style.add_modifier(Modifier::ITALIC),
-                theme,
-            ));
-            out.push(Line::from(spans));
-        }
-    }
-    out
-}
-
-fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
-    let hashes = line.chars().take_while(|ch| *ch == '#').count();
-    if hashes == 0 {
-        return None;
-    }
-    let text = line[hashes..].trim();
-    (!text.is_empty()).then_some((hashes, text))
-}
-
-fn strong_only_heading_text(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("**") || !trimmed.ends_with("**") || trimmed.len() < 4 {
-        return None;
-    }
-    let inner = trimmed[2..trimmed.len() - 2].trim();
-    if inner.is_empty() || inner.contains("**") {
-        return None;
-    }
-    Some(inner.to_string())
-}
-
-fn parse_list_marker(line: &str) -> Option<(&str, &str)> {
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(rest) = line.strip_prefix(marker) {
-            return Some((&marker[..1], rest.trim_start()));
-        }
-    }
-
-    let digits = line.chars().take_while(|ch| ch.is_ascii_digit()).count();
-    if digits > 0 && line[digits..].starts_with(". ") {
-        let marker = &line[..digits + 1];
-        let rest = line[digits + 2..].trim_start();
-        if !rest.is_empty() {
-            return Some((marker, rest));
-        }
-    }
-    None
-}
-
-fn parse_code_fence(line: &str) -> Option<&str> {
-    line.strip_prefix("```")
-        .or_else(|| line.strip_prefix("~~~"))
-        .map(str::trim)
-}
-
-fn parse_math_block_start(line: &str) -> Option<&'static str> {
-    match line.trim() {
-        "$$" => Some("$$"),
-        "\\[" => Some("\\]"),
-        _ => None,
-    }
-}
-
-fn extract_single_line_math_block(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.starts_with("$$") && trimmed.ends_with("$$") && trimmed.len() > 4 {
-        return Some(trimmed[2..trimmed.len() - 2].trim().to_string());
-    }
-    if trimmed.starts_with("\\[") && trimmed.ends_with("\\]") && trimmed.len() > 4 {
-        return Some(trimmed[2..trimmed.len() - 2].trim().to_string());
-    }
-    None
-}
-
-fn is_thematic_rule(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.len() >= 3
-        && (trimmed.chars().all(|ch| ch == '-')
-            || trimmed.chars().all(|ch| ch == '*')
-            || trimmed.chars().all(|ch| ch == '_'))
-}
-
-fn is_markdown_table_candidate(line: &str) -> bool {
-    line.starts_with('|') && line.ends_with('|') && line.matches('|').count() >= 3
-}
-
-fn split_markdown_table_cells(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|cell| cell.trim().to_string())
-        .collect()
-}
-
-fn is_markdown_table_separator(cells: &[String]) -> bool {
-    !cells.is_empty()
-        && cells.iter().all(|cell| {
-            let trimmed = cell.trim();
-            !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
-        })
-}
-
-fn format_table_border(widths: &[usize]) -> String {
-    let mut line = String::from("+");
-    for width in widths {
-        line.push_str(&"-".repeat(width.saturating_add(2)));
-        line.push('+');
-    }
-    line
-}
-
-fn truncate_to_width(text: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-        if used.saturating_add(ch_width).saturating_add(1) > width {
-            break;
-        }
-        out.push(ch);
-        used = used.saturating_add(ch_width);
-    }
-    out.push('…');
-    out
-}
-
-fn styled_text_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
+pub(super) fn styled_text_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut remaining = text;
 
@@ -2111,7 +955,7 @@ fn styled_text_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static
     spans
 }
 
-fn styled_code_spans(
+pub(super) fn styled_code_spans(
     text: &str,
     code_lang: &str,
     base: Style,
@@ -2124,7 +968,7 @@ fn styled_code_spans(
     }
 }
 
-fn styled_json_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
+pub(super) fn styled_json_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let bytes = text.as_bytes();
     let mut idx = 0usize;
@@ -2237,7 +1081,7 @@ fn json_token_is_key(text: &str, idx: usize) -> bool {
     text[idx..].chars().find(|ch| !ch.is_whitespace()) == Some(':')
 }
 
-fn styled_math_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
+pub(super) fn styled_math_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut idx = 0usize;
 
@@ -2508,7 +1352,7 @@ fn looks_like_command(text: &str) -> bool {
     )
 }
 
-fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+pub(super) fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
     let pct = background_pct.min(100) as u16;
     match (color, background) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
@@ -2524,7 +1368,7 @@ fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color 
     }
 }
 
-fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     if text.is_empty() {
         return vec![String::new()];
@@ -2605,12 +1449,6 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
     } else {
         lines
     }
-}
-
-fn next_tab_width(col: usize, width: usize) -> usize {
-    let width = width.max(1);
-    let to_stop = 4usize.saturating_sub(col % 4);
-    to_stop.max(1).min(width)
 }
 
 fn kv_line(label: &str, value: &str, label_style: Style, value_style: Style) -> Line<'static> {

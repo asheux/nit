@@ -15,6 +15,7 @@ mod token_spectrum;
 
 pub(crate) use ast_structure::AstStructureEncoder;
 pub(crate) use complexity::ComplexityFieldEncoder;
+pub(crate) use lang::SeedLanguage;
 pub use pipeline::encode_seed;
 pub(crate) use structural::StructuralEncoder;
 pub(crate) use token_spectrum::TokenSpectrumEncoder;

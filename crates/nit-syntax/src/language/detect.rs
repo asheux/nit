@@ -1,7 +1,12 @@
-//! Language detection: explicit override → shebang → path → `PlainText`,
-//! plus an injection-alias lookup used for Markdown/HTML fenced blocks.
+//! Language detection: explicit override → shebang → path → `PlainText`.
+//!
+//! Every extension/filename/alias gate routes through
+//! `nit_core::languages` so adding a language requires editing only the
+//! `LANGUAGES` table (plus a grammar arm in `grammars.rs`).
 
 use std::path::Path;
+
+use nit_core::languages;
 
 use super::id::LanguageId;
 
@@ -18,44 +23,20 @@ pub(crate) fn detect(
         return language;
     }
     file_path
-        .map(detect_from_path)
+        .and_then(detect_from_path)
         .unwrap_or(LanguageId::PlainText)
 }
 
-fn detect_from_path(file_path: &Path) -> LanguageId {
-    if let Some(filename) = file_path.file_name().and_then(|os| os.to_str()) {
-        match filename.to_lowercase().as_str() {
-            "cargo.toml" => return LanguageId::Toml,
-            "makefile" => return LanguageId::Bash,
-            _ => {}
-        }
-    }
-
-    let Some(extension) = file_path.extension().and_then(|os| os.to_str()) else {
-        return LanguageId::PlainText;
-    };
-
-    match extension.to_lowercase().as_str() {
-        "rs" => LanguageId::Rust,
-        "py" => LanguageId::Python,
-        "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
-        "ts" | "tsx" => LanguageId::TypeScript,
-        "md" | "markdown" => LanguageId::Markdown,
-        "html" | "htm" => LanguageId::Html,
-        "css" | "scss" | "sass" => LanguageId::Css,
-        "json" | "jsonc" => LanguageId::Json,
-        "toml" => LanguageId::Toml,
-        "yml" | "yaml" => LanguageId::Yaml,
-        "sh" | "bash" | "zsh" | "fish" => LanguageId::Bash,
-        _ => LanguageId::PlainText,
-    }
+fn detect_from_path(file_path: &Path) -> Option<LanguageId> {
+    languages::detect_by_path(file_path).and_then(|info| LanguageId::from_label(info.label))
 }
 
 fn detect_shebang(first_line: &str) -> Option<LanguageId> {
-    // Positional parser. The first whitespace token is the interpreter path;
-    // its basename names the language. If the basename is `env`, the next
-    // non-flag token names the actual interpreter — this also handles
-    // `env -S deno run`, where `-S` and any value after it are skipped.
+    // Bug-#1 regression guard: the pre-fix parser grabbed the LAST
+    // whitespace token, so flags or arg files (e.g. `-tt`, `-i a.py`,
+    // `env -S deno run`) were treated as the interpreter and the
+    // shebang silently fell through. This positional walker keeps the
+    // first non-flag token after `env` and ignores anything after it.
     let after_hash = first_line.trim().strip_prefix("#!")?;
     let mut tokens = after_hash.split_whitespace();
     let basename = |tok: &str| tok.rsplit('/').next().unwrap_or("").to_lowercase();
@@ -66,36 +47,19 @@ fn detect_shebang(first_line: &str) -> Option<LanguageId> {
         let interpreter = tokens.find(|tok| !tok.starts_with('-'))?;
         name = basename(interpreter);
     }
-
-    match name.as_str() {
-        "bash" | "sh" | "zsh" => Some(LanguageId::Bash),
-        "python" | "python3" => Some(LanguageId::Python),
-        "node" | "deno" => Some(LanguageId::JavaScript),
-        _ => None,
-    }
+    languages::detect_by_shebang(&name).and_then(|info| LanguageId::from_label(info.label))
 }
 
-/// Used for Markdown/HTML fenced blocks: accepts aliases like
-/// `js`, `ts`, `md`, `yml`, `sh` that the path detector does not.
+/// Resolves Markdown/HTML fenced-block info-string tags like `rust,no_run`,
+/// `tsx`, or `shell-session`. The token is split on the first
+/// non-alphanumeric/`-`/`_` character so info-string extras (`rust,no_run`,
+/// `python title="x"`) reduce to their language label before lookup.
 #[must_use]
 pub(crate) fn from_injection_name(injection_name: &str) -> Option<LanguageId> {
     let token = injection_name
         .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
         .next()
         .unwrap_or(injection_name);
-
-    match token.to_lowercase().as_str() {
-        "rust" => Some(LanguageId::Rust),
-        "python" => Some(LanguageId::Python),
-        "javascript" | "js" => Some(LanguageId::JavaScript),
-        "typescript" | "ts" | "tsx" => Some(LanguageId::TypeScript),
-        "markdown" | "md" => Some(LanguageId::Markdown),
-        "html" => Some(LanguageId::Html),
-        "css" => Some(LanguageId::Css),
-        "json" => Some(LanguageId::Json),
-        "toml" => Some(LanguageId::Toml),
-        "yaml" | "yml" => Some(LanguageId::Yaml),
-        "bash" | "sh" => Some(LanguageId::Bash),
-        _ => None,
-    }
+    languages::detect_by_injection_alias(token)
+        .and_then(|info| LanguageId::from_label(info.label))
 }

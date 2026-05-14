@@ -263,12 +263,23 @@ async function main() {
   let total = prior.total_downloads;
 
   let processed = 0;
+  // Track only logs we successfully PARSED so the idempotency cursor
+  // never advances past a file we silently failed to read. Otherwise a
+  // transient IAM/policy error would mark every file as "done" forever.
+  let lastSuccessfulKey = cutoff;
+  let failures = 0;
   for (const key of newKeys) {
     let buf;
     try {
       buf = await downloadLogGzipped(key);
     } catch (e) {
-      console.warn(`[aggregate-stats] skip ${key}: ${e.message}`);
+      // Include AWS stderr — the bare `e.message` is just "Command failed"
+      // which hides IAM/policy errors (the common cause of every-log-fails
+      // patterns). With stderr we get e.g. `AccessDenied` and can fix
+      // the IAM policy without re-running the workflow blind.
+      const detail = e.stderr ? `${e.message} — ${e.stderr.trim()}` : e.message;
+      console.warn(`[aggregate-stats] skip ${key}: ${detail}`);
+      failures += 1;
       continue;
     }
     const events = parseLogBuffer(buf);
@@ -278,9 +289,18 @@ async function main() {
       byVersion[tag] = (byVersion[tag] ?? 0) + 1;
     }
     processed += 1;
+    lastSuccessfulKey = key;
     if (processed % 25 === 0) {
       debug(`processed ${processed}/${newKeys.length} files; running total ${total}`);
     }
+  }
+  // Fail loudly when EVERY new log fails — silent advancement of the
+  // cursor through unparseable files is what produced the
+  // "0-downloads-forever" bug we just patched.
+  if (newKeys.length > 0 && processed === 0) {
+    throw new Error(
+      `[aggregate-stats] ${failures} log(s) found but all failed to read — refusing to advance cursor. Fix IAM/decryption first, then rerun. (Last attempted: ${newKeys[newKeys.length - 1]})`,
+    );
   }
 
   const latestTag = (await findLatestTag()) ?? prior.latest_release.tag;
@@ -296,8 +316,8 @@ async function main() {
     downloads_by_platform: byPlatform,
     downloads_by_version: byVersion,
     latest_release: { tag: latestTag, downloads: latestDownloads },
-    last_processed_log_key:
-      newKeys.length > 0 ? newKeys[newKeys.length - 1] : cutoff,
+    // Only advances for logs we actually parsed — see the loop above.
+    last_processed_log_key: lastSuccessfulKey,
   };
 
   console.log(`[aggregate-stats] writing stats.json: total=${total}, by_platform=${JSON.stringify(byPlatform)}, latest_release=${JSON.stringify(next.latest_release)}`);

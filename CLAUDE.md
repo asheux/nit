@@ -23,7 +23,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `nit-gol` | Game of Life simulation |
 | `nit-metal` | Metal GPU acceleration (macOS) |
 | `nit-mcp` | MCP stdio JSON-RPC server (`nit-mcp-server` binary) — bridges spawned `codex` back into substrate tools (signals/claims/assumptions); spawned by `codex_runner` |
-| `nit-syntax` | Syntax highlighting |
+| `nit-syntax` | Syntax highlighting (tree-sitter 0.25, 28 active grammars; language metadata lives in `nit-core::languages::LANGUAGES`) |
 | `nit-utils` | Shared filesystem/hashing/path utilities |
 
 ## Key source files
@@ -34,6 +34,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - `crates/nit-core/src/agent_bus.rs` — `AgentBusEvent` enum and state application
 - `crates/nit-core/src/state.rs` — `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types, `AgentOpsTab` (8 UI tabs + 1 internal `Patch`)
 - `crates/nit-core/src/genome_report.rs` — code-as-genome tier scoring, parsimony detector, soft-bottleneck lift
+- `crates/nit-core/src/languages.rs` — master `LANGUAGES` table (extensions, filenames, shebangs, injection aliases, `is_code`) consumed by `nit-syntax` detection, the file-watcher, the swarm scope walk, and the seed encoders. To add a language: append a `LanguageInfo` entry here, then add the grammar crate dep + arm in `nit-syntax/src/language/grammars.rs` (and the matching `SeedLanguage::ts_language` arm in `nit-core/src/seed/encoders/lang.rs` if the genome encoders should score it).
 - `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution, gate bundles `rust-ci`/`node-ci`/`python-ci`/`go-ci`, custom gates)
 - `crates/nit-tui/src/shadow.rs` — shadow agent pipeline (`propose-a` / `propose-b` → `judge` → `review` → main)
 - `crates/nit-tui/src/codex_runner.rs` — Codex CLI integration (MCP server + exec runtime)

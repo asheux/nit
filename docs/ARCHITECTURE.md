@@ -636,6 +636,34 @@ nit uses a dedicated crate (`nit-syntax`) to provide fast, incremental, tree-sit
 highlighting with a plain‑text fallback. The pipeline is intentionally split so future
 semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI code.
 
+**Language coverage (28 active grammars on tree-sitter 0.25):**
+
+The canonical list lives in `crates/nit-core/src/languages.rs` as the
+`LANGUAGES` table (`LanguageInfo` entries with extensions, filenames,
+shebangs, injection aliases, and an `is_code` flag). Every detection
+gate in the workspace — `nit-syntax`'s `detect_by_path` /
+`detect_by_extension` / `detect_by_injection_alias`, the file-watcher,
+the swarm scope walker, the markdown fenced-code resolver, and the
+seed encoders' supported-language predicate — pulls from that table.
+The grouping below is documentation only:
+
+| Family | Languages |
+|--------|-----------|
+| Systems | Rust, Go, C, C++, Zig |
+| JVM | Java, Kotlin |
+| Scripting | Python, JavaScript, TypeScript, Ruby, Lua, PHP, Bash |
+| Functional | OCaml, Haskell, Elixir, Lean |
+| Mobile / Apple | Swift |
+| Markup / Config | Markdown, HTML, CSS, JSON, TOML, YAML, Nix |
+| Data / Build | SQL, Makefile |
+
+Dockerfile has an entry in `LANGUAGES` (so filename detection works for
+`Dockerfile`, `Containerfile`, `Dockerfile.prod`, `prod.dockerfile`),
+but `nit-syntax::grammars::tree_sitter_language` returns `None` for it
+— the upstream `tree-sitter-dockerfile` crate is pinned to an older
+ABI, so it currently renders as plain text until upstream ships a
+0.25-compatible release.
+
 **Pipeline**
 - Buffer edits in `nit-core` record byte/point edits and bump the buffer version.
 - The TUI collects edits, debounces updates, and schedules background highlight jobs.
@@ -653,8 +681,42 @@ semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI 
 - `editor.tab_width`
 
 **Extensibility**
-- Language detection is centralized in a registry (extension, filename, shebang).
-- Queries live in `crates/nit-syntax/queries` and can be swapped without touching TUI code.
+- Language detection is centralized in `crates/nit-core/src/languages.rs`
+  (the `LANGUAGES` table). `detect_by_path`, `detect_by_extension`,
+  `detect_by_filename`, `detect_by_shebang`,
+  `detect_by_injection_alias`, and `is_supported_extension` all read
+  from that single source — `nit-syntax`'s `LanguageRegistry` is a thin
+  shim that translates table hits into `LanguageId` variants.
+- Queries live in `crates/nit-syntax/queries` and can be swapped
+  without touching TUI code.
+- Adding a language is a two-edit workflow:
+  1. Append a `LanguageInfo` entry to `LANGUAGES` in
+     `crates/nit-core/src/languages.rs` (extensions, filenames,
+     shebangs, injection aliases, `is_code` flag). This automatically
+     unlocks extension matching, filename matching, shebang
+     resolution, injection-alias resolution, the file-watcher's
+     trackable-source predicate, the swarm scope walker, and the
+     markdown fenced-code resolver.
+  2. Wire the grammar: add the `tree-sitter-<lang>` crate dep to
+     `crates/nit-syntax/Cargo.toml` (and to
+     `crates/nit-core/Cargo.toml` if the seed encoders should score
+     the language), add a variant to `LanguageId` in
+     `crates/nit-syntax/src/language/id.rs`, then add matching arms in
+     `nit-syntax/src/language/grammars.rs::tree_sitter_language` (and
+     `highlights_query`, plus a hand-rolled
+     `queries/<lang>/highlights.scm` if the grammar crate doesn't
+     export a `HIGHLIGHTS_QUERY` constant). For seed-encoder coverage,
+     also add a `SeedLanguage` variant + `ts_language` arm in
+     `crates/nit-core/src/seed/encoders/lang.rs`.
+  3. Add a smoke-test row in
+     `crates/nit-syntax/src/tests/engines.rs` covering at least one
+     keyword.
+- Extension lists, filename matchers, alias dispatches, and
+  `is_code` predicates no longer need per-language edits — they all
+  derive from the central `LANGUAGES` table.
+- For visual eyeballing, `testall/` at the repo root ships one
+  minimal sample per language — open with `nit testall/` and tab
+  through.
 
 ## Visualizer (Game of Life)
 

@@ -81,28 +81,79 @@ scripts/healthcheck.sh --deep
 - Rust 1.88.0 (pinned via `rust-toolchain.toml`)
 - ratatui + crossterm for UI/input
 - ropey, unicode-segmentation, unicode-width for text correctness
-- tree-sitter for syntax highlighting and AST-based seed encoders
+- tree-sitter 0.25 for syntax highlighting (28 active grammars; the workspace's language registry — extensions, filenames, shebangs, injection aliases, `is_code` flag — lives in `crates/nit-core/src/languages.rs`) and AST-based seed encoders
 
 ### Releasing
 
 Pushing a `v*` tag to GitHub kicks off `.github/workflows/release.yml`, which:
 
-1. Creates a draft GitHub Release for human-readable notes.
-2. Builds `nit` + `nit-mcp-server` for macOS (universal), Linux x86_64 (glibc), and Windows x86_64 in parallel.
-3. Uploads each archive plus `.sha256` and an aggregated `SHA256SUMS` to `s3://download.nit.tools/<tag>/`.
-4. On non-prerelease tags only: writes `s3://download.nit.tools/latest.json` so `install.sh` can resolve `latest`.
-5. Re-uploads `install.sh` and `install.ps1` to the bucket root and invalidates the relevant CloudFront paths.
-6. Updates the Homebrew formula at `asheux/homebrew-tap` (pre-release tags skip this step).
-7. Promotes the draft Release to published; pre-release tags are marked as such.
+1. Verifies the tag version matches the workspace `Cargo.toml` version (fast-fail if mismatched).
+2. Creates a draft GitHub Release for human-readable notes.
+3. Builds `nit` + `nit-mcp-server` for macOS (universal), Linux x86_64 (glibc), and Windows x86_64 in parallel.
+4. Uploads each archive plus `.sha256` and an aggregated `SHA256SUMS` to `s3://download.nit.tools/<tag>/`.
+5. On non-prerelease tags only: writes `s3://download.nit.tools/latest.json` so `install.sh` can resolve `latest`.
+6. Re-uploads `install.sh` and `install.ps1` to the bucket root and invalidates the relevant CloudFront paths.
+7. Updates the Homebrew formula at `asheux/homebrew-tap` (pre-release tags skip this step).
+8. Promotes the draft Release to published; pre-release tags are marked as such.
 
-Cut a release with:
+Cut a release (e.g. `v0.1.2`):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+# 1. Bump the workspace version. CI guards against tag/Cargo.toml mismatch.
+$EDITOR Cargo.toml                       # version = "0.1.2" under [workspace.package]
+git commit -am "Bump version to 0.1.2"
+git push origin main
+
+# 2. Tag and push. End-to-end workflow runs in ~6-8 min.
+git tag v0.1.2
+git push origin v0.1.2
+
+# 3. Watch progress.
+gh run watch
 ```
 
-Required GitHub repo secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_CF_DISTRIBUTION_ID`, `HOMEBREW_TAP_TOKEN`.
+Pre-release tags (anything with a hyphen like `v0.2.0-rc1`) are marked as pre-release on GitHub, skip the Homebrew formula update, and don't bump `latest.json`.
+
+#### Re-releasing a botched tag
+
+If a release fails partway through and you need to retry under the same version:
+
+```bash
+git tag -d v0.1.2                        # delete locally
+git push origin :refs/tags/v0.1.2        # delete remote
+gh release delete v0.1.2 --yes           # if a GitHub Release was created
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+If artifacts at the same key were already cached at the CDN, invalidate manually:
+
+```bash
+aws cloudfront create-invalidation \
+  --distribution-id E31XHIF603G4P3 \
+  --paths "/v0.1.2/*" "/latest.json" "/SHA256SUMS"
+```
+
+#### Required GitHub repo secrets
+
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_CF_DISTRIBUTION_ID`, `HOMEBREW_TAP_TOKEN`.
+
+### Download stats aggregator
+
+`.github/workflows/stats-aggregator.yml` runs daily at 06:00 UTC. It walks CloudFront access logs under `s3://${AWS_S3_BUCKET}/AWSLogs/<account>/CloudFront/`, counts successful release-asset downloads by version and platform, and writes `s3://${AWS_S3_BUCKET}/stats.json`. The nit-website's prebuild script reads that file at deploy time and renders the Downloads section on the landing page.
+
+Idempotent — each run only processes logs strictly newer than `last_processed_log_key` in the existing `stats.json`.
+
+```bash
+# Run on demand (e.g. after enabling CloudFront logging for the first time,
+# or after fixing a schema bug).
+gh workflow run stats-aggregator.yml
+gh run watch
+
+# Wipe and rebuild stats from scratch.
+aws s3 rm s3://${AWS_S3_BUCKET}/stats.json
+gh workflow run stats-aggregator.yml
+```
 
 ### Reproducibility
 
@@ -250,7 +301,10 @@ nit/
 │  │  └─ src/
 │  │     ├─ macos/        Device, dispatch, shader, policy, cache
 │  │     └─ stubs.rs      No-op stubs for non-macOS platforms
-│  ├─ nit-syntax/         Tree-sitter syntax highlighting
+│  ├─ nit-syntax/         Tree-sitter syntax highlighting (registry derives
+│  │  │                   from `nit-core::languages::LANGUAGES`; only the
+│  │  │                   per-grammar `tree_sitter_<lang>` arms in
+│  │  │                   `language/grammars.rs` live here)
 │  │  ├─ src/             Engine, registry, captures, debounce
 │  │  └─ queries/         Tree-sitter highlight queries per language
 │  └─ nit-utils/          Shared filesystem, hashing, path utilities
@@ -322,7 +376,8 @@ See `docs/MULTIPANE.md` for the full spec.
 ## Known limitations (MVP)
 
 - Horizontal scrolling uses character columns; tabs before the viewport can shift alignment.
-- Syntax highlighting falls back to plain text for unsupported or very large files.
+- Syntax highlighting covers 28 languages (the canonical list lives in `crates/nit-core/src/languages.rs`) and falls back to plain text for the rest or for very large files.
+- Dockerfile detection is wired (it's an entry in the central `LANGUAGES` table) but the grammar crate is pinned to an older tree-sitter ABI; renders as plain text until upstream catches up.
 - Gemini models appear in the roster but are display-only (no runtime runner).
 
 ## License

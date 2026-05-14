@@ -15,19 +15,54 @@ tracing = { workspace = true }
 nit-core = { path = "../nit-core" }
 nit-utils = { path = "../nit-utils" }
 
-# Tree-sitter runtime
-tree-sitter = "0.20.10"
-tree-sitter-highlight = "0.20.1"
+# Tree-sitter runtime (bumped from 0.20 to unlock newer-API grammars).
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
+# QueryMatches lost its Iterator impl in 0.25 — driven via `streaming-iterator`
+# now, which tree-sitter pulls in transitively.
+streaming-iterator = "0.1"
 
-# Language grammars — each enum variant in LanguageId has a matching entry
-tree-sitter-bash = "0.20.3"
-tree-sitter-css = "0.20.0"
-tree-sitter-html = "0.19.0"
-tree-sitter-javascript = "0.20.4"
-tree-sitter-json = "0.20.2"
-tree-sitter-markdown-fork = "0.7.3"
-tree-sitter-python = "0.20.4"
-tree-sitter-rust = "0.20.4"
-tree-sitter-toml = "0.20.0"
-tree-sitter-typescript = "0.20.5"
-tree-sitter-yaml = "0.0.1"
+# Language grammars — every entry in `nit_core::languages::LANGUAGES`
+# whose grammar arm in `src/language/grammars.rs::tree_sitter_language`
+# returns `Some(_)` has a matching crate below. Adding a language is one
+# entry in `LANGUAGES`, one dep here, and one arm in `grammars.rs`.
+# Versions track tree-sitter 0.25; most crates expose `LANGUAGE: LanguageFn`
+# and we convert via `.into()`.
+tree-sitter-bash = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-md = "0.3"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+# TOML and YAML stay on their older crates — neither has a 0.21+ release
+# yet; they still expose `fn language()` and work with tree-sitter 0.22
+# via a thin shim at the call site.
+tree-sitter-toml-ng = "0.7"
+tree-sitter-yaml = "0.7"
+
+# Expanded language set (Tier-1 + Aggressive). Now able to use the
+# newer-API forks because the foundation has been bumped.
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-lua = "0.5"
+tree-sitter-ocaml = "0.25"
+tree-sitter-haskell = "0.23"
+tree-sitter-elixir = "0.3"
+tree-sitter-php = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-dockerfile = "0.2"
+
+# Previously-disabled crates: now unblocked by the tree-sitter bump.
+tree-sitter-nix = "0.0.2"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-sequel = "0.3"
+tree-sitter-zig = "1.1"
+tree-sitter-make = "1.1"
+tree-sitter-lean4 = "0.3"
+# tree-sitter-graphql — no maintained crate compatible with 0.22 yet.

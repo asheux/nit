@@ -161,7 +161,10 @@ pub(super) fn collect_spans(
             continue;
         }
         cursor.set_byte_range(start..end);
-        for m in cursor.matches(&cfg.query, root, source) {
+        // tree-sitter 0.25: QueryMatches is a streaming-iterator now,
+        // not `Iterator`. Drive it with `next()` instead of `for`.
+        let mut matches = cursor.matches(&cfg.query, root, source);
+        while let Some(m) = streaming_iterator::StreamingIterator::next(&mut matches) {
             let priority = cmp::min(m.pattern_index, u8::MAX as usize) as u8;
             for cap in m.captures {
                 let group = cfg.highlight_for_index(cap.index as usize);

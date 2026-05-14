@@ -20,7 +20,7 @@ nit ships seven encoders in two categories.
 
 ### AST-Driven Encoders
 
-These use tree-sitter to parse the source file and extract structural properties. Supported for 11 languages: Rust, Python, JavaScript, TypeScript, Bash, HTML, CSS, JSON, TOML, YAML, and Markdown. They gracefully fall back to byte-level analysis for unsupported languages.
+These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 active grammars; Dockerfile is listed in `LANGUAGES` for filename detection but its grammar crate is wedged at an older tree-sitter ABI, so encoders skip it). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
 
 #### Token Spectrum (default)
 
