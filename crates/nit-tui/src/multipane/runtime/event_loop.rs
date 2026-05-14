@@ -141,6 +141,12 @@ pub fn run_loop(
                 );
             }
         }
+
+        // Async backend-probe events (cache-miss path of init_agents).
+        // See app/runner.rs for the single-pane mirror.
+        for event in nit_core::agent_bus::async_queue::drain() {
+            event.apply(state);
+        }
         for event in dir_search_runner.events.try_iter() {
             apply_dir_search_event(state, event);
         }

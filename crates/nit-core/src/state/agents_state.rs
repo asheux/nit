@@ -261,6 +261,12 @@ pub struct AgentsState {
     pub claude_models: Vec<String>,
     #[serde(skip)]
     pub claude_models_error: Option<String>,
+    /// `true` while the background probe thread is fetching `claude models
+    /// --json`. Set by `init_agents` on cache miss, cleared by the
+    /// `BackendModelsLoaded` event handler. Drives the "loading models…"
+    /// placeholder row in Agent Ops.
+    #[serde(skip)]
+    pub claude_models_loading: bool,
     #[serde(skip)]
     pub claude_effective_context_window_tokens: HashMap<String, u32>,
     #[serde(skip)]
@@ -309,6 +315,10 @@ pub struct AgentsState {
     pub gemini_models: Vec<String>,
     #[serde(skip)]
     pub gemini_models_error: Option<String>,
+    /// Mirrors [`claude_models_loading`](Self::claude_models_loading) for
+    /// the Gemini backend.
+    #[serde(skip)]
+    pub gemini_models_loading: bool,
     /// Intake decision deferred until `TurnCompleted` / `TurnFailed` lands
     /// for the synthetic intake lane.
     #[serde(skip)]
@@ -477,6 +487,7 @@ impl Default for AgentsState {
             gemini_cli_available: false,
             claude_models: Vec::new(),
             claude_models_error: None,
+            claude_models_loading: false,
             claude_effective_context_window_tokens: HashMap::new(),
             claude_estimated_tokens_used_by_mission: HashMap::new(),
             claude_default_effort: HashMap::new(),
@@ -492,6 +503,7 @@ impl Default for AgentsState {
             queued_claude_turns: VecDeque::new(),
             gemini_models: Vec::new(),
             gemini_models_error: None,
+            gemini_models_loading: false,
             pending_intake: None,
             intake_agent_id: None,
         }

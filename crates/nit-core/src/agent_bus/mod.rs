@@ -1,12 +1,13 @@
 use crate::state::{
-    AgentAlert, AgentDiagnosticEvent, AgentLane, AgentMessage, AppState, McpStatus, MissionRecord,
-    CONSOLE_SCROLL_BOTTOM,
+    AgentAlert, AgentDiagnosticEvent, AgentLane, AgentLaneKind, AgentMessage, AgentStatus,
+    AppState, McpStatus, MissionRecord, CONSOLE_SCROLL_BOTTOM,
 };
 
 pub use crate::genome_storage::{
     delete_genome_report, gc_genome_cache, load_genome_reports, persist_genome_report,
 };
 
+pub mod async_queue;
 mod claims_signals;
 mod file_ops;
 mod helpers;
@@ -160,6 +161,26 @@ pub enum AgentBusEvent {
         mood: crate::mood::Mood,
         source: String,
     },
+    /// Emitted by the async backend-probe thread spawned during a
+    /// cache-miss `init_agents`. The TUI renders a "loading models…"
+    /// placeholder in Agent Ops until this lands; on apply it populates
+    /// the matching `*_models` / `*_models_error` fields, clears the
+    /// `*_models_loading` flag, and re-materializes per-model lanes.
+    BackendModelsLoaded {
+        backend: BackendKind,
+        models: Vec<String>,
+        error: Option<String>,
+    },
+}
+
+/// Discriminates the two backends whose model probes run asynchronously.
+/// Codex is omitted because its model list comes from a synchronously-read
+/// JSON cache (`~/.codex/models_cache.json`), not a subprocess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    Claude,
+    Gemini,
 }
 
 impl AgentBusEvent {
@@ -311,11 +332,70 @@ impl AgentBusEvent {
             AgentBusEvent::SetMood { mood, source } => {
                 mood_control::handle_set_mood(state, *mood, source);
             }
+            AgentBusEvent::BackendModelsLoaded {
+                backend,
+                models,
+                error,
+            } => {
+                apply_backend_models_loaded(state, *backend, models, error);
+            }
         }
 
         // Bumps `event_epoch` so the runner's vitals sampler counts this
         // event toward the ECG / criticality histogram.
         state.agents.note_event();
+    }
+}
+
+fn apply_backend_models_loaded(
+    state: &mut AppState,
+    backend: BackendKind,
+    models: &[String],
+    error: &Option<String>,
+) {
+    let (display_name, kind) = match backend {
+        BackendKind::Claude => {
+            state.agents.claude_models = models.to_vec();
+            state.agents.claude_models_error = error.clone();
+            state.agents.claude_models_loading = false;
+            ("Claude", AgentLaneKind::Claude)
+        }
+        BackendKind::Gemini => {
+            state.agents.gemini_models = models.to_vec();
+            state.agents.gemini_models_error = error.clone();
+            state.agents.gemini_models_loading = false;
+            ("Gemini", AgentLaneKind::Gemini)
+        }
+    };
+
+    // Drop the placeholder lanes (if any) and re-materialize one row per
+    // discovered model. Mirrors `agents::sync_backend_model_lanes` in the
+    // `nit` crate; replicated here so the apply path doesn't have to dip
+    // back across the crate boundary at event time.
+    state.agents.agents.retain(|lane| lane.kind != kind);
+    for model_id in models {
+        state.agents.agents.push(AgentLane {
+            id: model_id.clone(),
+            role: model_id.clone(),
+            lane: display_name.into(),
+            kind,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+            shadow: false,
+        });
+    }
+
+    // Selection invariant: if the operator was selecting a stale placeholder
+    // row that got retained-out, point them at the first lane that still
+    // exists. Mirrors `restore_selection_after_expansion`.
+    if let Some(selected) = state.agents.selected_agent.clone() {
+        if !state.agents.agents.iter().any(|l| l.id == selected) {
+            state.agents.selected_agent = state.agents.agents.first().map(|l| l.id.clone());
+            state.agents.roster_selected = 0;
+        }
     }
 }
 

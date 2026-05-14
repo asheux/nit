@@ -1095,10 +1095,14 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
     if !codex.is_empty() {
         out.push((AgentLaneKind::Codex, cap_visible(codex)));
     }
-    if !claude.is_empty() {
+    // Include Claude / Gemini even with zero lanes when their async probe
+    // is in flight, so the "⟳ loading models…" placeholder has a backend
+    // group to render under. Without this, the entire backend disappears
+    // from the roster until the probe completes.
+    if !claude.is_empty() || state.agents.claude_models_loading {
         out.push((AgentLaneKind::Claude, cap_visible(claude)));
     }
-    if !gemini.is_empty() {
+    if !gemini.is_empty() || state.agents.gemini_models_loading {
         out.push((AgentLaneKind::Gemini, cap_visible(gemini)));
     }
     if !local.is_empty() {
@@ -1242,8 +1246,26 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
         } else {
             String::new()
         };
+        // Async-probe state for the loader indicator. Claude + Gemini are
+        // the only backends whose model list is fetched via subprocess; the
+        // flag stays `true` from `init_agents` until `BackendModelsLoaded`
+        // lands on the bus.
+        let loading_for_backend = match backend {
+            AgentLaneKind::Claude => state.agents.claude_models_loading,
+            AgentLaneKind::Gemini => state.agents.gemini_models_loading,
+            _ => false,
+        };
+        // Append a loading suffix to the header label (rather than a
+        // separate sub-row) so the indicator is visible in BOTH collapsed
+        // and expanded states. Pattern-matched downstream by
+        // `roster_styled_line` to apply the warning accent.
+        let loading_suffix = if loading_for_backend {
+            " · ⟳ loading models…"
+        } else {
+            ""
+        };
         let label = format!(
-            "{} {}{count_suffix}",
+            "{} {}{count_suffix}{loading_suffix}",
             if roster_backend_is_expanded(state, backend) {
                 tree_open_glyph()
             } else {
@@ -1266,6 +1288,24 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
         ));
         if !roster_backend_is_expanded(state, backend) {
             continue;
+        }
+
+        // Display-only backends are probed for model detection but have no
+        // runtime runner wired yet (Gemini today). Surface that explicitly
+        // so the operator doesn't try to dispatch to a lane and get a
+        // silent no-op. Show only after probe completes (otherwise the
+        // header's loading suffix carries the message). Kept short enough
+        // to fit `widths[0]`; styled in warning color downstream.
+        if matches!(backend, AgentLaneKind::Gemini) && !loading_for_backend {
+            out.push(format!(
+                "{}{} {} {} {} {}",
+                ' ',
+                fit_left("  ⓘ display-only · view only", widths[0]),
+                fit_left("", widths[1]),
+                fit_right("", widths[2]),
+                fit_right("", widths[3]),
+                fit_left("", widths[4]),
+            ));
         }
 
         for agent_idx in agent_indices {
@@ -6962,6 +7002,20 @@ fn roster_styled_line(
                 .bg(table_bg),
         ));
     }
+    // Virtual rows injected by `roster_lines` (display-only info banner under
+    // a non-runtime backend) don't have a `RosterBodyMeta` entry — they're
+    // pure presentation, not selectable. Pattern-match on content and style
+    // with the warning accent so they read as a callout rather than a lane.
+    if line.contains("ⓘ display-only") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::ITALIC)
+                .bg(table_bg),
+        ));
+    }
+
     let body_line = line_idx.saturating_sub(roster_body_offset(state));
     let Some(meta) = roster_body_meta(state, body_line) else {
         if state.agents.agents.is_empty() {

@@ -841,6 +841,15 @@ pub(super) fn run_loop(
             }
         }
 
+        // Async backend-probe events (cache-miss path of init_agents).
+        // Bypasses the runner channels because the probe thread runs
+        // before any runner exists. One event per backend; redraw on each
+        // so the operator sees the loader clear immediately.
+        for event in nit_core::agent_bus::async_queue::drain() {
+            event.apply(state);
+            needs_redraw = true;
+        }
+
         if file_tree_tick(state, &file_tree_runner) {
             needs_redraw = true;
         }

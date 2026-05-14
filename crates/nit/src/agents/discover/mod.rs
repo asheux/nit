@@ -7,18 +7,7 @@ pub(in crate::agents) use runner::{
     capture_cli_help_text, probe_models_from_cli, DEFAULT_MODEL_LIST_ARG_SETS,
 };
 
-pub(in crate::agents) fn codex_cli_available() -> bool {
-    is_executable_in_path("codex")
-}
-
-pub(in crate::agents) fn claude_cli_available() -> bool {
-    is_executable_in_path("claude")
-}
-
-pub(in crate::agents) fn gemini_cli_available() -> bool {
-    is_executable_in_path("gemini")
-}
-
-fn is_executable_in_path(binary_name: &str) -> bool {
-    find_executable_in_path(binary_name).is_some()
-}
+// `*_cli_available()` helpers were collapsed into `init_agents` once it
+// started caching `Option<PathBuf>` for cache invalidation purposes:
+// keeping just `find_executable_in_path` avoids resolving each binary
+// twice (once for "is it there?" and once for "where is it?").
