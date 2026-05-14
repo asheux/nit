@@ -210,10 +210,37 @@ function classifyAccessEvent(method, uri, status) {
 }
 
 async function findFirstReleaseAt() {
-  // Pull from latest.json — it has `published_at` for the current latest,
-  // but that's not the FIRST release. We approximate by reading the
-  // earliest tag dir's LastModified on the bucket; for the common case of
-  // a fresh project, latest.json is good-enough for the dashboard.
+  // Query GH Releases for the chronologically FIRST release. Anonymous
+  // GH API allows 60 calls/hour; we make one per aggregator run (daily
+  // by default), so no token is needed. Falls back to latest.json
+  // (current release's date) only if GH is unreachable — that's
+  // imprecise but better than null.
+  try {
+    const res = await fetch(
+      "https://api.github.com/repos/asheux/nit/releases?per_page=100",
+      { headers: { "User-Agent": "nit-stats-aggregator" } },
+    );
+    if (res.ok) {
+      const releases = await res.json();
+      if (Array.isArray(releases) && releases.length > 0) {
+        // Releases default-sorted by created_at DESC; pick the oldest.
+        const oldest = releases
+          .filter((r) => r.published_at)
+          .sort(
+            (a, b) =>
+              new Date(a.published_at).getTime() - new Date(b.published_at).getTime(),
+          )[0];
+        if (oldest?.published_at) {
+          debug(`first release: ${oldest.tag_name} at ${oldest.published_at}`);
+          return oldest.published_at;
+        }
+      }
+    } else {
+      debug(`GH releases HTTP ${res.status}; falling back to latest.json`);
+    }
+  } catch (e) {
+    debug(`GH releases unreachable (${e.message}); falling back to latest.json`);
+  }
   const manifest = await loadLatestManifest();
   return manifest?.published_at || null;
 }
