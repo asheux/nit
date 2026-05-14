@@ -56,6 +56,22 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
 
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          # Guards against the v0.1.0 → v0.1.1 mistake: tag was bumped but
+          # the workspace `version = "..."` in Cargo.toml wasn't, so the
+          # compiled binary still reported the old version. Strip the
+          # `-rcN` suffix when comparing — pre-release tags share a base
+          # version with the eventual stable.
+          tag_version="${{ steps.resolve.outputs.version }}"
+          tag_base="${tag_version%%-*}"
+          cargo_version="$(awk -F'"' '/^version = "/{print $2; exit}' Cargo.toml)"
+          if [ "$tag_base" != "$cargo_version" ]; then
+            echo "::error::Tag is v${tag_base} but Cargo.toml workspace version is ${cargo_version}; bump Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Cargo.toml version (${cargo_version}) matches tag (${tag_version}) ✓"
+
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -445,10 +461,18 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           TAP_REPO="asheux/homebrew-tap"
+          # `gh repo clone` uses HTTPS but doesn't configure git's credential
+          # helper, so a plain `git push` afterwards prompts for a username
+          # (which kills the workflow with `could not read Username`).
+          # Embed the PAT directly in the remote URL so subsequent git pushes
+          # authenticate over HTTPS. The URL is set AFTER the clone so the
+          # token never lands in shell history during cloning.
           gh repo clone "$TAP_REPO" tap -- --depth=1
           mkdir -p tap/Formula
           cp Formula/nit.rb tap/Formula/nit.rb
           cd tap
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git"
           git add Formula/nit.rb
           # `git diff --cached --quiet` returns 0 when the staging area is
           # empty (no real change vs. HEAD). Using `--cached` (instead of the
