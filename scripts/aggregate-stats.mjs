@@ -214,21 +214,29 @@ async function findFirstReleaseAt() {
   // but that's not the FIRST release. We approximate by reading the
   // earliest tag dir's LastModified on the bucket; for the common case of
   // a fresh project, latest.json is good-enough for the dashboard.
-  try {
-    const body = await awsCli(["s3", "cp", `s3://${BUCKET}/latest.json`, "-"]);
-    const manifest = JSON.parse(body);
-    return manifest.published_at || null;
-  } catch {
-    return null;
-  }
+  const manifest = await loadLatestManifest();
+  return manifest?.published_at || null;
 }
 
 async function findLatestTag() {
+  const manifest = await loadLatestManifest();
+  return manifest?.tag || null;
+}
+
+// Single canonical loader so the warning surfaces once when latest.json
+// can't be read (silently catching twice — once per accessor — hid the
+// `latest_release.tag: null` bug for a full debug cycle).
+async function loadLatestManifest() {
   try {
     const body = await awsCli(["s3", "cp", `s3://${BUCKET}/latest.json`, "-"]);
-    const manifest = JSON.parse(body);
-    return manifest.tag || null;
-  } catch {
+    return JSON.parse(body);
+  } catch (e) {
+    const detail = e.stderr ? `${e.message} — ${e.stderr.trim()}` : e.message;
+    console.warn(
+      `[aggregate-stats] warn: latest.json unreadable (${detail}); ` +
+        "latest_release.tag and first_release_at will remain null. " +
+        "Check IAM grants s3:GetObject on the bucket root.",
+    );
     return null;
   }
 }
