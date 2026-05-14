@@ -130,10 +130,16 @@ jobs:
       - name: Ensure cargo is on PATH (macOS runner image workaround)
         if: runner.os == 'macOS'
         shell: bash
-        # See ci.yml — Homebrew's rustup on macos-14 (image ≥ 20260512.x)
-        # leaves $HOME/.cargo/bin off PATH and a shim resolves `cargo` to
-        # rustup-init. Force cargo bin to the front.
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # See ci.yml — macos-14 runner image periodically rotates with a
+        # broken cargo proxy. `rustup which cargo` returns the real
+        # toolchain binary regardless of proxy state.
+        run: |
+          set -euo pipefail
+          REAL_CARGO="$(rustup which cargo)"
+          REAL_CARGO_DIR="$(dirname "$REAL_CARGO")"
+          echo "Real cargo: $REAL_CARGO"
+          "$REAL_CARGO" --version
+          echo "$REAL_CARGO_DIR" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:

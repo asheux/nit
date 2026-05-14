@@ -94,13 +94,20 @@ jobs:
       - name: Ensure cargo is on PATH (macOS runner image workaround)
         if: runner.os == 'macOS'
         shell: bash
-        # The macos-14 runner image (≥ 20260512.x) ships Homebrew's rustup
-        # at /opt/homebrew/bin/rustup but does NOT keep $HOME/.cargo/bin on
-        # PATH. dtolnay/rust-toolchain only adds $CARGO_HOME/bin when it
-        # has to install rustup fresh — when Homebrew's rustup is already
-        # present, that branch is skipped and `cargo` resolves to a stale
-        # shim that's actually rustup-init. Force the cargo bin dir first.
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # The macos-14 runner image periodically rotates with a broken
+        # cargo proxy at $HOME/.cargo/bin/cargo (resolves to rustup-init
+        # instead of the real cargo). Prepending the proxy directory to
+        # PATH doesn't help when the file *at that path* is the wrong
+        # binary. Use `rustup which cargo` — which queries rustup's
+        # internal toolchain mapping rather than walking PATH — to get
+        # the real cargo and prepend its containing dir.
+        run: |
+          set -euo pipefail
+          REAL_CARGO="$(rustup which cargo)"
+          REAL_CARGO_DIR="$(dirname "$REAL_CARGO")"
+          echo "Real cargo: $REAL_CARGO"
+          "$REAL_CARGO" --version
+          echo "$REAL_CARGO_DIR" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -141,13 +148,20 @@ jobs:
       - name: Ensure cargo is on PATH (macOS runner image workaround)
         if: runner.os == 'macOS'
         shell: bash
-        # The macos-14 runner image (≥ 20260512.x) ships Homebrew's rustup
-        # at /opt/homebrew/bin/rustup but does NOT keep $HOME/.cargo/bin on
-        # PATH. dtolnay/rust-toolchain only adds $CARGO_HOME/bin when it
-        # has to install rustup fresh — when Homebrew's rustup is already
-        # present, that branch is skipped and `cargo` resolves to a stale
-        # shim that's actually rustup-init. Force the cargo bin dir first.
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # The macos-14 runner image periodically rotates with a broken
+        # cargo proxy at $HOME/.cargo/bin/cargo (resolves to rustup-init
+        # instead of the real cargo). Prepending the proxy directory to
+        # PATH doesn't help when the file *at that path* is the wrong
+        # binary. Use `rustup which cargo` — which queries rustup's
+        # internal toolchain mapping rather than walking PATH — to get
+        # the real cargo and prepend its containing dir.
+        run: |
+          set -euo pipefail
+          REAL_CARGO="$(rustup which cargo)"
+          REAL_CARGO_DIR="$(dirname "$REAL_CARGO")"
+          echo "Real cargo: $REAL_CARGO"
+          "$REAL_CARGO" --version
+          echo "$REAL_CARGO_DIR" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
