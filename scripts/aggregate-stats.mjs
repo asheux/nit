@@ -210,15 +210,18 @@ function classifyAccessEvent(method, uri, status) {
 }
 
 async function findFirstReleaseAt() {
-  // Query GH Releases for the chronologically FIRST release. Anonymous
-  // GH API allows 60 calls/hour; we make one per aggregator run (daily
-  // by default), so no token is needed. Falls back to latest.json
-  // (current release's date) only if GH is unreachable — that's
-  // imprecise but better than null.
+  // Query GH Releases for the chronologically FIRST release. The repo
+  // is private, so we authenticate with the workflow-injected
+  // GITHUB_TOKEN — anonymous calls would 404. Falls back to
+  // latest.json (current release's date) only if GH is unreachable.
+  const headers = { "User-Agent": "nit-stats-aggregator" };
+  if (process.env.GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
   try {
     const res = await fetch(
       "https://api.github.com/repos/asheux/nit/releases?per_page=100",
-      { headers: { "User-Agent": "nit-stats-aggregator" } },
+      { headers },
     );
     if (res.ok) {
       const releases = await res.json();

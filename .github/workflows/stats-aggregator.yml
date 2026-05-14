@@ -45,6 +45,12 @@ jobs:
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
           AWS_CF_DISTRIBUTION_ID: ${{ secrets.AWS_CF_DISTRIBUTION_ID }}
+          # GH token used to query the releases endpoint for
+          # `first_release_at` — the repo is private so the anonymous
+          # call would 404. The auto-injected `secrets.GITHUB_TOKEN`
+          # has read access to the same repo it ran for, which is all
+          # we need.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # In-script reset: aggregator skips loading existing stats and
           # processes every log from scratch. Uses only s3:PutObject (the
           # ambient write permission) — no s3:DeleteObject IAM grant
