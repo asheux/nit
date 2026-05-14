@@ -60,6 +60,5 @@ pub(crate) fn from_injection_name(injection_name: &str) -> Option<LanguageId> {
         .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
         .next()
         .unwrap_or(injection_name);
-    languages::detect_by_injection_alias(token)
-        .and_then(|info| LanguageId::from_label(info.label))
+    languages::detect_by_injection_alias(token).and_then(|info| LanguageId::from_label(info.label))
 }

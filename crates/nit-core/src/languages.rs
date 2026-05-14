@@ -54,151 +54,265 @@ pub struct LanguageInfo {
 /// it (upstream `tree-sitter-dockerfile` is wedged at an old ABI).
 pub const LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
-        label: "rust", display: "Rust",
-        extensions: &["rs"], filenames: &[], shebangs: &[],
-        injection_aliases: &["rs", "rust"], is_code: true,
+        label: "rust",
+        display: "Rust",
+        extensions: &["rs"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["rs", "rust"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "python", display: "Python",
-        extensions: &["py"], filenames: &[], shebangs: &["python", "python3"],
-        injection_aliases: &["py", "python"], is_code: true,
+        label: "python",
+        display: "Python",
+        extensions: &["py"],
+        filenames: &[],
+        shebangs: &["python", "python3"],
+        injection_aliases: &["py", "python"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "javascript", display: "JavaScript",
-        extensions: &["js", "mjs", "cjs", "jsx"], filenames: &[], shebangs: &["node", "deno"],
-        injection_aliases: &["js", "javascript"], is_code: true,
+        label: "javascript",
+        display: "JavaScript",
+        extensions: &["js", "mjs", "cjs", "jsx"],
+        filenames: &[],
+        shebangs: &["node", "deno"],
+        injection_aliases: &["js", "javascript"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "typescript", display: "TypeScript",
-        extensions: &["ts", "tsx"], filenames: &[], shebangs: &[],
-        injection_aliases: &["ts", "tsx", "typescript"], is_code: true,
+        label: "typescript",
+        display: "TypeScript",
+        extensions: &["ts", "tsx"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["ts", "tsx", "typescript"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "markdown", display: "Markdown",
-        extensions: &["md", "markdown"], filenames: &[], shebangs: &[],
-        injection_aliases: &["md", "markdown"], is_code: false,
+        label: "markdown",
+        display: "Markdown",
+        extensions: &["md", "markdown"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["md", "markdown"],
+        is_code: false,
     },
     LanguageInfo {
-        label: "html", display: "HTML",
-        extensions: &["html", "htm"], filenames: &[], shebangs: &[],
-        injection_aliases: &["html"], is_code: true,
+        label: "html",
+        display: "HTML",
+        extensions: &["html", "htm"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["html"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "css", display: "CSS",
-        extensions: &["css", "scss", "sass"], filenames: &[], shebangs: &[],
-        injection_aliases: &["css"], is_code: true,
+        label: "css",
+        display: "CSS",
+        extensions: &["css", "scss", "sass"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["css"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "json", display: "JSON",
-        extensions: &["json", "jsonc"], filenames: &[], shebangs: &[],
-        injection_aliases: &["json", "jsonc", "geojson"], is_code: false,
+        label: "json",
+        display: "JSON",
+        extensions: &["json", "jsonc"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["json", "jsonc", "geojson"],
+        is_code: false,
     },
     LanguageInfo {
-        label: "toml", display: "TOML",
-        extensions: &["toml"], filenames: &["cargo.toml"], shebangs: &[],
-        injection_aliases: &["toml"], is_code: false,
+        label: "toml",
+        display: "TOML",
+        extensions: &["toml"],
+        filenames: &["cargo.toml"],
+        shebangs: &[],
+        injection_aliases: &["toml"],
+        is_code: false,
     },
     LanguageInfo {
-        label: "yaml", display: "YAML",
-        extensions: &["yml", "yaml"], filenames: &[], shebangs: &[],
-        injection_aliases: &["yaml", "yml"], is_code: false,
+        label: "yaml",
+        display: "YAML",
+        extensions: &["yml", "yaml"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["yaml", "yml"],
+        is_code: false,
     },
     LanguageInfo {
-        label: "bash", display: "Bash",
-        extensions: &["sh", "bash", "zsh", "fish"], filenames: &[], shebangs: &["bash", "sh", "zsh"],
+        label: "bash",
+        display: "Bash",
+        extensions: &["sh", "bash", "zsh", "fish"],
+        filenames: &[],
+        shebangs: &["bash", "sh", "zsh"],
         injection_aliases: &["bash", "sh", "shell", "shell-session", "console", "zsh"],
         is_code: true,
     },
     LanguageInfo {
-        label: "go", display: "Go",
-        extensions: &["go"], filenames: &[], shebangs: &[],
-        injection_aliases: &["go", "golang"], is_code: true,
+        label: "go",
+        display: "Go",
+        extensions: &["go"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["go", "golang"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "c", display: "C",
-        extensions: &["c", "h"], filenames: &[], shebangs: &[],
-        injection_aliases: &["c"], is_code: true,
+        label: "c",
+        display: "C",
+        extensions: &["c", "h"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["c"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "cpp", display: "C++",
+        label: "cpp",
+        display: "C++",
         extensions: &["cc", "cpp", "cxx", "c++", "hh", "hpp", "hxx", "h++"],
-        filenames: &[], shebangs: &[],
-        injection_aliases: &["cpp", "c++", "cxx"], is_code: true,
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["cpp", "c++", "cxx"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "java", display: "Java",
-        extensions: &["java"], filenames: &[], shebangs: &[],
-        injection_aliases: &["java"], is_code: true,
+        label: "java",
+        display: "Java",
+        extensions: &["java"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["java"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "ruby", display: "Ruby",
-        extensions: &["rb", "rake", "gemspec"], filenames: &["rakefile", "gemfile"],
-        shebangs: &["ruby"], injection_aliases: &["rb", "ruby"], is_code: true,
+        label: "ruby",
+        display: "Ruby",
+        extensions: &["rb", "rake", "gemspec"],
+        filenames: &["rakefile", "gemfile"],
+        shebangs: &["ruby"],
+        injection_aliases: &["rb", "ruby"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "lua", display: "Lua",
-        extensions: &["lua"], filenames: &[], shebangs: &["lua"],
-        injection_aliases: &["lua"], is_code: true,
+        label: "lua",
+        display: "Lua",
+        extensions: &["lua"],
+        filenames: &[],
+        shebangs: &["lua"],
+        injection_aliases: &["lua"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "php", display: "PHP",
-        extensions: &["php", "phtml"], filenames: &[], shebangs: &["php"],
-        injection_aliases: &["php"], is_code: true,
+        label: "php",
+        display: "PHP",
+        extensions: &["php", "phtml"],
+        filenames: &[],
+        shebangs: &["php"],
+        injection_aliases: &["php"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "ocaml", display: "OCaml",
-        extensions: &["ml", "mli"], filenames: &[], shebangs: &["ocaml", "ocamlrun"],
-        injection_aliases: &["ocaml", "ml"], is_code: true,
+        label: "ocaml",
+        display: "OCaml",
+        extensions: &["ml", "mli"],
+        filenames: &[],
+        shebangs: &["ocaml", "ocamlrun"],
+        injection_aliases: &["ocaml", "ml"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "haskell", display: "Haskell",
-        extensions: &["hs", "lhs"], filenames: &[], shebangs: &["runghc", "runhaskell"],
-        injection_aliases: &["haskell", "hs"], is_code: true,
+        label: "haskell",
+        display: "Haskell",
+        extensions: &["hs", "lhs"],
+        filenames: &[],
+        shebangs: &["runghc", "runhaskell"],
+        injection_aliases: &["haskell", "hs"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "elixir", display: "Elixir",
-        extensions: &["ex", "exs"], filenames: &[], shebangs: &["elixir"],
-        injection_aliases: &["elixir", "ex"], is_code: true,
+        label: "elixir",
+        display: "Elixir",
+        extensions: &["ex", "exs"],
+        filenames: &[],
+        shebangs: &["elixir"],
+        injection_aliases: &["elixir", "ex"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "nix", display: "Nix",
-        extensions: &["nix"], filenames: &[], shebangs: &[],
-        injection_aliases: &["nix"], is_code: true,
+        label: "nix",
+        display: "Nix",
+        extensions: &["nix"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["nix"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "kotlin", display: "Kotlin",
-        extensions: &["kt", "kts"], filenames: &[], shebangs: &[],
-        injection_aliases: &["kotlin", "kt"], is_code: true,
+        label: "kotlin",
+        display: "Kotlin",
+        extensions: &["kt", "kts"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["kotlin", "kt"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "sql", display: "SQL",
-        extensions: &["sql"], filenames: &[], shebangs: &[],
-        injection_aliases: &["sql"], is_code: true,
+        label: "sql",
+        display: "SQL",
+        extensions: &["sql"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["sql"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "zig", display: "Zig",
-        extensions: &["zig", "zon"], filenames: &[], shebangs: &[],
-        injection_aliases: &["zig"], is_code: true,
+        label: "zig",
+        display: "Zig",
+        extensions: &["zig", "zon"],
+        filenames: &[],
+        shebangs: &[],
+        injection_aliases: &["zig"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "make", display: "Makefile",
-        extensions: &["mk", "make"], filenames: &["makefile", "gnumakefile"], shebangs: &[],
-        injection_aliases: &["make", "makefile"], is_code: false,
+        label: "make",
+        display: "Makefile",
+        extensions: &["mk", "make"],
+        filenames: &["makefile", "gnumakefile"],
+        shebangs: &[],
+        injection_aliases: &["make", "makefile"],
+        is_code: false,
     },
     LanguageInfo {
-        label: "lean", display: "Lean",
-        extensions: &["lean"], filenames: &[], shebangs: &["lean"],
-        injection_aliases: &["lean", "lean4"], is_code: true,
+        label: "lean",
+        display: "Lean",
+        extensions: &["lean"],
+        filenames: &[],
+        shebangs: &["lean"],
+        injection_aliases: &["lean", "lean4"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "swift", display: "Swift",
-        extensions: &["swift"], filenames: &[], shebangs: &["swift"],
-        injection_aliases: &["swift"], is_code: true,
+        label: "swift",
+        display: "Swift",
+        extensions: &["swift"],
+        filenames: &[],
+        shebangs: &["swift"],
+        injection_aliases: &["swift"],
+        is_code: true,
     },
     LanguageInfo {
-        label: "dockerfile", display: "Dockerfile",
-        extensions: &[], filenames: &["dockerfile", "containerfile"], shebangs: &[],
-        injection_aliases: &["dockerfile", "docker"], is_code: false,
+        label: "dockerfile",
+        display: "Dockerfile",
+        extensions: &[],
+        filenames: &["dockerfile", "containerfile"],
+        shebangs: &[],
+        injection_aliases: &["dockerfile", "docker"],
+        is_code: false,
     },
 ];
 
@@ -239,17 +353,13 @@ pub fn detect_by_path(path: &Path) -> Option<&'static LanguageInfo> {
 /// Resolve by lowercase extension (no leading dot).
 #[must_use]
 pub fn detect_by_extension(ext: &str) -> Option<&'static LanguageInfo> {
-    LANGUAGES
-        .iter()
-        .find(|info| info.extensions.contains(&ext))
+    LANGUAGES.iter().find(|info| info.extensions.contains(&ext))
 }
 
 /// Resolve by exact lowercase filename (no path).
 #[must_use]
 pub fn detect_by_filename(name: &str) -> Option<&'static LanguageInfo> {
-    LANGUAGES
-        .iter()
-        .find(|info| info.filenames.contains(&name))
+    LANGUAGES.iter().find(|info| info.filenames.contains(&name))
 }
 
 /// Resolve by interpreter basename in a shebang line.
@@ -288,7 +398,9 @@ pub fn is_supported_extension(ext: &str) -> bool {
 /// Every extension across every language. Useful for building file-tree
 /// filter sets without redeclaring the list per call-site.
 pub fn all_extensions() -> impl Iterator<Item = &'static str> {
-    LANGUAGES.iter().flat_map(|info| info.extensions.iter().copied())
+    LANGUAGES
+        .iter()
+        .flat_map(|info| info.extensions.iter().copied())
 }
 
 #[cfg(test)]
@@ -332,7 +444,12 @@ mod tests {
 
     #[test]
     fn detect_by_path_handles_dockerfile_variants() {
-        for name in ["Dockerfile", "containerfile", "Dockerfile.prod", "prod.dockerfile"] {
+        for name in [
+            "Dockerfile",
+            "containerfile",
+            "Dockerfile.prod",
+            "prod.dockerfile",
+        ] {
             let info = detect_by_path(Path::new(name))
                 .unwrap_or_else(|| panic!("expected match for {name}"));
             assert_eq!(info.label, "dockerfile", "{name}");
@@ -341,7 +458,13 @@ mod tests {
 
     #[test]
     fn detect_by_path_handles_makefile_variants() {
-        for name in ["Makefile", "GNUmakefile", "Makefile.local", "build.mk", "rules.make"] {
+        for name in [
+            "Makefile",
+            "GNUmakefile",
+            "Makefile.local",
+            "build.mk",
+            "rules.make",
+        ] {
             let info = detect_by_path(Path::new(name))
                 .unwrap_or_else(|| panic!("expected match for {name}"));
             assert_eq!(info.label, "make", "{name}");

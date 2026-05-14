@@ -4,8 +4,8 @@ use crate::swarm::{SwarmPersistenceView, SwarmTaskArtifacts, SwarmTaskPersistenc
 use crate::theme::Theme;
 
 use super::super::{
-    popup_note_line, popup_rule_line, popup_section_line, popup_title_line,
-    push_wrapped_bullet, push_wrapped_detail_lines, render_markdown_document,
+    popup_note_line, popup_rule_line, popup_section_line, popup_title_line, push_wrapped_bullet,
+    push_wrapped_detail_lines, render_markdown_document,
 };
 
 /// TASK card — agent metadata, expected artifacts checklist, captured

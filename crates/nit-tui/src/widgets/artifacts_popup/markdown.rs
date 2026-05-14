@@ -18,7 +18,11 @@ use super::{
 /// to [`super::table`], math blocks render with a heavier accent. A top-
 /// level JSON blob short-circuits to a pretty-printed code block so the
 /// rendering UI doesn't choke on raw JSON dumps.
-pub(super) fn render_markdown_document(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+pub(super) fn render_markdown_document(
+    text: &str,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     if let Some(json_lines) = maybe_render_json_document(text, theme, width) {
         return json_lines;
     }

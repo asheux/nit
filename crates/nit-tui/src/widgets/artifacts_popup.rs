@@ -802,7 +802,12 @@ pub(super) fn push_wrapped_detail_lines(
     }
 }
 
-pub(super) fn push_wrapped_bullet(out: &mut Vec<Line<'static>>, value: &str, theme: &Theme, width: usize) {
+pub(super) fn push_wrapped_bullet(
+    out: &mut Vec<Line<'static>>,
+    value: &str,
+    theme: &Theme,
+    width: usize,
+) {
     let bullet = " • ";
     let bullet_width = UnicodeWidthStr::width(bullet);
     let available = width.saturating_sub(bullet_width).max(8);
@@ -830,7 +835,11 @@ pub(super) fn push_wrapped_bullet(out: &mut Vec<Line<'static>>, value: &str, the
     }
 }
 
-pub(super) fn render_code_block_line(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+pub(super) fn render_code_block_line(
+    text: &str,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     render_numbered_code_line(None, text, "", None, theme, width, 1)
 }
 
