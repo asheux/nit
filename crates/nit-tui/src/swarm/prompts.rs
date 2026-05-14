@@ -5,8 +5,8 @@ use nit_core::AppState;
 use super::{
     dashboard_gate_rows, enumerate_scope_files, is_cargo_workspace, normalize_role_label,
     run_gates_label, task_artifacts_summary_for_prompt, truncate_chars, SwarmMissionKind, SwarmRun,
-    SwarmTask, SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, NO_PADDING_CLAUSE,
-    SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
+    SwarmTask, SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, FINDINGS_RETRY_CLAUSE,
+    NO_PADDING_CLAUSE, SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
 };
 
 /// Machine-checked sign-off sentinel. Swarm agents must emit this line exactly
@@ -552,12 +552,14 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not edit the workspace; suggest follow-ups as text only.",
             TEST_DISCIPLINE_CLAUSE,
             "GENOME: nit measures code across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
+            FINDINGS_RETRY_CLAUSE,
         ],
         "test" => &[
             "Focus on validation commands, expected results, and edge cases.",
             "Differentiate confirmed results from unrun suggestions.",
             "Do not redesign the solution unless a test failure makes it necessary.",
             TEST_DISCIPLINE_CLAUSE,
+            FINDINGS_RETRY_CLAUSE,
         ],
         "genome-reviewer" => &[
             "Evaluate the structural quality of code changes using the genome reports provided.",
@@ -1017,11 +1019,12 @@ fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
     out.push_str("    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n");
     out.push_str("    \"commands\": [\"<project test command>\"],\n");
     out.push_str("    \"risks\": [\"potential issue\"],\n");
-    out.push_str("    \"notes\": [\"additional context\"]\n");
+    out.push_str("    \"notes\": [\"additional context\"],\n");
+    out.push_str("    \"findings\": [{\"file\": \"path/to/file\", \"line\": 42, \"severity\": \"error\", \"issue\": \"one-line description\", \"category\": \"fmt|clippy|test|other\", \"suggestion\": \"concrete fix text\"}]\n");
     out.push_str("  }\n");
     out.push_str("}\n");
     out.push_str("```\n");
-    out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked.\n");
+    out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked. `findings` is VERIFIER-ONLY: test/review roles emit it to flag concrete fixable issues, which trigger one automatic integrator-retry turn (budget = 1). Writer roles MUST NOT emit findings — they describe their own work in `diffs` / `notes`.\n");
     if is_propose_or_judge {
         out.push_str(
             "\n### `files` array — load-bearing for compliance\n\

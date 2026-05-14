@@ -92,6 +92,7 @@ pub(crate) fn test_runtime_with_running_tasks_and_template(
         scope_files: Vec::new(),
         initial_genome_baselines: HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: super::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),

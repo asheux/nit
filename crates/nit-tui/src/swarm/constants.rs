@@ -12,6 +12,17 @@ pub(super) const MAX_SWARM_SIZE: usize = 256;
 // abort, rather than burn unbounded planner tokens on a stuck plan.
 pub(super) const REPAIR_RETRY_LIMIT: u8 = 2;
 
+// Initial budget for the verifier-findings auto-retry loop. When a
+// test or review task finishes with `parsed_artifacts.findings`
+// non-empty, the runtime synthesises one integrator turn scoped to
+// those findings and decrements the budget. At 0, findings stop
+// triggering retries and flow into synthesis as advisory only — the
+// operator dispatches any further fix themselves. Set to 1 deliberately
+// for cost safety: a runaway retry loop on flaky tests or pedantic
+// review remarks would burn agent tokens with no human in the loop.
+// Bump cautiously.
+pub(super) const VERIFIER_RETRY_BUDGET_DEFAULT: u8 = 1;
+
 // Operator-facing rollback for the deterministic plan validator + repair
 // loop. Accepted truthy values: `1`, `true`, `yes`, `on` (case-insensitive).
 // Resolved once at `SwarmRuntime::new`; when set, the planner stage stays
@@ -65,6 +76,30 @@ pub(super) const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational resea
 // across propose/integrate/judge/review/test contracts AND retry prompts.
 // Earlier drafts drifted (NO REVERT wording differed between gate-retry
 // and genome-retry; "don't pad small files" had three variants).
+
+// Verifier roles (test, review) inject this into their role contract so
+// they know that emitting structured `findings` in their swarm_artifacts
+// JSON drives an automatic re-dispatch — the orchestrator will create an
+// integrator turn scoped to those findings instead of waiting for the
+// operator to launch a fix swarm. Bounded by `VERIFIER_RETRY_BUDGET_DEFAULT`
+// (= 1) so a single retry pass happens automatically; further fixes are
+// the operator's call.
+pub(crate) const FINDINGS_RETRY_CLAUSE: &str =
+    "FINDINGS = AUTO-RETRY TRIGGER: When you detect a concrete, fixable issue \
+     (failed test, fmt drift, clippy warning, broken assertion, missing import \
+     after a rename, etc.), emit it as a STRUCTURED entry in the \
+     `swarm_artifacts.findings` array — NOT as prose in `notes`. Each finding \
+     must include at least `file` (repo-relative path) and `issue` (one-line \
+     description); add `line`, `severity` (\"error\" | \"warning\"), `category` \
+     (\"fmt\" | \"clippy\" | \"test\" | \"other\"), and `suggestion` (concrete \
+     replacement text) whenever you have them. The orchestrator parses this \
+     array and — if non-empty AND the run still has retry budget left — \
+     dispatches ONE follow-up integrator turn scoped to the cited files with \
+     your findings injected as the task description. Budget is small (1 retry \
+     by default), so high-value findings only: include things a writer can \
+     plausibly fix; leave subjective style critiques in `notes` where they \
+     inform synthesis without burning a retry turn. You remain READ-ONLY — \
+     report findings, do NOT attempt to fix them yourself.";
 
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
     "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands of any \

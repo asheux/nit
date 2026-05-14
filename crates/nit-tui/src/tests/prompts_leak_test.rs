@@ -200,6 +200,7 @@ fn make_run(spawn_cwd: &Path, gate_bundle: Option<GateBundle>, scope: Vec<String
         scope_files: scope,
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),

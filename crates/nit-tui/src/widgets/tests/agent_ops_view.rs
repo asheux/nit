@@ -200,6 +200,7 @@ fn artifact_lines_include_task_and_verify_paths() {
                     }],
                     risks: Vec::new(),
                     notes: vec!["needs follow-up for artifact comments".into()],
+                    findings: Vec::new(),
                 }),
             },
             SwarmTaskPersistenceView {

@@ -1169,6 +1169,7 @@ fn dag_scheduler_dispatches_after_deps() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -1289,6 +1290,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -1407,6 +1409,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -2162,6 +2165,7 @@ fn deadlock_detection_skips_pending_tasks() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -2398,6 +2402,70 @@ fn parse_task_artifacts_tolerates_malformed_fence_suffix() {
 }
 
 #[test]
+fn parse_task_artifacts_round_trips_findings() {
+    // Verifier-role agents (test, review) emit `findings` for concrete
+    // issues a writer could fix on a retry turn. The runtime relies on
+    // this exact field shape to drive the verifier-retry loop, so this
+    // test guards against silent JSON-schema drift.
+    let message = r#"
+```json
+{
+  "type": "swarm_artifacts",
+  "version": 1,
+  "task_id": "verify",
+  "summary": "two issues found",
+  "artifacts": {
+"findings": [
+  {
+    "file": "crates/nit-core/src/languages.rs",
+    "line": 243,
+    "severity": "error",
+    "issue": "Used .iter().any() where .contains() is shorter and one allocation lighter",
+    "category": "Clippy",
+    "suggestion": "info.extensions.contains(&ext)"
+  },
+  {
+    "file": "crates/nit-tui/src/swarm/scope.rs",
+    "issue": "is_source_extension lets .txt slip into the swarm scope walk; tests assert it should not",
+    "category": "test"
+  },
+  {
+    "file": "",
+    "issue": "missing file → should be skipped silently"
+  },
+  "bare string with no fields → should be skipped"
+]
+  }
+}
+```
+"#;
+
+    let artifacts = parse_task_artifacts("verify", message).expect("artifacts");
+    assert_eq!(
+        artifacts.findings.len(),
+        2,
+        "expected only the two well-formed entries to survive"
+    );
+
+    let first = &artifacts.findings[0];
+    assert_eq!(first.file, "crates/nit-core/src/languages.rs");
+    assert_eq!(first.line, Some(243));
+    assert_eq!(first.severity.as_deref(), Some("error"));
+    assert_eq!(first.category.as_deref(), Some("clippy")); // normalised lowercase
+    assert!(first
+        .suggestion
+        .as_deref()
+        .is_some_and(|s| s.contains(".contains(&ext)")));
+
+    let second = &artifacts.findings[1];
+    assert_eq!(second.file, "crates/nit-tui/src/swarm/scope.rs");
+    assert_eq!(second.line, None);
+    assert_eq!(second.severity, None);
+    assert_eq!(second.category.as_deref(), Some("test"));
+    assert_eq!(second.suggestion, None);
+}
+
+#[test]
 fn dashboard_distinguishes_pending_queued_and_skipped() {
     let run = SwarmRun {
         mission_id: "mis-001".into(),
@@ -2516,6 +2584,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -2851,6 +2920,7 @@ fn test_run(mission_id: &str, spawn_cwd: std::path::PathBuf) -> SwarmRun {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -3929,6 +3999,7 @@ fn make_verifying_run_with_fail_report() -> SwarmRun {
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -4052,6 +4123,210 @@ fn gate_pass_does_not_retry() {
     assert_eq!(run.gate_retry_count, 0);
 }
 
+// --- Verifier-findings auto-retry loop ---------------------------------------
+// Verifier (test / review) tasks that emit structured `findings` trigger
+// ONE auto-dispatched integrator turn scoped to those findings. Budget
+// = 1 by default; once exhausted, further findings flow into synthesis
+// as advisory only.
+
+fn make_verifier_run_with_findings(mission_id: &str, role: &str, _findings_json: &str) -> SwarmRun {
+    let mut run = make_run_with_tasks(SwarmTemplate::Lab, Vec::new());
+    run.mission_id = mission_id.into();
+    run.integrator_agent_id = Some("integ".into());
+    run.verifier_agent_id = Some("verify".into());
+    run.agent_ids = vec!["planner".into(), "integ".into(), "verify".into()];
+    run.stage = SwarmStage::Executing;
+    // A verifier task in Dispatched state — the TurnCompleted event will
+    // flip it to Done and the runtime then checks for findings.
+    run.tasks = vec![SwarmTask {
+        id: "verify-1".into(),
+        agent_id: "verify".into(),
+        role: Some(role.into()),
+        title: format!("verify ({role})"),
+        task_prompt: "run the gates".into(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: vec!["test-report".into()],
+        done_when: None,
+        state: SwarmTaskState::Dispatched,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+        compliance_missing_files: Vec::new(),
+        shard_index: None,
+        pre_dispatch_file_state: std::collections::HashMap::new(),
+    }];
+    run
+}
+
+const FINDINGS_MESSAGE: &str = r#"
+The test gates fail on these two issues.
+
+```json
+{
+  "type": "swarm_artifacts",
+  "version": 1,
+  "task_id": "verify-1",
+  "summary": "two failures",
+  "artifacts": {
+"findings": [
+  {
+    "file": "crates/nit-tui/src/swarm/scope.rs",
+    "line": 22,
+    "severity": "error",
+    "issue": "is_source_extension allows .txt; tests assert it must not",
+    "category": "test",
+    "suggestion": "drop the MARKUP_AUXILIARY_EXTENSIONS branch"
+  },
+  {
+    "file": "crates/nit-core/src/languages.rs",
+    "issue": "manual_contains lint",
+    "category": "clippy"
+  }
+]
+  }
+}
+```
+"#;
+
+#[test]
+fn verifier_findings_trigger_integrator_retry() {
+    let mut state = make_state_for_retry();
+    let run = make_verifier_run_with_findings("mis-vretry", "test", FINDINGS_MESSAGE);
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-vretry".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-vretry".into()),
+        thread_id: None,
+        token_count: None,
+        message: FINDINGS_MESSAGE.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+
+    assert_eq!(
+        outcome.dispatches.len(),
+        1,
+        "expected one integrator-retry dispatch"
+    );
+    let dispatch = &outcome.dispatches[0];
+    assert_eq!(dispatch.agent_id, "integ");
+    assert_eq!(dispatch.task_role.as_deref(), Some("integrate"));
+    assert!(
+        dispatch.prompt.contains("scope.rs"),
+        "prompt should cite the finding's file path"
+    );
+    assert!(
+        dispatch.prompt.contains("languages.rs"),
+        "prompt should include all findings"
+    );
+    assert!(
+        dispatch.prompt.contains("Line: 22"),
+        "prompt should include the line hint when present"
+    );
+
+    let run = runtime
+        .runs
+        .get("mis-vretry")
+        .expect("run still active after retry");
+    assert!(
+        matches!(run.stage, SwarmStage::Executing),
+        "stage should roll back to Executing while integrator fixes",
+    );
+    assert_eq!(
+        run.verifier_retry_budget, 0,
+        "budget should decrement from 1 → 0"
+    );
+    assert!(
+        run.tasks.iter().any(|t| t.id == "verifier-retry-verify-1"),
+        "integrator-retry task should be appended to the run"
+    );
+}
+
+#[test]
+fn verifier_findings_no_retry_when_budget_exhausted() {
+    let mut state = make_state_for_retry();
+    let mut run = make_verifier_run_with_findings("mis-vretry-2", "test", FINDINGS_MESSAGE);
+    // Pre-exhaust the budget — simulates a second verifier turn after the
+    // first auto-retry already burned the single budgeted attempt.
+    run.verifier_retry_budget = 0;
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-vretry-2".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-vretry-2".into()),
+        thread_id: None,
+        token_count: None,
+        message: FINDINGS_MESSAGE.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+
+    // No integrator-retry dispatch should be generated; the findings
+    // flow into synthesis as advisory.
+    assert!(
+        !outcome
+            .dispatches
+            .iter()
+            .any(|d| d.task_role.as_deref() == Some("integrate")),
+        "exhausted budget must not trigger another integrator retry"
+    );
+    let run = runtime.runs.get("mis-vretry-2").expect("run still tracked");
+    assert!(
+        !run.tasks
+            .iter()
+            .any(|t| t.id.starts_with("verifier-retry-")),
+        "no verifier-retry-* task should be enqueued"
+    );
+}
+
+#[test]
+fn verifier_findings_no_retry_when_artifacts_lack_findings() {
+    // A verifier task that completes cleanly (empty findings array)
+    // must not trigger a retry — that path is for fixable issues only.
+    let clean_message = r#"
+```json
+{
+  "type": "swarm_artifacts",
+  "version": 1,
+  "task_id": "verify-1",
+  "summary": "all gates passed",
+  "artifacts": {"notes": ["fmt clean, clippy clean, tests pass"]}
+}
+```
+"#;
+    let mut state = make_state_for_retry();
+    let run = make_verifier_run_with_findings("mis-vretry-3", "test", clean_message);
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-vretry-3".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-vretry-3".into()),
+        thread_id: None,
+        token_count: None,
+        message: clean_message.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+
+    assert!(
+        !outcome
+            .dispatches
+            .iter()
+            .any(|d| d.task_role.as_deref() == Some("integrate") && d.prompt.contains("Verifier")),
+        "clean verifier must not trigger a retry"
+    );
+    let run = runtime.runs.get("mis-vretry-3").expect("run still tracked");
+    assert_eq!(
+        run.verifier_retry_budget,
+        crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
+        "budget should NOT decrement when there are no findings"
+    );
+}
+
 // Pins the synth-wins-race fix that left the breather stuck on
 // `Synthesizing (genome review) …` after the run was already terminal.
 fn make_synth_run_with_pending_review(mission_id: &str) -> SwarmRun {
@@ -4156,6 +4431,7 @@ fn make_run_with_tasks(template: SwarmTemplate, tasks: Vec<SwarmTask>) -> SwarmR
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),
@@ -4822,6 +5098,7 @@ fn propose_with_files(id: &str, files: &[&str]) -> SwarmTask {
         commands: Vec::new(),
         risks: Vec::new(),
         notes: Vec::new(),
+        findings: Vec::new(),
     });
     t
 }
@@ -5094,6 +5371,7 @@ fn collect_dependency_payload_skips_proposers_when_judge_present() {
         commands: Vec::new(),
         risks: Vec::new(),
         notes: Vec::new(),
+        findings: Vec::new(),
     });
     judge.output = Some("judge consolidated output".into());
 
@@ -5229,6 +5507,7 @@ fn sharded_integrate_prompt_skips_file_checklist() {
         commands: Vec::new(),
         risks: Vec::new(),
         notes: Vec::new(),
+        findings: Vec::new(),
     });
     let mut shard_task = make_task("integrate-shard-1", "w1", Some("integrate"), vec!["judge"]);
     shard_task.writes = true;
@@ -5269,6 +5548,7 @@ fn nonsharded_integrate_prompt_keeps_file_checklist() {
         commands: Vec::new(),
         risks: Vec::new(),
         notes: Vec::new(),
+        findings: Vec::new(),
     });
     let mut int_task = make_task("integrate", "w1", Some("integrate"), vec!["judge"]);
     int_task.writes = true;

@@ -28,6 +28,7 @@ mod scope;
 mod signals;
 mod types;
 pub mod validator;
+mod verifier_retry;
 mod workers;
 
 #[cfg(test)]
@@ -162,9 +163,9 @@ use config::{
     read_workspace_custom_gates, read_workspace_dag_validation_mode, read_workspace_gate_default,
 };
 pub(crate) use constants::{
-    code_hygiene_preamble, DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD, NO_PADDING_CLAUSE,
-    NO_REVERT_CLAUSE, SWARM_DEP_OUTPUT_MAX_CHARS_FULL as DEP_BUDGET_PER_DEP_CEILING,
-    TEST_DISCIPLINE_CLAUSE,
+    code_hygiene_preamble, DEFAULT_SWARM_SIZE, FINDINGS_RETRY_CLAUSE, LARGE_SWARM_WARN_THRESHOLD,
+    NO_PADDING_CLAUSE, NO_REVERT_CLAUSE,
+    SWARM_DEP_OUTPUT_MAX_CHARS_FULL as DEP_BUDGET_PER_DEP_CEILING, TEST_DISCIPLINE_CLAUSE,
 };
 use constants::{
     COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY, MAX_SWARM_SIZE,
@@ -237,9 +238,9 @@ use types::{
 };
 pub use types::{
     GateReport, GateReportGate, SwarmArtifactCommand, SwarmArtifactDiff, SwarmArtifactFile,
-    SwarmArtifactRisk, SwarmDashboardView, SwarmDispatch, SwarmGateDashboardRow, SwarmMissionKind,
-    SwarmPersistenceView, SwarmSize, SwarmTask, SwarmTaskArtifacts, SwarmTaskDashboardRow,
-    SwarmTaskPersistenceView, SwarmTemplate,
+    SwarmArtifactFinding, SwarmArtifactRisk, SwarmDashboardView, SwarmDispatch,
+    SwarmGateDashboardRow, SwarmMissionKind, SwarmPersistenceView, SwarmSize, SwarmTask,
+    SwarmTaskArtifacts, SwarmTaskDashboardRow, SwarmTaskPersistenceView, SwarmTemplate,
 };
 use workers::{maybe_spawn_genome_review, spawn_genome_gate_eval};
 

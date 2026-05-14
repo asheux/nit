@@ -710,6 +710,23 @@ fn handle_completed_executing(
             handle_incomplete_signoff(state, run, &completed.task_id, reason);
         }
         handle_structural_compliance_gap(state, run, &completed.task_id);
+        // Verifier-findings retry: when a test/review task lands with
+        // structured `findings`, synthesise a writer turn to fix them.
+        // See `verifier_retry.rs` for the full contract; this short-
+        // circuit returns before the normal readiness refresh so the
+        // freshly-enqueued integrator task lands at the top of the
+        // dispatch list rather than racing with whatever else just
+        // unblocked.
+        if let Some(dispatch) = super::verifier_retry::try_dispatch_verifier_findings_retry(
+            run,
+            state,
+            &completed.task_id,
+        ) {
+            outcome.dispatches.push(dispatch);
+            refresh_task_readiness(run);
+            update_mission_status(state, run, Some(tasks_terminal_count(&run.tasks)));
+            return RunFate::Active;
+        }
     }
     refresh_task_readiness(run);
     emit_unresolved_dep_signals(state, run);

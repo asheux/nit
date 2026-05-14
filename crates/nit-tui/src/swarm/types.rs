@@ -522,6 +522,16 @@ pub struct SwarmTaskArtifacts {
     pub risks: Vec<SwarmArtifactRisk>,
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Structured issues a verifier (test / review) saw that a writer
+    /// could plausibly fix on a retry turn. Distinct from `risks` (which
+    /// is advisory / strategic) and `notes` (free-form prose). The
+    /// runtime parses these in TurnCompleted; if a test/review task
+    /// finishes with `findings.len() > 0` and the run's
+    /// `verifier_retry_budget` > 0, a follow-up integrator task is
+    /// generated scoped to the cited files. Verifier roles emit these;
+    /// writer roles don't.
+    #[serde(default)]
+    pub findings: Vec<SwarmArtifactFinding>,
 }
 
 impl SwarmTaskArtifacts {
@@ -534,6 +544,7 @@ impl SwarmTaskArtifacts {
             && self.commands.is_empty()
             && self.risks.is_empty()
             && self.notes.is_empty()
+            && self.findings.is_empty()
     }
 }
 
@@ -565,6 +576,43 @@ pub struct SwarmArtifactRisk {
     pub item: String,
     #[serde(default)]
     pub mitigation: Option<String>,
+}
+
+/// Concrete actionable issue a verifier (test / review) saw and a writer
+/// could plausibly fix on a retry turn.
+///
+/// Category constrains the kind of issue so the runtime can decide
+/// whether a retry is even useful — `Fmt` / `Clippy` are mechanical and
+/// almost always fixable; `Test` is sometimes fixable; `Other` is
+/// best-effort. The retry path treats all four categories the same
+/// today (single retry, dispatched to the integrator) but the field is
+/// preserved through the artifact JSON so future tuning has a hook.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmArtifactFinding {
+    /// Repo-relative path the issue lives in. Required so the retry
+    /// turn's `files` scope can target it.
+    pub file: String,
+    /// 1-indexed line number when known. Optional because some failures
+    /// (e.g. clippy `manual_contains` across a whole file) don't point
+    /// at one line.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// `error` (must fix to ship) | `warning` (advisory).
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// One-line description of the issue. The retry prompt quotes this
+    /// verbatim, so phrasing matters: "let x = …" hits ID rules,
+    /// "missing trailing semicolon" reads like a compile error to the
+    /// integrator.
+    pub issue: String,
+    /// `fmt` | `clippy` | `test` | `other` — see the type doc.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Optional concrete suggestion the integrator can copy. Verifiers
+    /// are encouraged to fill this when the fix is mechanical (e.g.
+    /// `replace ".iter().any(|e| *e == ext)" with ".contains(&ext)"`).
+    #[serde(default)]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -784,6 +832,17 @@ pub(super) struct SwarmRun {
     /// (default 3). Each increment dispatches a fix task to the integrator
     /// and re-enters `Verifying`.
     pub(super) gate_retry_count: u8,
+    /// Remaining auto-retries left for the verifier-findings loop.
+    /// Starts at `VERIFIER_RETRY_BUDGET_DEFAULT` (= 1). When a
+    /// test/review task completes with `parsed_artifacts.findings`
+    /// non-empty AND this is still positive, the runtime synthesises an
+    /// integrator turn scoped to those findings and decrements this
+    /// budget. Once it reaches zero, findings flow into synthesis as
+    /// advisory only and the operator dispatches any further fix.
+    /// Distinct from `gate_retry_count` (which counts post-verify
+    /// gate-bundle failures, a structural retry path, not an
+    /// agent-finding-driven one).
+    pub(super) verifier_retry_budget: u8,
     /// Repair rounds attempted on the planner output (validator → repair
     /// prompt → planner). Capped by `REPAIR_RETRY_LIMIT`. Once the validator
     /// passes or the cap is hit, the run leaves the planning stage and this

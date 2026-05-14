@@ -48,6 +48,7 @@ fn empty_run() -> SwarmRun {
         scope_files: Vec::new(),
         initial_genome_baselines: HashMap::new(),
         gate_retry_count: 0,
+        verifier_retry_budget: crate::swarm::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
         repair_round: 0,
         last_plan_json: None,
         prior_violations: Vec::new(),

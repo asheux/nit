@@ -485,6 +485,7 @@ impl SwarmRuntime {
                 scope_files,
                 initial_genome_baselines: state.genome_reports.clone(),
                 gate_retry_count: 0,
+                verifier_retry_budget: super::constants::VERIFIER_RETRY_BUDGET_DEFAULT,
                 repair_round: 0,
                 last_plan_json: None,
                 prior_violations: Vec::new(),

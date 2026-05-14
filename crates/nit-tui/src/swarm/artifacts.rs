@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use super::{
     extract_json_code_blocks, sanitize_for_filename, SwarmArtifactCommand, SwarmArtifactDiff,
-    SwarmArtifactFile, SwarmArtifactRisk, SwarmRun, SwarmTask, SwarmTaskArtifacts,
+    SwarmArtifactFile, SwarmArtifactFinding, SwarmArtifactRisk, SwarmRun, SwarmTask,
+    SwarmTaskArtifacts,
 };
 
 pub(super) fn dependency_payload_text(run: &SwarmRun, task: &SwarmTask) -> String {
@@ -242,6 +243,7 @@ fn parse_task_artifacts_value(
     parsed.commands = parse_artifact_commands(source_obj.get("commands"));
     parsed.risks = parse_artifact_risks(source_obj.get("risks"));
     parsed.notes = parse_artifact_notes(source_obj.get("notes"));
+    parsed.findings = parse_artifact_findings(source_obj.get("findings"));
 
     if parsed.is_empty() {
         None
@@ -416,6 +418,67 @@ fn parse_artifact_risks(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactR
     out
 }
 
+fn parse_artifact_findings(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactFinding> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        let Some(obj) = item.as_object() else {
+            // Bare strings aren't useful as findings — without a file we
+            // can't scope the retry. Skip silently.
+            continue;
+        };
+        let Some(file) = obj
+            .get("file")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|file| !file.is_empty())
+        else {
+            continue;
+        };
+        let Some(issue) = obj
+            .get("issue")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|issue| !issue.is_empty())
+        else {
+            continue;
+        };
+        let line = obj
+            .get("line")
+            .and_then(|value| value.as_u64())
+            .and_then(|n| u32::try_from(n).ok());
+        let severity = obj
+            .get("severity")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|severity| !severity.is_empty())
+            .map(ToString::to_string);
+        let category = obj
+            .get("category")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|category| !category.is_empty())
+            .map(|c| c.to_ascii_lowercase());
+        let suggestion = obj
+            .get("suggestion")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|suggestion| !suggestion.is_empty())
+            .map(ToString::to_string);
+        out.push(SwarmArtifactFinding {
+            file: file.to_string(),
+            line,
+            severity,
+            issue: issue.to_string(),
+            category,
+            suggestion,
+        });
+    }
+    out
+}
+
 fn parse_artifact_notes(value: Option<&serde_json::Value>) -> Vec<String> {
     let Some(items) = value.and_then(|value| value.as_array()) else {
         return Vec::new();
@@ -482,6 +545,16 @@ pub(super) fn merge_task_artifacts(dst: &mut SwarmTaskArtifacts, src: SwarmTaskA
         entry.item.to_ascii_lowercase()
     });
     dedup_extend(&mut dst.notes, src.notes, |note| note.to_ascii_lowercase());
+    // Findings dedup on file+line+issue so two verifier blocks pointing
+    // at the same site don't generate two retry tasks for one fix.
+    dedup_extend(&mut dst.findings, src.findings, |finding| {
+        format!(
+            "{}|{}|{}",
+            finding.file.to_ascii_lowercase(),
+            finding.line.map(|n| n.to_string()).unwrap_or_default(),
+            finding.issue.to_ascii_lowercase()
+        )
+    });
 }
 
 fn dedup_extend<T>(dst: &mut Vec<T>, src: Vec<T>, key: impl Fn(&T) -> String) {
