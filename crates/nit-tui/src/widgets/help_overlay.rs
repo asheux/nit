@@ -98,6 +98,12 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             "COMMANDS (:)",
             &[
                 (":q", " quit (confirm if dirty)"),
+                (":w / :write", " save current file"),
+                (
+                    ":wq / :x",
+                    " save + quit (file launch) or save + switch to last buffer / NITTree (dir launch)",
+                ),
+                (":e / :edit <path>", " open file at path (workspace-relative)"),
                 (":help / :commands", " open this help overlay"),
                 (":run", " run active app"),
                 (":tree / :nittree / :explore", " toggle NITTree"),

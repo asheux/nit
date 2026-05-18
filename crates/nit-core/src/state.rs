@@ -204,6 +204,13 @@ pub struct Intervention {
 pub struct AppState {
     pub app_kind: AppKind,
     pub workspace_root: PathBuf,
+    /// `true` when nit was launched with a file path (`nit foo.rs`), `false`
+    /// when launched with a directory or no argument (`nit`, `nit src/`).
+    /// Controls `:wq` semantics: file-launch → quit the app on save, dir-launch
+    /// → close just the current buffer (don't jump to NITTree or another
+    /// buffer). Set once during bootstrap and never mutated afterwards.
+    #[serde(default)]
+    pub launched_with_file_path: bool,
     /// Directory names from `.gitignore` that should be excluded from file tracking and display.
     #[serde(skip)]
     pub gitignored_dirs: Vec<String>,
@@ -557,6 +564,7 @@ impl AppState {
         let games = default_games_state();
         Self {
             app_kind: AppKind::Gol,
+            launched_with_file_path: false,
             gitignored_dirs: Vec::new(),
             workspace_root,
             buffers: vec![editor, notes],
@@ -690,7 +698,7 @@ impl AppState {
             .any(|(id, buf)| id != self.notes_buffer_id && buf.is_dirty())
     }
 
-    fn find_editor_buffer_by_path(&self, path: &Path) -> Option<usize> {
+    pub(crate) fn find_editor_buffer_by_path(&self, path: &Path) -> Option<usize> {
         self.buffers.iter().enumerate().find_map(|(id, buf)| {
             (id != self.notes_buffer_id && buf.path().is_some_and(|buf_path| buf_path == path))
                 .then_some(id)

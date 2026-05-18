@@ -54,8 +54,12 @@ pub(crate) fn configure_app_state(
 
     migrate_legacy_notes(state);
 
+    // Record launch mode for the `:wq` dispatcher. File-launch → `:wq` quits;
+    // directory-launch → `:wq` closes the active buffer in place.
+    state.launched_with_file_path = target_path.is_some_and(|p| p.is_file());
+
     // Open the file tree when launching into a directory rather than a single file.
-    if target_path.is_none_or(|p| p.is_dir()) {
+    if !state.launched_with_file_path {
         state.file_tree.root = state.workspace_root.clone();
         state.file_tree.open = true;
         state.focus = PaneId::Editor;

@@ -1,11 +1,157 @@
 use super::*;
-use crate::{lab::AppKind, prompt::Prompt};
+use crate::{buffer::Buffer, io, lab::AppKind, prompt::Prompt};
 
 mod games_inspect;
 mod helpers;
 
 pub(super) use helpers::{apply_protocol_selection, apply_rule_selection};
 use helpers::{is_help_command_tokens, lab_from_tokens, log_rule_list, log_rule_overview};
+
+/// Save the active editor buffer to its on-disk path. Returns `true` on
+/// success, `false` when the buffer has no path or the write fails (with
+/// the reason surfaced in `state.status`). Mirrors `Action::Save`'s
+/// effects so `:w` and `<leader>w` behave identically.
+fn save_active_buffer(state: &mut AppState) -> bool {
+    let buf = state.editor_buffer_mut();
+    if buf.path().is_none() {
+        state.status = Some("No path to save".into());
+        return false;
+    }
+    if let Err(e) = io::save_buffer(buf) {
+        state.status = Some(format!("Save failed: {e}"));
+        return false;
+    }
+    buf.mark_clean();
+    state.status = Some("Saved".into());
+    if let Some(file_path) = state.editor_buffer().path().cloned() {
+        state.genome_save_eval_pending = Some(file_path);
+    }
+    true
+}
+
+/// Close the active editor buffer, vim-`:bd`-style. If another non-notes
+/// buffer is still open, switch to the highest-indexed one (= the most
+/// recently added) and remove the closed buffer from the vec. If the
+/// active buffer was the only file open, replace it with an untitled
+/// blank and pop open NITTree so the user has a place to land — that's
+/// the "nothing in the buffers → NITTree" fallback.
+///
+/// Never removes the notes buffer; only buffers other than
+/// `state.notes_buffer_id` are eligible to be active or to be closed.
+fn close_active_editor_buffer(state: &mut AppState) {
+    let active = state.active_editor_buffer_id;
+    let notes = state.notes_buffer_id;
+
+    // Defensive: `:wq` should only fire on the editor pane, but if the
+    // active id ever points at notes, do nothing rather than nuke notes.
+    if active == notes {
+        return;
+    }
+
+    // Highest-indexed non-notes, non-active buffer = "last buffer".
+    // None when the active buffer is the only editor buffer open.
+    let next_active = (0..state.buffers.len())
+        .rev()
+        .find(|&i| i != active && i != notes);
+
+    match next_active {
+        Some(idx) => {
+            // Remove the active slot; trailing indices shift down by 1.
+            state.buffers.remove(active);
+            if state.notes_buffer_id > active {
+                state.notes_buffer_id -= 1;
+            }
+            let new_active = if idx > active { idx - 1 } else { idx };
+            state.active_editor_buffer_id = new_active;
+            state.focus = PaneId::Editor;
+            state.mode = Mode::Normal;
+            let label = state
+                .editor_buffer()
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "untitled".into());
+            state.status = Some(format!("Buffer closed; switched to {label}"));
+        }
+        None => {
+            // No fallback buffer — replace the just-closed slot with an
+            // untitled blank (so `active_editor_buffer_id` stays valid)
+            // and open NITTree so the user has somewhere to go.
+            state.buffers[active] = Buffer::empty("untitled", None);
+            state.file_tree.root = state.workspace_root.clone();
+            state.file_tree.open = true;
+            // File tree is a sidebar over the Editor pane; focus stays
+            // on Editor while the tree handles arrow keys (matches the
+            // existing `:tree` command's behaviour).
+            state.focus = PaneId::Editor;
+            state.mode = Mode::Normal;
+            state.status = Some("Buffer closed; NITTree opened".into());
+        }
+    }
+}
+
+/// Open a file at `path` in the editor. Mirrors `Action::OpenFile`:
+/// reuses an existing buffer if one already holds the same path, swaps
+/// in place when the current editor buffer is clean, or appends a new
+/// buffer when the current is dirty. Path is interpreted relative to
+/// `workspace_root` when not already absolute.
+fn open_file_at_path(state: &mut AppState, raw_path: &str) {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        state.status = Some("Usage: :e <path>".into());
+        return;
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        state.workspace_root.join(path)
+    };
+
+    if let Some(buffer_id) = state.find_editor_buffer_by_path(&absolute) {
+        state.active_editor_buffer_id = buffer_id;
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        state.visualizer.pending_reseed = true;
+        state.status = Some(format!("Opened {}", absolute.display()));
+        return;
+    }
+    match io::load_to_string(&absolute) {
+        Ok(content) => {
+            let name = absolute
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled".into());
+            let buf = Buffer::from_str(name, &content, Some(absolute.clone()));
+            if state.editor_buffer().is_dirty() {
+                state.buffers.push(buf);
+                state.active_editor_buffer_id = state.buffers.len() - 1;
+            } else {
+                state.buffers[state.active_editor_buffer_id] = buf;
+            }
+            state.focus = PaneId::Editor;
+            state.mode = Mode::Normal;
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!("Opened {}", absolute.display()));
+        }
+        Err(err) => {
+            state.status = Some(format!("Open failed: {err}"));
+        }
+    }
+}
+
+/// Extract the argument to a single-keyword command (e.g. `:e foo/bar`)
+/// from the raw trimmed input. Returns the slice after the first
+/// whitespace, with surrounding whitespace stripped. `None` when the
+/// command had no argument. Case-preserving — necessary for filesystems
+/// where `Foo.RS` and `foo.rs` are distinct files.
+fn extract_command_arg<'a>(trimmed: &'a str, keyword: &str) -> Option<&'a str> {
+    let without_colon = trimmed.trim_start_matches(':');
+    let rest = without_colon
+        .strip_prefix(keyword)
+        .filter(|r| r.starts_with(char::is_whitespace) || r.is_empty())?;
+    let arg = rest.trim();
+    (!arg.is_empty()).then_some(arg)
+}
 
 pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     let trimmed = input.trim();
@@ -61,6 +207,43 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 false
             } else {
                 true
+            }
+        }
+        ["w"] | ["write"] => {
+            save_active_buffer(state);
+            false
+        }
+        ["e"] | ["edit"] => {
+            state.status = Some("Usage: :e <path>".into());
+            false
+        }
+        _ if tokens.first() == Some(&"e") || tokens.first() == Some(&"edit") => {
+            // Re-extract the path from the case-preserving `trimmed`
+            // string (tokens are lowercased; filesystems are not).
+            let keyword = tokens[0];
+            if let Some(arg) = extract_command_arg(trimmed, keyword) {
+                open_file_at_path(state, arg);
+            } else {
+                state.status = Some("Usage: :e <path>".into());
+            }
+            false
+        }
+        ["wq"] | ["x"] => {
+            if !save_active_buffer(state) {
+                // Save failed (no path / write error). Don't quit/close —
+                // the user needs to see the error and decide what to do.
+                return false;
+            }
+            if state.launched_with_file_path {
+                // `nit foo.rs` style launch — `:wq` quits the editor,
+                // matching vim's single-file ergonomics.
+                true
+            } else {
+                // `nit` / `nit src/` style launch — close the buffer in
+                // place, stay in the editor pane on an untitled buffer.
+                // Explicitly NOT jumping to NITTree or another buffer.
+                close_active_editor_buffer(state);
+                false
             }
         }
         ["tree"] | ["nittree"] | ["explore"] => {
