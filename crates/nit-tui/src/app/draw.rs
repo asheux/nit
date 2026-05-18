@@ -302,6 +302,11 @@ pub(super) fn draw(
             let area = dynamic_popup_rect(screen, prompt_size(message));
             render_prompt(f, area, theme, message);
         }
+        if let Some(Prompt::ConfirmCloseBuffer) = state.prompt {
+            let message = "Close buffer without saving? (Y/N)";
+            let area = dynamic_popup_rect(screen, prompt_size(message));
+            render_prompt(f, area, theme, message);
+        }
         let mut command_cursor = None;
         if let Some(cmd) = state.command_line.as_ref() {
             let message = format!(":{}", cmd.input);

@@ -211,6 +211,12 @@ pub struct AppState {
     /// buffer). Set once during bootstrap and never mutated afterwards.
     #[serde(default)]
     pub launched_with_file_path: bool,
+    /// Vim-style numeric prefix buffered between digit key-presses in Normal
+    /// mode. `5` then `j` runs MoveDown 5 times; `56G` jumps to line 56.
+    /// Cleared as soon as any non-digit action fires. Capped at 99_999 so
+    /// a stuck-down digit can't produce billion-iteration loops.
+    #[serde(skip)]
+    pub pending_count: Option<u32>,
     /// Directory names from `.gitignore` that should be excluded from file tracking and display.
     #[serde(skip)]
     pub gitignored_dirs: Vec<String>,
@@ -565,6 +571,7 @@ impl AppState {
         Self {
             app_kind: AppKind::Gol,
             launched_with_file_path: false,
+            pending_count: None,
             gitignored_dirs: Vec::new(),
             workspace_root,
             buffers: vec![editor, notes],

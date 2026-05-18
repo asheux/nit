@@ -3,8 +3,10 @@
 use super::*;
 
 #[test]
-fn command_q_quits_when_clean_and_prompts_when_dirty() {
-    let (_root, mut state) = empty_state("cmd-q");
+fn command_q_quits_when_clean_and_prompts_when_dirty_in_file_launch_mode() {
+    // `nit foo.rs` launch — `:q` quits the editor (confirm-if-dirty).
+    let (_root, mut state) = empty_state("cmd-q-file-launch");
+    state.launched_with_file_path = true;
     assert!(!state.editor_buffer().is_dirty());
     assert!(handle_command_line(&mut state, "q"));
 
@@ -13,6 +15,141 @@ fn command_q_quits_when_clean_and_prompts_when_dirty() {
     assert!(state.editor_buffer().is_dirty());
     assert!(!handle_command_line(&mut state, "q"));
     assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
+}
+
+#[test]
+fn command_q_closes_buffer_in_directory_launch_mode() {
+    // `nit src/` launch — `:q` closes the active buffer instead of
+    // quitting the editor (mirror of `:wq` minus the save).
+    let root = temp_dir("cmd-q-dir-launch-clean");
+    let file_a = root.join("a.txt");
+    fs::write(&file_a, "alpha").unwrap();
+
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+        Buffer::empty("n", None),
+    );
+    state.launched_with_file_path = false;
+    state.file_tree.open = false;
+    state.focus = PaneId::Editor;
+
+    // Buffer is clean → close in place, open NITTree (no other buffer
+    // to fall back to). Does NOT quit the editor.
+    assert!(!handle_command_line(&mut state, "q"));
+    assert!(state.editor_buffer().path().is_none());
+    assert!(state.file_tree.open);
+}
+
+#[test]
+fn command_q_prompts_close_when_buffer_is_dirty_in_directory_launch_mode() {
+    // Dirty buffer in dir-launch mode → `:q` raises ConfirmCloseBuffer
+    // (NOT ConfirmQuit; we're not exiting, just closing the buffer).
+    let root = temp_dir("cmd-q-dir-launch-dirty");
+    let file_a = root.join("a.txt");
+    fs::write(&file_a, "alpha").unwrap();
+
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+        Buffer::empty("n", None),
+    );
+    state.launched_with_file_path = false;
+    state.editor_buffer_mut().insert_char('!');
+
+    assert!(!handle_command_line(&mut state, "q"));
+    assert!(matches!(state.prompt, Some(Prompt::ConfirmCloseBuffer)));
+    // Buffer is still around — dismissal/confirmation is the user's call.
+    assert!(state.editor_buffer().is_dirty());
+}
+
+#[test]
+fn confirm_close_buffer_yes_discards_dirty_buffer_and_closes() {
+    // Following the prompt above: Y discards the dirty changes and
+    // closes the buffer (replacing with untitled + opening NITTree
+    // when it's the only buffer).
+    let root = temp_dir("cmd-q-dir-launch-confirm-yes");
+    let file_a = root.join("a.txt");
+    fs::write(&file_a, "alpha").unwrap();
+
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+        Buffer::empty("n", None),
+    );
+    state.launched_with_file_path = false;
+    state.file_tree.open = false;
+    state.editor_buffer_mut().insert_char('!');
+    state.prompt = Some(Prompt::ConfirmCloseBuffer);
+
+    let outcome = apply_action(&mut state, Action::ConfirmCloseBufferYes);
+    assert!(!outcome.should_exit);
+    assert!(state.prompt.is_none());
+    assert!(state.editor_buffer().path().is_none());
+    // Dirty changes were discarded — on-disk content is unchanged.
+    assert_eq!(fs::read_to_string(&file_a).unwrap(), "alpha");
+    assert!(state.file_tree.open);
+}
+
+#[test]
+fn confirm_close_buffer_no_keeps_the_buffer_open() {
+    let root = temp_dir("cmd-q-dir-launch-confirm-no");
+    let file_a = root.join("a.txt");
+    fs::write(&file_a, "alpha").unwrap();
+
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+        Buffer::empty("n", None),
+    );
+    state.launched_with_file_path = false;
+    state.editor_buffer_mut().insert_char('!');
+    state.prompt = Some(Prompt::ConfirmCloseBuffer);
+
+    let outcome = apply_action(&mut state, Action::ConfirmCloseBufferNo);
+    assert!(!outcome.should_exit);
+    assert!(state.prompt.is_none());
+    // Buffer survives, dirty flag preserved.
+    assert_eq!(state.editor_buffer().path(), Some(&file_a));
+    assert!(state.editor_buffer().is_dirty());
+}
+
+#[test]
+fn action_quit_always_exits_regardless_of_launch_mode() {
+    // Ctrl-Q (Action::Quit) is the global "exit nit" shortcut — always
+    // quits, no buffer-close fallback. Diverges from `:q`, which is
+    // launch-mode-aware. Tested here in directory-launch mode (where
+    // `:q` would close a buffer) to pin the divergence.
+    let root = temp_dir("action-quit-dir-clean");
+    let file_a = root.join("a.txt");
+    fs::write(&file_a, "alpha").unwrap();
+
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+        Buffer::empty("n", None),
+    );
+    state.launched_with_file_path = false;
+
+    let outcome = apply_action(&mut state, Action::Quit);
+    assert!(
+        outcome.should_exit,
+        "Ctrl-Q must always quit, even in directory-launch mode"
+    );
+}
+
+#[test]
+fn command_q_on_untitled_buffer_in_directory_mode_quits_nit() {
+    // When the active buffer is untitled — typical NITTree state, or
+    // after `:q`-ing the last file — there's nothing to close, so `:q`
+    // should exit the app. Otherwise it would be a no-op that looks
+    // broken.
+    let (_root, mut state) = empty_state("cmd-q-dir-untitled");
+    state.launched_with_file_path = false;
+    state.file_tree.open = true;
+    assert!(state.editor_buffer().path().is_none());
+
+    assert!(handle_command_line(&mut state, "q"));
 }
 
 #[test]
@@ -73,6 +210,8 @@ fn open_file_switches_to_existing_dirty_buffer_instead_of_reloading() {
 
 #[test]
 fn quit_prompts_when_hidden_editor_buffer_is_dirty() {
+    // Action::Quit (Ctrl-Q) checks ALL buffers — a dirty hidden buffer
+    // still triggers the confirm prompt regardless of launch mode.
     let root = temp_dir("quit-hidden-dirty");
     let file_a = root.join("a.txt");
     let file_b = root.join("b.txt");
@@ -94,7 +233,12 @@ fn quit_prompts_when_hidden_editor_buffer_is_dirty() {
 }
 
 #[test]
-fn command_q_prompts_when_hidden_editor_buffer_is_dirty() {
+fn command_q_prompts_when_hidden_editor_buffer_is_dirty_in_file_launch_mode() {
+    // File-launch path: `:q` checks ALL buffers for dirtiness, not just
+    // the active one — so a hidden dirty buffer still triggers
+    // ConfirmQuit. (In directory-launch mode `:q` only inspects the
+    // active buffer, which is a different code path covered by the
+    // close-buffer tests below.)
     let root = temp_dir("cmd-q-hidden-dirty");
     let file_a = root.join("a.txt");
     let file_b = root.join("b.txt");
@@ -106,6 +250,7 @@ fn command_q_prompts_when_hidden_editor_buffer_is_dirty() {
         Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
         Buffer::empty("n", None),
     );
+    state.launched_with_file_path = true;
     state.editor_buffer_mut().insert_char('!');
     let _ = apply_action(&mut state, Action::OpenFile(file_b));
 

@@ -466,6 +466,15 @@ pub(super) fn map_key_to_action(
             _ => None,
         };
     }
+    if let Some(Prompt::ConfirmCloseBuffer) = state.prompt {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::ConfirmCloseBufferYes),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                Some(Action::ConfirmCloseBufferNo)
+            }
+            _ => None,
+        };
+    }
     if let Some(target) = map_focus_hotkey(&key) {
         return Some(Action::FocusPane(target));
     }
@@ -592,6 +601,27 @@ pub(super) fn map_key_to_action(
 
     if is_command_prompt_open_key(&key) && state.mode == Mode::Normal {
         return Some(Action::CommandPromptOpen);
+    }
+
+    // Vim count prefix: digits in motion mode build up `state.pending_count`,
+    // which the next motion consumes. `0` is special — it doubles as both a
+    // count digit (when a count is already pending) AND the Home motion
+    // (when no count is buffered). Order matters: this intercept must
+    // precede the main key match, where `0` is wired to `Action::Home`.
+    if is_motion_mode(state) {
+        if let KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } = key
+        {
+            if let Some(digit) = ch.to_digit(10) {
+                let is_count_continuation = digit != 0 || state.pending_count.is_some();
+                if is_count_continuation {
+                    return Some(Action::AppendCountDigit(digit as u8));
+                }
+            }
+        }
     }
 
     match key {

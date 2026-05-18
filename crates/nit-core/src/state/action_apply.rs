@@ -28,6 +28,25 @@ fn with_focused_buffer(state: &mut AppState, f: impl FnOnce(&mut Buffer)) -> boo
     }
 }
 
+/// Take the buffered vim count prefix, returning the value if set or 1 as
+/// the default. Used by motion actions that repeat (`5j` → MoveDown × 5).
+fn take_motion_count(state: &mut AppState) -> u32 {
+    state.pending_count.take().unwrap_or(1)
+}
+
+/// Run `f` on the focused buffer N times (where N = the buffered vim
+/// count prefix, or 1 if none). Cheaper than repeating the focus +
+/// `ensure_visible` work — visibility recomputes only once at the end.
+fn repeat_motion(state: &mut AppState, f: impl Fn(&mut Buffer)) {
+    let n = take_motion_count(state);
+    if let Some(buf) = state.focused_buffer_mut() {
+        for _ in 0..n {
+            f(buf);
+        }
+        buf.ensure_visible();
+    }
+}
+
 /// Switch the global mode and update the focused buffer's selection /
 /// insert state to match. Centralises the per-mode buffer side-effects
 /// shared by `SwitchMode`, `ToggleMode`, `EnterVisual`, and `ExitVisual`.
@@ -53,8 +72,38 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     let mut should_exit = false;
     let changed = true;
 
+    // Vim count prefix: every action other than `AppendCountDigit` and the
+    // motions that consume the count drops any buffered count. The motion
+    // arms below call `take_motion_count` themselves; everything else gets
+    // a defensive reset here so a stray `5` followed by `i` doesn't leak
+    // a count into the next motion.
+    let preserve_count = matches!(
+        action,
+        Action::AppendCountDigit(_)
+            | Action::MoveUp
+            | Action::MoveDown
+            | Action::MoveLeft
+            | Action::MoveRight
+            | Action::MoveWordForward
+            | Action::MoveWordBack
+            | Action::MoveWordEnd
+            | Action::MoveBigWordForward
+            | Action::MoveBigWordBack
+            | Action::MoveBigWordEnd
+            | Action::PageUp
+            | Action::PageDown
+            | Action::ScrollHalfPageDown
+            | Action::ScrollHalfPageUp
+            | Action::GoToTop
+            | Action::GoToBottom
+    );
+
     match action {
         Action::Quit => {
+            // Ctrl-Q is the global "exit the app" shortcut — always
+            // quits, regardless of launch mode. Diverges from `:q`,
+            // which is launch-mode-aware (close-buffer in dir-launch).
+            // Confirm-if-dirty applies in both paths.
             if state.has_unsaved_editor_buffers() {
                 state.prompt = Some(Prompt::ConfirmQuit);
             } else {
@@ -65,6 +114,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             should_exit = true;
         }
         Action::ConfirmQuitNo => {
+            state.prompt = None;
+        }
+        Action::ConfirmCloseBufferYes => {
+            state.prompt = None;
+            super::cmd_line::close_active_editor_buffer(state);
+        }
+        Action::ConfirmCloseBufferNo => {
             state.prompt = None;
         }
         Action::Save | Action::SaveAndNormal => {
@@ -214,27 +270,33 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             with_focused_buffer(state, |buf| buf.delete_line());
         }
         Action::MoveUp => {
-            with_focused_buffer(state, |buf| buf.move_up());
+            repeat_motion(state, |buf| buf.move_up());
         }
         Action::MoveDown => {
-            with_focused_buffer(state, |buf| buf.move_down());
+            repeat_motion(state, |buf| buf.move_down());
         }
         Action::MoveLeft => {
-            with_focused_buffer(state, |buf| buf.move_left());
+            repeat_motion(state, |buf| buf.move_left());
         }
         Action::MoveRight => {
-            with_focused_buffer(state, |buf| buf.move_right());
+            repeat_motion(state, |buf| buf.move_right());
         }
         Action::PageUp => {
+            let n = take_motion_count(state);
             with_focused_buffer(state, |buf| {
                 let height = buf.viewport.height.max(1);
-                buf.page_up(height);
+                for _ in 0..n {
+                    buf.page_up(height);
+                }
             });
         }
         Action::PageDown => {
+            let n = take_motion_count(state);
             with_focused_buffer(state, |buf| {
                 let height = buf.viewport.height.max(1);
-                buf.page_down(height);
+                for _ in 0..n {
+                    buf.page_down(height);
+                }
             });
         }
         Action::Home => {
@@ -244,16 +306,26 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             with_focused_buffer(state, |buf| buf.move_end());
         }
         Action::MoveWordEnd => {
-            with_focused_buffer(state, |buf| buf.move_word_end());
+            repeat_motion(state, |buf| buf.move_word_end());
         }
         Action::MoveWordBack => {
-            with_focused_buffer(state, |buf| buf.move_word_back());
+            repeat_motion(state, |buf| buf.move_word_back());
         }
         Action::GoToTop => {
-            with_focused_buffer(state, |buf| buf.go_to_top());
+            // `gg` → line 1; `<N>gg` → line N (1-indexed). Mirrors vim.
+            let count = state.pending_count.take();
+            with_focused_buffer(state, |buf| match count {
+                Some(n) => buf.go_to_line(n as usize),
+                None => buf.go_to_top(),
+            });
         }
         Action::GoToBottom => {
-            with_focused_buffer(state, |buf| buf.go_to_bottom());
+            // `G` → last line; `<N>G` → line N (1-indexed). Mirrors vim.
+            let count = state.pending_count.take();
+            with_focused_buffer(state, |buf| match count {
+                Some(n) => buf.go_to_line(n as usize),
+                None => buf.go_to_bottom(),
+            });
         }
         Action::OpenLineAbove => {
             if with_focused_buffer(state, |buf| buf.open_line_above()) {
@@ -722,16 +794,16 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::MoveWordForward => {
-            with_focused_buffer(state, |buf| buf.move_word_forward());
+            repeat_motion(state, |buf| buf.move_word_forward());
         }
         Action::MoveBigWordForward => {
-            with_focused_buffer(state, |buf| buf.move_big_word_forward());
+            repeat_motion(state, |buf| buf.move_big_word_forward());
         }
         Action::MoveBigWordBack => {
-            with_focused_buffer(state, |buf| buf.move_big_word_back());
+            repeat_motion(state, |buf| buf.move_big_word_back());
         }
         Action::MoveBigWordEnd => {
-            with_focused_buffer(state, |buf| buf.move_big_word_end());
+            repeat_motion(state, |buf| buf.move_big_word_end());
         }
         Action::MoveFirstNonBlank => {
             with_focused_buffer(state, |buf| buf.move_first_non_blank());
@@ -787,10 +859,18 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             });
         }
         Action::ScrollHalfPageDown => {
-            with_focused_buffer(state, |buf| buf.scroll_half_page_down());
+            repeat_motion(state, |buf| buf.scroll_half_page_down());
         }
         Action::ScrollHalfPageUp => {
-            with_focused_buffer(state, |buf| buf.scroll_half_page_up());
+            repeat_motion(state, |buf| buf.scroll_half_page_up());
+        }
+        Action::AppendCountDigit(digit) => {
+            let current = state.pending_count.unwrap_or(0);
+            // Cap at 99_999 — defends against a stuck digit key producing
+            // a 4-billion-iteration motion. Higher caps don't add real-
+            // world value: nobody types `100000j` on purpose.
+            let next = current.saturating_mul(10).saturating_add(digit as u32);
+            state.pending_count = Some(next.min(99_999));
         }
         Action::CenterViewportOnCursor => {
             if let Some(buf) = state.focused_buffer_mut() {
@@ -915,6 +995,10 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             }
         }
+    }
+
+    if !preserve_count {
+        state.pending_count = None;
     }
 
     ActionOutcome {

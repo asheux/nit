@@ -104,6 +104,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                     " save + quit (file launch) or save + switch to last buffer / NITTree (dir launch)",
                 ),
                 (":e / :edit <path>", " open file at path (workspace-relative)"),
+                (":<N>", " jump to line N (e.g. `:56` jumps to line 56)"),
                 (":help / :commands", " open this help overlay"),
                 (":run", " run active app"),
                 (":tree / :nittree / :explore", " toggle NITTree"),
@@ -207,6 +208,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Enter", " newline (preserves indentation)"),
                 ("Esc", " switch to Normal mode"),
                 ("H/J/K/L", " move in Normal mode"),
+                (
+                    "<N> + motion",
+                    " repeat motion N times (`5j`, `3w`, `56G`)",
+                ),
                 ("I", " enter Insert mode"),
                 ("a", " append + Insert (Normal mode)"),
                 ("v", " Visual mode (Normal mode)"),

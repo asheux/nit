@@ -7,6 +7,56 @@ mod helpers;
 pub(super) use helpers::{apply_protocol_selection, apply_rule_selection};
 use helpers::{is_help_command_tokens, lab_from_tokens, log_rule_list, log_rule_overview};
 
+/// `:q` semantics, launch-mode-aware. Returns `true` when the caller
+/// should exit the app, `false` when control stays in the editor
+/// (either a confirmation prompt was raised or a buffer was closed in
+/// place).
+///
+/// - **File-launch (`nit foo.rs`)**: quit immediately when clean; raise
+///   `ConfirmQuit` when any buffer is dirty.
+/// - **Directory-launch (`nit src/`)**: behaviour depends on whether
+///   the active buffer represents an actual file. If it does, close
+///   that buffer (confirming first if dirty). If the active buffer is
+///   *untitled* — which is the state right after closing the last
+///   file, and the default state of NITTree-only sessions — there's
+///   nothing meaningful to close, so `:q` quits the app (with the same
+///   dirty-check across all buffers as the file-launch path).
+///
+/// Diverges from `Action::Quit` (Ctrl-Q), which always quits the app
+/// regardless of launch mode — Ctrl-Q is the global "exit nit"
+/// shortcut and shouldn't surprise users by hiding the only file
+/// instead of exiting.
+pub(super) fn quit_or_close_buffer(state: &mut AppState) -> bool {
+    if state.launched_with_file_path {
+        return if state.has_unsaved_editor_buffers() {
+            state.prompt = Some(Prompt::ConfirmQuit);
+            false
+        } else {
+            true
+        };
+    }
+
+    // Directory-launch path.
+    let active_is_untitled = state.editor_buffer().path().is_none();
+    if active_is_untitled {
+        // No file to close → user is asking to exit nit. Honour the
+        // dirty-buffer guard so unsaved work in OTHER buffers isn't
+        // silently discarded.
+        if state.has_unsaved_editor_buffers() {
+            state.prompt = Some(Prompt::ConfirmQuit);
+            false
+        } else {
+            true
+        }
+    } else if state.editor_buffer().is_dirty() {
+        state.prompt = Some(Prompt::ConfirmCloseBuffer);
+        false
+    } else {
+        close_active_editor_buffer(state);
+        false
+    }
+}
+
 /// Save the active editor buffer to its on-disk path. Returns `true` on
 /// success, `false` when the buffer has no path or the write fails (with
 /// the reason surfaced in `state.status`). Mirrors `Action::Save`'s
@@ -38,7 +88,11 @@ fn save_active_buffer(state: &mut AppState) -> bool {
 ///
 /// Never removes the notes buffer; only buffers other than
 /// `state.notes_buffer_id` are eligible to be active or to be closed.
-fn close_active_editor_buffer(state: &mut AppState) {
+///
+/// Exposed `pub(super)` so `action_apply::ConfirmCloseBufferYes` can
+/// share this exact implementation — keeps `:q` and `:wq`'s
+/// directory-launch close behaviour byte-identical.
+pub(super) fn close_active_editor_buffer(state: &mut AppState) {
     let active = state.active_editor_buffer_id;
     let notes = state.notes_buffer_id;
 
@@ -182,6 +236,17 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
         state.status = Some("Help opened".into());
         return false;
     }
+    // Vim `:<N>` jump-to-line. Bare-number command, no other tokens.
+    if tokens.len() == 1 {
+        if let Ok(line) = tokens[0].parse::<usize>() {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.go_to_line(line);
+                buf.ensure_visible();
+            }
+            state.status = Some(format!("Line {line}"));
+            return false;
+        }
+    }
     match tokens.as_slice() {
         ["substrate"] | ["sub"] | ["sig"] | ["signals"] => {
             state.show_substrate_overlay = true;
@@ -201,14 +266,7 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.substrate_overlay_scroll = 0;
             false
         }
-        ["q"] | ["quit"] | ["exit"] => {
-            if state.has_unsaved_editor_buffers() {
-                state.prompt = Some(Prompt::ConfirmQuit);
-                false
-            } else {
-                true
-            }
-        }
+        ["q"] | ["quit"] | ["exit"] => quit_or_close_buffer(state),
         ["w"] | ["write"] => {
             save_active_buffer(state);
             false

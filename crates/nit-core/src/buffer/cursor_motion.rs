@@ -90,6 +90,17 @@ impl Buffer {
         self.clamp_col();
     }
 
+    /// Jump to a specific line number, 1-indexed. Clamps to the buffer's
+    /// last line if the requested number exceeds it; clamps to line 1 if
+    /// the request is 0. Drives both `:N` command and `NG` motion.
+    pub fn go_to_line(&mut self, line_one_indexed: usize) {
+        self.end_edit_group();
+        let last = self.rope.len_lines().saturating_sub(1);
+        let target = line_one_indexed.saturating_sub(1).min(last);
+        self.cursor.line = target;
+        self.clamp_col();
+    }
+
     /// vim `e`: end of current/next "word" (alnum + `_`).
     pub fn move_word_end(&mut self) {
         self.end_edit_group();

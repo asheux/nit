@@ -8,6 +8,13 @@ pub enum Action {
     SaveAndNormal,
     ConfirmQuitYes,
     ConfirmQuitNo,
+    /// Discard dirty changes and close the active editor buffer
+    /// (switching to the last remaining buffer or opening NITTree).
+    /// Driven by `Prompt::ConfirmCloseBuffer`, which fires when `:q` is
+    /// run on a dirty buffer in directory-launch mode.
+    ConfirmCloseBufferYes,
+    /// Dismiss the `ConfirmCloseBuffer` prompt without closing.
+    ConfirmCloseBufferNo,
     FocusNextPane,
     FocusPrevPane,
     FocusPane(PaneId),
@@ -165,4 +172,9 @@ pub enum Action {
     SearchPromptExecute,
     SearchPromptInput(char),
     SearchPromptBackspace,
+    // --- Vim numeric prefix ---
+    /// Append a digit (0-9) to the count prefix buffered in
+    /// `state.pending_count`. `5` then `6` then `j` runs MoveDown 56 times;
+    /// any non-digit non-motion action clears the count.
+    AppendCountDigit(u8),
 }
