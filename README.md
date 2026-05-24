@@ -13,8 +13,10 @@ curl -fsSL https://download.nit.tools/install.sh | bash
 **Windows (PowerShell):**
 
 ```powershell
-irm https://download.nit.tools/install.ps1 | iex
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; irm https://download.nit.tools/install.ps1 | iex
 ```
+
+The `Set-ExecutionPolicy` prefix is scoped to the current PowerShell process only — it doesn't change any system-wide settings. Without it, PowerShell's default `Restricted` policy blocks the install script.
 
 **Homebrew (macOS / Linux):**
 
@@ -44,6 +46,20 @@ The macOS asset is a single universal Mach-O binary — Apple Silicon and
 Intel Macs both run native code from the same file (no Rosetta needed).
 
 `nit` requires external CLIs (`codex`, `claude`, `git`) on `PATH` to drive its agent runners.
+
+### Troubleshooting
+
+**macOS — "nit cannot be opened because the developer cannot be verified":**
+The downloaded binary isn't signed/notarized yet. Clear the quarantine attribute:
+
+```bash
+xattr -d com.apple.quarantine ~/.nit/bin/nit ~/.nit/bin/nit-mcp-server
+```
+
+This is only needed once per install and only triggers on machines where the binary went through a browser download (the `curl | bash` flow usually skips it).
+
+**`nit` not found after install:**
+The installer doesn't auto-modify your shell config; it prints a `PATH` hint at the end. Either start a new shell session after adding the export line, or run with the absolute path: `~/.nit/bin/nit --version`.
 
 ## Quick start
 
