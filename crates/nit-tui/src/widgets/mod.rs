@@ -28,6 +28,7 @@ pub mod protocol_picker;
 pub mod rule_picker;
 pub mod signals_view;
 pub mod substrate_overlay;
+pub(crate) mod tab_expand;
 pub mod text_selection;
 mod text_utils;
 pub mod top_bar;

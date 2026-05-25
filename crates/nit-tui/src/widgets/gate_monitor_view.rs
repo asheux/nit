@@ -275,6 +275,10 @@ pub fn render(
     let scroll = state.gate_monitor_scroll.min(max_scroll);
     state.gate_monitor_last_max_scroll = max_scroll;
     state.gate_monitor_scroll = scroll;
+    let lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .map(crate::widgets::tab_expand::expand_tabs_in_line)
+        .collect();
     let para = Paragraph::new(lines)
         .style(Style::default().bg(theme.background).fg(theme.foreground))
         .scroll((scroll as u16, 0));

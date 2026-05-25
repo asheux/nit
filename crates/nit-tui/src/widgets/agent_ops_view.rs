@@ -687,6 +687,10 @@ pub fn render(
         AgentOpsTab::Roster => ops_table_bg(theme),
         _ => theme.background,
     };
+    let visible: Vec<Line<'static>> = visible
+        .into_iter()
+        .map(crate::widgets::tab_expand::expand_tabs_in_line)
+        .collect();
     frame.render_widget(
         Paragraph::new(visible).style(Style::default().bg(body_bg)),
         chunks[2],

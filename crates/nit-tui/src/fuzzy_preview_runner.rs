@@ -21,6 +21,7 @@ const PREVIEW_MAX_BYTES: usize = 256 * 1024;
 const PREVIEW_MAX_LINE_BYTES: usize = 4 * 1024;
 const PREVIEW_CACHE_CAP: usize = 32;
 const HIGHLIGHT_WAIT: Duration = Duration::from_millis(180);
+const TAB_WIDTH: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct PreviewModel {
@@ -491,7 +492,36 @@ fn styled_line(
     let mut styles = vec![default_style; chars.len()];
     apply_syntax_styles(&mut styles, mapped, theme);
     apply_overlay_styles(&mut styles, overlay, theme);
+    // Expand TABs to spaces. `UnicodeWidthStr::width("\t")` returns 1, so ratatui's
+    // Paragraph writes `\t` into the buffer cell verbatim; crossterm then `Print`s
+    // it and the terminal jumps to the next tab stop, leaving the cells the diff
+    // believed it had overwritten still showing the previous frame's chars.
+    let (chars, styles) = expand_tabs(chars, styles);
     flatten_runs(chars, styles)
+}
+
+fn expand_tabs(chars: Vec<char>, styles: Vec<Style>) -> (Vec<char>, Vec<Style>) {
+    if !chars.contains(&'\t') {
+        return (chars, styles);
+    }
+    let mut out_chars = Vec::with_capacity(chars.len());
+    let mut out_styles = Vec::with_capacity(styles.len());
+    let mut col = 0usize;
+    for (ch, style) in chars.into_iter().zip(styles.into_iter()) {
+        if ch == '\t' {
+            let advance = TAB_WIDTH - (col % TAB_WIDTH);
+            for _ in 0..advance {
+                out_chars.push(' ');
+                out_styles.push(style);
+            }
+            col += advance;
+        } else {
+            out_chars.push(ch);
+            out_styles.push(style);
+            col += 1;
+        }
+    }
+    (out_chars, out_styles)
 }
 
 fn apply_syntax_styles(

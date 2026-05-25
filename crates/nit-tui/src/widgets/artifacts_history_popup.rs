@@ -265,6 +265,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         theme.selection_bg,
         scroll,
     );
+    let lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .map(crate::widgets::tab_expand::expand_tabs_in_line)
+        .collect();
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.foreground).bg(theme.background))
         .wrap(Wrap { trim: false })
