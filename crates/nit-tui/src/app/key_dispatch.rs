@@ -4,7 +4,7 @@ use arboard::Clipboard;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
     actions::Action, apply_action, AgentChannel, AgentMessage, AgentOpsTab, AppKind, AppState,
-    Mode, PaneId, Prompt, SearchMode, YankKind,
+    JumpEntry, Mode, PaneId, Prompt, SearchMode, YankKind,
 };
 
 use crate::{syntax::SyntaxRuntime, vitals::VitalsState};
@@ -31,6 +31,9 @@ pub(super) fn handle_editor_buffer_shortcuts(
     }
     if state.file_tree.open && state.focus == PaneId::Editor {
         return false;
+    }
+    if handle_jumplist_shortcut(key, state) {
+        return true;
     }
     let (buffer_id, is_editor) = match state.focus {
         PaneId::Editor => (state.active_editor_buffer_id, true),
@@ -420,10 +423,14 @@ pub(super) fn handle_paste_event(
         return false;
     }
 
+    if let Some(prompt) = state.search_prompt.as_mut() {
+        prompt.append_paste(text);
+        state.recompute_incremental_search();
+        return true;
+    }
+
     if let Some(command_line) = state.command_line.as_mut() {
-        for ch in text.chars() {
-            command_line.insert(ch);
-        }
+        command_line.append_paste(text);
         return true;
     }
 
@@ -450,6 +457,71 @@ pub(super) fn handle_paste_event(
     }
 
     false
+}
+
+/// T5: Ctrl-O walks the jumplist back, Ctrl-I walks it forward. Gated on
+/// Normal mode + Editor focus so the chord doesn't fight Tab's
+/// FocusNextPane / InsertTab role elsewhere. Returns `true` when the key
+/// was consumed.
+pub(super) fn handle_jumplist_shortcut(key: KeyEvent, state: &mut AppState) -> bool {
+    if state.focus != PaneId::Editor || state.mode != Mode::Normal {
+        return false;
+    }
+    let is_ctrl_o = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('o'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } | KeyEvent {
+            code: KeyCode::Char('\u{f}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+    );
+    let is_ctrl_i = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('i'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+    );
+    if !is_ctrl_o && !is_ctrl_i {
+        return false;
+    }
+    let buffer_id = state.active_editor_buffer_id;
+    let outcome = if is_ctrl_o {
+        nit_core::jumplist_step_back(&mut state.jumplist, buffer_id)
+    } else {
+        nit_core::jumplist_step_forward(&mut state.jumplist, buffer_id)
+    };
+    match outcome {
+        nit_core::JumpStepOutcome::Empty => {
+            let direction = if is_ctrl_o { "older" } else { "newer" };
+            state.status = Some(format!("No {direction} jump position"));
+        }
+        nit_core::JumpStepOutcome::CrossBuffer { .. } => {
+            state.status = Some("Cross-buffer jumps not supported yet".into());
+        }
+        nit_core::JumpStepOutcome::InBuffer { line, col } => {
+            let total = state.editor_buffer().lines_len();
+            if total == 0 {
+                return true;
+            }
+            let target_line = line.min(total - 1);
+            let buf = state.editor_buffer_mut();
+            let visible_chars = buf
+                .line_as_string(target_line)
+                .chars()
+                .take_while(|c| *c != '\n' && *c != '\r')
+                .count();
+            buf.cursor.line = target_line;
+            buf.cursor.col = col.min(visible_chars);
+            buf.ensure_visible();
+        }
+    }
+    true
 }
 
 pub(super) fn map_key_to_action(
@@ -1275,7 +1347,29 @@ pub(super) fn handle_clipboard_copy(
     clipboard: &mut Option<Clipboard>,
     action: &Action,
 ) {
-    if !matches!(action, Action::YankSelection | Action::YankLine) {
+    // Every action that writes the yank register also mirrors to the OS
+    // clipboard so `dd` / `D` / `dw` produce text that the user can paste
+    // outside nit. The flat `state.yank` field is the single source of
+    // truth — these arms only gate which actions count as a copy event.
+    if !matches!(
+        action,
+        Action::YankSelection
+            | Action::YankLine
+            | Action::DeleteLine
+            | Action::DeleteToEnd
+            | Action::ChangeToEnd
+            | Action::ChangeWordEnd
+            | Action::ChangeBigWordEnd
+            | Action::ChangeWordBack
+            | Action::ChangeBigWordBack
+            | Action::ChangeLine
+            | Action::DeleteWordForward
+            | Action::DeleteWordEnd
+            | Action::DeleteWordBack
+            | Action::DeleteBigWordForward
+            | Action::DeleteBigWordEnd
+            | Action::DeleteBigWordBack
+    ) {
         return;
     }
     if let (Some(text), Some(cb)) = (state.yank.as_ref(), clipboard.as_mut()) {

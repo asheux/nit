@@ -78,6 +78,14 @@ impl Buffer {
             .find(|ch| !is_indent_ws(*ch))
     }
 
+    /// First non-blank char between the cursor and the **end of the current
+    /// line** — intentionally line-scoped. The smart-Enter pair-expansion in
+    /// `build_indented_newline` uses this to confirm the closer is sitting
+    /// right next to the opener, so an already-multiline `fn foo(\n|\n)`
+    /// does NOT trigger a fresh expansion (the user already broke the pair
+    /// across lines). The single-line-pair invariant is pinned by
+    /// `smart_enter_does_not_expand_across_existing_newlines` in
+    /// `tests/buffer.rs`.
     pub(super) fn first_non_ws_after_cursor(&self) -> Option<char> {
         let line = self.clamped_cursor_line();
         let line_end = self.rope.line_to_char(line) + self.line_char_len(line);
@@ -97,6 +105,23 @@ pub(super) fn matching_closer(opener: char) -> Option<char> {
         '{' => Some('}'),
         '(' => Some(')'),
         '[' => Some(']'),
+        _ => None,
+    }
+}
+
+/// Matched-pair lookup spanning bracket *and* quote pairs. Used by the
+/// auto-pair-aware backspace path: deleting an opener that sits immediately
+/// before its closer removes both as one edit. Quotes are intentionally
+/// excluded from [`is_indent_opener`] / [`matching_closer`] because the
+/// smart-newline + `o`-line expansion that those helpers gate is only
+/// meaningful for code blocks, not string literals.
+pub(super) fn pair_opener_closer(opener: char) -> Option<char> {
+    match opener {
+        '{' => Some('}'),
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
         _ => None,
     }
 }

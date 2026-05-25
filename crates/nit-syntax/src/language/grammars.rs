@@ -47,6 +47,15 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
         // Dockerfile so detection (filename + extension) keeps working;
         // highlights are skipped until upstream ships a compatible crate.
         LanguageId::Dockerfile => None,
+        // Dotenv (`.env`, `.env.local`, …) reuses the bash grammar: the
+        // file content is shell-style `KEY=value`, and tree-sitter-bash
+        // is already a workspace dep — no new crate, no Cargo.lock churn.
+        LanguageId::Dotenv => Some(tree_sitter_bash::LANGUAGE.into()),
+        // Wolfram has no maintained tree-sitter crate compatible with 0.25.
+        // Mirror the Dockerfile arm: `LANGUAGES` claims `.wl` / `.wls` for
+        // status-bar labelling and code-block alias resolution, but
+        // highlights stay disabled until a usable grammar ships.
+        LanguageId::Wolfram => None,
         LanguageId::PlainText => None,
     }
 }
@@ -86,6 +95,11 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
         LanguageId::Lean => Some(include_str!("../../queries/lean/highlights.scm")),
         LanguageId::Swift => Some(include_str!("../../queries/swift/highlights.scm")),
         LanguageId::Dockerfile => Some(include_str!("../../queries/dockerfile/highlights.scm")),
+        // The bash grammar's stock highlight query labels every `KEY=value`
+        // assignment as the noisy variable kind; a tighter query keeps
+        // names crisp.
+        LanguageId::Dotenv => Some(include_str!("../../queries/dotenv/highlights.scm")),
+        LanguageId::Wolfram => None,
         LanguageId::PlainText => None,
     }
 }

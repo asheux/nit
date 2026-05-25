@@ -12,6 +12,18 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
+/// Per-render search-highlight spec. `live` means a `/` prompt is open and
+/// the term is being typed — `editor_view` paints those matches with a
+/// stronger style on the cursor's own line so the operator can see which
+/// hit `Enter` will commit to.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchHighlight<'a> {
+    pub term: &'a str,
+    pub whole_word: bool,
+    pub case_insensitive: bool,
+    pub live: bool,
+}
+
 const EDITOR_TITLE: &str = "EDITOR  [ SAVE ]";
 const DEFAULT_LINE_NUM_WIDTH: usize = 3;
 const GUTTER_PAD_CHARS: usize = 4;
@@ -59,8 +71,11 @@ pub fn render_editor(
     )
 }
 
-// Overlay a search highlight for `term` while a vim `/`, `*`, or `#` search
-// is active; `whole_word` gates the vim `*`/`#` behaviour.
+/// Overlay a search highlight for `term` while a vim `/`, `*`, or `#`
+/// search is active. Pass `SearchHighlight::live` to render the
+/// "type-time" style — used while the `/` prompt is still open — which
+/// matches every occurrence in the viewport and emphasises the cursor's
+/// match more strongly than the committed-search style.
 #[allow(clippy::too_many_arguments)]
 pub fn render_editor_with_search(
     frame: &mut Frame,
@@ -72,7 +87,7 @@ pub fn render_editor_with_search(
     mode: Mode,
     theme: &Theme,
     tab_width: usize,
-    search: Option<(&str, bool)>,
+    search: Option<SearchHighlight<'_>>,
 ) -> Option<CursorPlacement> {
     render_buffer(
         frame,
@@ -105,7 +120,7 @@ pub fn render_buffer(
     tab_width: usize,
     show_cursor: bool,
     mode: Mode,
-    search: Option<(&str, bool)>,
+    search: Option<SearchHighlight<'_>>,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
     let content_bg = buffer_input_bg(theme, focused);
@@ -320,7 +335,7 @@ fn render_lines<'a>(
     content_width: usize,
     tab_width: usize,
     selection: Option<(usize, usize)>,
-    search: Option<(&str, bool)>,
+    search: Option<SearchHighlight<'_>>,
 ) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::with_capacity(line_data.len());
     for (row, data) in line_data.iter().enumerate() {
@@ -380,20 +395,34 @@ fn apply_search_highlights(
     line_idx: usize,
     actual_lines: usize,
     theme: &Theme,
-    search: Option<(&str, bool)>,
+    search: Option<SearchHighlight<'_>>,
 ) {
-    let Some((term, whole_word)) = search else {
+    let Some(highlight) = search else {
         return;
     };
-    if term.is_empty() || line_idx >= actual_lines {
+    if highlight.term.is_empty() || line_idx >= actual_lines {
         return;
     }
-    let matches = buffer.search_line_matches(line_idx, term, whole_word);
+    let matches = buffer.search_line_matches_opt(
+        line_idx,
+        highlight.term,
+        highlight.whole_word,
+        highlight.case_insensitive,
+    );
+    let cursor_on_line = highlight.live && line_idx == buffer.cursor.line;
     for (m_start, m_end) in matches {
+        let is_current =
+            cursor_on_line && buffer.cursor.col >= m_start && buffer.cursor.col < m_end;
         for idx in m_start..m_end.min(styles.len()) {
-            styles[idx] = styles[idx]
+            let mut style = styles[idx]
                 .bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD);
+            if is_current {
+                // Reverse-video the active match so the operator can see
+                // which hit `Enter` will commit when the `/` prompt is open.
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            styles[idx] = style;
         }
     }
 }

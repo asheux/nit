@@ -243,6 +243,8 @@ fn registry_label(language: LanguageId) -> &'static str {
         LanguageId::Lean => "lean",
         LanguageId::Swift => "swift",
         LanguageId::Dockerfile => "dockerfile",
+        LanguageId::Dotenv => "dotenv",
+        LanguageId::Wolfram => "wolfram",
         LanguageId::PlainText => "plaintext",
     }
 }

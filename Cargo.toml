@@ -1,3 +1,9 @@
+# Workspace manifest. The vim-cluster PR (T1–T11) deliberately does NOT
+# add or bump any workspace dependency: `.env` files ride on the
+# existing `tree-sitter-bash` 0.23 (see `crates/nit-syntax/Cargo.toml`),
+# and Wolfram ships without a grammar (no crate vendored). Keeping
+# `Cargo.lock` untouched preserves CI's `--locked` invariant per
+# `CLAUDE.md`.
 [workspace]
 members = [
     "crates/nit",

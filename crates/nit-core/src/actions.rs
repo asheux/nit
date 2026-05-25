@@ -138,6 +138,17 @@ pub enum Action {
     // --- Vim-style editor operators (no explicit motion pairing) ---
     DeleteToEnd,
     ChangeToEnd,
+    /// `cw` / `ce` — change to end of word, then enter Insert mode.
+    /// Both `cw` and `ce` route here per vim's `cw == ce` quirk.
+    ChangeWordEnd,
+    /// `cW` / `cE` — same as `ChangeWordEnd` but using WORD boundaries.
+    ChangeBigWordEnd,
+    /// `cb` — change backward to start of word, then enter Insert mode.
+    ChangeWordBack,
+    /// `cB` — change backward to start of WORD, then enter Insert mode.
+    ChangeBigWordBack,
+    /// `cc` — change entire line (preserve indent), then enter Insert mode.
+    ChangeLine,
     SubstituteChar,
     SubstituteLine,
     JoinLines,
@@ -177,4 +188,22 @@ pub enum Action {
     /// `state.pending_count`. `5` then `6` then `j` runs MoveDown 56 times;
     /// any non-digit non-motion action clears the count.
     AppendCountDigit(u8),
+    // --- Vim word-delete operators (T2) ---
+    /// `dw`: delete from cursor to start of next word/class run.
+    DeleteWordForward,
+    /// `de`: delete to end of current/next word (inclusive).
+    DeleteWordEnd,
+    /// `db`: delete back to the start of the previous word/class run.
+    DeleteWordBack,
+    /// `dW`: WORD-aware forward delete (whitespace-separated runs).
+    DeleteBigWordForward,
+    /// `dE`: WORD-aware delete to end of run.
+    DeleteBigWordEnd,
+    /// `dB`: WORD-aware backward delete.
+    DeleteBigWordBack,
+    // --- Jumplist navigation (T5) ---
+    /// `Ctrl-O`: pop the previous jumplist position.
+    JumpBack,
+    /// `Ctrl-I`: advance to the next jumplist position.
+    JumpForward,
 }

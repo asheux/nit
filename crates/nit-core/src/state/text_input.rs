@@ -1,10 +1,8 @@
 //! Single-line text input widgets shared between the editor's `/` search
 //! prompt and the `:` command line.
 
-/// Vim-style in-editor search state. Tracks the active term, whether `*`/`#`
-/// started it (which forces whole-word matching), and the last direction so
-/// `n` repeats it and `N` reverses. Shared across editor buffers, matching
-/// vim's globally-scoped last-search pattern.
+use crate::cursor::Cursor;
+
 #[derive(Clone, Debug, Default)]
 pub struct EditorSearch {
     pub term: Option<String>,
@@ -23,15 +21,28 @@ impl EditorSearch {
     }
 }
 
+/// `/` prompt state. Holds the in-progress query, an insertion cursor, and
+/// the cursor position from before the prompt opened so `Esc` can restore
+/// it (vim's incremental-search semantics).
 #[derive(Clone, Debug, Default)]
 pub struct SearchPrompt {
     pub input: String,
     pub cursor: usize,
+    /// Cursor + buffer the user was on when `/` opened. Used by `Esc` to
+    /// jump back; persists through every keystroke until the prompt closes.
+    pub pre_search_cursor: Option<(usize, Cursor)>,
 }
 
 impl SearchPrompt {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_origin(buffer_id: usize, cursor: Cursor) -> Self {
+        Self {
+            pre_search_cursor: Some((buffer_id, cursor)),
+            ..Self::default()
+        }
     }
 
     pub fn insert(&mut self, ch: char) {
@@ -41,6 +52,30 @@ impl SearchPrompt {
     pub fn backspace(&mut self) {
         backspace_at_cursor(&mut self.input, &mut self.cursor);
     }
+
+    /// Append a bracketed-paste payload, dropping anything after the first
+    /// newline. Vim treats `/` as single-line, so a pasted multi-line blob
+    /// becomes its leading line.
+    pub fn append_paste(&mut self, text: &str) {
+        let head = text.split(['\n', '\r']).next().unwrap_or("");
+        for ch in head.chars() {
+            self.insert(ch);
+        }
+    }
+
+    /// Vim smart-case: lowercase-only query → case-insensitive; any uppercase
+    /// char → case-sensitive. Mirrors `:set smartcase`.
+    pub fn case_insensitive(&self) -> bool {
+        smart_case_insensitive(&self.input)
+    }
+}
+
+/// Returns `true` when `term` should match case-insensitively under vim's
+/// smart-case rule. Exposed at module scope so callers that don't have a
+/// `SearchPrompt` handy (e.g. the `editor_search.term` highlight path on
+/// the next render) can apply the same logic.
+pub fn smart_case_insensitive(term: &str) -> bool {
+    !term.chars().any(|c| c.is_uppercase())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -72,6 +107,15 @@ impl CommandLine {
         let len = self.input.chars().count();
         if self.cursor < len {
             self.cursor += 1;
+        }
+    }
+
+    /// `:` is single-line; a paste with embedded newlines truncates at the
+    /// first one (vim ex-line parity).
+    pub fn append_paste(&mut self, text: &str) {
+        let head = text.split(['\n', '\r']).next().unwrap_or("");
+        for ch in head.chars() {
+            self.insert(ch);
         }
     }
 }

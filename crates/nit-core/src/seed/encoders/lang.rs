@@ -2,9 +2,18 @@
 //!
 //! `SeedLanguage` is duplicated here (rather than reused from `nit-syntax`)
 //! to avoid a dependency cycle — `nit-syntax` already depends on
-//! `nit-core`. The variant set must stay in lock-step with
-//! `nit_syntax::LanguageId`, minus `PlainText` (enum-only sentinel) and
-//! minus `Dockerfile` (grammar crate wedged at an older tree-sitter ABI).
+//! `nit-core`. The variant set tracks `nit_syntax::LanguageId`, minus:
+//!   - `PlainText` (enum-only sentinel),
+//!   - `Dockerfile` (grammar crate wedged at an older tree-sitter ABI),
+//!   - `Wolfram` (no tree-sitter crate compatible with 0.25; the
+//!     status-bar label is set in `LANGUAGES` but the encoders have no
+//!     parser to feed).
+//!
+//! `Dotenv` rides on the bash grammar — `.env` files are shell-style
+//! `KEY=value` assignments, and the bash parser produces a usable AST
+//! for them. `is_code: false` in `LANGUAGES` keeps the workspace scan
+//! from genome-scoring config files in practice, but the parser arm is
+//! wired so a `Buffer` opened from `.env` still gets a tree.
 //!
 //! Path → variant resolution delegates to [`crate::languages`], the
 //! single source of truth for label / extension / filename mapping. Only
@@ -45,11 +54,13 @@ pub(crate) enum SeedLanguage {
     Make,
     Lean,
     Swift,
+    Dotenv,
 }
 
 impl SeedLanguage {
     /// Map a `LANGUAGES` label back to a `SeedLanguage` variant. Returns
-    /// `None` for labels the seed encoders do not parse (`dockerfile`).
+    /// `None` for labels the seed encoders do not parse: `dockerfile`
+    /// (ABI mismatch) and `wolfram` (no compatible grammar).
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         Some(match label {
             "rust" => Self::Rust,
@@ -80,6 +91,7 @@ impl SeedLanguage {
             "make" => Self::Make,
             "lean" => Self::Lean,
             "swift" => Self::Swift,
+            "dotenv" => Self::Dotenv,
             _ => return None,
         })
     }
@@ -121,6 +133,9 @@ impl SeedLanguage {
             Self::Make => tree_sitter_make::LANGUAGE.into(),
             Self::Lean => tree_sitter_lean4::language(),
             Self::Swift => tree_sitter_swift::LANGUAGE.into(),
+            // Dotenv reuses the bash grammar; see the module-level
+            // comment for the rationale.
+            Self::Dotenv => tree_sitter_bash::LANGUAGE.into(),
         }
     }
 }

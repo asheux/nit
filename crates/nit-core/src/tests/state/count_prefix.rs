@@ -137,3 +137,62 @@ fn command_line_bare_number_clamps_to_last_line_when_too_large() {
     assert!(!handle_command_line(&mut state, "9999"));
     assert_eq!(state.editor_buffer().cursor.line, 9);
 }
+
+// --- Count + operator (T2 follow-up: `3dw`, `2db`, `2dW`) ---
+//
+// These pin the count-prefix → DeleteWord* end-to-end path that the
+// `tests/vim_semantics.rs::counts_apply_to_motions_and_operators`
+// placeholder was waiting on. Each test seeds a count, fires the
+// action, and asserts both the buffer content and the cursor landing.
+
+fn state_with_text(text: &str) -> AppState {
+    let mut state = AppState::new(
+        crate::test_helpers::temp_dir("count-operator"),
+        Buffer::from_str("x", text, None),
+        Buffer::empty("n", None),
+    );
+    state.mode = Mode::Normal;
+    state.focus = PaneId::Editor;
+    state
+}
+
+#[test]
+fn three_dw_deletes_three_words_and_leaves_cursor_at_fourth_word() {
+    // vim `3dw`: delete three "word + trailing whitespace" runs starting
+    // at the cursor; cursor lands on the start of the fourth word.
+    let mut state = state_with_text("alpha beta gamma delta epsilon");
+    state.editor_buffer_mut().cursor.col = 0;
+    apply_action(&mut state, Action::AppendCountDigit(3));
+    apply_action(&mut state, Action::DeleteWordForward);
+    assert_eq!(state.editor_buffer().content_as_string(), "delta epsilon");
+    assert_eq!(state.editor_buffer().cursor.line, 0);
+    assert_eq!(state.editor_buffer().cursor.col, 0);
+}
+
+#[test]
+fn two_db_walks_back_two_words() {
+    // vim `2db`: starting from the end of "alpha beta gamma", walk back
+    // two word starts. The buffer shrinks to "alpha " and the cursor
+    // lands on the leading space of "beta" (col 6, the first char of
+    // the removed span).
+    let mut state = state_with_text("alpha beta gamma");
+    state.editor_buffer_mut().cursor.col = 15; // 'a' in gamma's tail (end)
+    apply_action(&mut state, Action::AppendCountDigit(2));
+    apply_action(&mut state, Action::DeleteWordBack);
+    assert_eq!(state.editor_buffer().content_as_string(), "alpha a");
+    assert_eq!(state.editor_buffer().cursor.col, 6);
+}
+
+#[test]
+fn two_dbig_w_deletes_two_big_words() {
+    // vim `2dW`: delete two whitespace-separated runs, even when they
+    // contain punctuation. Starts at col 0; first dW removes
+    // "foo,bar ", second removes "baz=qux " — the dotted tail "end"
+    // survives.
+    let mut state = state_with_text("foo,bar baz=qux end");
+    state.editor_buffer_mut().cursor.col = 0;
+    apply_action(&mut state, Action::AppendCountDigit(2));
+    apply_action(&mut state, Action::DeleteBigWordForward);
+    assert_eq!(state.editor_buffer().content_as_string(), "end");
+    assert_eq!(state.editor_buffer().cursor.col, 0);
+}

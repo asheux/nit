@@ -39,7 +39,9 @@ pub use arbiters::{
     Arbiter, ArbiterFn, InterventionKind, InterventionProposal, InterventionTarget,
     ARBITER_INITIAL_STRENGTH, ARBITER_RETRY_LIMIT, REGISTERED_ARBITERS,
 };
-pub use buffer::{Buffer, BufferEdit, BufferPoint, LineDiffStatus};
+pub use buffer::{
+    Buffer, BufferEdit, BufferPoint, JumpEntry, JumpList, LineDiffStatus, JUMPLIST_CAPACITY,
+};
 pub use config::{
     AgentGenomeConfig, EditorConfig, GenomeGateConfig, GolConfig, GolRuleConfig, GolRulesConfig,
     GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig, GolUserRule,
@@ -72,6 +74,10 @@ pub use seed::{
     encode_seed, EncodedSeed, SeedEncoderId, SeedParams, SeedPlacement, SeedPreviewMode, SeedStats,
     SeedSymmetry,
 };
+pub use state::jumplist::{
+    step_back as jumplist_step_back, step_forward as jumplist_step_forward, JumpStepOutcome,
+};
+pub use state::YankRegister;
 pub use state::{
     apply_action, apply_family_run_runtime_overrides, build_family_run_override_for_request,
     build_family_run_override_for_request_with_timings, build_family_run_override_from_base_config,

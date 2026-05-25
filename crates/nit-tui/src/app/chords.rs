@@ -37,11 +37,25 @@ pub(super) fn handle_normal_chords(
             }
         }
         KeyCode::Char('d') => {
-            if is_normal_mode(state) && input.chord_normal('d', now) {
-                Some(Action::DeleteLine)
-            } else {
-                None
+            // `d` opens an operator-pending state: the next key picks the
+            // motion (`w`/`W`/`e`/`E`/`b`/`B`/`d`/`$`). The chord half-key
+            // tracker is cleared so a stale `g`/`y` doesn't accidentally
+            // pair with this `d`.
+            if is_normal_mode(state) {
+                input.normal_last_char = None;
+                input.pending_editor_op = Some(PendingEditorOp::Delete);
             }
+            None
+        }
+        KeyCode::Char('c') => {
+            // `c` mirrors `d` but the resolved action also switches to Insert
+            // mode (see Change* arms in `action_apply`). Capital `C` is the
+            // standalone `c$` and is handled in `key_dispatch`.
+            if is_normal_mode(state) {
+                input.normal_last_char = None;
+                input.pending_editor_op = Some(PendingEditorOp::Change);
+            }
+            None
         }
         _ => {
             input.normal_last_char = None;
@@ -108,6 +122,77 @@ pub(super) fn handle_editor_pending_op(
         (PendingEditorOp::ZMotion, KeyCode::Char('b')) if plain_or_shift => {
             input.pending_editor_op = None;
             Some(Action::ViewportBottomOnCursor)
+        }
+        // `d` waiting for its motion target. Each arm matches both the
+        // plain character and the shifted form so `dW`/`dE`/`dB` work
+        // regardless of how the terminal reports the modifier mask.
+        (PendingEditorOp::Delete, KeyCode::Char('w')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteWordForward)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('e')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteWordEnd)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('b')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteWordBack)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('W')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteBigWordForward)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('E')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteBigWordEnd)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('B')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteBigWordBack)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('d')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteLine)
+        }
+        (PendingEditorOp::Delete, KeyCode::Char('$')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::DeleteToEnd)
+        }
+        // `c` operator. Vim quirk: `cw` and `cW` route to the *end-of-word*
+        // change (mirrors `ce`/`cE`), not to the start of the next word —
+        // changing past trailing whitespace would push that whitespace into
+        // the user's new text. See `:h cw`.
+        (PendingEditorOp::Change, KeyCode::Char('w')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeWordEnd)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('e')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeWordEnd)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('b')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeWordBack)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('W')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeBigWordEnd)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('E')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeBigWordEnd)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('B')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeBigWordBack)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('c')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeLine)
+        }
+        (PendingEditorOp::Change, KeyCode::Char('$')) if plain_or_shift => {
+            input.pending_editor_op = None;
+            Some(Action::ChangeToEnd)
         }
         _ => {
             input.pending_editor_op = None;

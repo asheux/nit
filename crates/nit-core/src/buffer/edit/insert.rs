@@ -120,6 +120,11 @@ impl Buffer {
         self.insert_char('\t');
     }
 
+    /// Insert mode `<CR>`. A newline always seals the surrounding edit chunk
+    /// (per the dispatcher spec — typing across a newline is two undo steps,
+    /// not one), and the smart-Enter expansion in `build_indented_newline`
+    /// runs under a single `push_undo` so an entry like `fn foo(\n    \n)`
+    /// rewinds in one step.
     pub fn insert_newline(&mut self) {
         if self.selection_range().is_some() {
             self.replace_selection_with_newline_preserve_indent();
@@ -133,13 +138,13 @@ impl Buffer {
         let idx = self.char_index();
         let (text, cursor_col) = self.build_indented_newline(&indent);
 
+        self.end_edit_group();
+        self.push_undo();
         self.record_insert(idx, &text);
-        self.begin_insert_group(idx);
         self.rope.insert(idx, &text);
         self.cursor.line += 1;
         self.cursor.col = cursor_col;
         self.dirty = true;
-        self.finish_insert_group();
     }
 
     pub fn open_line_below(&mut self) {

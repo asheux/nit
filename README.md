@@ -1,6 +1,12 @@
-# nit — Neural Interface Terminal
+# nit - Neural Interface Terminal
 
-A terminal-first, multi-pane TUI editor and **agent station** built in Rust. Secure-by-default, event-driven rendering, multi-backend agent orchestration (Codex + Claude), persistent stigmergic substrate, two built-in research labs (Conway's Game of Life, game-theory tournaments), and a multipane grid mode for driving N concurrent agent sessions from a single terminal.
+AI agents ship code faster than any programmer can keep up with, and the code decays faster than anyone
+can refactor it. nit is a vim-keyed TUI that watches every edit an agent makes and runs it through Conway's
+Game of Life as a fitness function for scoring. Code that scores well propagates and survives, but code
+that scores badly dies out. It is experimental because as of now, we do not quite know whether GoL is indeed
+a better quality measure for code written by everyone, not just agents.
+
+- [Thesis](https://community.wolfram.com/groups/-/m/t/3720941)
 
 ## Install
 

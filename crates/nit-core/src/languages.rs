@@ -14,6 +14,46 @@
 
 use std::path::Path;
 
+/// Default indentation policy advertised by a language. Consumed by
+/// `Buffer::indent_unit` as the fallback when content sniffing finds no
+/// indented lines, and by `insert_tab` so a space-indented language
+/// never inserts a stray `\t`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IndentStyle {
+    /// Hard tabs (Go, Make).
+    Tabs,
+    /// Soft tabs of `width` ASCII spaces.
+    Spaces(u8),
+}
+
+impl IndentStyle {
+    /// String suitable for direct insertion into the rope — one tab or
+    /// `width` spaces.
+    #[must_use]
+    pub fn unit(self) -> String {
+        match self {
+            Self::Tabs => "\t".to_string(),
+            Self::Spaces(width) => " ".repeat(width as usize),
+        }
+    }
+
+    /// `true` for `Tabs`; `false` for any space width.
+    #[must_use]
+    pub fn uses_tabs(self) -> bool {
+        matches!(self, Self::Tabs)
+    }
+
+    /// Column width one indent step occupies on screen — `1` for `Tabs`
+    /// (one char), `n` for `Spaces(n)`.
+    #[must_use]
+    pub fn width(self) -> u8 {
+        match self {
+            Self::Tabs => 1,
+            Self::Spaces(n) => n,
+        }
+    }
+}
+
 /// Metadata for one tree-sitter-supported language. Grammar functions
 /// live in higher-level crates (they need `tree_sitter_<lang>` crates in
 /// scope), so we keep this table grammar-free.
@@ -44,6 +84,11 @@ pub struct LanguageInfo {
     /// skips them to avoid wasting CPU on files that don't carry the
     /// signal the genome encoders measure.
     pub is_code: bool,
+    /// Authoritative indent policy for new files when content sniffing
+    /// finds no indented lines. `None` means "let the buffer fall back
+    /// to its hard-coded default" (used for data formats where the
+    /// editor's default is fine).
+    pub default_indent: Option<IndentStyle>,
 }
 
 /// The master table. Edit here to add a language; every other gate in
@@ -52,6 +97,17 @@ pub struct LanguageInfo {
 /// `Dockerfile` is listed so its extension/filename resolution works,
 /// but `nit-syntax::grammars::tree_sitter_language` returns `None` for
 /// it (upstream `tree-sitter-dockerfile` is wedged at an old ABI).
+///
+/// `Wolfram` is listed for `.wl` / `.wls` detection; `.m` is not
+/// claimed (it overlaps MATLAB and Objective-C, and a wrong default
+/// produces visibly broken highlights). No grammar crate currently
+/// targets tree-sitter 0.25 cleanly, so the grammar arm returns `None`
+/// — the file opens as plain text with a "Wolfram" status label.
+///
+/// `Dotenv` reuses `tree-sitter-bash` (shell-style `KEY=value`); no
+/// dedicated dotenv crate is pulled in. Detection covers `.env`,
+/// `.env.local`, `.env.production`, etc. via the `.env*` filename
+/// pattern in [`detect_by_path`].
 pub const LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
         label: "rust",
@@ -61,6 +117,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["rs", "rust"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "python",
@@ -70,6 +127,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["python", "python3"],
         injection_aliases: &["py", "python"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "javascript",
@@ -79,6 +137,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["node", "deno"],
         injection_aliases: &["js", "javascript"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "typescript",
@@ -88,6 +147,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["ts", "tsx", "typescript"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "markdown",
@@ -97,6 +157,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["md", "markdown"],
         is_code: false,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "html",
@@ -106,6 +167,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["html"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "css",
@@ -115,6 +177,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["css"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "json",
@@ -124,6 +187,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["json", "jsonc", "geojson"],
         is_code: false,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "toml",
@@ -133,6 +197,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["toml"],
         is_code: false,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "yaml",
@@ -142,6 +207,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["yaml", "yml"],
         is_code: false,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "bash",
@@ -151,6 +217,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["bash", "sh", "zsh"],
         injection_aliases: &["bash", "sh", "shell", "shell-session", "console", "zsh"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "go",
@@ -160,6 +227,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["go", "golang"],
         is_code: true,
+        default_indent: Some(IndentStyle::Tabs),
     },
     LanguageInfo {
         label: "c",
@@ -169,6 +237,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["c"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "cpp",
@@ -178,6 +247,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["cpp", "c++", "cxx"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "java",
@@ -187,6 +257,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["java"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "ruby",
@@ -196,6 +267,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["ruby"],
         injection_aliases: &["rb", "ruby"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "lua",
@@ -205,6 +277,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["lua"],
         injection_aliases: &["lua"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "php",
@@ -214,6 +287,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["php"],
         injection_aliases: &["php"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "ocaml",
@@ -223,6 +297,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["ocaml", "ocamlrun"],
         injection_aliases: &["ocaml", "ml"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "haskell",
@@ -232,6 +307,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["runghc", "runhaskell"],
         injection_aliases: &["haskell", "hs"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "elixir",
@@ -241,6 +317,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["elixir"],
         injection_aliases: &["elixir", "ex"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "nix",
@@ -250,6 +327,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["nix"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "kotlin",
@@ -259,6 +337,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["kotlin", "kt"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "sql",
@@ -268,6 +347,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["sql"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "zig",
@@ -277,6 +357,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["zig"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "make",
@@ -286,6 +367,9 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["make", "makefile"],
         is_code: false,
+        // GNU Make requires hard tabs for recipe lines; using spaces
+        // produces "missing separator" errors.
+        default_indent: Some(IndentStyle::Tabs),
     },
     LanguageInfo {
         label: "lean",
@@ -295,6 +379,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["lean"],
         injection_aliases: &["lean", "lean4"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
     LanguageInfo {
         label: "swift",
@@ -304,6 +389,7 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &["swift"],
         injection_aliases: &["swift"],
         is_code: true,
+        default_indent: Some(IndentStyle::Spaces(4)),
     },
     LanguageInfo {
         label: "dockerfile",
@@ -313,6 +399,41 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         shebangs: &[],
         injection_aliases: &["dockerfile", "docker"],
         is_code: false,
+        default_indent: Some(IndentStyle::Spaces(2)),
+    },
+    LanguageInfo {
+        label: "dotenv",
+        display: "Dotenv",
+        // `.env` filenames are matched by the `.env*` pattern in
+        // `detect_by_path`; the bare `.env` is also listed below for
+        // direct lookup.
+        extensions: &[],
+        filenames: &[".env"],
+        shebangs: &[],
+        injection_aliases: &["dotenv", "env"],
+        is_code: false,
+        default_indent: None,
+    },
+    LanguageInfo {
+        label: "wolfram",
+        display: "Wolfram",
+        // `.m` is intentionally omitted — it overlaps MATLAB and
+        // Objective-C. Detection sticks to the unambiguous `.wl`
+        // (package) and `.wls` (script) extensions; users who want
+        // Wolfram highlighting on `.m` files can rename or rely on a
+        // future content-sniff hook.
+        // TODO(filetype-override-T13): add either (a) a first-non-comment
+        // line sniff that picks Wolfram on `Clear[` / `Module[` /
+        // `BeginPackage[`, MATLAB on bare `function`, Objective-C on
+        // `@interface`, OR (b) a user-facing `:set ft=wolfram` style
+        // override that beats path-based detection. Tracked as the
+        // T9.1 follow-up to the T9 language-support ticket.
+        extensions: &["wl", "wls"],
+        filenames: &[],
+        shebangs: &["wolframscript"],
+        injection_aliases: &["wolfram", "mathematica"],
+        is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
     },
 ];
 
@@ -324,8 +445,9 @@ pub const MARKUP_AUXILIARY_EXTENSIONS: &[&str] = &["txt", "conf"];
 // ---------- Lookup helpers ----------
 
 /// Resolve a file's language by trying filename match → extension match →
-/// pattern-based filename suffix/prefix (Dockerfile.prod, foo.mk, etc.).
-/// Returns `None` if the path doesn't match any registered language.
+/// pattern-based filename suffix/prefix (Dockerfile.prod, foo.mk,
+/// .env.production, etc.). Returns `None` if the path doesn't match any
+/// registered language.
 #[must_use]
 pub fn detect_by_path(path: &Path) -> Option<&'static LanguageInfo> {
     if let Some(filename) = path.file_name().and_then(|os| os.to_str()) {
@@ -333,15 +455,21 @@ pub fn detect_by_path(path: &Path) -> Option<&'static LanguageInfo> {
         if let Some(info) = detect_by_filename(&lower) {
             return Some(info);
         }
-        // Pattern-based filenames: Dockerfile.<x>, <x>.dockerfile, etc.
-        // Each language entry lists its primary filenames; suffix/prefix
-        // variants are checked here so we don't have to enumerate every
-        // possible Dockerfile.* in the table.
+        // Pattern-based filenames: Dockerfile.<x>, <x>.dockerfile,
+        // .env.<x>, etc. Each language entry lists its primary filenames;
+        // suffix/prefix variants are checked here so we don't have to
+        // enumerate every possible Dockerfile.* / .env.* in the table.
         if lower.starts_with("dockerfile.") || lower.ends_with(".dockerfile") {
             return detect_by_label("dockerfile");
         }
         if lower.starts_with("makefile.") || lower.ends_with(".make") || lower.ends_with(".mk") {
             return detect_by_label("make");
+        }
+        // `.env`, `.env.local`, `.env.production`, etc. The bare `.env`
+        // is already handled by `detect_by_filename` above; this arm
+        // catches every dotted variant (`.env.<tag>`).
+        if lower.starts_with(".env.") {
+            return detect_by_label("dotenv");
         }
     }
     path.extension()
@@ -469,5 +597,79 @@ mod tests {
                 .unwrap_or_else(|| panic!("expected match for {name}"));
             assert_eq!(info.label, "make", "{name}");
         }
+    }
+
+    #[test]
+    fn detect_by_path_handles_dotenv_variants() {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".env.development.local",
+        ] {
+            let info = detect_by_path(Path::new(name))
+                .unwrap_or_else(|| panic!("expected match for {name}"));
+            assert_eq!(info.label, "dotenv", "{name}");
+        }
+    }
+
+    #[test]
+    fn detect_by_path_handles_wolfram_extensions() {
+        for name in ["foo.wl", "math.wls", "FooBar.WL"] {
+            let info = detect_by_path(Path::new(name))
+                .unwrap_or_else(|| panic!("expected match for {name}"));
+            assert_eq!(info.label, "wolfram", "{name}");
+        }
+    }
+
+    #[test]
+    fn detect_by_path_leaves_dot_m_unclaimed() {
+        // `.m` overlaps MATLAB / Objective-C / Mathematica; the safer
+        // default is plain text (no entry). See `LANGUAGES`'s Wolfram
+        // doc comment for the rationale.
+        assert!(detect_by_path(Path::new("foo.m")).is_none());
+    }
+
+    #[test]
+    fn detect_by_path_does_not_misclaim_env_substring_filenames() {
+        // `environment.json` should resolve to JSON via extension, not
+        // dotenv via the `.env*` pattern.
+        let info = detect_by_path(Path::new("environment.json")).expect("json match");
+        assert_eq!(info.label, "json");
+    }
+
+    #[test]
+    fn default_indent_matrix_matches_language_conventions() {
+        // Spot-check the per-language indent defaults. Drives the T10
+        // fallback consumed by `Buffer::indent_unit` and `insert_tab`.
+        let cases = [
+            ("rust", Some(IndentStyle::Spaces(4))),
+            ("python", Some(IndentStyle::Spaces(4))),
+            ("go", Some(IndentStyle::Tabs)),
+            ("make", Some(IndentStyle::Tabs)),
+            ("javascript", Some(IndentStyle::Spaces(2))),
+            ("typescript", Some(IndentStyle::Spaces(2))),
+            ("html", Some(IndentStyle::Spaces(2))),
+            ("css", Some(IndentStyle::Spaces(2))),
+            ("markdown", Some(IndentStyle::Spaces(2))),
+            ("bash", Some(IndentStyle::Spaces(2))),
+            ("dotenv", None),
+        ];
+        for (label, expected) in cases {
+            let info = detect_by_label(label)
+                .unwrap_or_else(|| panic!("missing language entry for {label}"));
+            assert_eq!(info.default_indent, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn indent_style_unit_matches_width() {
+        assert_eq!(IndentStyle::Tabs.unit(), "\t");
+        assert_eq!(IndentStyle::Spaces(2).unit(), "  ");
+        assert_eq!(IndentStyle::Spaces(4).unit(), "    ");
+        assert!(IndentStyle::Tabs.uses_tabs());
+        assert!(!IndentStyle::Spaces(4).uses_tabs());
+        assert_eq!(IndentStyle::Spaces(4).width(), 4);
+        assert_eq!(IndentStyle::Tabs.width(), 1);
     }
 }

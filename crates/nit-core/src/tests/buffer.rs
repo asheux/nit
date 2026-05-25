@@ -1,5 +1,18 @@
 use super::*;
 
+#[path = "buffer/indent_style.rs"]
+mod indent_style;
+#[path = "buffer/jumplist.rs"]
+mod jumplist;
+#[path = "buffer/smart_newline.rs"]
+mod smart_newline;
+#[path = "buffer/undo_groups.rs"]
+mod undo_groups;
+#[path = "buffer/word_motion.rs"]
+mod word_motion;
+#[path = "buffer/yank_register.rs"]
+mod yank_register;
+
 #[test]
 fn undo_single_step_on_selection_replace_char() {
     let mut buf = Buffer::from_str("test", "hello", None);
@@ -826,4 +839,571 @@ fn repeated_hash_scans_through_matches_backward() {
     // Wrap back to last match.
     assert!(buf.search_prev_match("foo", true));
     assert_eq!(buf.cursor.col, 8);
+}
+
+// --- T1: insert/delete undo chunking ---
+
+#[test]
+fn undo_typing_run_collapses_into_one_step() {
+    let mut buf = Buffer::empty("test", None);
+    for c in "hello".chars() {
+        buf.insert_char(c);
+    }
+    assert_eq!(buf.content_as_string(), "hello");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "");
+}
+
+#[test]
+fn undo_insert_then_motion_then_insert_is_two_steps() {
+    let mut buf = Buffer::empty("test", None);
+    buf.insert_str("abc");
+    buf.move_left();
+    buf.move_right();
+    buf.insert_str("def");
+    assert_eq!(buf.content_as_string(), "abcdef");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abc");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "");
+}
+
+#[test]
+fn undo_inserts_split_by_newline() {
+    let mut buf = Buffer::empty("test", None);
+    buf.insert_str("abc");
+    buf.insert_newline();
+    buf.insert_str("def");
+    assert_eq!(buf.content_as_string(), "abc\ndef");
+    // First undo rewinds the post-newline "def" group.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abc\n");
+    // Second undo rewinds the newline itself.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abc");
+    // Third undo rewinds the original "abc".
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "");
+}
+
+#[test]
+fn undo_contiguous_backspaces_collapse_into_one_step() {
+    let mut buf = Buffer::from_str("test", "hello", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 5;
+    for _ in 0..5 {
+        buf.backspace();
+    }
+    assert_eq!(buf.content_as_string(), "");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "hello");
+}
+
+#[test]
+fn undo_backspace_run_breaks_on_motion() {
+    let mut buf = Buffer::from_str("test", "abcdef", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 6;
+    buf.backspace();
+    buf.backspace(); // "abcd"
+    buf.move_left();
+    buf.move_right();
+    buf.backspace();
+    buf.backspace(); // "ab"
+    assert_eq!(buf.content_as_string(), "ab");
+    // First undo restores the second backspace pair.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abcd");
+    // Second undo restores the first backspace pair.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abcdef");
+}
+
+#[test]
+fn undo_contiguous_forward_deletes_collapse_into_one_step() {
+    let mut buf = Buffer::from_str("test", "hello", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    for _ in 0..5 {
+        buf.delete_forward();
+    }
+    assert_eq!(buf.content_as_string(), "");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "hello");
+}
+
+#[test]
+fn undo_paste_line_below_breaks_group_from_typing() {
+    let mut buf = Buffer::empty("test", None);
+    buf.insert_str("abc");
+    buf.paste_line_below("xyz");
+    // Undo rewinds the paste; the typed "abc" survives.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "abc");
+    // Next undo rewinds the typing.
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "");
+}
+
+// --- T3: bracket-aware backspace ---
+
+#[test]
+fn backspace_collapses_paren_pair_when_cursor_between() {
+    let mut buf = Buffer::from_str("test", "()", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1; // between '(' and ')'
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "");
+    assert_eq!(buf.cursor.col, 0);
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "()");
+}
+
+#[test]
+fn backspace_collapses_bracket_pair() {
+    let mut buf = Buffer::from_str("test", "[]", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "");
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn backspace_collapses_brace_pair() {
+    let mut buf = Buffer::from_str("test", "{}", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "");
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn backspace_collapses_double_quote_pair() {
+    let mut buf = Buffer::from_str("test", "\"\"", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "");
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn backspace_collapses_single_quote_pair() {
+    let mut buf = Buffer::from_str("test", "''", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "");
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn backspace_does_not_collapse_pair_when_chars_between() {
+    let mut buf = Buffer::from_str("test", "(foo)", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1; // between '(' and 'f'
+    buf.backspace();
+    // Only '(' should be deleted — the ')' stays at the end.
+    assert_eq!(buf.content_as_string(), "foo)");
+}
+
+#[test]
+fn backspace_collapses_pair_inside_text() {
+    let mut buf = Buffer::from_str("test", "let v = ();", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 9; // between '(' and ')'
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "let v = ;");
+    assert_eq!(buf.cursor.col, 8);
+}
+
+// --- T6: delete_line LineWise yank + delete_word_* CharWise ---
+
+#[test]
+fn delete_line_returns_linewise_text_with_trailing_newline() {
+    let mut buf = Buffer::from_str("test", "alpha\nbeta\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    let yanked = buf.delete_line();
+    assert_eq!(yanked, "alpha\n");
+    assert_eq!(buf.content_as_string(), "beta\n");
+}
+
+#[test]
+fn delete_line_appends_trailing_newline_for_final_line() {
+    // Final line has no trailing newline in source; the yank must still be
+    // line-wise so a later `p` paste re-creates the row.
+    let mut buf = Buffer::from_str("test", "only", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    let yanked = buf.delete_line();
+    assert_eq!(yanked, "only\n");
+}
+
+#[test]
+fn delete_word_forward_returns_removed_text_charwise() {
+    let mut buf = Buffer::from_str("test", "foo bar", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    let yanked = buf.delete_word_forward();
+    assert_eq!(yanked, "foo ");
+    assert_eq!(buf.content_as_string(), "bar");
+    // CharWise: never carries a leading/trailing newline.
+    assert!(!yanked.contains('\n'));
+}
+
+#[test]
+fn delete_word_back_returns_removed_text_charwise() {
+    let mut buf = Buffer::from_str("test", "foo bar", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 7;
+    let yanked = buf.delete_word_back();
+    assert_eq!(yanked, "bar");
+    assert_eq!(buf.content_as_string(), "foo ");
+}
+
+#[test]
+fn delete_to_end_returns_removed_text_charwise() {
+    let mut buf = Buffer::from_str("test", "hello world", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 5;
+    let yanked = buf.delete_to_end();
+    assert_eq!(yanked, " world");
+    assert_eq!(buf.content_as_string(), "hello");
+}
+
+// --- T11: smart Enter inside bracket pairs ---
+
+#[test]
+fn smart_enter_expands_paren_pair_at_line_start() {
+    let mut buf = Buffer::from_str("test", "()", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1; // between '(' and ')'
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "(\n    \n)");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+#[test]
+fn smart_enter_expands_bracket_pair_at_line_start() {
+    let mut buf = Buffer::from_str("test", "[]", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "[\n    \n]");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+#[test]
+fn smart_enter_expands_brace_pair_mid_line() {
+    let mut buf = Buffer::from_str("test", "let f = {};", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 9; // between '{' and '}'
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "let f = {\n    \n};");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+#[test]
+fn smart_enter_expands_paren_pair_at_end_of_line() {
+    // Cursor sits one past the opener with the closer immediately after.
+    let mut buf = Buffer::from_str("test", "fn f()", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 5; // between '(' and ')'
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "fn f(\n    \n)");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+#[test]
+fn smart_enter_does_not_expand_quote_pair() {
+    // Quotes are excluded from `is_indent_opener` because they don't open
+    // an indent scope — pressing Enter inside `""` should produce a plain
+    // newline, not a multi-line expansion.
+    let mut buf = Buffer::from_str("test", "\"\"", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "\"\n\"");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn smart_enter_pair_expansion_is_one_undo_step() {
+    let mut buf = Buffer::from_str("test", "fn f() {}", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 8; // between '{' and '}'
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "fn f() {\n    \n}");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "fn f() {}");
+}
+
+#[test]
+fn smart_enter_does_not_expand_across_existing_newlines() {
+    // T11 invariant: `build_indented_newline` only expands when the
+    // opener and the closer sit on the same line. Once the pair has
+    // already been broken across lines (cursor on a blank middle line
+    // between `(` above and `)` below), pressing Enter inserts a plain
+    // indented newline — it does NOT pull `)` up onto a new third
+    // line. Documented on `first_non_ws_after_cursor` in `indent.rs`.
+    let mut buf = Buffer::from_str("test", "fn foo(\n    \n)", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 4;
+    buf.insert_newline();
+    assert_eq!(buf.content_as_string(), "fn foo(\n    \n    \n)");
+    assert_eq!(buf.cursor.line, 2);
+    assert_eq!(buf.cursor.col, 4);
+}
+
+// --- T4: char-class word motions on mixed punctuation runs ---
+
+#[test]
+fn w_walks_class_boundaries_in_quoted_phrase() {
+    // T4 ticket spec — `foo "bar" (baz)` is the operator's literal
+    // acceptance string. `w` lands on the start of every new class
+    // (word / punct / whitespace) run, which gives six stops:
+    //   foo → "  (0 → 4)
+    //   "   → bar (4 → 5)
+    //   bar → "   (5 → 8)
+    //   "   → (   (8 → 10) — the trailing space is skipped
+    //   (   → baz (10 → 11)
+    //   baz → )   (11 → 14)
+    let mut buf = Buffer::from_str("t", "foo \"bar\" (baz)", None);
+    buf.cursor.col = 0;
+    let landings = [4, 5, 8, 10, 11, 14];
+    for expected in landings {
+        buf.move_word_forward();
+        assert_eq!(buf.cursor.col, expected, "w step landed on {expected}");
+    }
+}
+
+#[test]
+fn e_walks_class_boundaries_in_quoted_phrase() {
+    // `foo "bar" (baz)` — `e` lands on the end of every class run:
+    //   foo → " (2 → 4); " → bar (4 → 7); bar → " (7 → 8);
+    //   " → ( (8 → 10); ( → baz (10 → 13); baz → ) (13 → 14).
+    let mut buf = Buffer::from_str("t", "foo \"bar\" (baz)", None);
+    buf.cursor.col = 0;
+    let landings = [2, 4, 7, 8, 10, 13, 14];
+    for expected in landings {
+        buf.move_word_end();
+        assert_eq!(buf.cursor.col, expected, "e step landed on {expected}");
+    }
+}
+
+#[test]
+fn b_walks_class_boundaries_in_quoted_phrase() {
+    // From the trailing `)` of `foo "bar" (baz)`, `b` walks back through
+    // every class start: ) → ( → baz → ( → " → bar → " → foo.
+    let mut buf = Buffer::from_str("t", "foo \"bar\" (baz)", None);
+    buf.cursor.col = 14; // on ')'
+    let landings = [11, 10, 8, 5, 4, 0];
+    for expected in landings {
+        buf.move_word_back();
+        assert_eq!(buf.cursor.col, expected, "b step landed on {expected}");
+    }
+}
+
+#[test]
+fn big_w_jumps_run_to_run_in_quoted_phrase() {
+    // `W` ignores intra-WORD punctuation: `foo "bar" (baz)` is three
+    // WORDS — `foo`, `"bar"`, `(baz)`.
+    let mut buf = Buffer::from_str("t", "foo \"bar\" (baz)", None);
+    buf.cursor.col = 0;
+    buf.move_big_word_forward();
+    assert_eq!(buf.cursor.col, 4); // start of "bar"
+    buf.move_big_word_forward();
+    assert_eq!(buf.cursor.col, 10); // start of (baz)
+    buf.move_big_word_back();
+    assert_eq!(buf.cursor.col, 4);
+    buf.move_big_word_back();
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn big_e_lands_on_last_char_of_each_run() {
+    let mut buf = Buffer::from_str("t", "foo \"bar\" (baz)", None);
+    buf.cursor.col = 0;
+    buf.move_big_word_end();
+    assert_eq!(buf.cursor.col, 2); // 'o' end of foo
+    buf.move_big_word_end();
+    assert_eq!(buf.cursor.col, 8); // closing '"' of "bar"
+    buf.move_big_word_end();
+    assert_eq!(buf.cursor.col, 14); // ')' end of (baz)
+}
+
+// --- T2: dw / de / db span semantics ---
+
+#[test]
+fn dw_on_whitespace_deletes_only_whitespace_run() {
+    // Cursor on the leading space of " bar" — `dw` deletes the space
+    // up to where `w` would land, leaving "foo" + "bar" → "foobar".
+    let mut buf = Buffer::from_str("t", "foo bar", None);
+    buf.cursor.col = 3;
+    buf.delete_word_forward();
+    assert_eq!(buf.content_as_string(), "foobar");
+    assert_eq!(buf.cursor.col, 3);
+}
+
+#[test]
+fn de_on_last_word_deletes_to_end_of_buffer() {
+    let mut buf = Buffer::from_str("t", "foo bar", None);
+    buf.cursor.col = 4; // 'b' of bar
+    buf.delete_word_end();
+    assert_eq!(buf.content_as_string(), "foo ");
+}
+
+#[test]
+fn de_from_middle_of_word_deletes_to_class_end() {
+    let mut buf = Buffer::from_str("t", "alpha beta", None);
+    buf.cursor.col = 2; // inside 'alpha'
+    buf.delete_word_end();
+    // `e` from inside 'alpha' lands on its last char; `de` deletes that
+    // span (inclusive), leaving "al beta".
+    assert_eq!(buf.content_as_string(), "al beta");
+}
+
+#[test]
+fn db_from_word_start_deletes_back_through_previous_class() {
+    // Cursor on '(' (col 10) of "foo (baz)". `db` walks back through
+    // the whitespace + "foo" word and deletes them.
+    let mut buf = Buffer::from_str("t", "foo (baz)", None);
+    buf.cursor.col = 4; // '('
+    buf.delete_word_back();
+    // After db on '(': deleted "foo " (cols 0..4), result is "(baz)".
+    assert_eq!(buf.content_as_string(), "(baz)");
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn repeated_dw_deletes_three_words() {
+    // Buffer-level `3dw` simulation: action_apply.rs iterates
+    // `delete_word_forward` three times. Each call deletes one
+    // class-run + trailing whitespace, so three calls on "one two three
+    // four" leave "four".
+    let mut buf = Buffer::from_str("t", "one two three four", None);
+    buf.cursor.col = 0;
+    for _ in 0..3 {
+        buf.delete_word_forward();
+    }
+    assert_eq!(buf.content_as_string(), "four");
+}
+
+#[test]
+fn dw_undo_restores_original_content() {
+    let mut buf = Buffer::from_str("t", "foo bar baz", None);
+    buf.cursor.col = 0;
+    buf.delete_word_forward();
+    assert_eq!(buf.content_as_string(), "bar baz");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "foo bar baz");
+}
+
+#[test]
+fn dw_uppercase_deletes_whole_big_word_run_including_punctuation() {
+    // `dW` from start of "foo,bar baz" deletes the entire "foo,bar "
+    // run (punctuation included), leaving "baz".
+    let mut buf = Buffer::from_str("t", "foo,bar baz", None);
+    buf.cursor.col = 0;
+    buf.delete_big_word_forward();
+    assert_eq!(buf.content_as_string(), "baz");
+}
+
+#[test]
+fn de_uppercase_deletes_to_end_of_current_big_word() {
+    let mut buf = Buffer::from_str("t", "foo,bar baz", None);
+    buf.cursor.col = 0;
+    buf.delete_big_word_end();
+    assert_eq!(buf.content_as_string(), " baz");
+}
+
+#[test]
+fn db_uppercase_walks_back_a_whole_big_word() {
+    let mut buf = Buffer::from_str("t", "foo,bar baz", None);
+    buf.cursor.col = 10; // 'z' of baz
+    buf.delete_big_word_back();
+    // dB from 'z': scan_big_word_start_back from col 10 → step to 9
+    // ('a'), still non-ws → walk back to start of run → col 8. Range
+    // 8..10 removed → "foo,bar z".
+    assert_eq!(buf.content_as_string(), "foo,bar z");
+}
+
+// --- T5: jumplist ring buffer ---
+
+#[test]
+fn jumplist_push_and_walk_back() {
+    use crate::buffer::{JumpEntry, JumpList};
+    let mut list = JumpList::new();
+    list.push(JumpEntry::new(0, 10, 5));
+    list.push(JumpEntry::new(0, 20, 0));
+    list.push(JumpEntry::new(1, 5, 7));
+    assert_eq!(list.len(), 3);
+
+    assert_eq!(list.jump_back(), Some(JumpEntry::new(1, 5, 7)));
+    assert_eq!(list.jump_back(), Some(JumpEntry::new(0, 20, 0)));
+    assert_eq!(list.jump_back(), Some(JumpEntry::new(0, 10, 5)));
+    assert_eq!(list.jump_back(), None);
+}
+
+#[test]
+fn jumplist_walk_forward_after_back() {
+    use crate::buffer::{JumpEntry, JumpList};
+    let mut list = JumpList::new();
+    for line in [10, 20, 30] {
+        list.push(JumpEntry::new(0, line, 0));
+    }
+    list.jump_back();
+    list.jump_back();
+    assert_eq!(list.jump_forward(), Some(JumpEntry::new(0, 30, 0)));
+}
+
+#[test]
+fn jumplist_push_truncates_forward_tail() {
+    use crate::buffer::{JumpEntry, JumpList};
+    let mut list = JumpList::new();
+    list.push(JumpEntry::new(0, 1, 0));
+    list.push(JumpEntry::new(0, 2, 0));
+    list.push(JumpEntry::new(0, 3, 0));
+    list.jump_back(); // returns line 3
+    list.jump_back(); // returns line 2 — cursor now points at line 1
+                      // Pushing replaces the abandoned forward tail (lines 2 and 3) with
+                      // the new entry; the original line-1 record stays in front of it.
+    list.push(JumpEntry::new(0, 99, 0));
+    assert_eq!(list.len(), 2);
+    assert_eq!(list.jump_back(), Some(JumpEntry::new(0, 99, 0)));
+    assert_eq!(list.jump_back(), Some(JumpEntry::new(0, 1, 0)));
+    assert_eq!(list.jump_back(), None);
+}
+
+#[test]
+fn jumplist_caps_at_jumplist_capacity_entries() {
+    use crate::buffer::{JumpEntry, JumpList, JUMPLIST_CAPACITY};
+    let mut list = JumpList::new();
+    for line in 0..(JUMPLIST_CAPACITY + 10) {
+        list.push(JumpEntry::new(0, line, 0));
+    }
+    assert_eq!(list.len(), JUMPLIST_CAPACITY);
+    // The oldest entries (lines 0..10) were evicted.
+    while let Some(entry) = list.jump_back() {
+        assert!(entry.line >= 10, "evicted line {} resurfaced", entry.line);
+    }
+}
+
+#[test]
+fn jumplist_dedupes_consecutive_identical_entries() {
+    use crate::buffer::{JumpEntry, JumpList};
+    let mut list = JumpList::new();
+    let here = JumpEntry::new(0, 5, 3);
+    list.push(here);
+    list.push(here);
+    list.push(here);
+    assert_eq!(list.len(), 1);
 }

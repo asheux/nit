@@ -34,12 +34,15 @@ pub struct BufferEdit {
     pub new_end_point: BufferPoint,
 }
 
-/// Kind of the most-recent edit, used to coalesce contiguous typing into a
-/// single undo group. Only `Insert` is currently tracked; the enum exists so
-/// future delete-grouping can be added without re-shaping `EditMeta`.
+/// Kind of the most-recent edit, used to coalesce contiguous edits into a
+/// single undo group. A run of inserts collapses while the cursor advances
+/// through the same position; backspace and forward-delete each track their
+/// own contiguity criterion (cursor walks back vs. cursor stays put).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum EditKind {
     Insert,
+    DeleteBack,
+    DeleteForward,
 }
 
 #[derive(Copy, Clone, Debug)]

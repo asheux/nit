@@ -76,6 +76,13 @@ pub(super) enum PendingEditorOp {
     TillForward,
     TillBack,
     ZMotion,
+    /// `d` waiting for its target motion (`w`/`W`/`e`/`E`/`b`/`B`/`d`/`$`).
+    Delete,
+    /// `c` waiting for its target motion (`w`/`W`/`e`/`E`/`b`/`B`/`c`/`$`).
+    /// Vim quirk: `cw` and `cW` change to the END of the word (like `ce`/`cE`),
+    /// not past trailing whitespace — see the `(Change, 'w' | 'W')` arms in
+    /// `chords::handle_editor_pending_op`.
+    Change,
 }
 
 pub(super) struct InputState {

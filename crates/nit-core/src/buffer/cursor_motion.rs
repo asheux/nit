@@ -101,183 +101,52 @@ impl Buffer {
         self.clamp_col();
     }
 
-    /// vim `e`: end of current/next "word" (alnum + `_`).
+    /// vim `e`: end of current/next "word" — three-class transitions where
+    /// `Word`, `Punct`, and `Whitespace` are each treated as separate runs.
     pub fn move_word_end(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
+        if let Some(idx) = self.scan_word_end_forward() {
+            self.set_cursor_from_char_index(idx);
         }
-        let mut idx = self.char_index();
-        if idx >= len {
-            return;
-        }
-        // Already on the last char of a word — jump past it so `e` advances.
-        if is_word_char(self.rope.char(idx))
-            && idx + 1 < len
-            && !is_word_char(self.rope.char(idx + 1))
-        {
-            idx += 1;
-        }
-        while idx < len && !is_word_char(self.rope.char(idx)) {
-            idx += 1;
-        }
-        if idx >= len {
-            return;
-        }
-        while idx + 1 < len && is_word_char(self.rope.char(idx + 1)) {
-            idx += 1;
-        }
-        self.set_cursor_from_char_index(idx);
     }
 
-    /// vim `b`: previous "word" start.
+    /// vim `b`: previous "word" start using three-class transitions.
     pub fn move_word_back(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
-        }
-        let mut idx = self.char_index();
-        if idx == 0 {
-            return;
-        }
-        if idx >= len {
-            idx = len - 1;
-        }
-        if is_word_char(self.rope.char(idx)) {
-            if idx > 0 && !is_word_char(self.rope.char(idx - 1)) {
-                idx -= 1;
-            }
-        } else {
-            idx -= 1;
-        }
-        while idx > 0 && !is_word_char(self.rope.char(idx)) {
-            idx -= 1;
-        }
-        if !is_word_char(self.rope.char(idx)) {
-            return;
-        }
-        while idx > 0 && is_word_char(self.rope.char(idx - 1)) {
-            idx -= 1;
-        }
+        let idx = self.scan_word_start_back();
         self.set_cursor_from_char_index(idx);
     }
 
-    /// vim `w`: start of next "word" (alnum + `_`) OR next run of
-    /// non-whitespace punctuation. Whitespace is skipped.
+    /// vim `w`: start of next "word" run (word OR punct), skipping
+    /// whitespace between runs.
     pub fn move_word_forward(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
+        if let Some(idx) = self.scan_word_start_forward() {
+            self.set_cursor_from_char_index(idx);
         }
-        let mut idx = self.char_index().min(len);
-        if idx >= len {
-            return;
-        }
-        let cur = self.rope.char(idx);
-        if cur.is_whitespace() {
-            // skip leading whitespace below
-        } else if is_word_char(cur) {
-            while idx < len && is_word_char(self.rope.char(idx)) {
-                idx += 1;
-            }
-        } else {
-            while idx < len {
-                let c = self.rope.char(idx);
-                if c.is_whitespace() || is_word_char(c) {
-                    break;
-                }
-                idx += 1;
-            }
-        }
-        while idx < len && self.rope.char(idx).is_whitespace() {
-            idx += 1;
-        }
-        if idx >= len {
-            idx = len - 1;
-        }
-        self.set_cursor_from_char_index(idx);
     }
 
     /// vim `W`: start of next WORD (whitespace-separated).
     pub fn move_big_word_forward(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
+        if let Some(idx) = self.scan_big_word_start_forward() {
+            self.set_cursor_from_char_index(idx);
         }
-        let mut idx = self.char_index().min(len);
-        if idx >= len {
-            return;
-        }
-        while idx < len && !self.rope.char(idx).is_whitespace() {
-            idx += 1;
-        }
-        while idx < len && self.rope.char(idx).is_whitespace() {
-            idx += 1;
-        }
-        if idx >= len {
-            idx = len - 1;
-        }
-        self.set_cursor_from_char_index(idx);
     }
 
     /// vim `B`: previous WORD start.
     pub fn move_big_word_back(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
-        }
-        let mut idx = self.char_index().min(len);
-        if idx == 0 {
-            return;
-        }
-        idx -= 1;
-        while idx > 0 && self.rope.char(idx).is_whitespace() {
-            idx -= 1;
-        }
-        if self.rope.char(idx).is_whitespace() {
-            self.set_cursor_from_char_index(idx);
-            return;
-        }
-        while idx > 0 && !self.rope.char(idx - 1).is_whitespace() {
-            idx -= 1;
-        }
+        let idx = self.scan_big_word_start_back();
         self.set_cursor_from_char_index(idx);
     }
 
     /// vim `E`: end of current/next WORD.
     pub fn move_big_word_end(&mut self) {
         self.end_edit_group();
-        let len = self.rope.len_chars();
-        if len == 0 {
-            return;
+        if let Some(idx) = self.scan_big_word_end_forward() {
+            self.set_cursor_from_char_index(idx);
         }
-        let mut idx = self.char_index().min(len);
-        if idx + 1 >= len {
-            if idx < len {
-                self.set_cursor_from_char_index(len - 1);
-            }
-            return;
-        }
-        let on_nonws = !self.rope.char(idx).is_whitespace();
-        let at_word_end = on_nonws && self.rope.char(idx + 1).is_whitespace();
-        if at_word_end || self.rope.char(idx).is_whitespace() {
-            idx += 1;
-            while idx < len && self.rope.char(idx).is_whitespace() {
-                idx += 1;
-            }
-        }
-        if idx >= len {
-            return;
-        }
-        while idx + 1 < len && !self.rope.char(idx + 1).is_whitespace() {
-            idx += 1;
-        }
-        self.set_cursor_from_char_index(idx);
     }
 
     /// vim `^`: first non-blank character on the line.
@@ -387,6 +256,193 @@ impl Buffer {
         let h = self.viewport.height.max(1);
         self.cursor.line = (self.viewport.offset_line + h.saturating_sub(1)).min(last);
         self.clamp_col();
+    }
+
+    /// Position the cursor would land on after `w`, or `None` if the cursor
+    /// is already at the end of buffer. Shared between `move_word_forward`
+    /// and `delete_word_forward` so a `dw` deletes exactly the span `w`
+    /// would traverse.
+    pub(super) fn scan_word_start_forward(&self) -> Option<usize> {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return None;
+        }
+        let cls = char_class(self.rope.char(idx));
+        if cls != CharClass::Whitespace {
+            while idx < len && char_class(self.rope.char(idx)) == cls {
+                idx += 1;
+            }
+        }
+        while idx < len && self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        if idx >= len {
+            idx = len - 1;
+        }
+        Some(idx)
+    }
+
+    /// Position the cursor would land on after `b`. Walks back past any
+    /// trailing whitespace then to the start of whichever class lies
+    /// behind the cursor.
+    pub(super) fn scan_word_start_back(&self) -> usize {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return 0;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx == 0 {
+            return 0;
+        }
+        if idx >= len {
+            idx = len.saturating_sub(1);
+        }
+        // Step back one so the cursor leaves its current class boundary.
+        idx -= 1;
+        while idx > 0 && self.rope.char(idx).is_whitespace() {
+            idx -= 1;
+        }
+        if !self.rope.char(idx).is_whitespace() {
+            let cls = char_class(self.rope.char(idx));
+            while idx > 0 && char_class(self.rope.char(idx - 1)) == cls {
+                idx -= 1;
+            }
+        }
+        idx
+    }
+
+    /// Position the cursor would land on after `e`. Advances past the
+    /// current class if the cursor sits on its trailing edge so repeated
+    /// `e` presses walk forward instead of stalling on a boundary.
+    pub(super) fn scan_word_end_forward(&self) -> Option<usize> {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return None;
+        }
+        let cur_cls = char_class(self.rope.char(idx));
+        let at_class_edge = cur_cls == CharClass::Whitespace
+            || idx + 1 >= len
+            || char_class(self.rope.char(idx + 1)) != cur_cls;
+        if at_class_edge {
+            idx += 1;
+            while idx < len && self.rope.char(idx).is_whitespace() {
+                idx += 1;
+            }
+            if idx >= len {
+                return Some(len - 1);
+            }
+        }
+        let cls = char_class(self.rope.char(idx));
+        while idx + 1 < len && char_class(self.rope.char(idx + 1)) == cls {
+            idx += 1;
+        }
+        Some(idx)
+    }
+
+    /// `W`-equivalent landing point: any non-whitespace run is one big WORD.
+    pub(super) fn scan_big_word_start_forward(&self) -> Option<usize> {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return None;
+        }
+        while idx < len && !self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        while idx < len && self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        if idx >= len {
+            idx = len - 1;
+        }
+        Some(idx)
+    }
+
+    /// `B`-equivalent landing point: walks back past whitespace then the
+    /// entire previous non-whitespace run.
+    pub(super) fn scan_big_word_start_back(&self) -> usize {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return 0;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx == 0 {
+            return 0;
+        }
+        if idx >= len {
+            idx = len.saturating_sub(1);
+        }
+        idx -= 1;
+        while idx > 0 && self.rope.char(idx).is_whitespace() {
+            idx -= 1;
+        }
+        if !self.rope.char(idx).is_whitespace() {
+            while idx > 0 && !self.rope.char(idx - 1).is_whitespace() {
+                idx -= 1;
+            }
+        }
+        idx
+    }
+
+    /// `E`-equivalent landing point: end of current/next non-whitespace run.
+    pub(super) fn scan_big_word_end_forward(&self) -> Option<usize> {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return None;
+        }
+        let on_nonws = !self.rope.char(idx).is_whitespace();
+        let at_word_end = on_nonws && (idx + 1 >= len || self.rope.char(idx + 1).is_whitespace());
+        if at_word_end || !on_nonws {
+            idx += 1;
+            while idx < len && self.rope.char(idx).is_whitespace() {
+                idx += 1;
+            }
+            if idx >= len {
+                return Some(len - 1);
+            }
+        }
+        while idx + 1 < len && !self.rope.char(idx + 1).is_whitespace() {
+            idx += 1;
+        }
+        Some(idx)
+    }
+}
+
+/// Three-class character partition used by every vim-style word motion.
+/// Word characters are alphanumerics plus underscore (vim's default
+/// `iskeyword`-relaxed view); punctuation is everything printable that
+/// isn't whitespace or a word char. Distinguishing punct from whitespace
+/// is what makes `w` land on `"` in `foo "bar"` instead of skipping
+/// straight to `bar`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum CharClass {
+    Whitespace,
+    Word,
+    Punct,
+}
+
+pub(super) fn char_class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Whitespace
+    } else if is_word_char(c) {
+        CharClass::Word
+    } else {
+        CharClass::Punct
     }
 }
 

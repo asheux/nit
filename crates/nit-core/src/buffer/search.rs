@@ -76,30 +76,57 @@ impl Buffer {
         term: &str,
         whole_word: bool,
     ) -> Vec<(usize, usize)> {
+        self.search_line_matches_opt(line, term, whole_word, false)
+    }
+
+    /// Variant of `search_line_matches` with vim-style case folding. When
+    /// `case_insensitive`, both `term` and the buffer slice are lowercased
+    /// before comparing — implements the case-folded side of smart-case.
+    pub fn search_line_matches_opt(
+        &self,
+        line: usize,
+        term: &str,
+        whole_word: bool,
+        case_insensitive: bool,
+    ) -> Vec<(usize, usize)> {
         let mut hits = Vec::new();
         if term.is_empty() || line >= self.rope.len_lines() {
             return hits;
         }
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
-        let term_chars: Vec<char> = term.chars().collect();
+        let term_chars: Vec<char> = if case_insensitive {
+            term.chars().flat_map(char::to_lowercase).collect()
+        } else {
+            term.chars().collect()
+        };
         let term_len = term_chars.len();
         if term_len == 0 || term_len > line_len {
             return hits;
         }
-        // Materialize once: per-position rope reads traverse the tree on each call.
-        let line_chars: Vec<char> = self
+        let raw_line_chars: Vec<char> = self
             .rope
             .slice(line_start..line_start + line_len)
             .chars()
             .collect();
+        let line_chars: Vec<char> = if case_insensitive {
+            raw_line_chars
+                .iter()
+                .flat_map(|c| c.to_lowercase())
+                .collect()
+        } else {
+            raw_line_chars.clone()
+        };
+        if line_chars.len() != raw_line_chars.len() {
+            return self.fallback_case_fold_matches(line, term, whole_word);
+        }
         let mut at = 0;
         while at + term_len <= line_len {
             let end = at + term_len;
             let chars_match = line_chars[at..end] == term_chars[..];
             let boundary_ok = !whole_word
-                || ((at == 0 || !is_word_char(line_chars[at - 1]))
-                    && (end >= line_len || !is_word_char(line_chars[end])));
+                || ((at == 0 || !is_word_char(raw_line_chars[at - 1]))
+                    && (end >= line_len || !is_word_char(raw_line_chars[end])));
             let stride = if chars_match && boundary_ok {
                 hits.push((at, end));
                 term_len
@@ -111,19 +138,128 @@ impl Buffer {
         hits
     }
 
+    /// Conservative O(n*m) scan used when Unicode case folding expands chars
+    /// (Turkish `İ` → `i̇`, etc.) and the column indices would otherwise
+    /// drift. Rare path; keeps highlight correctness without a Unicode-aware
+    /// indexing layer.
+    fn fallback_case_fold_matches(
+        &self,
+        line: usize,
+        term: &str,
+        whole_word: bool,
+    ) -> Vec<(usize, usize)> {
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let raw_line_chars: Vec<char> = self
+            .rope
+            .slice(line_start..line_start + line_len)
+            .chars()
+            .collect();
+        let term_lower: String = term.chars().flat_map(char::to_lowercase).collect();
+        let term_count = term.chars().count();
+        let mut hits = Vec::new();
+        let mut at = 0;
+        while at + term_count <= raw_line_chars.len() {
+            let candidate: String = raw_line_chars[at..at + term_count]
+                .iter()
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            let chars_match = candidate == term_lower;
+            let end = at + term_count;
+            let boundary_ok = !whole_word
+                || ((at == 0 || !is_word_char(raw_line_chars[at - 1]))
+                    && (end >= raw_line_chars.len() || !is_word_char(raw_line_chars[end])));
+            if chars_match && boundary_ok {
+                hits.push((at, end));
+                at = end;
+            } else {
+                at += 1;
+            }
+        }
+        hits
+    }
+
     /// Move cursor to next match of `term` after the cursor; wrap to top on miss.
     pub fn search_next_match(&mut self, term: &str, whole_word: bool) -> bool {
-        self.search_in_direction(term, whole_word, true)
+        self.search_in_direction(term, whole_word, false, true)
     }
 
     /// Move cursor to previous match before cursor; wrap to bottom on miss.
     /// If cursor is inside a match, the boundary is that match's start (so we
     /// skip past the enclosing occurrence rather than snapping to its start).
     pub fn search_prev_match(&mut self, term: &str, whole_word: bool) -> bool {
-        self.search_in_direction(term, whole_word, false)
+        self.search_in_direction(term, whole_word, false, false)
     }
 
-    fn search_in_direction(&mut self, term: &str, whole_word: bool, forward: bool) -> bool {
+    pub fn search_next_match_opt(
+        &mut self,
+        term: &str,
+        whole_word: bool,
+        case_insensitive: bool,
+    ) -> bool {
+        self.search_in_direction(term, whole_word, case_insensitive, true)
+    }
+
+    pub fn search_prev_match_opt(
+        &mut self,
+        term: &str,
+        whole_word: bool,
+        case_insensitive: bool,
+    ) -> bool {
+        self.search_in_direction(term, whole_word, case_insensitive, false)
+    }
+
+    /// Place the cursor at the first match at-or-after `(start_line, start_col)`,
+    /// wrapping to the buffer head if nothing is found between the seed and
+    /// EOF. Used by `/` incremental search so every keystroke re-runs from the
+    /// position the prompt opened at — preventing the cursor from "drifting"
+    /// across matches as the user types.
+    pub fn search_seek_first_match(
+        &mut self,
+        term: &str,
+        whole_word: bool,
+        case_insensitive: bool,
+        start_line: usize,
+        start_col: usize,
+    ) -> bool {
+        if term.is_empty() {
+            return false;
+        }
+        let total_lines = self.rope.len_lines();
+        if total_lines == 0 {
+            return false;
+        }
+        let same_line =
+            self.search_line_matches_opt(start_line, term, whole_word, case_insensitive);
+        if let Some((col, _)) = same_line.iter().find(|(s, _)| *s >= start_col) {
+            self.cursor.line = start_line;
+            self.cursor.col = *col;
+            self.clamp_col();
+            return true;
+        }
+        for offset in 1..=total_lines {
+            let line = (start_line + offset) % total_lines;
+            let hits = self.search_line_matches_opt(line, term, whole_word, case_insensitive);
+            if let Some((col, _)) = hits.first() {
+                self.cursor.line = line;
+                self.cursor.col = *col;
+                self.clamp_col();
+                return true;
+            }
+            if line == start_line {
+                break;
+            }
+        }
+        false
+    }
+
+    fn search_in_direction(
+        &mut self,
+        term: &str,
+        whole_word: bool,
+        case_insensitive: bool,
+        forward: bool,
+    ) -> bool {
         if term.is_empty() {
             return false;
         }
@@ -135,10 +271,8 @@ impl Buffer {
         let cursor_line = self.cursor.line;
         let cursor_col = self.cursor.col;
 
-        // Pass 1: same line as cursor. Forward picks the first match strictly
-        // past the cursor; backward steps off the enclosing match (if any) so
-        // the cursor doesn't snap onto its current match's start.
-        let same_line = self.search_line_matches(cursor_line, term, whole_word);
+        let same_line =
+            self.search_line_matches_opt(cursor_line, term, whole_word, case_insensitive);
         let pass_one = if forward {
             same_line
                 .iter()
@@ -163,8 +297,6 @@ impl Buffer {
             return true;
         }
 
-        // Passes 2 + 3: walk past the cursor in `forward` direction, then wrap
-        // around to the cursor's own line so prior occurrences are reachable.
         let mut probe: Box<dyn Iterator<Item = usize>> = if forward {
             Box::new(((cursor_line + 1)..total_lines).chain(0..=cursor_line))
         } else {
@@ -175,7 +307,7 @@ impl Buffer {
             )
         };
         let hit = probe.find_map(|l| {
-            let line_hits = self.search_line_matches(l, term, whole_word);
+            let line_hits = self.search_line_matches_opt(l, term, whole_word, case_insensitive);
             let pick = if forward {
                 line_hits.first()
             } else {

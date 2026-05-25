@@ -40,6 +40,8 @@ pub enum LanguageId {
     Lean,
     Swift,
     Dockerfile,
+    Dotenv,
+    Wolfram,
     PlainText,
 }
 
@@ -79,12 +81,14 @@ const LABELS: &[(LanguageId, &str)] = &[
     (LanguageId::Lean, "lean"),
     (LanguageId::Swift, "swift"),
     (LanguageId::Dockerfile, "dockerfile"),
+    (LanguageId::Dotenv, "dotenv"),
+    (LanguageId::Wolfram, "wolfram"),
 ];
 
 impl LanguageId {
     /// Every variant that ships a grammar slot (excludes [`Self::PlainText`]).
     /// Used by `captures::config` to build per-language highlight configs.
-    pub const ALL: [LanguageId; 29] = [
+    pub const ALL: [LanguageId; 31] = [
         Self::Rust,
         Self::Python,
         Self::JavaScript,
@@ -114,6 +118,8 @@ impl LanguageId {
         Self::Lean,
         Self::Swift,
         Self::Dockerfile,
+        Self::Dotenv,
+        Self::Wolfram,
     ];
 
     /// Canonical lowercase label, matching `LanguageInfo.label`. `PlainText`

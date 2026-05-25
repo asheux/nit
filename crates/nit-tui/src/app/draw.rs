@@ -83,11 +83,34 @@ pub(super) fn draw(
         } else {
             state.editor_buffer_mut().compute_diff_if_needed();
             let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
-            let search = state
-                .editor_search
-                .term
-                .as_deref()
-                .map(|t| (t, state.editor_search.whole_word));
+            // While the `/` prompt is open the live input takes
+            // priority — every keystroke restyles matches in real time;
+            // once Enter commits the term we fall back to the persistent
+            // `editor_search` highlight that `n` / `N` step through.
+            let live_prompt = state
+                .search_prompt
+                .as_ref()
+                .map(|p| p.input.as_str())
+                .filter(|s| !s.is_empty());
+            let search = if let Some(term) = live_prompt {
+                Some(editor_view::SearchHighlight {
+                    term,
+                    whole_word: false,
+                    case_insensitive: nit_core::state::smart_case_insensitive(term),
+                    live: true,
+                })
+            } else {
+                state
+                    .editor_search
+                    .term
+                    .as_deref()
+                    .map(|t| editor_view::SearchHighlight {
+                        term: t,
+                        whole_word: state.editor_search.whole_word,
+                        case_insensitive: nit_core::state::smart_case_insensitive(t),
+                        live: false,
+                    })
+            };
             editor_view::render_editor_with_search(
                 f,
                 layout.editor,

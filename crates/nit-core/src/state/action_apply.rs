@@ -1,5 +1,5 @@
 use super::*;
-use crate::{actions::Action, io};
+use crate::{actions::Action, buffer::JumpEntry, io};
 use nit_gol::Rule;
 
 fn on_off(flag: bool) -> &'static str {
@@ -11,6 +11,10 @@ fn on_off(flag: bool) -> &'static str {
 }
 
 /// Closing char for an auto-pair opener, or `None` for chars that don't pair.
+/// Kept in sync with the bracket-aware backspace rule in `buffer::edit::delete`
+/// (T3): every opener that auto-pairs on insert must also auto-delete its
+/// matching closer when the opener is backspaced from `(|)` / `[|]` / `{|}`
+/// / `"|"` / `'|'`. Update both tables together.
 fn pair_closer(c: char) -> Option<char> {
     match c {
         '(' => Some(')'),
@@ -129,6 +133,176 @@ fn switch_mode_with_buffer(state: &mut AppState, mode: Mode) {
         }
     }
 }
+
+/// Push the focused editor cursor into the global jumplist. Called from
+/// `/`, `n`, `N`, `*`, `#`, `gg`, `G` and any other motion that vim treats
+/// as a "jump" — so `Ctrl-O` can walk back through them.
+fn push_jump_here(state: &mut AppState) {
+    let entry = state.current_jump_entry();
+    state.jumplist.push(entry);
+}
+
+#[derive(Copy, Clone, Debug)]
+enum JumpDirection {
+    Back,
+    Forward,
+}
+
+/// Drive `Action::JumpBack` / `Action::JumpForward` through the shared
+/// `state::jumplist` classifier so the action arm and the chord-layer fast
+/// path agree on cross-buffer surface text and EOL clamping.
+fn apply_jump_step(state: &mut AppState, dir: JumpDirection) {
+    let buffer_id = state.active_editor_buffer_id;
+    let outcome = match dir {
+        JumpDirection::Back => super::jumplist::step_back(&mut state.jumplist, buffer_id),
+        JumpDirection::Forward => super::jumplist::step_forward(&mut state.jumplist, buffer_id),
+    };
+    match outcome {
+        super::jumplist::JumpStepOutcome::Empty => {
+            let label = match dir {
+                JumpDirection::Back => "older",
+                JumpDirection::Forward => "newer",
+            };
+            state.status = Some(format!("No {label} jump position"));
+        }
+        super::jumplist::JumpStepOutcome::CrossBuffer { .. } => {
+            state.status = Some("Cross-buffer jumps not supported yet".into());
+        }
+        super::jumplist::JumpStepOutcome::InBuffer { line, col } => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                let total = buf.lines_len();
+                if total == 0 {
+                    return;
+                }
+                let target_line = line.min(total - 1);
+                let visible_chars = buf
+                    .line_as_string(target_line)
+                    .chars()
+                    .take_while(|c| *c != '\n' && *c != '\r')
+                    .count();
+                buf.cursor.line = target_line;
+                buf.cursor.col = col.min(visible_chars);
+                buf.ensure_visible();
+            }
+        }
+    }
+}
+
+/// vim smart-case for a `/` term: lowercase-only query → case-insensitive,
+/// any uppercase → case-sensitive. Mirrors `:set smartcase`.
+fn is_smart_case_insensitive(term: &str) -> bool {
+    !term.chars().any(|c| c.is_uppercase())
+}
+
+/// Width (in spaces) of one indent step inferred from the focused buffer's
+/// leading whitespace. Returns `None` when the file is tab-indented (caller
+/// should fall back to inserting a literal `\t`). Bounded scan: only the
+/// first ~200 lines participate, mirroring the inference cap in
+/// `Buffer::indent_unit`. When the buffer has no detectable indentation
+/// (fresh file, or one whose first lines are all top-level) the language
+/// metadata's `default_indent` provides the fallback so a brand-new Python
+/// file's first Tab still expands to four spaces rather than dropping a raw
+/// `\t` next to space-indented content.
+fn focused_buffer_space_indent_width(buf: &Buffer) -> Option<u8> {
+    const SCAN_LINES: usize = 200;
+    let scan = buf.lines_len().min(SCAN_LINES);
+    let mut widths: Vec<usize> = Vec::new();
+    for line_idx in 0..scan {
+        let line = buf.line_as_string(line_idx);
+        let mut spaces = 0usize;
+        let mut saw_tab = false;
+        for ch in line.chars() {
+            match ch {
+                '\t' => {
+                    saw_tab = true;
+                    break;
+                }
+                ' ' => spaces += 1,
+                _ => break,
+            }
+        }
+        if saw_tab {
+            return None;
+        }
+        let has_content = line
+            .chars()
+            .nth(spaces)
+            .is_some_and(|c| c != '\n' && c != '\r');
+        if spaces > 0 && has_content {
+            widths.push(spaces);
+        }
+    }
+    if let Some(unit) = widths.iter().copied().reduce(gcd) {
+        return Some(unit.clamp(1, 8) as u8);
+    }
+    let info = buf
+        .path()
+        .and_then(|p| crate::languages::detect_by_path(p))?;
+    let style = info.default_indent?;
+    if style.uses_tabs() {
+        None
+    } else {
+        Some(style.width().clamp(1, 8))
+    }
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Snapshot the text from the cursor to the end of its line (newline
+/// excluded). Returns an empty string when the cursor is past the line's
+/// last char — vim's `D` on an empty line is a no-op, so the yank register
+/// is left untouched in that case.
+fn capture_to_eol(buf: &Buffer) -> String {
+    if buf.lines_len() == 0 {
+        return String::new();
+    }
+    let line_idx = buf.cursor.line.min(buf.lines_len() - 1);
+    let line = buf.line_as_string(line_idx);
+    let chars: Vec<char> = line
+        .chars()
+        .take_while(|c| *c != '\n' && *c != '\r')
+        .collect();
+    let col = buf.cursor.col.min(chars.len());
+    chars[col..].iter().collect()
+}
+
+/// vim incsearch: every keystroke into the `/` prompt re-runs the search
+/// from the position the prompt opened at, so adding letters narrows
+/// strictly forward instead of drifting from the previous live match.
+pub(super) fn run_incremental_search(state: &mut AppState) {
+    let Some(prompt) = state.search_prompt.as_ref() else {
+        return;
+    };
+    let term = prompt.input.clone();
+    let case_insensitive = is_smart_case_insensitive(&term);
+    let Some((buffer_id, cursor)) = prompt.pre_search_cursor else {
+        return;
+    };
+    if buffer_id != state.active_editor_buffer_id {
+        return;
+    }
+    let Some(buf) = state.focused_buffer_mut() else {
+        return;
+    };
+    if term.is_empty() {
+        buf.cursor = cursor;
+        buf.ensure_visible();
+        return;
+    }
+    let found =
+        buf.search_seek_first_match(&term, false, case_insensitive, cursor.line, cursor.col);
+    if !found {
+        buf.cursor = cursor;
+    }
+    buf.ensure_visible();
+}
 pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     state.metrics.last_action = Some(action.clone());
     let mut should_exit = false;
@@ -246,73 +420,106 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             with_focused_buffer(state, |buf| buf.insert_newline());
         }
         Action::InsertTab => {
-            with_focused_buffer(state, |buf| buf.insert_tab());
+            // T10: when the focused buffer is space-indented (Python, Rust,
+            // JS), Tab inserts that many spaces instead of a literal `\t`,
+            // so the file doesn't end up with a tab/space mix that Python's
+            // tokenizer rejects.
+            let indent_text = state.focused_buffer_mut().map(|buf| {
+                match focused_buffer_space_indent_width(buf) {
+                    Some(width) => " ".repeat(width as usize),
+                    None => "\t".to_string(),
+                }
+            });
+            if let Some(text) = indent_text {
+                with_focused_buffer(state, |buf| {
+                    if text == "\t" {
+                        buf.insert_tab();
+                    } else {
+                        buf.insert_str(&text);
+                    }
+                });
+            }
         }
         Action::EnterVisual => switch_mode_with_buffer(state, Mode::Visual),
         Action::ExitVisual => switch_mode_with_buffer(state, Mode::Normal),
         Action::YankSelection => {
             let yank = if let Some(buf) = state.focused_buffer_mut() {
-                let yank = buf.yank_selection();
+                let text = buf.yank_selection();
                 buf.clear_selection();
-                yank
+                text
             } else {
                 None
             };
-            if let Some(text) = yank {
-                state.yank_kind = if text.contains('\n') {
-                    YankKind::Line
-                } else {
-                    YankKind::Char
-                };
-                state.yank = Some(text);
-            } else {
-                state.yank = None;
-                state.yank_kind = YankKind::Char;
+            match yank {
+                Some(text) => {
+                    let register = if text.contains('\n') {
+                        YankRegister::LineWise(text)
+                    } else {
+                        YankRegister::CharWise(text)
+                    };
+                    state.set_yank_register(register);
+                }
+                None => state.clear_yank_register(),
             }
             state.mode = Mode::Normal;
         }
         Action::YankLine => {
             if let Some(buf) = state.focused_buffer_mut() {
-                state.yank = Some(buf.yank_line());
-                state.yank_kind = YankKind::Line;
+                let text = buf.yank_line();
+                state.set_yank_register(YankRegister::LineWise(text));
             }
         }
         Action::DeleteSelection => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                if buf.delete_selection() {
+            // Vim's `d` in visual mode yanks the selection before removing
+            // it (so `dd` then `p` can re-paste). Linewise vs char-wise is
+            // decided by the same `\n` heuristic the yank path uses.
+            let captured = if let Some(buf) = state.focused_buffer_mut() {
+                let yank = buf.yank_selection();
+                let changed = buf.delete_selection();
+                if changed {
                     buf.ensure_visible();
                 }
+                yank
+            } else {
+                None
+            };
+            if let Some(text) = captured {
+                let register = if text.contains('\n') {
+                    YankRegister::LineWise(text)
+                } else {
+                    YankRegister::CharWise(text)
+                };
+                state.set_yank_register(register);
             }
             state.mode = Mode::Normal;
         }
         Action::Paste => {
-            let yank = state.yank.clone();
+            let register = state.yank_register();
             let is_normal = state.mode == Mode::Normal;
-            let yank_kind = state.yank_kind;
-            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
-                if is_normal && yank_kind == YankKind::Line {
-                    buf.paste_line_below(&yank);
-                } else {
-                    if is_normal {
+            if let (Some(register), Some(buf)) = (register, state.focused_buffer_mut()) {
+                match (is_normal, register) {
+                    (true, YankRegister::LineWise(text)) => buf.paste_line_below(&text),
+                    (true, YankRegister::CharWise(text)) => {
                         buf.append();
+                        buf.insert_str(&text);
                     }
-                    buf.insert_str(&yank);
+                    (false, register) => buf.insert_str(register.as_str()),
                 }
                 buf.ensure_visible();
             }
         }
         Action::PasteLineAbove => {
-            let yank = state.yank.clone();
-            let yank_kind = state.yank_kind;
-            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
-                if yank_kind == YankKind::Line {
-                    buf.paste_line_above(&yank);
-                } else {
-                    let mut text = yank;
-                    if !text.ends_with('\n') {
-                        text.push('\n');
+            let register = state.yank_register();
+            if let (Some(register), Some(buf)) = (register, state.focused_buffer_mut()) {
+                match register {
+                    YankRegister::LineWise(text) => buf.paste_line_above(&text),
+                    YankRegister::CharWise(text) => {
+                        let mut padded = text;
+                        if !padded.ends_with('\n') {
+                            padded.push('\n');
+                        }
+                        buf.paste_line_above(&padded);
                     }
-                    buf.paste_line_above(&text);
                 }
                 buf.ensure_visible();
             }
@@ -329,7 +536,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             with_focused_buffer(state, |buf| buf.delete_forward());
         }
         Action::DeleteLine => {
-            with_focused_buffer(state, |buf| buf.delete_line());
+            // vim `dd`: yank the line linewise so `p` later pastes it on a
+            // new line and `P` pastes it above.
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let text = buf.yank_line();
+                buf.delete_line();
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked {
+                state.set_yank_register(YankRegister::LineWise(text));
+            }
         }
         Action::MoveUp => {
             repeat_motion(state, |buf| buf.move_up());
@@ -375,15 +592,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::GoToTop => {
             // `gg` → line 1; `<N>gg` → line N (1-indexed). Mirrors vim.
+            // Push the pre-jump cursor so `Ctrl-O` can come back.
             let count = state.pending_count.take();
+            push_jump_here(state);
             with_focused_buffer(state, |buf| match count {
                 Some(n) => buf.go_to_line(n as usize),
                 None => buf.go_to_top(),
             });
         }
         Action::GoToBottom => {
-            // `G` → last line; `<N>G` → line N (1-indexed). Mirrors vim.
             let count = state.pending_count.take();
+            push_jump_here(state);
             with_focused_buffer(state, |buf| match count {
                 Some(n) => buf.go_to_line(n as usize),
                 None => buf.go_to_bottom(),
@@ -867,6 +1086,56 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::MoveBigWordEnd => {
             repeat_motion(state, |buf| buf.move_big_word_end());
         }
+        Action::DeleteWordForward => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_word_forward();
+                }
+            });
+        }
+        Action::DeleteWordEnd => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_word_end();
+                }
+            });
+        }
+        Action::DeleteWordBack => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_word_back();
+                }
+            });
+        }
+        Action::DeleteBigWordForward => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_big_word_forward();
+                }
+            });
+        }
+        Action::DeleteBigWordEnd => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_big_word_end();
+                }
+            });
+        }
+        Action::DeleteBigWordBack => {
+            let n = take_motion_count(state);
+            with_focused_buffer(state, |buf| {
+                for _ in 0..n {
+                    buf.delete_big_word_back();
+                }
+            });
+        }
+        Action::JumpBack => apply_jump_step(state, JumpDirection::Back),
+        Action::JumpForward => apply_jump_step(state, JumpDirection::Forward),
         Action::MoveFirstNonBlank => {
             with_focused_buffer(state, |buf| buf.move_first_non_blank());
         }
@@ -889,21 +1158,136 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             with_focused_buffer(state, |buf| buf.move_viewport_bottom());
         }
         Action::DeleteToEnd => {
-            with_focused_buffer(state, |buf| buf.delete_to_end());
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let text = capture_to_eol(buf);
+                buf.delete_to_end();
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
         }
         Action::ChangeToEnd => {
             // ChangeToEnd swaps to Insert mode unconditionally, mirroring
             // vim's `C` semantics (no-op buffer + still-in-Insert is the
             // documented behaviour when there's no focused buffer).
-            with_focused_buffer(state, |buf| buf.delete_to_end());
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let text = capture_to_eol(buf);
+                buf.delete_to_end();
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::ChangeWordEnd => {
+            // `cw` / `ce`: vim's `cw` deviates from `de` by *not* advancing
+            // past a single-char word edge (see `:h cw`), so this routes
+            // through `delete_word_change` rather than `delete_word_end`.
+            // Count-aware: `3cw` concatenates the three deletions into one
+            // CharWise yank.
+            let n = take_motion_count(state);
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let mut text = String::new();
+                for _ in 0..n {
+                    text.push_str(&buf.delete_word_change(false));
+                }
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::ChangeBigWordEnd => {
+            let n = take_motion_count(state);
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let mut text = String::new();
+                for _ in 0..n {
+                    text.push_str(&buf.delete_word_change(true));
+                }
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::ChangeWordBack => {
+            let n = take_motion_count(state);
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let mut text = String::new();
+                for _ in 0..n {
+                    text.push_str(&buf.delete_word_back());
+                }
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::ChangeBigWordBack => {
+            let n = take_motion_count(state);
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let mut text = String::new();
+                for _ in 0..n {
+                    text.push_str(&buf.delete_big_word_back());
+                }
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::ChangeLine => {
+            // `cc`: linewise yank, drop the line, open a fresh one above the
+            // cursor position so the leading indent matches the prior line's
+            // (`open_line_above` reuses the line-above indent the way vim's
+            // `cc` does). Single undo group via the buffer methods' shared
+            // edit-tracking.
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let text = buf.yank_line();
+                buf.delete_line();
+                buf.open_line_above();
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked {
+                state.set_yank_register(YankRegister::LineWise(text));
+            }
             state.mode = Mode::Insert;
         }
         Action::SubstituteChar => {
-            with_focused_buffer(state, |buf| buf.delete_forward());
+            let yanked = state.focused_buffer_mut().and_then(|buf| {
+                let captured = buf.peek_char_at_cursor().map(|c| c.to_string());
+                buf.delete_forward();
+                buf.ensure_visible();
+                captured
+            });
+            if let Some(text) = yanked.filter(|t| !t.is_empty()) {
+                state.set_yank_register(YankRegister::CharWise(text));
+            }
             state.mode = Mode::Insert;
         }
         Action::SubstituteLine => {
-            with_focused_buffer(state, |buf| buf.substitute_line());
+            let yanked = state.focused_buffer_mut().map(|buf| {
+                let text = buf.yank_line();
+                buf.substitute_line();
+                buf.ensure_visible();
+                text
+            });
+            if let Some(text) = yanked {
+                state.set_yank_register(YankRegister::LineWise(text));
+            }
             state.mode = Mode::Insert;
         }
         Action::JoinLines => {
@@ -952,11 +1336,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::SearchWordForward => {
             let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
             if let Some(term) = word {
+                push_jump_here(state);
                 state.editor_search.term = Some(term.clone());
                 state.editor_search.whole_word = true;
                 state.editor_search.forward = true;
+                let case_insensitive = is_smart_case_insensitive(&term);
                 if let Some(buf) = state.focused_buffer_mut() {
-                    buf.search_next_match(&term, true);
+                    buf.search_next_match_opt(&term, true, case_insensitive);
                     buf.ensure_visible();
                 }
                 state.status = Some(format!("/\\<{term}\\>"));
@@ -967,11 +1353,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::SearchWordBack => {
             let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
             if let Some(term) = word {
+                push_jump_here(state);
                 state.editor_search.term = Some(term.clone());
                 state.editor_search.whole_word = true;
                 state.editor_search.forward = false;
+                let case_insensitive = is_smart_case_insensitive(&term);
                 if let Some(buf) = state.focused_buffer_mut() {
-                    buf.search_prev_match(&term, true);
+                    buf.search_prev_match_opt(&term, true, case_insensitive);
                     buf.ensure_visible();
                 }
                 state.status = Some(format!("?\\<{term}\\>"));
@@ -984,11 +1372,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             let whole_word = state.editor_search.whole_word;
             let forward = state.editor_search.forward;
             if let Some(term) = term {
+                push_jump_here(state);
+                let case_insensitive = is_smart_case_insensitive(&term);
                 if let Some(buf) = state.focused_buffer_mut() {
                     let found = if forward {
-                        buf.search_next_match(&term, whole_word)
+                        buf.search_next_match_opt(&term, whole_word, case_insensitive)
                     } else {
-                        buf.search_prev_match(&term, whole_word)
+                        buf.search_prev_match_opt(&term, whole_word, case_insensitive)
                     };
                     buf.ensure_visible();
                     if !found {
@@ -1004,11 +1394,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             let whole_word = state.editor_search.whole_word;
             let forward = state.editor_search.forward;
             if let Some(term) = term {
+                push_jump_here(state);
+                let case_insensitive = is_smart_case_insensitive(&term);
                 if let Some(buf) = state.focused_buffer_mut() {
                     let found = if forward {
-                        buf.search_prev_match(&term, whole_word)
+                        buf.search_prev_match_opt(&term, whole_word, case_insensitive)
                     } else {
-                        buf.search_next_match(&term, whole_word)
+                        buf.search_next_match_opt(&term, whole_word, case_insensitive)
                     };
                     buf.ensure_visible();
                     if !found {
@@ -1023,30 +1415,60 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.editor_search.clear();
         }
         Action::SearchPromptOpen => {
-            state.search_prompt = Some(SearchPrompt::new());
+            // Capture the cursor we started from so `Esc` can put it back
+            // and so `/<term><Enter>` can push it onto the jumplist for
+            // `Ctrl-O` to walk back to.
+            let buffer_id = state.active_editor_buffer_id;
+            let cursor = state.editor_buffer().cursor;
+            state.search_prompt = Some(SearchPrompt::with_origin(buffer_id, cursor));
         }
         Action::SearchPromptCancel => {
-            state.search_prompt = None;
+            // Restore the pre-prompt cursor (vim incsearch semantics): every
+            // keystroke moved the cursor onto the first match, so cancelling
+            // would otherwise leave it parked on the last incremental hit.
+            if let Some(prompt) = state.search_prompt.take() {
+                if let Some((buffer_id, cursor)) = prompt.pre_search_cursor {
+                    if buffer_id == state.active_editor_buffer_id {
+                        if let Some(buf) = state.focused_buffer_mut() {
+                            buf.cursor = cursor;
+                            buf.ensure_visible();
+                        }
+                    }
+                }
+            }
         }
         Action::SearchPromptBackspace => {
             if let Some(p) = state.search_prompt.as_mut() {
                 p.backspace();
             }
+            run_incremental_search(state);
         }
         Action::SearchPromptInput(ch) => {
             if let Some(p) = state.search_prompt.as_mut() {
                 p.insert(ch);
             }
+            run_incremental_search(state);
         }
         Action::SearchPromptExecute => {
             if let Some(prompt) = state.search_prompt.take() {
                 let term = prompt.input;
                 if !term.is_empty() {
+                    // Push the cursor we started from so Ctrl-O can return.
+                    if let Some((_buffer_id, cursor)) = prompt.pre_search_cursor {
+                        state.jumplist.push(JumpEntry::new(
+                            state.active_editor_buffer_id,
+                            cursor.line,
+                            cursor.col,
+                        ));
+                    } else {
+                        push_jump_here(state);
+                    }
                     state.editor_search.term = Some(term.clone());
                     state.editor_search.whole_word = false;
                     state.editor_search.forward = true;
+                    let case_insensitive = is_smart_case_insensitive(&term);
                     if let Some(buf) = state.focused_buffer_mut() {
-                        let found = buf.search_next_match(&term, false);
+                        let found = buf.search_next_match_opt(&term, false, case_insensitive);
                         buf.ensure_visible();
                         if !found {
                             state.status = Some(format!("Pattern not found: {term}"));

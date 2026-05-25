@@ -58,8 +58,37 @@ impl Buffer {
     }
 
     pub(super) fn begin_insert_group(&mut self, idx: usize) {
+        self.begin_edit_group(EditKind::Insert, idx);
+    }
+
+    pub(super) fn finish_insert_group(&mut self) {
+        self.finish_edit_group(EditKind::Insert);
+    }
+
+    /// Push a new undo snapshot unless the previous edit was the same kind of
+    /// delete at the position required for contiguity. Backspace expects the
+    /// previous cursor to sit one character ahead of `idx` (it just walked
+    /// left); forward-delete expects the previous cursor to sit at `idx`
+    /// (it stays put as content shifts left).
+    pub(super) fn begin_delete_group(&mut self, kind: EditKind, idx: usize) {
+        debug_assert!(matches!(
+            kind,
+            EditKind::DeleteBack | EditKind::DeleteForward
+        ));
+        self.begin_edit_group(kind, idx);
+    }
+
+    pub(super) fn finish_delete_group(&mut self, kind: EditKind) {
+        debug_assert!(matches!(
+            kind,
+            EditKind::DeleteBack | EditKind::DeleteForward
+        ));
+        self.finish_edit_group(kind);
+    }
+
+    fn begin_edit_group(&mut self, kind: EditKind, idx: usize) {
         let start_new = match self.last_edit {
-            Some(meta) => meta.kind != EditKind::Insert || meta.cursor_index != idx,
+            Some(meta) => meta.kind != kind || meta.cursor_index != idx,
             None => true,
         };
         if start_new {
@@ -67,9 +96,9 @@ impl Buffer {
         }
     }
 
-    pub(super) fn finish_insert_group(&mut self) {
+    fn finish_edit_group(&mut self, kind: EditKind) {
         self.last_edit = Some(EditMeta {
-            kind: EditKind::Insert,
+            kind,
             cursor_index: self.char_index(),
         });
     }

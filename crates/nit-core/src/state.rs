@@ -1,6 +1,6 @@
 use crate::{
     actions::Action,
-    buffer::Buffer,
+    buffer::{Buffer, JumpEntry, JumpList},
     config::{GolSeedSource, Settings},
     gol_rules::{RuleCatalog, SelectedRule},
     lab::AppKind,
@@ -26,6 +26,7 @@ mod defaults;
 mod family_run;
 pub mod file_tree;
 mod games;
+pub mod jumplist;
 pub mod multipane;
 mod pickers;
 mod text_input;
@@ -55,7 +56,7 @@ pub use games::{
 };
 pub use multipane::{DirSearchState, MultipaneState, PaneSelection, PaneSession};
 pub use pickers::{ProtocolPickerState, RulePickerState};
-pub use text_input::{CommandLine, EditorSearch, SearchPrompt};
+pub use text_input::{smart_case_insensitive, CommandLine, EditorSearch, SearchPrompt};
 pub use visualizer::{GolRenderMode, VisualizerMode, VisualizerRuleEntry, VisualizerState};
 
 use cmd_line::{apply_protocol_selection, apply_rule_selection, handle_command_line};
@@ -249,6 +250,13 @@ pub struct AppState {
     pub yank: Option<String>,
     #[serde(skip)]
     pub yank_kind: YankKind,
+    /// Vim-style jumplist — `Ctrl-O` walks back through saved cursor
+    /// positions, `Ctrl-I` walks forward. Populated by `/` / `n` / `N` /
+    /// `gg` / `G` and friends. Single ring across all buffers (single-pane
+    /// model); per-window scope is a follow-up when multipane gets real
+    /// editor surfaces.
+    #[serde(skip)]
+    pub jumplist: JumpList,
     #[serde(skip)]
     pub command_line: Option<CommandLine>,
     #[serde(skip)]
@@ -413,6 +421,34 @@ pub enum YankKind {
     #[default]
     Char,
     Line,
+}
+
+/// Tagged form of nit's unnamed yank register. `LineWise` content is pasted
+/// on a new line (`p` below / `P` above); `CharWise` content is pasted inline.
+/// The flat (`state.yank` + `state.yank_kind`) storage is preserved for now —
+/// `AppState::yank_register` / `set_yank_register` translate between the two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum YankRegister {
+    CharWise(String),
+    LineWise(String),
+}
+
+impl YankRegister {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::CharWise(s) | Self::LineWise(s) => s.as_str(),
+        }
+    }
+
+    pub fn into_string(self) -> String {
+        match self {
+            Self::CharWise(s) | Self::LineWise(s) => s,
+        }
+    }
+
+    pub fn is_line_wise(&self) -> bool {
+        matches!(self, Self::LineWise(_))
+    }
 }
 
 pub struct ActionOutcome {
@@ -604,6 +640,7 @@ impl AppState {
             search_prompt: None,
             yank: None,
             yank_kind: YankKind::Char,
+            jumplist: JumpList::new(),
             command_line: None,
             ui_selection: None,
             help_scroll: 0,
@@ -740,6 +777,56 @@ impl AppState {
     pub fn line_col(&self) -> (usize, usize) {
         let buf = self.editor_buffer();
         (buf.cursor.line + 1, buf.cursor.col + 1)
+    }
+
+    /// Tagged view over the underlying `yank` + `yank_kind` storage. Returns
+    /// `None` when the register is empty.
+    pub fn yank_register(&self) -> Option<YankRegister> {
+        let text = self.yank.clone()?;
+        Some(match self.yank_kind {
+            YankKind::Line => YankRegister::LineWise(text),
+            YankKind::Char => YankRegister::CharWise(text),
+        })
+    }
+
+    /// Write into the unnamed register, splitting back into the flat storage
+    /// that legacy readers (clipboard sync, mouse drag autocopy) continue to
+    /// consult.
+    pub fn set_yank_register(&mut self, register: YankRegister) {
+        match register {
+            YankRegister::LineWise(text) => {
+                self.yank = Some(text);
+                self.yank_kind = YankKind::Line;
+            }
+            YankRegister::CharWise(text) => {
+                self.yank = Some(text);
+                self.yank_kind = YankKind::Char;
+            }
+        }
+    }
+
+    pub fn clear_yank_register(&mut self) {
+        self.yank = None;
+        self.yank_kind = YankKind::Char;
+    }
+
+    /// JumpEntry for the currently focused editor cursor. Cheap; called on
+    /// every `n`/`N`/`/` confirm so it avoids any clones.
+    pub fn current_jump_entry(&self) -> JumpEntry {
+        let buf = self.editor_buffer();
+        JumpEntry {
+            buffer_id: self.active_editor_buffer_id,
+            line: buf.cursor.line,
+            col: buf.cursor.col,
+        }
+    }
+
+    /// Re-run the live `/` search after the prompt input changes via a
+    /// non-`Action::SearchPromptInput` path — currently only bracketed
+    /// paste. Keeps the cursor on the first match relative to the position
+    /// the prompt opened at, matching vim's incsearch behaviour.
+    pub fn recompute_incremental_search(&mut self) {
+        action_apply::run_incremental_search(self);
     }
 
     pub fn receive_log(&mut self, line: impl Into<String>) {
