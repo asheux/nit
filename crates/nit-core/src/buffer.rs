@@ -172,6 +172,19 @@ impl Buffer {
         line_start + col
     }
 
+    /// Character at the cursor (the one a new insert would land before).
+    /// Returns `None` past end-of-buffer.
+    pub fn peek_char_at_cursor(&self) -> Option<char> {
+        let idx = self.char_index();
+        (idx < self.rope.len_chars()).then(|| self.rope.char(idx))
+    }
+
+    /// Character immediately before the cursor.
+    pub fn peek_char_before_cursor(&self) -> Option<char> {
+        let idx = self.char_index();
+        (idx > 0).then(|| self.rope.char(idx - 1))
+    }
+
     pub(super) fn clamp_col(&mut self) {
         let len = self.line_char_len(self.cursor.line);
         // Strict `>` not `>=`: cursor may sit one past last char during `append`.

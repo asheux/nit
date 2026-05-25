@@ -92,6 +92,30 @@ impl Buffer {
         self.finish_insert_group();
     }
 
+    /// Insert `open` and `close` at the cursor as a single edit, leaving the
+    /// cursor between them. Used by the InsertChar action's auto-pair path so
+    /// undo treats the pair as one operation.
+    pub fn insert_pair(&mut self, open: char, close: char) {
+        if self.selection_range().is_some() {
+            // Wrapping a selection isn't supported yet; fall back to inserting
+            // only the opener (matches the pre-auto-pair behavior).
+            let mut buf = [0u8; 4];
+            let s = open.encode_utf8(&mut buf);
+            self.replace_selection_with_str(s);
+            return;
+        }
+        let idx = self.char_index();
+        let mut s = String::with_capacity(open.len_utf8() + close.len_utf8());
+        s.push(open);
+        s.push(close);
+        self.record_insert(idx, &s);
+        self.begin_insert_group(idx);
+        self.rope.insert(idx, &s);
+        self.cursor.col += 1;
+        self.dirty = true;
+        self.finish_insert_group();
+    }
+
     pub fn insert_tab(&mut self) {
         self.insert_char('\t');
     }

@@ -7,6 +7,8 @@ use crate::buffer::Buffer;
 use crate::test_helpers::temp_dir;
 use std::fs;
 
+#[path = "state/auto_pair.rs"]
+mod auto_pair;
 #[path = "state/count_prefix.rs"]
 mod count_prefix;
 #[path = "state/games_family_build.rs"]

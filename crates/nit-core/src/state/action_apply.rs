@@ -10,6 +10,68 @@ fn on_off(flag: bool) -> &'static str {
     }
 }
 
+/// Closing char for an auto-pair opener, or `None` for chars that don't pair.
+fn pair_closer(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        _ => None,
+    }
+}
+
+fn is_closing_pair(c: char) -> bool {
+    matches!(c, ')' | ']' | '}' | '"' | '\'')
+}
+
+/// InsertChar with bracket/quote auto-pair:
+///   - `(`, `[`, `{` → insert `()` etc. with cursor between, unless the next
+///     char is a word char (likely the user is wrapping existing text).
+///   - `"`, `'` → same, plus skip when adjacent to an identifier char
+///     (apostrophes in words like `don't`).
+///   - typing the closing char while it's already at the cursor moves the
+///     cursor past it instead of inserting a duplicate — needed so `()` typed
+///     as `(` then `)` doesn't end up as `()`-then-`)` (i.e. `())`).
+fn insert_with_auto_pair(buf: &mut Buffer, c: char) {
+    if buf.selection_range().is_some() {
+        buf.insert_char(c);
+        return;
+    }
+    if is_closing_pair(c) && buf.peek_char_at_cursor() == Some(c) {
+        buf.move_right();
+        return;
+    }
+    let Some(close) = pair_closer(c) else {
+        buf.insert_char(c);
+        return;
+    };
+    if !should_auto_pair(buf, c) {
+        buf.insert_char(c);
+        return;
+    }
+    buf.insert_pair(c, close);
+}
+
+fn should_auto_pair(buf: &Buffer, opener: char) -> bool {
+    let next = buf.peek_char_at_cursor();
+    // Never pair if the cursor sits right before alphanumerics — the user is
+    // most likely wrapping existing text.
+    if matches!(next, Some(n) if n.is_alphanumeric()) {
+        return false;
+    }
+    // For quotes only: skip when the previous char is alphanumeric or another
+    // quote of the same kind. Catches `don'|t`, ending an empty `""`, etc.
+    if matches!(opener, '"' | '\'') {
+        let prev = buf.peek_char_before_cursor();
+        if matches!(prev, Some(p) if p.is_alphanumeric() || p == opener) {
+            return false;
+        }
+    }
+    true
+}
+
 fn focus_order_index(focus: PaneId) -> usize {
     PaneId::ALL.iter().position(|p| *p == focus).unwrap_or(0)
 }
@@ -178,7 +240,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::InsertChar(c) => {
-            with_focused_buffer(state, |buf| buf.insert_char(c));
+            with_focused_buffer(state, |buf| insert_with_auto_pair(buf, c));
         }
         Action::InsertNewline => {
             with_focused_buffer(state, |buf| buf.insert_newline());
