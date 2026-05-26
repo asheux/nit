@@ -1595,6 +1595,42 @@ fn swarm_exec_label_uses_researching_for_research_mission_with_mixed_roles() {
 }
 
 #[test]
+fn swarm_exec_label_compound_role_uses_last_token_gerund() {
+    // `computational-research` (and the legacy `computational research`
+    // form) compound role names should label using only the trailing
+    // activity verb — the qualifier is dropped so the breather reads
+    // naturally ("Researching ..." instead of
+    // "Computational-researching ..."). Operators who want the raw
+    // role see it in the agent-ops DAG.
+    //
+    // Roles whose trailing token is an agent-noun ("genome-reviewer",
+    // "*-or") would gerund to awkward strings ("Reviewering"), but
+    // those roles only fire during the VERIFY phase which has its own
+    // hard-coded "Verifying ..." label in `breather.rs` — they never
+    // reach `swarm_exec_label`. No need to special-case them here.
+    use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str()]);
+
+    for (role, expected) in [
+        ("computational-research", "Researching ..."),
+        ("computational research", "Researching ..."),
+        ("computational_research", "Researching ..."),
+    ] {
+        let runtime = test_runtime_with_running_tasks_and_kind(
+            "mis-001",
+            &[(clone_a.as_str(), role)],
+            SwarmMissionKind::ComputationalResearch,
+        );
+        let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
+        assert_eq!(
+            label, expected,
+            "role `{role}` did not produce the expected breather label"
+        );
+    }
+}
+
+#[test]
 fn swarm_exec_label_screenshot_repro_research_with_integrator_only() {
     // End-to-end reproduction of the production screenshot: a `parallel`
     // research swarm with multiple clones registered, only clone-01

@@ -3391,24 +3391,24 @@ fn uniform_role_gerund_label(roles: &[String]) -> Option<String> {
 }
 
 /// Lowercase role string → display-cased gerund phrase. No `...` suffix
-/// (caller appends it). Word-boundary split is on whitespace or `-`; we
-/// gerund the *last* token and keep the rest as a leading qualifier so
-/// `"computational-research"` → `"Computational-research"` reads more
-/// naturally than `"Computational-researching"`. Tradeoff documented:
-/// callers wanting the activity verb get it from the last segment.
+/// (caller appends it). For compound role names (`computational-
+/// research`, `genome-reviewer`, …) the *last* whitespace/`-`/`_`-
+/// separated token is the activity verb — the leading qualifier is
+/// dropped so the gerund reads naturally (`computational-research` →
+/// `Researching`, not `Computational-researching`). Trade-off: the
+/// qualifier is lost from the breather text; operators who want the
+/// raw role inspect the agent-ops DAG instead. Single-word roles pass
+/// through unchanged.
 fn to_gerund_phrase(role: &str) -> String {
     let role = role.trim();
     if role.is_empty() {
         return String::new();
     }
-    // For multi-token roles, gerund only the trailing activity word.
-    let split_idx = role.rfind([' ', '-', '_']);
-    let (prefix, last) = match split_idx {
-        Some(idx) => (&role[..=idx], &role[idx + 1..]),
-        None => ("", role),
+    let last = match role.rfind([' ', '-', '_']) {
+        Some(idx) => &role[idx + 1..],
+        None => role,
     };
-    let gerund = to_gerund_word(last);
-    capitalize_first(&format!("{prefix}{gerund}"))
+    capitalize_first(&to_gerund_word(last))
 }
 
 /// English -ing rule, narrow scope: drops a trailing silent `e` (but not
