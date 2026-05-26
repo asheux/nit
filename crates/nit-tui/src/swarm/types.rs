@@ -77,11 +77,12 @@ impl SwarmMissionKind {
     }
 
     pub(super) fn allows_role(&self, role: &str) -> bool {
+        // `research` is allowed in any mission kind: even on a General
+        // coding mission the planner may want a read-only research clone
+        // to compare prior-art / patterns before the integrator writes.
+        // `computational-research` stays gated to ComputationalResearch
+        // since it carries the heavier simulation/numerical contract.
         match normalize_role_label(role).as_deref() {
-            Some("research") => matches!(
-                self,
-                SwarmMissionKind::Research | SwarmMissionKind::ComputationalResearch
-            ),
             Some(COMPUTATIONAL_RESEARCH_ROLE) => {
                 matches!(self, SwarmMissionKind::ComputationalResearch)
             }

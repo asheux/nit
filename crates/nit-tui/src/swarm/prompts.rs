@@ -352,7 +352,7 @@ fn append_template_specific_constraints(out: &mut String, template: SwarmTemplat
             out.push_str("- Use deps to express ordering (DAG). Avoid cycles.\n");
             out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
             out.push_str(
-                "- Use read-only proposal/review tasks for codebase work; use research roles only when external/topic research is part of the mission.\n",
+                "- Use read-only proposal/review tasks for codebase work. Use a `research` role task (one or more, parallel) whenever the best approach for a ticket is non-obvious and benefits from comparing prior art, surveying related implementations in other editors/libraries, or surfacing competing patterns — research clones are read-only and feed their findings into the proposer/integrator dependencies. Reserve `computational-research` for missions that need simulations/numerical work.\n",
             );
             out.push_str(
                 "- PROPOSER PARALLELISM (lab): if you assign multiple propose tasks, they MUST have empty `deps` and run concurrently. Do NOT chain them (propose-02 depending on propose-01 etc.) — proposers are independent investigators, not a pipeline. A judge task then fans in via `deps = [propose-01, propose-02, ...]` and waits for all of them in parallel, not serially. Sequential proposers just waste wall-clock time; the judge has to wait for the last one regardless.\n",
@@ -376,6 +376,9 @@ fn append_template_specific_constraints(out: &mut String, template: SwarmTemplat
             );
             out.push_str(
                 "- Use ids `propose-01`, `propose-02`, ... plus `judge` and `integrate` so the workflow is easy to track.\n",
+            );
+            out.push_str(
+                "- OPTIONAL `research` lane: when the request involves non-obvious design choices that benefit from prior-art comparison (other editors / libraries / RFCs / docs), prepend one or more `research` tasks (e.g. `research-01`, `research-02`) with empty `deps`. Make the proposers' `deps` include the research task ids so each proposer can build on the surfaced findings instead of duplicating the survey. Research clones are read-only and feed the proposer/integrator chain.\n",
             );
             out.push_str(
                 "- Create a judge task that depends on ALL proposer tasks and selects the best approach.\n",

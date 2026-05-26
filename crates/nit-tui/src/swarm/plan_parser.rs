@@ -94,8 +94,16 @@ fn prompt_explicitly_requests_computational_research_role(prompt: &str) -> bool 
     )
 }
 
-fn prompt_has_research_intent(prompt: &str) -> bool {
-    if prompt_contains_any(
+/// Phrases that unambiguously declare research intent. Substring match
+/// is safe here because each entry is long enough that incidental usage
+/// in a coding prompt is implausible (e.g. `"literature review"`,
+/// `"read papers"`, `"survey the literature"`). The weak verb+topic
+/// heuristic that used to live alongside this caused false-positives on
+/// coding prompts that mentioned "prior art" of other editors or
+/// "explore ideas" — operators now opt into Research mode either via
+/// these strong phrases or an explicit `mission: research` line.
+fn prompt_has_strong_research_intent(prompt: &str) -> bool {
+    prompt_contains_any(
         prompt,
         &[
             "do research",
@@ -112,54 +120,12 @@ fn prompt_has_research_intent(prompt: &str) -> bool {
             "find sources",
             "find references",
             "gather citations",
-            "prior art",
-            "related work",
-            "explore ideas",
-            "explore topics",
-            "new ideas",
-        ],
-    ) {
-        return true;
-    }
-
-    prompt_contains_any(
-        prompt,
-        &[
-            "research",
-            "investigate",
-            "survey",
-            "study",
-            "search",
-            "browse",
-            "read",
-            "compare",
-            "evaluate",
-            "explore",
-        ],
-    ) && prompt_contains_any(
-        prompt,
-        &[
-            "papers",
-            "literature",
-            "web",
-            "online",
-            "sources",
-            "references",
-            "citations",
-            "resources",
-            "prior art",
-            "related work",
-            "topic",
-            "topics",
-            "ideas",
-            "hypothesis",
-            "hypotheses",
         ],
     )
 }
 
-fn prompt_has_computational_research_intent(prompt: &str) -> bool {
-    if prompt_contains_any(
+fn prompt_has_strong_computational_research_intent(prompt: &str) -> bool {
+    prompt_contains_any(
         prompt,
         &[
             "computational research",
@@ -170,48 +136,6 @@ fn prompt_has_computational_research_intent(prompt: &str) -> bool {
             "optimization study",
             "design an experiment",
             "reproducible analysis",
-        ],
-    ) {
-        return true;
-    }
-
-    prompt_contains_any(
-        prompt,
-        &[
-            "simulation",
-            "simulate",
-            "modeling",
-            "modelling",
-            "numerical",
-            "optimization",
-            "optimisation",
-            "data fitting",
-            "model fitting",
-            "network analysis",
-            "pattern analysis",
-            "reproducible",
-            "benchmark",
-            "experiment",
-            "measurement",
-        ],
-    ) && prompt_contains_any(
-        prompt,
-        &[
-            "research",
-            "study",
-            "evaluate",
-            "compare",
-            "topic",
-            "topics",
-            "hypothesis",
-            "hypotheses",
-            "papers",
-            "literature",
-            "sources",
-            "evidence",
-            "dataset",
-            "datasets",
-            "methods",
         ],
     )
 }
@@ -226,14 +150,21 @@ pub(crate) fn detect_swarm_mission_kind_from_prompt(root_prompt: &str) -> Option
         return Some(kind);
     }
 
+    // Strong-phrases-only auto-detection. The previous weak verb+topic
+    // heuristic — coupled with a code-task marker veto — caused
+    // false-positives that silently demoted integrators to read-only
+    // (e.g. a coding prompt mentioning "prior art" of another editor).
+    // Operators now opt into Research with either a strong phrase
+    // (`literature review`, `do research`, `read papers`, …) or an
+    // explicit `mission: research` / `mission=research` line.
     if prompt_explicitly_requests_computational_research_role(prompt.as_str())
-        || prompt_has_computational_research_intent(prompt.as_str())
+        || prompt_has_strong_computational_research_intent(prompt.as_str())
     {
         return Some(SwarmMissionKind::ComputationalResearch);
     }
 
     if prompt_explicitly_requests_research_role(prompt.as_str())
-        || prompt_has_research_intent(prompt.as_str())
+        || prompt_has_strong_research_intent(prompt.as_str())
     {
         return Some(SwarmMissionKind::Research);
     }

@@ -93,6 +93,73 @@ fn detect_swarm_mission_kind_requires_actual_research_intent() {
     );
 }
 
+#[test]
+fn coding_prompt_with_prior_art_is_general() {
+    // Reproduces the production scenario: a coding-task prompt that
+    // mentions another editor's "prior art" and tells agents to "read"
+    // a file. The prior weak (verb+topic) heuristic flipped this to
+    // Research and silenced integrator writes. Strong-phrases-only
+    // auto-detection treats it as General.
+    let prompt = "\
+T13. Matching-bracket highlight\n\
+Files:\n\
+- crates/nit-core/src/buffer/indent.rs:99\n\
+Acceptance:\n\
+- Vim's MatchParen highlight is the prior art; Read CLAUDE.md first.\n\
+- cargo test --all green.\n";
+    assert_eq!(detect_swarm_mission_kind_from_prompt(prompt), None);
+}
+
+#[test]
+fn strong_research_phrases_classify_as_research_even_in_coding_prompts() {
+    // Operator who really wants Research mode while pointing at code
+    // still gets it via a strong unambiguous phrase.
+    let prompt = "\
+Files: crates/foo/bar.rs\n\
+Run cargo test, then do a literature review of mailbox CRDT designs.\n";
+    assert_eq!(
+        detect_swarm_mission_kind_from_prompt(prompt),
+        Some(SwarmMissionKind::Research)
+    );
+}
+
+#[test]
+fn explicit_mission_general_wins_over_research_signals() {
+    let prompt = "\
+mission: general\n\
+Read papers and survey the literature on bracket-pair highlighting.\n";
+    assert_eq!(
+        detect_swarm_mission_kind_from_prompt(prompt),
+        Some(SwarmMissionKind::General)
+    );
+}
+
+#[test]
+fn vague_research_topic_phrasing_no_longer_auto_classifies() {
+    // Used to hit the weak verb+topic heuristic ("compare" + "papers" +
+    // "ideas") → Research. Strong-only auto-detection treats this as
+    // General until the operator adds `mission: research` or a strong
+    // phrase like "literature review".
+    let prompt = "Compare new ideas for ranking strategies across these papers.";
+    assert_eq!(detect_swarm_mission_kind_from_prompt(prompt), None);
+}
+
+#[test]
+fn research_role_allowed_in_general_mission() {
+    // The planner is allowed to spin up read-only `research` clones even
+    // on a General coding mission — used for prior-art comparison /
+    // pattern surveys that feed the integrator. Computational-research
+    // stays gated to its dedicated mission because it carries the
+    // heavier simulation/numerical contract.
+    assert!(SwarmMissionKind::General.allows_role("research"));
+    assert!(SwarmMissionKind::Research.allows_role("research"));
+    assert!(SwarmMissionKind::ComputationalResearch.allows_role("research"));
+
+    assert!(!SwarmMissionKind::General.allows_role("computational-research"));
+    assert!(!SwarmMissionKind::Research.allows_role("computational-research"));
+    assert!(SwarmMissionKind::ComputationalResearch.allows_role("computational-research"));
+}
+
 fn make_lane(id: &str, role: &str) -> AgentLane {
     AgentLane {
         id: id.into(),
@@ -791,7 +858,11 @@ fn role_ordering_clears_integrate_role_for_non_integrator() {
 }
 
 #[test]
-fn role_ordering_clears_research_role_for_non_research_prompts() {
+fn role_ordering_preserves_research_role_in_general_mission() {
+    // Planner may emit `research` tasks even on General missions so it
+    // can spin up read-only prior-art / pattern-survey clones that feed
+    // the integrator. The previous "clear research role on General"
+    // behavior demoted this whole pipeline; now the role survives.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut tasks = vec![make_task(
         "research-task",
@@ -810,20 +881,22 @@ fn role_ordering_clears_research_role_for_non_research_prompts() {
     );
 
     let task = tasks.first().expect("task");
-    assert_eq!(task.role, None);
-    assert!(warnings
+    assert_eq!(task.role.as_deref(), Some("research"));
+    assert!(!warnings
         .iter()
         .any(|warning| warning.contains("does not permit that research role")));
 }
 
 #[test]
-fn planner_role_hint_downgrades_research_hint_for_non_research_prompts() {
+fn planner_role_hint_preserves_research_hint_in_general_mission() {
     let mut hints = HashMap::new();
     hints.insert("a1".into(), "research".into());
 
+    // Research-role hints survive in every mission kind (matches the
+    // new SwarmMissionKind::allows_role contract that permits research
+    // role across the board).
     let role = planner_role_hint_for_agent(&hints, "a1", None, SwarmMissionKind::General);
-    assert_eq!(role, "all");
-
+    assert_eq!(role, "research");
     let role = planner_role_hint_for_agent(&hints, "a1", None, SwarmMissionKind::Research);
     assert_eq!(role, "research");
 }
