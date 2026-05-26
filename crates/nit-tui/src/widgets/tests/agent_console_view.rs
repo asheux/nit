@@ -1595,6 +1595,38 @@ fn swarm_exec_label_uses_researching_for_research_mission_with_mixed_roles() {
 }
 
 #[test]
+fn swarm_exec_label_screenshot_repro_research_with_integrator_only() {
+    // End-to-end reproduction of the production screenshot: a `parallel`
+    // research swarm with multiple clones registered, only clone-01
+    // currently Running the `integrate` task. Other clones are idle (no
+    // active turn). The breather must show "Integrating ..." — the
+    // previous bug surfaced "Researching ..." because the mission-kind
+    // shortcut fired before the role pass, and even after that fix the
+    // turn-stage `?` was failing fast on idle clones.
+    use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
+    let clone_integrator = "claude-opus-4-7#swarm-mis-001-clone-01".to_string();
+    let clone_idle_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_idle_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+    let clone_idle_c = "claude-opus-4-7#swarm-mis-001-clone-04".to_string();
+    // Only the integrator has an active turn.
+    let state = state_with_active_clones(&[clone_integrator.as_str()]);
+    let runtime = test_runtime_with_running_tasks_and_kind(
+        "mis-001",
+        &[(clone_integrator.as_str(), "integrate")],
+        SwarmMissionKind::Research,
+    );
+    let ordered_ids = vec![
+        clone_integrator.clone(),
+        clone_idle_a,
+        clone_idle_b,
+        clone_idle_c,
+    ];
+
+    let label = swarm_exec_label(&state, &ordered_ids, Some(&runtime));
+    assert_eq!(label, "Integrating ...");
+}
+
+#[test]
 fn swarm_exec_label_uses_role_label_when_uniform_in_research_mission() {
     // When a research swarm has the integrator clone running on its own
     // (e.g. synthesizing the recon/design/propose outputs), the breather
@@ -1653,6 +1685,40 @@ fn swarm_exec_label_prefers_agent_reported_turn_stage_over_role() {
 
     let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
     assert_eq!(label, "Synthesizing ...");
+}
+
+#[test]
+fn swarm_exec_label_ignores_protocol_shaped_turn_stages() {
+    // Production stage strings from the Claude/Codex runners look like
+    // `assistant(text)`, `tool_use(read)`, `tools/call(grep)`,
+    // `content_block_start`, `starting` — none of which read well as a
+    // breather phase. The semantic-stage filter rejects them so the
+    // role-based pass takes over.
+    use crate::swarm::test_runtime_with_running_tasks;
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+
+    for noise in [
+        "assistant(text)",
+        "tool_use(read)",
+        "tools/call(grep)",
+        "content_block_start",
+        "starting",
+        "running",
+        "system",
+        "result",
+    ] {
+        let state = state_with_active_clones_at_stage(&[clone_a.as_str(), clone_b.as_str()], noise);
+        let runtime = test_runtime_with_running_tasks(
+            "mis-001",
+            &[(clone_a.as_str(), "propose"), (clone_b.as_str(), "propose")],
+        );
+        let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
+        assert_eq!(
+            label, "Proposing ...",
+            "stage `{noise}` should not surface as the breather label"
+        );
+    }
 }
 
 #[test]

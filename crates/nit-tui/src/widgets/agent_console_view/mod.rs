@@ -3306,18 +3306,34 @@ pub(super) fn swarm_exec_label(
     fallback_label
 }
 
-/// (1) If every active turn surfaces the same `stage` string, return it
-/// verbatim as `"Stage ..."`. Returns `None` if no active turn has a
-/// stage set, or if at least two stages disagree.
+/// (1) If every active turn surfaces the *same* semantic-intent stage,
+/// return it as `"Stage ..."`. Protocol-shaped values like
+/// `"tool_use(read)"`, `"assistant(text)"`, `"tools/call(grep)"`,
+/// `"content_block_start"`, or generic placeholders like `"starting"`
+/// / `"running"` / `"system"` are filtered out — they're plumbing
+/// noise, not what an operator wants in the breather. If the runners
+/// ever emit a clean intent label like `"Synthesizing"`, this path
+/// uses it; otherwise the function returns `None` and the caller
+/// falls through to the role-based pass.
 fn uniform_turn_stage_label(state: &nit_core::AppState, ordered_ids: &[String]) -> Option<String> {
     let mut stages: Vec<String> = Vec::new();
     for id in ordered_ids {
-        let turn = state.agents.active_turns.get(id.as_str())?;
-        let stage = turn
+        // Idle clones (no active turn) don't disqualify the rest — the
+        // breather should label what the *active* clones are doing.
+        let Some(turn) = state.agents.active_turns.get(id.as_str()) else {
+            continue;
+        };
+        let Some(stage) = turn
             .stage
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.is_empty())
+            .filter(|s| is_semantic_stage_label(s))
+        else {
+            // One active clone has no semantic stage → the whole
+            // uniformity claim is unsafe; fall through to role pass.
+            return None;
+        };
         stages.push(stage.to_string());
     }
     let first = stages.first()?.clone();
@@ -3325,6 +3341,35 @@ fn uniform_turn_stage_label(state: &nit_core::AppState, ordered_ids: &[String]) 
         return None;
     }
     Some(format!("{} ...", capitalize_first(&first)))
+}
+
+/// Reject stage values that came from the runner's raw-event stream
+/// (protocol shapes like `assistant(text)`, `tool_use(...)`,
+/// `tools/call(...)`, `content_block_start`) or generic placeholders
+/// (`starting`, `running`, …). What survives is the rare case where a
+/// runner explicitly emits an operator-readable phase string.
+fn is_semantic_stage_label(stage: &str) -> bool {
+    if stage.contains(['(', ')', '/']) {
+        return false;
+    }
+    let lower = stage.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "starting"
+            | "running"
+            | "system"
+            | "assistant"
+            | "user"
+            | "result"
+            | "error"
+            | "tool_use"
+            | "tool_result"
+            | "content_block_start"
+            | "content_block_stop"
+            | "message_start"
+            | "message_stop"
+            | "message_delta"
+    )
 }
 
 /// (2) Algorithmic gerund: `"research"` → `"Researching ..."`, `"integrate"`
