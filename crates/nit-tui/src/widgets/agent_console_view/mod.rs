@@ -3239,6 +3239,34 @@ pub(super) fn swarm_exec_label<'a>(
         Option<crate::swarm::SwarmDashboardView>,
     > = std::collections::HashMap::new();
 
+    // Mission-kind shortcut: when every active clone is part of a
+    // research-style mission, label as "Researching ..." even if the
+    // individual task roles (recon / design / propose / review) span
+    // several categories — the role-uniformity test further down would
+    // otherwise drop to "Executing ..." for the multi-role lab template.
+    let mut active_mission_kinds: Vec<crate::swarm::SwarmMissionKind> = Vec::new();
+    for id in ordered_ids {
+        if !state.agents.active_turns.contains_key(id.as_str()) {
+            continue;
+        }
+        if let (Some(swarm), Some(mid)) = (swarm, swarm_clone_mission_id(id)) {
+            if let Some(kind) = swarm.mission_kind(mid) {
+                active_mission_kinds.push(kind);
+            }
+        }
+    }
+    if !active_mission_kinds.is_empty()
+        && active_mission_kinds.iter().all(|k| {
+            matches!(
+                k,
+                crate::swarm::SwarmMissionKind::Research
+                    | crate::swarm::SwarmMissionKind::ComputationalResearch,
+            )
+        })
+    {
+        return "Researching ...";
+    }
+
     let mut roles: Vec<String> = Vec::new();
     for id in ordered_ids {
         if !state.agents.active_turns.contains_key(id.as_str()) {

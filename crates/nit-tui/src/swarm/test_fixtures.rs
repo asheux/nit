@@ -47,6 +47,22 @@ pub(crate) fn test_runtime_with_running_tasks(
     test_runtime_with_running_tasks_and_template(mission_id, tasks, SwarmTemplate::Parallel)
 }
 
+/// Same as `test_runtime_with_running_tasks` but pins the mission kind —
+/// used to verify the breather's mission-kind shortcut (research missions
+/// label as "Researching ..." even when clones run mixed roles).
+pub(crate) fn test_runtime_with_running_tasks_and_kind(
+    mission_id: &str,
+    tasks: &[(&str, &str)],
+    mission_kind: SwarmMissionKind,
+) -> SwarmRuntime {
+    let mut runtime =
+        test_runtime_with_running_tasks_and_template(mission_id, tasks, SwarmTemplate::Parallel);
+    if let Some(run) = runtime.runs.get_mut(mission_id) {
+        run.mission_kind = mission_kind;
+    }
+    runtime
+}
+
 /// Same as `test_runtime_with_running_tasks` but lets callers pin the
 /// template — needed for tests that verify prompt parity across parallel /
 /// lab / bulk templates.

@@ -511,6 +511,14 @@ impl SwarmRuntime {
             .or_else(|| self.completed_runs.get(mission_id))
     }
 
+    /// Lookup the mission kind for a swarm run. Used by the inline-breather
+    /// label so a research mission whose clones span multiple roles
+    /// (recon/design/propose/review) still reports as "Researching ..."
+    /// instead of dropping to the role-uniformity fallback.
+    pub fn mission_kind(&self, mission_id: &str) -> Option<SwarmMissionKind> {
+        self.run_for_mission(mission_id).map(|run| run.mission_kind)
+    }
+
     /// Aborts a single in-flight swarm. Marks the run cancelled (moves it
     /// from `runs` to `completed_runs` with a synthetic "ABORTED" status),
     /// drains queued turns for every agent in the run, pushes a

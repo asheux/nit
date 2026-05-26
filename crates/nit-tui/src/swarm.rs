@@ -247,7 +247,8 @@ use workers::{maybe_spawn_genome_review, spawn_genome_gate_eval};
 #[cfg(test)]
 pub(crate) use test_fixtures::{
     merge_single_mission_runtime, test_runtime_with_running_and_queued_tasks,
-    test_runtime_with_running_tasks, test_runtime_with_running_tasks_and_template,
+    test_runtime_with_running_tasks, test_runtime_with_running_tasks_and_kind,
+    test_runtime_with_running_tasks_and_template,
 };
 #[cfg(test)]
 pub(crate) use types::SwarmTemplate as SwarmTemplateForTests;

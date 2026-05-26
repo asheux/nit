@@ -1555,6 +1555,48 @@ fn swarm_exec_label_returns_executing_for_mixed_running_roles() {
 }
 
 #[test]
+fn swarm_exec_label_uses_researching_for_research_mission_with_mixed_roles() {
+    // Research missions fan out across recon / design / propose / review
+    // simultaneously; without the mission-kind shortcut the role-uniformity
+    // test below would drop to "Executing ...". The mission_kind check makes
+    // the breather say "Researching ..." for the whole run.
+    use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
+    let clone_recon = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_design = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+    let state = state_with_active_clones(&[clone_recon.as_str(), clone_design.as_str()]);
+    let runtime = test_runtime_with_running_tasks_and_kind(
+        "mis-001",
+        &[
+            (clone_recon.as_str(), "recon"),
+            (clone_design.as_str(), "design"),
+        ],
+        SwarmMissionKind::Research,
+    );
+
+    let label = swarm_exec_label(
+        &state,
+        &[clone_recon.clone(), clone_design.clone()],
+        Some(&runtime),
+    );
+    assert_eq!(label, "Researching ...");
+}
+
+#[test]
+fn swarm_exec_label_uses_researching_for_computational_research_mission() {
+    use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str()]);
+    let runtime = test_runtime_with_running_tasks_and_kind(
+        "mis-001",
+        &[(clone_a.as_str(), "implement")],
+        SwarmMissionKind::ComputationalResearch,
+    );
+
+    let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
+    assert_eq!(label, "Researching ...");
+}
+
+#[test]
 fn swarm_exec_label_resolves_role_via_clones_own_mission_id() {
     // Even if the caller's selected mission isn't the same as the clone's
     // mission, role resolution should still work because we extract the
