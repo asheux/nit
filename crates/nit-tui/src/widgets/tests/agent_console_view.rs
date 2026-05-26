@@ -1582,7 +1582,29 @@ fn swarm_exec_label_uses_researching_for_research_mission_with_mixed_roles() {
 }
 
 #[test]
-fn swarm_exec_label_uses_researching_for_computational_research_mission() {
+fn swarm_exec_label_uses_role_label_when_uniform_in_research_mission() {
+    // When a research swarm has the integrator clone running on its own
+    // (e.g. synthesizing the recon/design/propose outputs), the breather
+    // must reflect the active role ("Integrating ...") rather than the
+    // generic "Researching ..." — the mission-kind label only kicks in
+    // as the fallback for mixed/empty roles.
+    use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
+    let clone_integrator = "claude-opus-4-7#swarm-mis-001-clone-01".to_string();
+    let state = state_with_active_clones(&[clone_integrator.as_str()]);
+    let runtime = test_runtime_with_running_tasks_and_kind(
+        "mis-001",
+        &[(clone_integrator.as_str(), "integrate")],
+        SwarmMissionKind::Research,
+    );
+
+    let label = swarm_exec_label(&state, &[clone_integrator.clone()], Some(&runtime));
+    assert_eq!(label, "Integrating ...");
+}
+
+#[test]
+fn swarm_exec_label_uses_role_label_for_computational_research_mission() {
+    // Same precedence rule for computational-research: an active
+    // `implement` role wins over the mission-kind fallback.
     use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
     let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
     let state = state_with_active_clones(&[clone_a.as_str()]);
@@ -1593,7 +1615,7 @@ fn swarm_exec_label_uses_researching_for_computational_research_mission() {
     );
 
     let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
-    assert_eq!(label, "Researching ...");
+    assert_eq!(label, "Coding ...");
 }
 
 #[test]

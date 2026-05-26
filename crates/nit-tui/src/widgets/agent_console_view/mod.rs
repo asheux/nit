@@ -3239,11 +3239,12 @@ pub(super) fn swarm_exec_label<'a>(
         Option<crate::swarm::SwarmDashboardView>,
     > = std::collections::HashMap::new();
 
-    // Mission-kind shortcut: when every active clone is part of a
-    // research-style mission, label as "Researching ..." even if the
-    // individual task roles (recon / design / propose / review) span
-    // several categories — the role-uniformity test further down would
-    // otherwise drop to "Executing ..." for the multi-role lab template.
+    // Gather the active clones' mission kinds for the *fallback* path
+    // below — the role-specific label (Coding / Integrating / Judging
+    // / Reviewing / …) wins when the uniformity check succeeds. Only
+    // when role logic would otherwise drop to "Executing ..." (mixed
+    // roles, no role at all) do we promote to "Researching ..." for
+    // research-style missions.
     let mut active_mission_kinds: Vec<crate::swarm::SwarmMissionKind> = Vec::new();
     for id in ordered_ids {
         if !state.agents.active_turns.contains_key(id.as_str()) {
@@ -3255,17 +3256,18 @@ pub(super) fn swarm_exec_label<'a>(
             }
         }
     }
-    if !active_mission_kinds.is_empty()
+    let fallback_label = if !active_mission_kinds.is_empty()
         && active_mission_kinds.iter().all(|k| {
             matches!(
                 k,
                 crate::swarm::SwarmMissionKind::Research
                     | crate::swarm::SwarmMissionKind::ComputationalResearch,
             )
-        })
-    {
-        return "Researching ...";
-    }
+        }) {
+        "Researching ..."
+    } else {
+        "Executing ..."
+    };
 
     let mut roles: Vec<String> = Vec::new();
     for id in ordered_ids {
@@ -3323,7 +3325,7 @@ pub(super) fn swarm_exec_label<'a>(
     }
 
     if roles.is_empty() {
-        return "Executing ...";
+        return fallback_label;
     }
 
     let first = roles[0].as_str();
@@ -3344,11 +3346,11 @@ pub(super) fn swarm_exec_label<'a>(
             "refactor" | "refactoring" => "Refactoring ...",
             "fix" | "fixer" | "bugfix" => "Fixing ...",
             "document" | "docs" | "documentation" => "Documenting ...",
-            _ => "Executing ...",
+            _ => fallback_label,
         };
     }
 
-    "Executing ..."
+    fallback_label
 }
 
 pub(super) fn ecg_indicator(
