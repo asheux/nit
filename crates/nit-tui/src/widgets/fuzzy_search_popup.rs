@@ -41,20 +41,22 @@ pub fn render(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(inner);
-    render_header(frame, layout[0], state, theme);
+    render_query_line(frame, layout[0], state, theme);
+    render_status_line(frame, layout[1], state, theme);
     render_body(
         frame,
-        layout[1],
+        layout[2],
         state,
         theme,
         preview,
         preview_scroll_delta,
     );
-    render_footer(frame, layout[2], theme);
+    render_footer(frame, layout[3], theme);
 }
 
 fn popup_block(theme: &Theme, title: &str) -> Block<'static> {
@@ -70,31 +72,14 @@ fn popup_block(theme: &Theme, title: &str) -> Block<'static> {
         .style(Style::default().bg(theme.background))
 }
 
-fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+/// Top row: mode label + `>` + the query input. Dedicated to the query
+/// alone so long pasted paths can't collide with the status text — vim
+/// and fzf both keep the query on its own line for the same reason.
+fn render_query_line(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let mode_label = match state.fuzzy_search.mode {
         SearchMode::Files => "[FILES]",
         SearchMode::Content => "[CONTENT]",
     };
-    let status_style = if state.fuzzy_search.indexing || state.fuzzy_search.searching {
-        Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.foreground)
-    };
-
-    let results = match state.fuzzy_search.mode {
-        SearchMode::Files => state.fuzzy_search.file_results.len(),
-        SearchMode::Content => state.fuzzy_search.match_results.len(),
-    };
-    let status = if state.fuzzy_search.status_msg.is_empty() {
-        format!("{results} results")
-    } else {
-        state.fuzzy_search.status_msg.clone()
-    };
-    let hidden = on_off(state.fuzzy_search.show_hidden);
-    let ignored = on_off(state.fuzzy_search.show_ignored);
-
     let line = Line::from(vec![
         Span::styled(
             mode_label.to_string(),
@@ -107,11 +92,39 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
             state.fuzzy_search.query.clone(),
             Style::default().fg(theme.foreground),
         ),
-        Span::styled(
-            format!("  {status}  hidden:{hidden} ignored:{ignored}"),
-            status_style,
-        ),
     ]);
+    frame.render_widget(
+        Paragraph::new(vec![line]).style(Style::default().bg(theme.background)),
+        area,
+    );
+}
+
+/// Second row: result count / search timing / `hidden:` / `ignored:`
+/// flags. Lives below the query so paste-induced query length never
+/// pushes the status off-screen or causes mid-line truncation.
+fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let status_style = if state.fuzzy_search.indexing || state.fuzzy_search.searching {
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.foreground)
+    };
+    let results = match state.fuzzy_search.mode {
+        SearchMode::Files => state.fuzzy_search.file_results.len(),
+        SearchMode::Content => state.fuzzy_search.match_results.len(),
+    };
+    let status = if state.fuzzy_search.status_msg.is_empty() {
+        format!("{results} results")
+    } else {
+        state.fuzzy_search.status_msg.clone()
+    };
+    let hidden = on_off(state.fuzzy_search.show_hidden);
+    let ignored = on_off(state.fuzzy_search.show_ignored);
+    let line = Line::from(vec![Span::styled(
+        format!("{status}  hidden:{hidden} ignored:{ignored}"),
+        status_style,
+    )]);
     frame.render_widget(
         Paragraph::new(vec![line]).style(Style::default().bg(theme.background)),
         area,
