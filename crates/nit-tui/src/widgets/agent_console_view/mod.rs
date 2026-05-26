@@ -3223,134 +3223,213 @@ pub(super) fn pad_to_width(input: &str, width: usize) -> String {
     out
 }
 
-// EXEC-phase label reflects the active roles (Coding/Reviewing/Integrating); mixed/absent → "Executing ...".
-pub(super) fn swarm_exec_label<'a>(
+// EXEC-phase label is derived from live signals on the active agent turns,
+// in priority order:
+//
+//   1. Agent-reported turn `stage` (filled by the `TurnStage` bus event —
+//      Claude/Codex runners surface whatever phase the model says it is
+//      in). Freshest, most specific.
+//   2. Swarm-task role from the DAG (recon / design / propose / review /
+//      integrate / …) — algorithmically converted to a gerund so new
+//      planner-emitted roles work without code changes.
+//   3. Mission-kind fallback ("Researching ..." for Research / Computational-
+//      Research missions, "Executing ..." otherwise).
+//
+// No hard-coded role→label table — `to_gerund_phrase` derives the display
+// form from the role string itself, so an unfamiliar planner-emitted role
+// like `audit` or `validate` still labels as "Auditing ..." / "Validating
+// ..." instead of falling through to the generic phase.
+pub(super) fn swarm_exec_label(
     state: &nit_core::AppState,
     ordered_ids: &[String],
     swarm: Option<&SwarmRuntime>,
-) -> &'a str {
-    // Resolve dashboards per-clone using the mission_id encoded in the
-    // clone's agent ID, mirroring `agent_ops_view::swarm_clone_label_parts`.
-    // This avoids relying on the caller's `selected_context_mission` matching
-    // the clone's mission and makes the lookup work even when the swarm run
-    // has been moved to `completed_runs` for a different selected mission.
+) -> String {
+    // (1) Active-turn stage: the agent's own self-reported phase. If
+    // every active turn reports the same stage string (case-
+    // insensitive), surface it verbatim. Mixed stages mean different
+    // clones are at different phases — fall through to the role pass.
+    if let Some(label) = uniform_turn_stage_label(state, ordered_ids) {
+        return label;
+    }
+
+    // (2) Pre-compute the mission-kind aware fallback in case the role
+    // pass below ends up empty or mixed. We do this up-front so the
+    // fallback decision stays a one-pass scan over `ordered_ids`.
+    let fallback_label = mission_kind_fallback_label(state, ordered_ids, swarm);
+
+    // (3) Collect roles from the swarm DAG for clones with a Running
+    // task. Swarm-clone lanes carry a placeholder "(clone NN)" in
+    // `agent.role`; the meaningful role lives on the DAG task. Don't
+    // include Queued / Pending / Done tasks — a proposer with a
+    // downstream queued `test` task would otherwise inject "test" into
+    // the role list and poison the uniformity check.
     let mut dash_by_mission: std::collections::HashMap<
         String,
         Option<crate::swarm::SwarmDashboardView>,
     > = std::collections::HashMap::new();
+    // Lane roles (`planner`, `coder`, `integrator`, …) are noun
+    // identifiers, not verb bases — gerunding them produces nonsense
+    // ("Plannering ..."). Only swarm-task DAG roles (`propose`,
+    // `integrate`, `research`, …) feed the uniformity check; agents
+    // with only a lane role fall through to the mission-kind fallback
+    // below.
+    let mut roles: Vec<String> = Vec::new();
+    for id in ordered_ids {
+        if !state.agents.active_turns.contains_key(id.as_str()) {
+            continue;
+        }
+        let Some((swarm, mid)) = swarm.zip(swarm_clone_mission_id(id)) else {
+            continue;
+        };
+        let dash = dash_by_mission
+            .entry(mid.to_string())
+            .or_insert_with(|| swarm.swarm_dashboard(state, mid))
+            .clone();
+        let Some(dash) = dash else {
+            continue;
+        };
+        for task in dash
+            .tasks
+            .iter()
+            .filter(|t| t.agent_id == *id && t.state == "Running")
+        {
+            if let Some(role) = task.role.as_deref().map(str::trim) {
+                if !role.is_empty() {
+                    roles.push(role.to_string());
+                }
+            }
+        }
+    }
+    if let Some(label) = uniform_role_gerund_label(&roles) {
+        return label;
+    }
+    fallback_label
+}
 
-    // Gather the active clones' mission kinds for the *fallback* path
-    // below — the role-specific label (Coding / Integrating / Judging
-    // / Reviewing / …) wins when the uniformity check succeeds. Only
-    // when role logic would otherwise drop to "Executing ..." (mixed
-    // roles, no role at all) do we promote to "Researching ..." for
-    // research-style missions.
-    let mut active_mission_kinds: Vec<crate::swarm::SwarmMissionKind> = Vec::new();
+/// (1) If every active turn surfaces the same `stage` string, return it
+/// verbatim as `"Stage ..."`. Returns `None` if no active turn has a
+/// stage set, or if at least two stages disagree.
+fn uniform_turn_stage_label(state: &nit_core::AppState, ordered_ids: &[String]) -> Option<String> {
+    let mut stages: Vec<String> = Vec::new();
+    for id in ordered_ids {
+        let turn = state.agents.active_turns.get(id.as_str())?;
+        let stage = turn
+            .stage
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        stages.push(stage.to_string());
+    }
+    let first = stages.first()?.clone();
+    if !stages.iter().all(|s| s.eq_ignore_ascii_case(&first)) {
+        return None;
+    }
+    Some(format!("{} ...", capitalize_first(&first)))
+}
+
+/// (2) Algorithmic gerund: `"research"` → `"Researching ..."`, `"integrate"`
+/// → `"Integrating ..."`, `"propose"` → `"Proposing ..."`, etc. Handles
+/// multi-token roles by gerunding the *last* token only
+/// (`"computational-research"` → `"Computational Researching ..."` →
+/// rendered as `"Researching ..."` keeps reading natural; for hyphenated
+/// inputs we preserve hyphens). Roles already in gerund form
+/// (`"reviewing"`) pass through unchanged.
+fn uniform_role_gerund_label(roles: &[String]) -> Option<String> {
+    if roles.is_empty() {
+        return None;
+    }
+    let first = roles[0].trim().to_ascii_lowercase();
+    if !roles.iter().all(|r| r.trim().eq_ignore_ascii_case(&first)) {
+        return None;
+    }
+    Some(format!("{} ...", to_gerund_phrase(&first)))
+}
+
+/// Lowercase role string → display-cased gerund phrase. No `...` suffix
+/// (caller appends it). Word-boundary split is on whitespace or `-`; we
+/// gerund the *last* token and keep the rest as a leading qualifier so
+/// `"computational-research"` → `"Computational-research"` reads more
+/// naturally than `"Computational-researching"`. Tradeoff documented:
+/// callers wanting the activity verb get it from the last segment.
+fn to_gerund_phrase(role: &str) -> String {
+    let role = role.trim();
+    if role.is_empty() {
+        return String::new();
+    }
+    // For multi-token roles, gerund only the trailing activity word.
+    let split_idx = role.rfind([' ', '-', '_']);
+    let (prefix, last) = match split_idx {
+        Some(idx) => (&role[..=idx], &role[idx + 1..]),
+        None => ("", role),
+    };
+    let gerund = to_gerund_word(last);
+    capitalize_first(&format!("{prefix}{gerund}"))
+}
+
+/// English -ing rule, narrow scope: drops a trailing silent `e` (but not
+/// `ee` / `oe` / `ye` / `ie`) before appending `ing`; otherwise just
+/// appends. Already-gerund words (`"reviewing"`) pass through.
+fn to_gerund_word(word: &str) -> String {
+    let word = word.to_ascii_lowercase();
+    if word.ends_with("ing") {
+        return word;
+    }
+    if word.len() > 1
+        && word.ends_with('e')
+        && !word.ends_with("ee")
+        && !word.ends_with("oe")
+        && !word.ends_with("ye")
+        && !word.ends_with("ie")
+    {
+        let mut s = word;
+        s.pop();
+        s.push_str("ing");
+        return s;
+    }
+    format!("{word}ing")
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// (3) Mission-kind aware fallback for the empty-roles / mixed-roles
+/// case. Research-style missions show "Researching ..." since whatever
+/// the clones are doing collectively is research work; General missions
+/// fall back to the generic "Executing ...".
+fn mission_kind_fallback_label(
+    state: &nit_core::AppState,
+    ordered_ids: &[String],
+    swarm: Option<&SwarmRuntime>,
+) -> String {
+    let mut kinds: Vec<crate::swarm::SwarmMissionKind> = Vec::new();
     for id in ordered_ids {
         if !state.agents.active_turns.contains_key(id.as_str()) {
             continue;
         }
         if let (Some(swarm), Some(mid)) = (swarm, swarm_clone_mission_id(id)) {
             if let Some(kind) = swarm.mission_kind(mid) {
-                active_mission_kinds.push(kind);
+                kinds.push(kind);
             }
         }
     }
-    let fallback_label = if !active_mission_kinds.is_empty()
-        && active_mission_kinds.iter().all(|k| {
+    if !kinds.is_empty()
+        && kinds.iter().all(|k| {
             matches!(
                 k,
                 crate::swarm::SwarmMissionKind::Research
                     | crate::swarm::SwarmMissionKind::ComputationalResearch,
             )
-        }) {
-        "Researching ..."
+        })
+    {
+        "Researching ...".to_string()
     } else {
-        "Executing ..."
-    };
-
-    let mut roles: Vec<String> = Vec::new();
-    for id in ordered_ids {
-        if !state.agents.active_turns.contains_key(id.as_str()) {
-            continue;
-        }
-        // Swarm clone lanes carry "(clone NN)" in `agent.role`; the meaningful
-        // role ("propose", "integrate", ...) lives on the agent's swarm task
-        // in the DAG. Prefer the task role so the breather label reflects
-        // what the active clones are actually doing. Don't filter by task
-        // state: the agent ops panel intentionally shows the assigned role
-        // regardless of state (see `swarm_assigned_roles_for_agent`); the
-        // breather should match.
-        // Only include tasks the agent is actively running (state="Running").
-        // "Queued" tasks (Ready/Dispatched in the DAG) are next-up but not
-        // in-flight — including them poisons the uniformity check (e.g. a
-        // proposer with a queued downstream test task would add "test" to
-        // the role list and flip the breather from "Proposing ..." to
-        // "Executing ..."). Pending/Done tasks are similarly irrelevant.
-        let mut from_task = false;
-        let is_clone = swarm_clone_mission_id(id).is_some();
-        if let (Some(swarm), Some(mid)) = (swarm, swarm_clone_mission_id(id)) {
-            let dash = dash_by_mission
-                .entry(mid.to_string())
-                .or_insert_with(|| swarm.swarm_dashboard(state, mid))
-                .clone();
-            if let Some(dash) = dash {
-                for task in dash
-                    .tasks
-                    .iter()
-                    .filter(|t| t.agent_id == *id && t.state == "Running")
-                {
-                    if let Some(role) = task.role.as_deref().map(str::trim) {
-                        if !role.is_empty() {
-                            roles.push(role.to_string());
-                            from_task = true;
-                        }
-                    }
-                }
-            }
-        }
-        if from_task || is_clone {
-            // For swarm clones whose dashboard didn't yield a Running task,
-            // skip the `agent.role` fallback entirely — the clone's lane
-            // role is the placeholder "(clone NN)", which differs per clone
-            // and would break the uniformity check below.
-            continue;
-        }
-        if let Some(agent) = state.agents.agents_get(id.as_str()) {
-            let r = agent.role.trim();
-            if !r.is_empty() {
-                roles.push(r.to_string());
-            }
-        }
+        "Executing ...".to_string()
     }
-
-    if roles.is_empty() {
-        return fallback_label;
-    }
-
-    let first = roles[0].as_str();
-    let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
-    if uniform {
-        let lower = first.to_ascii_lowercase();
-        return match lower.as_str() {
-            "code" | "coding" | "implement" => "Coding ...",
-            "review" | "reviewer" => "Reviewing ...",
-            "test" | "testing" | "tester" => "Testing ...",
-            "integrate" | "integrator" | "integration" => "Integrating ...",
-            "judge" | "judging" => "Judging ...",
-            "research" | "researcher" => "Researching ...",
-            "computational-research" | "computational research" => "Researching ...",
-            "propose" | "proposer" => "Proposing ...",
-            "design" | "designer" => "Designing ...",
-            "recon" | "reconnaissance" | "scout" => "Scouting ...",
-            "refactor" | "refactoring" => "Refactoring ...",
-            "fix" | "fixer" | "bugfix" => "Fixing ...",
-            "document" | "docs" | "documentation" => "Documenting ...",
-            _ => fallback_label,
-        };
-    }
-
-    fallback_label
 }
 
 pub(super) fn ecg_indicator(

@@ -1481,6 +1481,19 @@ fn artifact_link_rows_use_user_prompt_bg() {
 }
 
 fn state_with_active_clones(clone_ids: &[&str]) -> AppState {
+    state_with_active_clones_inner(clone_ids, None)
+}
+
+/// Same as `state_with_active_clones` but lets callers seed each clone's
+/// `AgentTurnState.stage` so tests can exercise the turn-stage path of
+/// `swarm_exec_label` (the agent's self-reported phase wins over the
+/// swarm-task role).
+#[allow(dead_code)]
+fn state_with_active_clones_at_stage(clone_ids: &[&str], stage: &str) -> AppState {
+    state_with_active_clones_inner(clone_ids, Some(stage.to_string()))
+}
+
+fn state_with_active_clones_inner(clone_ids: &[&str], stage: Option<String>) -> AppState {
     let mut state = test_state();
     state.agents.agents.clear();
     state.agents.active_turns.clear();
@@ -1499,7 +1512,7 @@ fn state_with_active_clones(clone_ids: &[&str]) -> AppState {
                 started_at: now,
                 last_heartbeat_at: now,
                 last_output_at: now,
-                stage: Some("starting".into()),
+                stage: stage.clone(),
             },
         );
     }
@@ -1604,7 +1617,10 @@ fn swarm_exec_label_uses_role_label_when_uniform_in_research_mission() {
 #[test]
 fn swarm_exec_label_uses_role_label_for_computational_research_mission() {
     // Same precedence rule for computational-research: an active
-    // `implement` role wins over the mission-kind fallback.
+    // `implement` role wins over the mission-kind fallback. The label is
+    // derived algorithmically from the role string, so the planner-
+    // emitted role ("implement") surfaces as "Implementing ..." rather
+    // than being aliased to a hard-coded "Coding ..." synonym.
     use crate::swarm::{test_runtime_with_running_tasks_and_kind, SwarmMissionKind};
     let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
     let state = state_with_active_clones(&[clone_a.as_str()]);
@@ -1615,7 +1631,51 @@ fn swarm_exec_label_uses_role_label_for_computational_research_mission() {
     );
 
     let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
-    assert_eq!(label, "Coding ...");
+    assert_eq!(label, "Implementing ...");
+}
+
+#[test]
+fn swarm_exec_label_prefers_agent_reported_turn_stage_over_role() {
+    // When every active clone surfaces the same `AgentTurnState.stage`
+    // value (the freshest signal — emitted by the runner via
+    // TurnStage bus events), the breather uses it verbatim instead of
+    // falling back to the swarm-task role. Lets the model say what
+    // it's doing without the orchestrator second-guessing it.
+    use crate::swarm::test_runtime_with_running_tasks;
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+    let state =
+        state_with_active_clones_at_stage(&[clone_a.as_str(), clone_b.as_str()], "Synthesizing");
+    let runtime = test_runtime_with_running_tasks(
+        "mis-001",
+        &[(clone_a.as_str(), "propose"), (clone_b.as_str(), "propose")],
+    );
+
+    let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
+    assert_eq!(label, "Synthesizing ...");
+}
+
+#[test]
+fn swarm_exec_label_falls_through_when_turn_stages_disagree() {
+    // Mixed stages across clones → drop the turn-stage path and fall
+    // back to the role pass (or mission-kind fallback if roles are
+    // also mixed). Reproduces the "different clones at different
+    // phases" case where surfacing one of them would be misleading.
+    use crate::swarm::test_runtime_with_running_tasks;
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+    let mut state =
+        state_with_active_clones_at_stage(&[clone_a.as_str(), clone_b.as_str()], "Reviewing");
+    if let Some(turn) = state.agents.active_turns.get_mut(clone_b.as_str()) {
+        turn.stage = Some("Tooling".into());
+    }
+    let runtime = test_runtime_with_running_tasks(
+        "mis-001",
+        &[(clone_a.as_str(), "propose"), (clone_b.as_str(), "propose")],
+    );
+
+    let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
+    assert_eq!(label, "Proposing ...");
 }
 
 #[test]
