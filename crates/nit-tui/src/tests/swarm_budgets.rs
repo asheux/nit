@@ -54,6 +54,7 @@ fn empty_run() -> SwarmRun {
         prior_violations: Vec::new(),
         prompt_budget_defaults: PromptBudgets::default(),
         prompt_budgets: HashMap::new(),
+        prior_followup_snapshot: None,
     }
 }
 

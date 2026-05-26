@@ -788,6 +788,77 @@ pub(super) struct GenomeReviewPending {
     pub(super) reviewer_id: String,
 }
 
+/// Captured the moment a completed run is re-activated for a follow-up so
+/// the new planner prompt can splice the prior synthesis, artifacts, gate
+/// report, and scope verbatim without consulting state that the wipe
+/// would otherwise have cleared.
+#[derive(Clone, Debug)]
+pub(super) struct FollowupContext {
+    pub(super) mission_kind: SwarmMissionKind,
+    pub(super) template: SwarmTemplate,
+    pub(super) gate_selection: String,
+    pub(super) gate_report: Option<GateReport>,
+    pub(super) report_status: Option<String>,
+    pub(super) report_output: Option<String>,
+    pub(super) scope_files: Vec<String>,
+    pub(super) tasks: Vec<FollowupTaskSnapshot>,
+    /// `Some(prev_kind)` only when the operator explicitly switched mission
+    /// kinds on the follow-up command (e.g. `mission: general` on a prior
+    /// Research run). The prelude renders a `from -> to` annotation so the
+    /// new planner knows the kind changed mid-flight.
+    pub(super) prior_mission_kind: Option<SwarmMissionKind>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FollowupTaskSnapshot {
+    pub(super) id: String,
+    pub(super) title: String,
+    pub(super) role: Option<String>,
+    pub(super) agent_id: String,
+    /// Pre-truncated headline: first FOLLOWUP_TASK_HEADLINE_CHARS chars of
+    /// `parsed_artifacts.notes.join(" ")` (or the prose `task.output` if no
+    /// structured notes). Empty when both sources are empty.
+    pub(super) headline: String,
+}
+
+const FOLLOWUP_TASK_HEADLINE_CHARS: usize = 80;
+
+impl FollowupTaskSnapshot {
+    pub(super) fn from_task(task: &SwarmTask) -> Self {
+        Self {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            role: task.role.clone(),
+            agent_id: task.agent_id.clone(),
+            headline: Self::headline_from_task(task),
+        }
+    }
+
+    fn headline_from_task(task: &SwarmTask) -> String {
+        if let Some(artifacts) = task.parsed_artifacts.as_ref() {
+            let joined = artifacts.notes.join(" ");
+            let trimmed = joined.trim();
+            if !trimmed.is_empty() {
+                return super::truncate_chars(trimmed, FOLLOWUP_TASK_HEADLINE_CHARS);
+            }
+        }
+        if let Some(output) = task.output.as_deref() {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                return super::truncate_chars(trimmed, FOLLOWUP_TASK_HEADLINE_CHARS);
+            }
+        }
+        String::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FollowupMessage {
+    pub(super) agent_id: Option<String>,
+    pub(super) text: String,
+    pub(super) kind: Option<String>,
+}
+
 pub(super) struct SwarmRun {
     pub(super) mission_id: String,
     pub(super) root_prompt: String,
@@ -866,4 +937,10 @@ pub(super) struct SwarmRun {
     /// tokens. Consulted before falling back to `prompt_budget_defaults` so
     /// operators can stretch or shrink a specific role for one mission.
     pub(super) prompt_budgets: std::collections::HashMap<String, usize>,
+    /// Set by `reactivate_for_followup` to carry prior-run context into the
+    /// next planner prompt. Drained via `.take()` in
+    /// `build_followup_planner_prompt`, so a second follow-up build call
+    /// for the same active mission gets no prelude — intentional, one
+    /// follow-up = one prelude attempt.
+    pub(super) prior_followup_snapshot: Option<FollowupContext>,
 }

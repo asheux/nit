@@ -46,6 +46,10 @@ mod prompts_leak_test;
 #[path = "tests/swarm_budgets.rs"]
 mod swarm_budgets_tests;
 
+#[cfg(test)]
+#[path = "tests/followup_context.rs"]
+mod followup_context_tests;
+
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
@@ -233,8 +237,9 @@ pub(crate) use types::{
     SwarmEventOutcome,
 };
 use types::{
-    parse_swarm_template, FilePreState, Gate, GateBundle, GenomeGatePending, GenomeReviewPending,
-    SwarmDagValidationMode, SwarmRun, SwarmStage, SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
+    parse_swarm_template, FilePreState, FollowupContext, FollowupMessage, Gate, GateBundle,
+    GenomeGatePending, GenomeReviewPending, SwarmDagValidationMode, SwarmRun, SwarmStage,
+    SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
 };
 pub use types::{
     GateReport, GateReportGate, SwarmArtifactCommand, SwarmArtifactDiff, SwarmArtifactFile,

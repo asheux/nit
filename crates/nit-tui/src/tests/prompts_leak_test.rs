@@ -206,6 +206,7 @@ fn make_run(spawn_cwd: &Path, gate_bundle: Option<GateBundle>, scope: Vec<String
         prior_violations: Vec::new(),
         prompt_budget_defaults: super::budgets::PromptBudgets::default(),
         prompt_budgets: std::collections::HashMap::new(),
+        prior_followup_snapshot: None,
     }
 }
 
@@ -224,6 +225,8 @@ fn no_nit_literals_in_dotfiles_workspace() {
         &[],
         &[],
         cwd.as_path(),
+        &[],
+        None,
         &[],
     );
     assert_no_leak(&planner, "planner");
@@ -329,6 +332,8 @@ fn precedent_bleed_filtered_from_planner_prompt() {
         &[],
         cwd.as_path(),
         std::slice::from_ref(&stale),
+        None,
+        &[],
     );
 
     assert!(

@@ -355,6 +355,7 @@ const DEP_SECTION_MARKERS: &[&str] = &[
 
 const SECTION_TERMINATORS: &[&str] = &[
     "\nRespond with:",
+    "\n## PREVIOUS RUN",
     "\n## STRUCTURED ARTIFACTS",
     "\n## SIGN-OFF",
     "\n## GENOME LANDSCAPE",

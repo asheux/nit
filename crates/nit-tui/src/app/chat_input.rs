@@ -1279,7 +1279,7 @@ fn dispatch_swarm_followup(
     };
     let mid = mission_id.as_deref().unwrap();
     crate::swarm::ensure_swarm_agents_for_followup(state, mid, &config);
-    swarm.reactivate_for_followup(state, mid);
+    swarm.reactivate_for_followup(state, mid, Some(prompt));
     if let Some(mission) = state.agents.missions.iter_mut().find(|m| m.id == mid) {
         mission.status = "PLAN".into();
         mission.phase = MissionPhase::Plan;

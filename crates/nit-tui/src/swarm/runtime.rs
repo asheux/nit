@@ -1,17 +1,19 @@
 use std::sync::mpsc;
 
-use nit_core::{AppState, MissionPhase, MissionRecord};
+use nit_core::{AgentMessage, AppState, MissionPhase, MissionRecord};
 
+use super::types::{FollowupContext, FollowupMessage, FollowupTaskSnapshot};
 use super::{
     assign_clone_roles_for_parallel_coverage, blocked_on, build_planner_prompt,
     build_verify_prompt, classify_swarm_mission_kind, dashboard_gate_rows,
     deduplicate_inherited_role_hints, direct_role_hint_for_agent, ensure_size_clones,
-    enumerate_scope_files, gate_bundle_label, is_priority_agent, next_mission_id,
-    planner_role_hint_for_agent, push_system_message_to_mission, read_workspace_custom_gates,
-    run_gates_label, stage_label, swarm_mission_title, task_state_dashboard_label, timestamp_label,
-    Gate, GateBundle, SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView,
-    SwarmRun, SwarmRuntime, SwarmSessionConfig, SwarmSize, SwarmStage, SwarmTaskDashboardRow,
-    SwarmTaskPersistenceView, SwarmTaskState, SwarmTemplate,
+    enumerate_scope_files, explicit_swarm_mission_kind_from_prompt, gate_bundle_label,
+    is_priority_agent, next_mission_id, planner_role_hint_for_agent,
+    push_system_message_to_mission, read_workspace_custom_gates, run_gates_label, stage_label,
+    swarm_mission_title, task_state_dashboard_label, timestamp_label, Gate, GateBundle,
+    SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView, SwarmRun,
+    SwarmRuntime, SwarmSessionConfig, SwarmSize, SwarmStage, SwarmTaskDashboardRow,
+    SwarmTaskPersistenceView, SwarmTaskState, SwarmTemplate, SYSTEM_ALERT_KIND,
 };
 
 impl SwarmRuntime {
@@ -175,18 +177,26 @@ impl SwarmRuntime {
     }
 
     pub fn build_followup_planner_prompt(
-        &self,
+        &mut self,
         state: &AppState,
         mission_id: &str,
         user_prompt: &str,
     ) -> Option<String> {
-        let run = self.run_for_mission(mission_id)?;
+        let recent_messages = collect_recent_mission_messages(
+            state,
+            mission_id,
+            super::prompts::FOLLOWUP_RECENT_MESSAGES_CAP,
+        );
+        let run = self.runs.get_mut(mission_id)?;
         let role_hints = role_hints_for_followup(state, run);
         let priority_agent_ids = priority_agents_for_followup(state, run);
         // Phase 8: cross-mission memory. Reuse the mission's spawn cwd so a
-        // multipane followup keeps its pane's workspace.
-        let spawn_cwd = run.spawn_cwd.as_path();
-        let memory_hits = load_memory_hits(spawn_cwd, user_prompt, &[mission_id]);
+        // multipane followup keeps its pane's workspace. Clone the PathBuf
+        // here so the subsequent `.take()` on prior_followup_snapshot can
+        // mutably borrow `run` without conflicting with a shared borrow.
+        let spawn_cwd = run.spawn_cwd.clone();
+        let memory_hits = load_memory_hits(spawn_cwd.as_path(), user_prompt, &[mission_id]);
+        let prior_context = run.prior_followup_snapshot.take();
         Some(build_planner_prompt(
             user_prompt,
             run.template,
@@ -196,18 +206,51 @@ impl SwarmRuntime {
             run.integrator_agent_id.as_deref(),
             &role_hints,
             &priority_agent_ids,
-            spawn_cwd,
+            spawn_cwd.as_path(),
             &memory_hits,
+            prior_context.as_ref(),
+            &recent_messages,
         ))
     }
 
     /// Re-activates a completed swarm so the planner can produce a new
     /// plan for a follow-up prompt. Clears prior tasks/outputs while
-    /// keeping agent assignments and gate config intact.
-    pub fn reactivate_for_followup(&mut self, state: &mut AppState, mission_id: &str) -> bool {
+    /// keeping agent assignments and gate config intact. Snapshots the
+    /// prior run's structured state onto `prior_followup_snapshot` BEFORE
+    /// wiping so the next planner prompt can splice the `## PREVIOUS RUN`
+    /// prelude (T22).
+    pub fn reactivate_for_followup(
+        &mut self,
+        state: &mut AppState,
+        mission_id: &str,
+        user_prompt: Option<&str>,
+    ) -> bool {
         let Some(mut run) = self.completed_runs.remove(mission_id) else {
             return self.runs.contains_key(mission_id);
         };
+
+        // Mission-kind override: operator can flip Research -> General etc.
+        // with the existing `mission:` token in @swarm syntax. Apply before
+        // snapshotting so the prelude reflects the NEW kind, with a
+        // `prior_mission_kind` breadcrumb naming the OLD one.
+        let mut kind_switch = None;
+        if let Some(prompt) = user_prompt {
+            if let Some(new_kind) = explicit_swarm_mission_kind_from_prompt(prompt) {
+                if new_kind != run.mission_kind {
+                    kind_switch = Some((run.mission_kind, new_kind));
+                    run.mission_kind = new_kind;
+                }
+            }
+        }
+        if let Some((from, to)) = kind_switch {
+            push_system_message_to_mission(
+                state,
+                mission_id,
+                format!("Mission kind switched: {} -> {}", from.label(), to.label()),
+            );
+        }
+
+        let prior_snapshot = build_prior_followup_snapshot(&run, kind_switch.map(|(p, _)| p));
 
         push_system_message_to_mission(
             state,
@@ -238,6 +281,7 @@ impl SwarmRuntime {
         // deltas from the original swarm's starting point.
         run.initial_genome_baselines = state.genome_reports.clone();
         state.genome_mission_modified.remove(mission_id);
+        run.prior_followup_snapshot = Some(prior_snapshot);
         self.runs.insert(mission_id.to_string(), run);
         true
     }
@@ -429,6 +473,8 @@ impl SwarmRuntime {
             &priority_agent_ids,
             spawn_cwd.as_path(),
             &memory_hits,
+            None,
+            &[],
         );
 
         let scope_files = enumerate_scope_files(spawn_cwd.as_path(), &root_prompt);
@@ -491,6 +537,7 @@ impl SwarmRuntime {
                 prior_violations: Vec::new(),
                 prompt_budget_defaults: self.prompt_budgets.clone(),
                 prompt_budgets,
+                prior_followup_snapshot: None,
             },
         );
 
@@ -891,6 +938,65 @@ fn load_memory_hits(
         exclude_mission_ids,
         3,
     )
+}
+
+fn build_prior_followup_snapshot(
+    run: &SwarmRun,
+    prior_mission_kind: Option<SwarmMissionKind>,
+) -> FollowupContext {
+    let tasks = run
+        .tasks
+        .iter()
+        .map(FollowupTaskSnapshot::from_task)
+        .collect();
+    FollowupContext {
+        mission_kind: run.mission_kind,
+        template: run.template,
+        gate_selection: run.gate_selection.clone(),
+        gate_report: run.gate_report.clone(),
+        report_status: run.report_status.clone(),
+        report_output: run.report_output.clone(),
+        scope_files: run.scope_files.clone(),
+        tasks,
+        prior_mission_kind,
+    }
+}
+
+fn collect_recent_mission_messages(
+    state: &AppState,
+    mission_id: &str,
+    cap: usize,
+) -> Vec<FollowupMessage> {
+    let mut picked: Vec<FollowupMessage> = state
+        .agents
+        .messages
+        .iter()
+        .rev()
+        .filter(|m| m.mission_id.as_deref() == Some(mission_id))
+        .filter(|m| is_substantive_followup_message(m))
+        .take(cap)
+        .map(|m| FollowupMessage {
+            agent_id: m.agent_id.clone(),
+            text: m.text.clone(),
+            kind: m.kind.clone(),
+        })
+        .collect();
+    picked.reverse();
+    picked
+}
+
+// SYSTEM_ALERT_KIND broadcasts (clamp warnings, planner-validator notes)
+// and `swarm`-authored boilerplate (template restart lines, repair-round
+// banners) aren't conversational signal — keep the splice focused on
+// operator prompts and agent replies.
+fn is_substantive_followup_message(m: &AgentMessage) -> bool {
+    if m.kind.as_deref() == Some(SYSTEM_ALERT_KIND) {
+        return false;
+    }
+    if m.agent_id.as_deref() == Some("swarm") {
+        return false;
+    }
+    true
 }
 
 fn resolve_gates(spawn_cwd: &std::path::Path) -> GateSetup {

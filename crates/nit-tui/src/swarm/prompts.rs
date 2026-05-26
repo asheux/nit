@@ -2,11 +2,13 @@ use std::path::Path;
 
 use nit_core::AppState;
 
+use super::types::FollowupTaskSnapshot;
 use super::{
     dashboard_gate_rows, enumerate_scope_files, is_cargo_workspace, normalize_role_label,
-    run_gates_label, task_artifacts_summary_for_prompt, truncate_chars, SwarmMissionKind, SwarmRun,
-    SwarmTask, SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, FINDINGS_RETRY_CLAUSE,
-    NO_PADDING_CLAUSE, SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
+    run_gates_label, task_artifacts_summary_for_prompt, truncate_chars, FollowupContext,
+    FollowupMessage, GateReport, SwarmMissionKind, SwarmRun, SwarmTask, SwarmTaskState,
+    SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, FINDINGS_RETRY_CLAUSE, NO_PADDING_CLAUSE,
+    SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
 };
 
 /// Machine-checked sign-off sentinel. Swarm agents must emit this line exactly
@@ -98,6 +100,8 @@ pub(super) fn build_planner_prompt(
     priority_agent_ids: &[String],
     workspace_root: &Path,
     memory_hits: &[nit_core::MissionHit],
+    prior_context: Option<&FollowupContext>,
+    recent_messages: &[FollowupMessage],
 ) -> String {
     let available = agent_ids
         .iter()
@@ -130,6 +134,7 @@ pub(super) fn build_planner_prompt(
     append_planner_output_format(&mut out, template);
     append_planner_scope_section(&mut out, &scope_files);
     append_planner_memory_hits(&mut out, memory_hits, workspace_root);
+    append_followup_context_prelude(&mut out, prior_context, recent_messages);
 
     out.push_str("\nOperator request:\n");
     out.push_str(root_prompt.trim());
@@ -500,6 +505,127 @@ fn append_planner_memory_hits(
                     .join(", ")
             ));
         }
+    }
+}
+
+pub(super) const FOLLOWUP_RECENT_MESSAGES_CAP: usize = 20;
+const FOLLOWUP_SYNTHESIS_CHARS: usize = 800;
+const FOLLOWUP_SCOPE_DISPLAY_CAP: usize = 40;
+const FOLLOWUP_MESSAGE_BODY_CHARS: usize = 240;
+
+fn append_followup_context_prelude(
+    out: &mut String,
+    prior_context: Option<&FollowupContext>,
+    recent_messages: &[FollowupMessage],
+) {
+    let Some(ctx) = prior_context else {
+        return;
+    };
+    out.push_str("\n## PREVIOUS RUN (follow-up context — read before planning)\n");
+
+    let failed = ctx.report_status.as_deref().is_some_and(|s| {
+        s.eq_ignore_ascii_case("FAILED")
+            || s.eq_ignore_ascii_case("ABORTED")
+            || s.to_uppercase().contains("FAIL")
+    });
+    if failed {
+        out.push_str("\n⚠ Prior run did NOT succeed (status=");
+        out.push_str(ctx.report_status.as_deref().unwrap_or("unknown"));
+        out.push_str("). Treat artifacts below as PROPOSED work, not landed work.\n");
+    }
+    if let Some(prior) = ctx.prior_mission_kind {
+        out.push_str(&format!(
+            "Note: follow-up switched mission kind from `{}` to `{}`.\n",
+            prior.label(),
+            ctx.mission_kind.label(),
+        ));
+    }
+
+    out.push_str(&format!(
+        "- Mission kind: `{}`\n- Template: `{}`\n- Gate selection: `{}`\n",
+        ctx.mission_kind.label(),
+        ctx.template.label(),
+        ctx.gate_selection,
+    ));
+    if let Some(status) = ctx.report_status.as_deref() {
+        out.push_str(&format!("- Final status: `{status}`\n"));
+    }
+
+    if let Some(gate_report) = ctx.gate_report.as_ref() {
+        append_followup_gate_results(out, gate_report);
+    }
+    if let Some(report) = ctx.report_output.as_deref() {
+        out.push_str("\n### Prior synthesis (excerpt)\n");
+        out.push_str(truncate_chars(report.trim(), FOLLOWUP_SYNTHESIS_CHARS).trim());
+        out.push('\n');
+    }
+    if !ctx.tasks.is_empty() {
+        append_followup_task_artifacts(out, &ctx.tasks);
+    }
+    if !ctx.scope_files.is_empty() {
+        append_followup_scope_files(out, &ctx.scope_files);
+    }
+    if !recent_messages.is_empty() {
+        append_followup_messages(out, recent_messages);
+    }
+}
+
+fn append_followup_gate_results(out: &mut String, gate_report: &GateReport) {
+    out.push_str("\n### Prior gate results (red lines first)\n");
+    let mut gates: Vec<_> = gate_report.gates.iter().collect();
+    gates.sort_by_key(|g| g.ui_status() == "PASS");
+    for gate in gates {
+        out.push_str(&format!("- {}: {}\n", gate.name, gate.ui_status()));
+    }
+}
+
+fn append_followup_task_artifacts(out: &mut String, tasks: &[FollowupTaskSnapshot]) {
+    out.push_str("\n### Prior task artifacts\n");
+    for task in tasks {
+        let role = task.role.as_deref().unwrap_or("(no role)");
+        let headline = if task.headline.is_empty() {
+            "(no notes)"
+        } else {
+            task.headline.as_str()
+        };
+        out.push_str(&format!(
+            "- `{}` — {} ({} / {}): {}\n",
+            task.id, task.title, role, task.agent_id, headline
+        ));
+    }
+}
+
+fn append_followup_scope_files(out: &mut String, scope_files: &[String]) {
+    out.push_str(&format!(
+        "\n### Prior scope (skip re-scan — already known: {} files)\n",
+        scope_files.len(),
+    ));
+    for path in scope_files.iter().take(FOLLOWUP_SCOPE_DISPLAY_CAP) {
+        out.push_str(&format!("  - {path}\n"));
+    }
+    if scope_files.len() > FOLLOWUP_SCOPE_DISPLAY_CAP {
+        out.push_str(&format!(
+            "  - … and {} more\n",
+            scope_files.len() - FOLLOWUP_SCOPE_DISPLAY_CAP
+        ));
+    }
+}
+
+fn append_followup_messages(out: &mut String, messages: &[FollowupMessage]) {
+    out.push_str(&format!(
+        "\n### Recent conversation trace (most recent {} of ≤{} messages, oldest first)\n",
+        messages.len(),
+        FOLLOWUP_RECENT_MESSAGES_CAP,
+    ));
+    for msg in messages {
+        let who = msg.agent_id.as_deref().unwrap_or("operator");
+        let kind = msg
+            .kind
+            .as_deref()
+            .map(|k| format!(" [{k}]"))
+            .unwrap_or_default();
+        let text = truncate_chars(msg.text.trim(), FOLLOWUP_MESSAGE_BODY_CHARS);
+        out.push_str(&format!("- {who}{kind}: {text}\n"));
     }
 }
 
