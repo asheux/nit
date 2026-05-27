@@ -16,6 +16,7 @@ mod dashboard;
 mod fallback;
 mod gate_retry;
 mod graph_exec;
+pub mod intent;
 mod json;
 pub(crate) mod limits;
 mod mission;

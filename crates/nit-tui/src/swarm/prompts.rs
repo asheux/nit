@@ -103,6 +103,40 @@ pub(super) fn build_planner_prompt(
     prior_context: Option<&FollowupContext>,
     recent_messages: &[FollowupMessage],
 ) -> String {
+    let intent = super::intent::detect_intent(root_prompt);
+    build_planner_prompt_with_intent(
+        root_prompt,
+        template,
+        mission_kind,
+        planner_agent_id,
+        agent_ids,
+        integrator_agent_id,
+        role_hints,
+        priority_agent_ids,
+        workspace_root,
+        memory_hits,
+        prior_context,
+        recent_messages,
+        &intent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_planner_prompt_with_intent(
+    root_prompt: &str,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    planner_agent_id: &str,
+    agent_ids: &[String],
+    integrator_agent_id: Option<&str>,
+    role_hints: &[(String, String)],
+    priority_agent_ids: &[String],
+    workspace_root: &Path,
+    memory_hits: &[nit_core::MissionHit],
+    prior_context: Option<&FollowupContext>,
+    recent_messages: &[FollowupMessage],
+    intent: &super::intent::OperatorIntent,
+) -> String {
     let available = agent_ids
         .iter()
         .filter(|id| id.as_str() != planner_agent_id)
@@ -123,7 +157,7 @@ pub(super) fn build_planner_prompt(
         &scope_files,
         large_scope,
     );
-    append_template_specific_constraints(&mut out, template);
+    append_template_specific_constraints(&mut out, template, intent, agent_ids.len());
     out.push_str(
         "- When the operator request involves refactoring or modifying a module/directory, the plan MUST cover ALL files in that scope. Assign a recon or propose task to survey the full directory tree first, and ensure the integrate task prompt lists every affected file.\n",
     );
@@ -325,23 +359,60 @@ fn append_integrator_constraints(
     }
 }
 
-fn append_template_specific_constraints(out: &mut String, template: SwarmTemplate) {
+fn append_template_specific_constraints(
+    out: &mut String,
+    template: SwarmTemplate,
+    intent: &super::intent::OperatorIntent,
+    agent_count: usize,
+) {
     match template {
         SwarmTemplate::Parallel => {
+            // Compute the fanout floor up front so the planner sees the
+            // exact integer it MUST hit, not just "split the work".
+            // This number is the same one the validator's
+            // INV-17 parallel_min_integrators enforces. When operator
+            // intent exceeds capacity we explicitly switch the planner
+            // into bundling mode rather than asking for unbounded
+            // fanout.
+            let writer_budget = agent_count.saturating_sub(1).max(1);
+            let floor = super::validator::parallel_integrate_floor(intent, writer_budget);
+            let over_capacity =
+                super::validator::parallel_intent_exceeds_capacity(intent, writer_budget);
+            let intent_block = match intent.ticket_count {
+                Some(n) if intent.structured_list && over_capacity => format!(
+                    "OPERATOR INTENT: {n} distinct tickets detected — exceeds capacity ({floor} writer slots). Plan in BUNDLE MODE: group related tickets into {floor} integrators by shared file scope / module / domain. Each integrator's `task_prompt` MUST quote ALL tickets in its bundle and list the union of their files.\n",
+                ),
+                Some(n) if intent.structured_list => format!(
+                    "OPERATOR INTENT: {n} distinct tickets detected in the prompt (bullets / numbered items / `T<n>.` headers / `Files:` blocks). Capacity is sufficient ({writer_budget} writer slots) — one integrator per ticket.\n",
+                ),
+                _ => String::from(
+                    "OPERATOR INTENT: no explicit ticket count detected; prompt may be a single deliverable or unstructured prose.\n",
+                ),
+            };
+            out.push_str(&intent_block);
+            out.push_str(&format!(
+                "- PARALLEL FANOUT — MUST: produce AT LEAST {floor} `role=integrate` tasks (each `writes=true`). Under-fanned plans (`integrate_count < {floor}`) are auto-rejected by the post-parse validator (INV-17 parallel_min_integrators). Upper bound: {floor} (the writer budget caps fanout — beyond this the marginal integrator costs more than it saves).\n",
+            ));
+            if over_capacity {
+                out.push_str(
+                    "- BUNDLING — MUST: tickets exceed writer capacity. Group related tickets into bundles such that integrator_count = floor, and put the bundling rationale in each integrator's `task_prompt` (e.g. \"this integrator owns tickets T13 + T14 + T17 because they all touch editor_view.rs\"). Group by: shared file scope first, shared module second, shared semantic domain last. Avoid splitting a single ticket across integrators (the rebases will collide).\n",
+                );
+            } else {
+                out.push_str(
+                    "- ONE TICKET PER INTEGRATOR — MUST: do NOT consolidate multiple tickets into a single integrator. If the operator asked for N tickets, produce N integrators, each with `task_prompt` quoting its specific ticket text and listing the files that ticket owns. Consolidation is the most common parallel-template plan failure.\n",
+                );
+            }
             out.push_str(
-                "- Prefer ONE task per agent id (max parallelism, deterministic tracking).\n",
+                "- DISTINCT SCOPE: each integrate task's `task_prompt` MUST clearly state which files / which ticket(s) it owns. Two integrators with overlapping scope is a plan failure (the integrators race on the same files).\n",
             );
             out.push_str(
-                "- REQUIRED: reserve at least ONE non-integrate lane for a `propose` (or `research` / `recon`) task that surveys the target module first and outputs a concrete file-by-file implementation plan. The remaining agents take `integrate` and split the file work, with the propose task as a dep. Even when the scope is large and multiple integrate tasks are allowed, do NOT make every agent an integrator — a single propose/recon lane should always run first as a dep for the integrate tasks.\n",
+                "- RECON LANE: reserve ONE non-integrate lane for a `propose` (or `research` / `recon`) task that surveys the target scope first. The integrators depend on it (so they share a consistent view of the codebase) but the integrators themselves run in parallel after recon completes.\n",
             );
             out.push_str(
-                "- Prefer tasks that can run in parallel (deps should usually be empty), except where the propose lane feeds the integrate tasks.\n",
+                "- Prefer tasks that can run in parallel (deps should usually be empty), except where the recon lane feeds the integrate tasks.\n",
             );
             out.push_str(
                 "- If you assign producer/consumer-style roles (e.g. research or computational-research → judge), use deps to express required ordering.\n",
-            );
-            out.push_str(
-                "- Use `propose`, `research`, `review`, and `test` for the remaining lanes instead of repeating singleton roles.\n",
             );
             out.push_str(
                 "- VERIFIER ORDERING (parallel): every `test` and `review` task MUST set `deps` to ALL `integrate` task ids. Verifiers cannot run before writers have produced output — a `test` task with empty deps will fire alongside the proposers and report nothing-to-test. The runtime auto-repairs missing deps as a safety net, but plans should set them explicitly so the dependency intent is visible in the DAG.\n",

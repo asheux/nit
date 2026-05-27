@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::intent::OperatorIntent;
 use super::{analyze_swarm_dag, normalize_role_label, SwarmMissionKind, SwarmTask, SwarmTemplate};
 
 /// Severity of a structural defect in a parsed plan.
@@ -48,6 +49,12 @@ pub struct ValidationContext<'a> {
     pub template: SwarmTemplate,
     pub mission_kind: SwarmMissionKind,
     pub root_prompt: &'a str,
+    /// What the operator's prompt seems to be asking for (ticket
+    /// count / structured-list flag). Drives the parallel-template
+    /// `INV-17 parallel_min_integrators` invariant — without this
+    /// the planner's consolidation prior wins and operators get
+    /// under-fanned plans.
+    pub intent: OperatorIntent,
 }
 
 const BULK_PROPOSER_HARD_CAP: usize = 12;
@@ -74,7 +81,119 @@ pub fn validate_plan(ctx: &ValidationContext<'_>) -> Vec<Violation> {
     violations.extend(invariant_no_proposer_to_proposer_dep(ctx));
     violations.extend(invariant_artifacts_field_shape(ctx));
     violations.extend(invariant_bulk_max_proposers(ctx));
+    violations.extend(invariant_parallel_min_integrators(ctx));
     violations
+}
+
+/// Hard upper bound on parallel integrate-task count. Matches
+/// `BULK_PROPOSER_HARD_CAP` — beyond ~12 simultaneous writers we hit
+/// file-descriptor / prompt-budget ceilings and the marginal value of
+/// each additional integrator drops below the dispatch overhead.
+/// When operator intent exceeds this, the planner is told to GROUP
+/// related tickets into fewer integrators (each handling a bundle).
+const PARALLEL_INTEGRATE_HARD_CAP: usize = 12;
+
+/// Minimum integrate-task count for the `parallel` template given an
+/// available-agents budget and a (possibly absent) operator intent
+/// signal.
+///
+/// Rule:
+///   * Raw floor = operator's ticket_count (or `ceil(writer_budget/2)`
+///     if intent is ambiguous).
+///   * Capped at `min(writer_budget, HARD_CAP)` so a runaway prompt
+///     can't request more integrators than the swarm can physically
+///     dispatch in parallel.
+///   * When the raw floor is capped, the planner is responsible for
+///     grouping related tickets into single integrators — that
+///     guidance lives in the planner prompt and the
+///     `INV-17 parallel_min_integrators` violation hint.
+///
+/// `available_writer_count` excludes the planner agent itself.
+pub fn parallel_integrate_floor(intent: &OperatorIntent, available_writer_count: usize) -> usize {
+    let raw = if let Some(n) = intent.ticket_count {
+        n.max(2)
+    } else {
+        available_writer_count.div_ceil(2).max(2)
+    };
+    let ceiling = available_writer_count.clamp(1, PARALLEL_INTEGRATE_HARD_CAP);
+    raw.min(ceiling)
+}
+
+/// `true` when the operator's intent exceeds what we'll cap to in
+/// practice — the planner needs to BUNDLE tickets across integrators
+/// rather than aim for one-per-ticket. Surfaces in the planner prompt
+/// so the planner emits sensible groupings the first time.
+pub fn parallel_intent_exceeds_capacity(
+    intent: &OperatorIntent,
+    available_writer_count: usize,
+) -> bool {
+    let Some(n) = intent.ticket_count else {
+        return false;
+    };
+    let ceiling = available_writer_count.clamp(1, PARALLEL_INTEGRATE_HARD_CAP);
+    n > ceiling
+}
+
+fn invariant_parallel_min_integrators(ctx: &ValidationContext<'_>) -> Vec<Violation> {
+    if !matches!(ctx.template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
+    let writer_budget = ctx.available_agents.len();
+    let floor = parallel_integrate_floor(&ctx.intent, writer_budget);
+    let over_capacity = parallel_intent_exceeds_capacity(&ctx.intent, writer_budget);
+    let integrate_count = integrate_tasks(ctx).len();
+    if integrate_count >= floor {
+        return Vec::new();
+    }
+    let intent_hint = match ctx.intent.ticket_count {
+        Some(n) if over_capacity => format!(
+            "Operator intent: {n} distinct tickets, exceeds writer capacity \
+             ({writer_budget}); plan should BUNDLE related tickets into \
+             {floor} integrators."
+        ),
+        Some(n) => format!("Operator intent: {n} distinct tickets detected in the prompt."),
+        None => format!(
+            "No explicit ticket count detected; floor derived from \
+             half the available writer budget ({writer_budget})."
+        ),
+    };
+    // Severity is MustFix only when intent is structurally confident
+    // (≥ 3 list items detected). Ambiguous-intent plans get an
+    // Advisory so the planner is informed but the dispatch doesn't
+    // loop indefinitely on unstructured prompts.
+    let severity = if ctx.intent.structured_list {
+        Severity::MustFix
+    } else {
+        Severity::Advisory
+    };
+    let hint = if over_capacity {
+        format!(
+            "Produce exactly {floor} `role=integrate` tasks, each with \
+             `writes=true`. Operator intent exceeds capacity, so BUNDLE \
+             related tickets into integrators: group by shared file scope \
+             first, shared module second, shared domain last. Each \
+             integrator's `task_prompt` MUST quote all tickets in its \
+             bundle. Available writer agents: {writer_budget}."
+        )
+    } else {
+        format!(
+            "Produce at least {floor} `role=integrate` tasks, each with \
+             `writes=true` and a distinct scope. One integrator per ticket \
+             — do not consolidate tickets into a single writer. \
+             Available writer agents: {writer_budget}."
+        )
+    };
+    vec![Violation {
+        id: "INV-17 parallel_min_integrators",
+        task_id: None,
+        agent_id: None,
+        severity,
+        human: format!(
+            "Parallel plan has {integrate_count} integrate tasks; \
+             template + intent indicate ≥ {floor}. {intent_hint}"
+        ),
+        hint,
+    }]
 }
 
 /// Filters a violation set to just the rule-breaking entries (the LLM repair
@@ -640,6 +759,19 @@ pub(super) fn planner_invariants_for_prompt(template: SwarmTemplate) -> Vec<&'st
     if matches!(template, SwarmTemplate::Bulk) {
         lines.push("Emit at least 2 proposer tasks when there are 2+ non-integrator agents.");
         lines.push("Cap proposers at 12 to keep the per-dep budget meaningful.");
+    }
+    if matches!(template, SwarmTemplate::Parallel) {
+        // Parallel-template fanout floor. The actual numeric floor comes
+        // from `parallel_integrate_floor` at validation time (operator
+        // intent + available-writer count); the prompt-side rule states
+        // the contract so the planner emits N integrators on the first
+        // attempt rather than waiting for a repair round.
+        lines.push(
+            "PARALLEL FANOUT — MUST: when the operator's prompt enumerates distinct tickets (bullet list, numbered list, `T<n>.` headers, or multiple `Files:` blocks), produce one `role=integrate` task per ticket. Consolidating multiple tickets into a single integrator is a plan failure that the post-parse validator auto-rejects. The OPERATOR INTENT block earlier in this prompt gives the exact count.",
+        );
+        lines.push(
+            "PARALLEL DISTINCT SCOPE: each integrate task MUST declare a distinct scope (different files / different ticket). Two integrators with the same scope is a plan failure.",
+        );
     }
     lines
 }

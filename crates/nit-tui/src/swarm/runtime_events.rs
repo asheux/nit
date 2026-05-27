@@ -252,6 +252,11 @@ fn dispatch_repair_or_finalize(
     available: &[String],
 ) -> RepairDecision {
     let role_hints = collect_role_hints(state, available);
+    // Detect operator-intent (ticket count, structured-list flag) so
+    // the parallel-template fanout invariant has something to check
+    // against. Heuristic only — see `swarm/intent.rs`. Recomputed per
+    // repair round; the prompt doesn't change so the result is stable.
+    let intent = super::intent::detect_intent(run.root_prompt.as_str());
     let ctx = ValidationContext {
         tasks: parsed.tasks.as_slice(),
         available_agents: available,
@@ -260,6 +265,7 @@ fn dispatch_repair_or_finalize(
         template: run.template,
         mission_kind: run.mission_kind,
         root_prompt: run.root_prompt.as_str(),
+        intent,
     };
     let all_violations = validate_plan(&ctx);
     surface_advisory_violations(state, run, &all_violations);
