@@ -1,120 +1,143 @@
-use super::types::{EditKind, EditMeta, Snapshot};
+use super::undo_log::{EditDelta, GroupHint};
 use super::Buffer;
-
-/// Maximum snapshots retained per stack. The oldest entry is dropped on
-/// overflow so a long editing session keeps the redo path live without
-/// unbounded memory growth.
-pub(super) const UNDO_LIMIT: usize = 256;
 
 impl Buffer {
     pub fn undo(&mut self) -> bool {
-        self.swap_with_history(true)
-    }
-
-    pub fn redo(&mut self) -> bool {
-        self.swap_with_history(false)
-    }
-
-    pub(super) fn push_undo(&mut self) {
-        let snap = self.snapshot();
-        push_snapshot(&mut self.undo, snap);
-        // A fresh edit invalidates the redo stack — the user is now branching
-        // away from any previously-undone state.
-        self.redo.clear();
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            rope: self.rope.clone(),
-            cursor: self.cursor,
-            dirty: self.dirty,
-        }
-    }
-
-    fn swap_with_history(&mut self, pop_undo: bool) -> bool {
-        let popped = if pop_undo {
-            self.undo.pop()
-        } else {
-            self.redo.pop()
-        };
-        let Some(snapshot) = popped else {
+        self.undo_log.seal();
+        let Some(step) = self.undo_log.pop_undo() else {
             return false;
         };
-        self.end_edit_group();
-        // Push current state onto the *opposite* stack so the swap is reversible.
-        let mirror = self.snapshot();
-        let target = if pop_undo {
-            &mut self.redo
-        } else {
-            &mut self.undo
-        };
-        push_snapshot(target, mirror);
-        self.rope = snapshot.rope;
-        self.cursor = snapshot.cursor;
-        self.dirty = snapshot.dirty;
+        let (cursor, dirty_before) = step.apply_undo(&mut self.rope);
+        self.cursor = cursor;
+        self.dirty = dirty_before;
         self.clear_selection();
         self.record_full_reparse();
+        self.clamp_col();
         true
     }
 
-    pub(super) fn begin_insert_group(&mut self, idx: usize) {
-        self.begin_edit_group(EditKind::Insert, idx);
-    }
-
-    pub(super) fn finish_insert_group(&mut self) {
-        self.finish_edit_group(EditKind::Insert);
-    }
-
-    /// Push a new undo snapshot unless the previous edit was the same kind of
-    /// delete at the position required for contiguity. Backspace expects the
-    /// previous cursor to sit one character ahead of `idx` (it just walked
-    /// left); forward-delete expects the previous cursor to sit at `idx`
-    /// (it stays put as content shifts left).
-    pub(super) fn begin_delete_group(&mut self, kind: EditKind, idx: usize) {
-        debug_assert!(matches!(
-            kind,
-            EditKind::DeleteBack | EditKind::DeleteForward
-        ));
-        self.begin_edit_group(kind, idx);
-    }
-
-    pub(super) fn finish_delete_group(&mut self, kind: EditKind) {
-        debug_assert!(matches!(
-            kind,
-            EditKind::DeleteBack | EditKind::DeleteForward
-        ));
-        self.finish_edit_group(kind);
-    }
-
-    fn begin_edit_group(&mut self, kind: EditKind, idx: usize) {
-        let start_new = match self.last_edit {
-            Some(meta) => meta.kind != kind || meta.cursor_index != idx,
-            None => true,
+    pub fn redo(&mut self) -> bool {
+        self.undo_log.seal();
+        let Some(step) = self.undo_log.pop_redo() else {
+            return false;
         };
-        if start_new {
-            self.push_undo();
-        }
+        let (cursor, dirty_after) = step.apply_redo(&mut self.rope);
+        self.cursor = cursor;
+        self.dirty = dirty_after;
+        self.clear_selection();
+        self.record_full_reparse();
+        self.clamp_col();
+        true
     }
 
-    fn finish_edit_group(&mut self, kind: EditKind) {
-        self.last_edit = Some(EditMeta {
-            kind,
-            cursor_index: self.char_index(),
-        });
+    /// Public transaction handle. Multiple edits made between
+    /// [`Buffer::begin_undo_group`] and [`Buffer::end_undo_group`] collapse
+    /// to a single undo step. Nesting is reference-counted so a helper that
+    /// already opens a transaction won't fragment an outer one.
+    pub fn begin_undo_group(&mut self) {
+        self.undo_log.open_group();
     }
 
-    pub(super) fn end_edit_group(&mut self) {
-        self.last_edit = None;
+    pub fn end_undo_group(&mut self) {
+        self.undo_log.close_group();
     }
 
+    /// Force the in-progress edit group closed. Cursor motions, mode
+    /// switches, paste, and any standalone op call this so the next char of
+    /// typing starts a fresh word run instead of coalescing.
     pub fn break_undo_group(&mut self) {
         self.end_edit_group();
     }
+
+    /// Tell the history log that the current head reflects the on-disk state
+    /// so [`Buffer::is_dirty_relative_to_saved`] can recognise an
+    /// undo-to-saved-state as clean. Called by the save path.
+    pub fn mark_saved(&mut self) {
+        self.undo_log.mark_saved();
+    }
+
+    pub fn is_dirty_relative_to_saved(&self) -> bool {
+        self.undo_log.dirty_relative_to_save()
+    }
+
+    pub(super) fn end_edit_group(&mut self) {
+        self.undo_log.seal();
+    }
+
+    pub(super) fn record_insert_delta(
+        &mut self,
+        char_idx: usize,
+        text: &str,
+        cursor_before: crate::cursor::Cursor,
+        hint: GroupHint,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let dirty_before = self.dirty;
+        let cursor_after = self.cursor;
+        self.undo_log.record(
+            EditDelta::Insert {
+                char_idx,
+                text: text.to_string(),
+                cursor_before,
+                cursor_after,
+            },
+            hint,
+            dirty_before,
+            true,
+        );
+    }
+
+    pub(super) fn record_delete_delta(
+        &mut self,
+        char_idx: usize,
+        text: &str,
+        cursor_before: crate::cursor::Cursor,
+        hint: GroupHint,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let dirty_before = self.dirty;
+        let cursor_after = self.cursor;
+        self.undo_log.record(
+            EditDelta::Delete {
+                char_idx,
+                text: text.to_string(),
+                cursor_before,
+                cursor_after,
+            },
+            hint,
+            dirty_before,
+            true,
+        );
+    }
+
+    pub(super) fn classify_insert_hint(text: &str) -> GroupHint {
+        if text.is_empty() {
+            return GroupHint::Atomic;
+        }
+        let mut chars = text.chars();
+        let first = chars.next().expect("non-empty");
+        if chars.next().is_some() {
+            // Multi-char inserts (paste, indent, smart-newline) are always
+            // their own transaction — never coalesce with a word run.
+            return GroupHint::Atomic;
+        }
+        if is_word_continuation(first) {
+            GroupHint::InsertWordChar
+        } else {
+            GroupHint::Atomic
+        }
+    }
 }
 
-fn push_snapshot(stack: &mut Vec<Snapshot>, snap: Snapshot) {
-    if stack.len() >= UNDO_LIMIT {
-        stack.remove(0);
-    }
-    stack.push(snap);
+/// Word-run membership for insert-grouping. Anything alphanumeric or `_` is
+/// part of a word; whitespace, punctuation, and brackets force a new group.
+/// This is intentionally narrower than vim's `iskeyword` because we want
+/// `foo.bar` to split into two undo steps even though `.` is technically
+/// identifier-adjacent in some languages.
+fn is_word_continuation(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }

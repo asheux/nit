@@ -310,6 +310,13 @@ pub(super) fn scroll_buffer(buf: &mut nit_core::Buffer, delta: i32) {
     let max_offset = buf.lines_len().saturating_sub(height);
     let offset = buf.viewport.offset_line as i32 + delta;
     let clamped = offset.clamp(0, max_offset as i32);
+    if clamped != buf.viewport.offset_line as i32 {
+        // Wheel scrolling counts as the operator stepping away from the current
+        // typing run, so the in-progress undo group closes here. Next char
+        // typed after the scroll starts a fresh transaction rather than
+        // coalescing across the visual jump.
+        buf.break_undo_group();
+    }
     buf.viewport.offset_line = clamped as usize;
 }
 

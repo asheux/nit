@@ -6,7 +6,8 @@ use crate::cursor::Cursor;
 use crate::viewport::Viewport;
 
 use super::diff;
-use super::types::{BufferEdit, EditMeta, LineDiffStatus, Snapshot};
+use super::types::{BufferEdit, LineDiffStatus};
+use super::undo_log::UndoLog;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Buffer {
@@ -15,11 +16,7 @@ pub struct Buffer {
     #[serde(skip)]
     pub(super) rope: Rope,
     #[serde(skip)]
-    pub(super) undo: Vec<Snapshot>,
-    #[serde(skip)]
-    pub(super) redo: Vec<Snapshot>,
-    #[serde(skip)]
-    pub(super) last_edit: Option<EditMeta>,
+    pub(super) undo_log: UndoLog,
     #[serde(skip)]
     pub(super) pending_edits: Vec<BufferEdit>,
     #[serde(skip)]
@@ -55,9 +52,7 @@ impl Buffer {
             name: name.into(),
             path,
             rope: content,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            last_edit: None,
+            undo_log: UndoLog::new(),
             pending_edits: Vec::new(),
             full_reparse: false,
             version: 0,

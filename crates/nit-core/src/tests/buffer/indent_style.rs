@@ -28,7 +28,11 @@ fn newline_preserves_4_space_indent() {
 
 #[test]
 fn newline_preserves_2_space_indent() {
-    let mut buffer = buf("function foo() {\n  return 1;\n}\n");
+    // `let x = 1;` is intentionally NOT a control-flow terminator — the
+    // T8a smart-dedent rule fires after `return` / `break` / `continue`,
+    // so this test exercises pure indent-unit detection without bumping
+    // into the dedent path.
+    let mut buffer = buf("function foo() {\n  let x = 1;\n}\n");
     buffer.cursor.line = 1;
     buffer.cursor.col = 12;
     buffer.insert_newline();
@@ -39,9 +43,9 @@ fn newline_preserves_2_space_indent() {
 
 #[test]
 fn newline_preserves_tab_indent() {
-    let mut buffer = buf("func foo() {\n\treturn 1\n}\n");
+    let mut buffer = buf("func foo() {\n\tlet x = 1\n}\n");
     buffer.cursor.line = 1;
-    buffer.cursor.col = 9;
+    buffer.cursor.col = 10;
     buffer.insert_newline();
     let line2 = buffer.line_as_string(2);
     assert!(
@@ -53,7 +57,13 @@ fn newline_preserves_tab_indent() {
 #[test]
 fn open_line_below_after_colon_adds_one_indent_step() {
     // Python-style: line ends with `:` so `o` should add one indent step.
-    let mut buffer = buf("def foo():\n    pass\n");
+    // The `:`-as-block-opener rule is language-gated (see is_block_starter),
+    // so the buffer is tagged with a `.py` path to activate the Python branch.
+    let mut buffer = Buffer::from_str(
+        "script.py",
+        "def foo():\n    pass\n",
+        Some(std::path::PathBuf::from("script.py")),
+    );
     buffer.cursor.line = 0;
     buffer.cursor.col = 10;
     buffer.open_line_below();

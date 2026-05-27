@@ -161,7 +161,13 @@ fn open_file_at_path(state: &mut AppState, raw_path: &str) {
         state.workspace_root.join(path)
     };
 
+    // Push the live cursor before the buffer swap so `:e other` is
+    // reachable via `Ctrl-O` exactly like the NITTree / Ctrl-P paths.
+    let pre_open = state.current_jump_entry();
     if let Some(buffer_id) = state.find_editor_buffer_by_path(&absolute) {
+        if buffer_id != state.active_editor_buffer_id {
+            state.jumplist.push(pre_open);
+        }
         state.active_editor_buffer_id = buffer_id;
         state.focus = PaneId::Editor;
         state.mode = Mode::Normal;
@@ -176,11 +182,17 @@ fn open_file_at_path(state: &mut AppState, raw_path: &str) {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "untitled".into());
             let buf = Buffer::from_str(name, &content, Some(absolute.clone()));
-            if state.editor_buffer().is_dirty() {
+            // Mirrors `Action::OpenFile`: only the never-touched untitled
+            // buffer is safe to overwrite in place; a clean real file
+            // stays in `buffers` so Ctrl-O can return to it.
+            let active_is_initial_blank =
+                state.editor_buffer().path().is_none() && !state.editor_buffer().is_dirty();
+            state.jumplist.push(pre_open);
+            if active_is_initial_blank {
+                state.buffers[state.active_editor_buffer_id] = buf;
+            } else {
                 state.buffers.push(buf);
                 state.active_editor_buffer_id = state.buffers.len() - 1;
-            } else {
-                state.buffers[state.active_editor_buffer_id] = buf;
             }
             state.focus = PaneId::Editor;
             state.mode = Mode::Normal;

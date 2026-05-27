@@ -1,3 +1,4 @@
+use super::undo_log::GroupHint;
 use super::Buffer;
 
 impl Buffer {
@@ -53,9 +54,11 @@ impl Buffer {
         if start >= end {
             return false;
         }
-        self.push_undo();
+        let text = self.rope.slice(start..end).to_string();
+        let before = self.cursor;
         self.apply_selection_removal(start, end);
         self.dirty = true;
+        self.record_delete_delta(start, &text, before, GroupHint::Atomic);
         true
     }
 

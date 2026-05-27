@@ -2,6 +2,8 @@ use super::*;
 use crate::{actions::Action, buffer::JumpEntry, io};
 use nit_gol::Rule;
 
+use super::jumplist::{apply_step as jumplist_apply_step, JumpDirection};
+
 fn on_off(flag: bool) -> &'static str {
     if flag {
         "ON"
@@ -142,51 +144,10 @@ fn push_jump_here(state: &mut AppState) {
     state.jumplist.push(entry);
 }
 
-#[derive(Copy, Clone, Debug)]
-enum JumpDirection {
-    Back,
-    Forward,
-}
-
-/// Drive `Action::JumpBack` / `Action::JumpForward` through the shared
-/// `state::jumplist` classifier so the action arm and the chord-layer fast
-/// path agree on cross-buffer surface text and EOL clamping.
-fn apply_jump_step(state: &mut AppState, dir: JumpDirection) {
-    let buffer_id = state.active_editor_buffer_id;
-    let outcome = match dir {
-        JumpDirection::Back => super::jumplist::step_back(&mut state.jumplist, buffer_id),
-        JumpDirection::Forward => super::jumplist::step_forward(&mut state.jumplist, buffer_id),
-    };
-    match outcome {
-        super::jumplist::JumpStepOutcome::Empty => {
-            let label = match dir {
-                JumpDirection::Back => "older",
-                JumpDirection::Forward => "newer",
-            };
-            state.status = Some(format!("No {label} jump position"));
-        }
-        super::jumplist::JumpStepOutcome::CrossBuffer { .. } => {
-            state.status = Some("Cross-buffer jumps not supported yet".into());
-        }
-        super::jumplist::JumpStepOutcome::InBuffer { line, col } => {
-            if let Some(buf) = state.focused_buffer_mut() {
-                let total = buf.lines_len();
-                if total == 0 {
-                    return;
-                }
-                let target_line = line.min(total - 1);
-                let visible_chars = buf
-                    .line_as_string(target_line)
-                    .chars()
-                    .take_while(|c| *c != '\n' && *c != '\r')
-                    .count();
-                buf.cursor.line = target_line;
-                buf.cursor.col = col.min(visible_chars);
-                buf.ensure_visible();
-            }
-        }
-    }
-}
+// `JumpDirection` and the shared apply helper live in
+// `super::jumplist` — this arm just routes the action onto them so the
+// chord-layer fast path in nit-tui and the action dispatcher stay in
+// lockstep on anchor / cross-buffer / EOL-clamp behaviour.
 
 /// vim smart-case for a `/` term: lowercase-only query → case-insensitive,
 /// any uppercase → case-sensitive. Mirrors `:set smartcase`.
@@ -1030,7 +991,18 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.fuzzy_search.close();
         }
         Action::OpenFile(path) => {
+            // Snapshot where we're leaving so `Ctrl-O` can come back to
+            // it. NITTree row activation, the Ctrl-P fuzzy picker, the
+            // Ctrl-F content picker, and `:e` all funnel through this
+            // arm, so a single push here covers every cross-buffer
+            // entry point. The push is gated on actually changing
+            // buffers — re-opening the already-focused file would
+            // otherwise spam the ring with no-op jumps.
+            let pre_open = state.current_jump_entry();
             if let Some(buffer_id) = state.find_editor_buffer_by_path(&path) {
+                if buffer_id != state.active_editor_buffer_id {
+                    state.jumplist.push(pre_open);
+                }
                 state.active_editor_buffer_id = buffer_id;
                 state.focus = PaneId::Editor;
                 state.mode = Mode::Normal;
@@ -1044,11 +1016,22 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "untitled".into());
                         let buf = Buffer::from_str(name, &content, Some(path.clone()));
-                        if state.editor_buffer().is_dirty() {
+                        // The active slot is "blank-and-disposable" only
+                        // when it has no path (the fresh untitled buffer
+                        // nit launches with when no file argument is
+                        // given). A clean *real* file is preserved so the
+                        // jumplist can walk back to it — without this, a
+                        // Ctrl-P open from a never-edited file would
+                        // silently evict that file from `buffers` and
+                        // strand the Ctrl-O return.
+                        let active_is_initial_blank = state.editor_buffer().path().is_none()
+                            && !state.editor_buffer().is_dirty();
+                        state.jumplist.push(pre_open);
+                        if active_is_initial_blank {
+                            state.buffers[state.active_editor_buffer_id] = buf;
+                        } else {
                             state.buffers.push(buf);
                             state.active_editor_buffer_id = state.buffers.len() - 1;
-                        } else {
-                            state.buffers[state.active_editor_buffer_id] = buf;
                         }
                         state.focus = PaneId::Editor;
                         state.mode = Mode::Normal;
@@ -1134,8 +1117,50 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             });
         }
-        Action::JumpBack => apply_jump_step(state, JumpDirection::Back),
-        Action::JumpForward => apply_jump_step(state, JumpDirection::Forward),
+        Action::JumpBack => {
+            let _ = jumplist_apply_step(state, JumpDirection::Back);
+        }
+        Action::JumpForward => {
+            let _ = jumplist_apply_step(state, JumpDirection::Forward);
+        }
+        Action::MatchBracket => {
+            // `%` is a vim "jump" — record the origin so `Ctrl-O` can walk
+            // back. The push happens unconditionally even when the motion
+            // is a no-op (cursor not on a bracket, no bracket on the line)
+            // because vim itself records the position before consulting
+            // the partner table; the dedup in `JumpList::push` prevents a
+            // run of no-op presses from filling the ring.
+            push_jump_here(state);
+            with_focused_buffer(state, |buf| buf.match_bracket());
+        }
+        Action::IndentSelection => {
+            // Vim's `>` in visual mode exits to Normal once the shift lands,
+            // mirroring the YankSelection / DeleteSelection pattern. The
+            // selection is cleared so the operator can keep moving without
+            // re-selecting (vim's `gv` re-selects on demand).
+            let was_visual = state.mode == Mode::Visual;
+            with_focused_buffer(state, |buf| {
+                let _ = buf.indent_selection();
+                if was_visual {
+                    buf.clear_selection();
+                }
+            });
+            if was_visual {
+                state.mode = Mode::Normal;
+            }
+        }
+        Action::DedentSelection => {
+            let was_visual = state.mode == Mode::Visual;
+            with_focused_buffer(state, |buf| {
+                let _ = buf.dedent_selection();
+                if was_visual {
+                    buf.clear_selection();
+                }
+            });
+            if was_visual {
+                state.mode = Mode::Normal;
+            }
+        }
         Action::MoveFirstNonBlank => {
             with_focused_buffer(state, |buf| buf.move_first_non_blank());
         }

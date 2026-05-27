@@ -110,6 +110,13 @@ impl JumpList {
         self.entries.get(self.cursor - 1).copied()
     }
 
+    /// Most recently appended entry, regardless of where the navigation
+    /// cursor sits. Used by the cross-buffer apply path to decide whether
+    /// the live cursor needs to be anchored before a `Ctrl-O` step.
+    pub fn last(&self) -> Option<JumpEntry> {
+        self.entries.back().copied()
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.cursor = 0;

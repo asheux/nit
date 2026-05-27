@@ -459,10 +459,15 @@ pub(super) fn handle_paste_event(
     false
 }
 
-/// T5: Ctrl-O walks the jumplist back, Ctrl-I walks it forward. Gated on
+/// Ctrl-O walks the jumplist back, Ctrl-I walks it forward. Gated on
 /// Normal mode + Editor focus so the chord doesn't fight Tab's
-/// FocusNextPane / InsertTab role elsewhere. Returns `true` when the key
-/// was consumed.
+/// FocusNextPane / InsertTab role elsewhere. Returns `true` when the
+/// chord was consumed.
+///
+/// All policy (anchor on first back, cross-buffer switching, stale-entry
+/// skipping, EOL clamping, empty-ring status) lives in
+/// `nit_core::jumplist_apply_step`; this layer's job is purely to
+/// recognise the chord and forward it.
 pub(super) fn handle_jumplist_shortcut(key: KeyEvent, state: &mut AppState) -> bool {
     if state.focus != PaneId::Editor || state.mode != Mode::Normal {
         return false;
@@ -490,37 +495,12 @@ pub(super) fn handle_jumplist_shortcut(key: KeyEvent, state: &mut AppState) -> b
     if !is_ctrl_o && !is_ctrl_i {
         return false;
     }
-    let buffer_id = state.active_editor_buffer_id;
-    let outcome = if is_ctrl_o {
-        nit_core::jumplist_step_back(&mut state.jumplist, buffer_id)
+    let dir = if is_ctrl_o {
+        nit_core::JumpDirection::Back
     } else {
-        nit_core::jumplist_step_forward(&mut state.jumplist, buffer_id)
+        nit_core::JumpDirection::Forward
     };
-    match outcome {
-        nit_core::JumpStepOutcome::Empty => {
-            let direction = if is_ctrl_o { "older" } else { "newer" };
-            state.status = Some(format!("No {direction} jump position"));
-        }
-        nit_core::JumpStepOutcome::CrossBuffer { .. } => {
-            state.status = Some("Cross-buffer jumps not supported yet".into());
-        }
-        nit_core::JumpStepOutcome::InBuffer { line, col } => {
-            let total = state.editor_buffer().lines_len();
-            if total == 0 {
-                return true;
-            }
-            let target_line = line.min(total - 1);
-            let buf = state.editor_buffer_mut();
-            let visible_chars = buf
-                .line_as_string(target_line)
-                .chars()
-                .take_while(|c| *c != '\n' && *c != '\r')
-                .count();
-            buf.cursor.line = target_line;
-            buf.cursor.col = col.min(visible_chars);
-            buf.ensure_visible();
-        }
-    }
+    let _ = nit_core::jumplist_apply_step(state, dir);
     true
 }
 
@@ -663,6 +643,31 @@ pub(super) fn map_key_to_action(
             KeyCode::Char('y') => return Some(Action::YankSelection),
             KeyCode::Char('d') => return Some(Action::DeleteSelection),
             KeyCode::Char('v') => return Some(Action::ExitVisual),
+            _ => {}
+        }
+    }
+
+    // T5: `>` / `<` block indent. Lives outside the visual-mode block so
+    // `>` in Normal mode also indents the cursor's line (vim's `>>` shape,
+    // collapsed to a single keypress here). `modifiers.is_empty() ||
+    // modifiers == SHIFT` accepts both crossterm reportings — some
+    // terminals attach SHIFT to the shifted glyph, others don't.
+    if is_motion_mode(state) {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('>'),
+                modifiers,
+                ..
+            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                return Some(Action::IndentSelection);
+            }
+            KeyEvent {
+                code: KeyCode::Char('<'),
+                modifiers,
+                ..
+            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                return Some(Action::DedentSelection);
+            }
             _ => {}
         }
     }
@@ -925,7 +930,7 @@ pub(super) fn map_key_to_action(
         KeyEvent {
             code: KeyCode::Char('%'),
             ..
-        } if is_motion_mode(state) => Some(Action::Home),
+        } if is_motion_mode(state) => Some(Action::MatchBracket),
         KeyEvent {
             code: KeyCode::Char('p'),
             modifiers: KeyModifiers::NONE,

@@ -206,4 +206,14 @@ pub enum Action {
     JumpBack,
     /// `Ctrl-I`: advance to the next jumplist position.
     JumpForward,
+    /// `%`: jump to the bracket matching the one under the cursor. Covers
+    /// `()`, `[]`, `{}`, and `<>`. Treated as a jump so `Ctrl-O` walks back.
+    MatchBracket,
+    /// Visual-mode `>` / normal-mode `>>`: prepend one indent unit to
+    /// every line touched by the active selection (or the cursor's line
+    /// when nothing is selected). One undo step for the whole block.
+    IndentSelection,
+    /// Visual-mode `<` / normal-mode `<<`: strip up to one indent unit of
+    /// leading whitespace from each line in the block. One undo step.
+    DedentSelection,
 }

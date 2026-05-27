@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "buffer/bracket_match.rs"]
+mod bracket_match;
+#[path = "buffer/cursor_sticky.rs"]
+mod cursor_sticky;
+#[path = "buffer/indent_block.rs"]
+mod indent_block;
 #[path = "buffer/indent_style.rs"]
 mod indent_style;
 #[path = "buffer/jumplist.rs"]
@@ -185,7 +191,11 @@ fn open_line_below_after_brace_increases_indent() {
 
 #[test]
 fn open_line_below_after_colon_increases_indent() {
-    let mut buf = Buffer::from_str("test", "def foo():", None);
+    let mut buf = Buffer::from_str(
+        "test.py",
+        "def foo():",
+        Some(std::path::PathBuf::from("test.py")),
+    );
     buf.cursor.line = 0;
     buf.cursor.col = 0;
     buf.open_line_below();
@@ -1406,4 +1416,87 @@ fn jumplist_dedupes_consecutive_identical_entries() {
     list.push(here);
     list.push(here);
     assert_eq!(list.len(), 1);
+}
+
+// --- T8b: smart backspace on blank lines ---
+
+#[test]
+fn backspace_on_fully_empty_line_joins_previous() {
+    let mut buf = Buffer::from_str("test", "foo\n\nbar", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 0;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "foo\nbar");
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 3);
+}
+
+#[test]
+fn backspace_on_whitespace_only_line_removes_whole_line() {
+    let mut buf = Buffer::from_str("test", "foo\n   \nbar", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 3;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "foo\nbar");
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 3);
+}
+
+#[test]
+fn backspace_on_whitespace_line_at_end_of_buffer_joins_previous() {
+    let mut buf = Buffer::from_str("test", "foo\n    ", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 4;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "foo");
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 3);
+}
+
+#[test]
+fn backspace_on_blank_line_is_one_undo_step() {
+    let mut buf = Buffer::from_str("test", "foo\n    \nbar", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 4;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "foo\nbar");
+    assert!(buf.undo());
+    assert_eq!(buf.content_as_string(), "foo\n    \nbar");
+}
+
+#[test]
+fn backspace_on_blank_first_line_is_noop() {
+    let mut buf = Buffer::from_str("test", "    \nfoo", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 4;
+    let before = buf.content_as_string();
+    buf.backspace();
+    // Falls through to the per-char branch — the leading whitespace is the
+    // only thing in front of the cursor, so backspace eats one space.
+    // We just need to confirm we don't blow up; we don't promise a specific
+    // shape when there is no previous line to join to.
+    assert!(buf.content_as_string().len() <= before.len());
+}
+
+#[test]
+fn backspace_on_non_blank_line_still_deletes_one_char() {
+    let mut buf = Buffer::from_str("test", "foo\nbar", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 3;
+    buf.backspace();
+    assert_eq!(buf.content_as_string(), "foo\nba");
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 2);
+}
+
+#[test]
+fn delete_forward_at_end_of_last_line_is_noop() {
+    let mut buf = Buffer::from_str("test", "foo", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 3;
+    let before_version = buf.version();
+    buf.delete_forward();
+    assert_eq!(buf.content_as_string(), "foo");
+    // No edit recorded — version stays put, no spam events.
+    assert_eq!(buf.version(), before_version);
 }

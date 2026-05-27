@@ -182,6 +182,102 @@ fn editor_ctrl_backspace_deletes_word_left() {
 }
 
 #[test]
+fn editor_ctrl_c_without_selection_is_silent_noop() {
+    // T8c: vim-style — no selection means Ctrl+C copies nothing, never
+    // grabs the whole line silently.
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    state.mode = Mode::Normal;
+    state.editor_buffer_mut().insert_str("hello world\n");
+    state.editor_buffer_mut().go_to_top();
+    state.editor_buffer_mut().move_home();
+    state.yank = None;
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let mut clipboard = None;
+
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert_eq!(state.yank, None);
+}
+
+#[test]
+fn editor_cmd_c_copies_selection_on_macos() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    state.mode = Mode::Normal;
+    state.editor_buffer_mut().insert_str("alpha");
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let mut clipboard = None;
+
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert_eq!(state.yank.as_deref(), Some("alpha"));
+}
+
+#[test]
+fn scratchpad_ctrl_c_copies_selection_to_yank() {
+    let mut state = state_for_test();
+    state.focus = PaneId::JobOutput;
+    state.agents.dock_tab = AgentOpsTab::Scratchpad;
+    state.mode = Mode::Insert;
+    state.notes_buffer_mut().insert_str("scratch copy");
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let mut clipboard = None;
+
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert_eq!(state.yank.as_deref(), Some("scratch copy"));
+    // The buffer text is untouched — Ctrl+C is read-only.
+    assert_eq!(state.notes_buffer().content_as_string(), "scratch copy");
+}
+
+#[test]
+fn scratchpad_ctrl_c_without_selection_is_silent_noop() {
+    let mut state = state_for_test();
+    state.focus = PaneId::JobOutput;
+    state.agents.dock_tab = AgentOpsTab::Scratchpad;
+    state.mode = Mode::Insert;
+    state.notes_buffer_mut().insert_str("idle scratch");
+    state.notes_buffer_mut().move_home();
+    state.yank = None;
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let mut clipboard = None;
+
+    assert!(handle_editor_buffer_shortcuts(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut syntax,
+        &mut clipboard,
+    ));
+    assert_eq!(state.yank, None);
+    assert_eq!(state.notes_buffer().content_as_string(), "idle scratch");
+}
+
+#[test]
 fn scratchpad_ctrl_a_selects_all_and_ctrl_x_cuts() {
     let mut state = state_for_test();
     state.focus = PaneId::JobOutput;

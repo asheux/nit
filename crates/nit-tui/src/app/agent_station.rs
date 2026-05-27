@@ -33,6 +33,11 @@ pub(super) fn handle_agent_station_key_with_clipboard(
     clipboard: &mut Option<Clipboard>,
 ) -> bool {
     if let Some(target) = map_focus_hotkey(&key) {
+        if target != PaneId::Editor {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.break_undo_group();
+            }
+        }
         state.focus = target;
         if target == PaneId::JobOutput && state.agents.dock_tab == AgentOpsTab::Scratchpad {
             state.mode = Mode::Insert;

@@ -16,6 +16,7 @@ struct ThemeFile {
     cursor: Option<String>,
     cursor_line_bg: Option<String>,
     selection_bg: Option<String>,
+    bracket_match: Option<String>,
     warning: Option<String>,
     success: Option<String>,
     error: Option<String>,
@@ -100,6 +101,7 @@ pub struct Theme {
     pub cursor: Color,
     pub cursor_line_bg: Color,
     pub selection_bg: Color,
+    pub bracket_match: Color,
     pub warning: Color,
     pub success: Color,
     pub error: Color,
@@ -196,6 +198,7 @@ impl Theme {
         overlay(&mut theme.cursor, cfg.cursor.as_deref());
         overlay(&mut theme.cursor_line_bg, cfg.cursor_line_bg.as_deref());
         overlay(&mut theme.selection_bg, cfg.selection_bg.as_deref());
+        overlay(&mut theme.bracket_match, cfg.bracket_match.as_deref());
         overlay(&mut theme.warning, cfg.warning.as_deref());
         overlay(&mut theme.success, cfg.success.as_deref());
         overlay(&mut theme.error, cfg.error.as_deref());
@@ -305,6 +308,7 @@ impl Default for Theme {
             cursor: Color::Rgb(255, 209, 102),
             cursor_line_bg: Color::Rgb(20, 52, 77),
             selection_bg: Color::Rgb(27, 63, 92),
+            bracket_match: Color::Rgb(56, 102, 138),
             warning: Color::Rgb(242, 165, 65),
             success: Color::Rgb(154, 216, 143),
             error: Color::Rgb(242, 95, 92),

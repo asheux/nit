@@ -40,7 +40,8 @@ pub use arbiters::{
     ARBITER_INITIAL_STRENGTH, ARBITER_RETRY_LIMIT, REGISTERED_ARBITERS,
 };
 pub use buffer::{
-    Buffer, BufferEdit, BufferPoint, JumpEntry, JumpList, LineDiffStatus, JUMPLIST_CAPACITY,
+    find_matching_bracket, BracketMatch, Buffer, BufferEdit, BufferPoint, JumpEntry, JumpList,
+    LineDiffStatus, JUMPLIST_CAPACITY,
 };
 pub use config::{
     AgentGenomeConfig, EditorConfig, GenomeGateConfig, GolConfig, GolRuleConfig, GolRulesConfig,
@@ -75,7 +76,8 @@ pub use seed::{
     SeedSymmetry,
 };
 pub use state::jumplist::{
-    step_back as jumplist_step_back, step_forward as jumplist_step_forward, JumpStepOutcome,
+    apply_step as jumplist_apply_step, step_back as jumplist_step_back,
+    step_forward as jumplist_step_forward, JumpDirection, JumpStepOutcome,
 };
 pub use state::YankRegister;
 pub use state::{

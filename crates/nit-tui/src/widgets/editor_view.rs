@@ -1,5 +1,5 @@
 use crate::theme::Theme;
-use nit_core::{Buffer, LineDiffStatus, Mode, PaneId};
+use nit_core::{find_matching_bracket, BracketMatch, Buffer, LineDiffStatus, Mode, PaneId};
 use nit_syntax::{hash_line_bytes, map_line_segments_to_chars, HighlightSnapshot, SegmentMapError};
 use ratatui::{
     layout::Rect,
@@ -162,6 +162,7 @@ pub fn render_buffer(
         });
     }
 
+    let bracket_pair = bracket_pair_for_render(buffer, &line_data, mode);
     let lines = render_lines(
         buffer,
         theme,
@@ -175,6 +176,7 @@ pub fn render_buffer(
         tab_width,
         selection,
         search,
+        bracket_pair,
     );
 
     let paragraph = Paragraph::new(lines)
@@ -336,6 +338,7 @@ fn render_lines<'a>(
     tab_width: usize,
     selection: Option<(usize, usize)>,
     search: Option<SearchHighlight<'_>>,
+    bracket_pair: Option<BracketRender>,
 ) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::with_capacity(line_data.len());
     for (row, data) in line_data.iter().enumerate() {
@@ -354,6 +357,7 @@ fn render_lines<'a>(
             data.chars.len(),
             theme,
         );
+        apply_bracket_pair_highlight(&mut styles, line_idx, bracket_pair, theme);
 
         let (ln_text, ln_style, sep_style) = gutter_styles(
             theme,
@@ -424,6 +428,92 @@ fn apply_search_highlights(
             }
             styles[idx] = style;
         }
+    }
+}
+
+/// Per-frame bracket-pair locations in viewport-relative form. Both ends are
+/// stored so the painter can flag whichever one is on-screen — either the
+/// cursor's bracket (when it carries syntax-driven styling) or its partner
+/// (which the syntax pass might color identically to surrounding code).
+#[derive(Copy, Clone)]
+struct BracketRender {
+    cursor_line: usize,
+    cursor_col: usize,
+    partner_line: usize,
+    partner_col: usize,
+}
+
+/// Decide whether to compute a bracket-pair highlight this frame and return
+/// the buffer coordinates of both ends if so. Skips the scan in Visual mode
+/// (selection styling already dominates that case) and when the cursor sits
+/// inside a string/comment syntax segment — naive char matching there
+/// produces noisy flicker inside `"({"` literals.
+fn bracket_pair_for_render(
+    buffer: &Buffer,
+    line_data: &[LineData],
+    mode: Mode,
+) -> Option<BracketRender> {
+    if mode == Mode::Visual {
+        return None;
+    }
+    let cursor_line = buffer.cursor.line;
+    let cursor_col = buffer.cursor.col;
+    let cursor_row = cursor_line.checked_sub(buffer.viewport.offset_line)?;
+    let cursor_data = line_data.get(cursor_row)?;
+    if cursor_in_string_or_comment(cursor_data, cursor_col) {
+        return None;
+    }
+    let pair: BracketMatch = find_matching_bracket(buffer, cursor_line, cursor_col)?;
+    let (partner_line, partner_col) = buffer.char_to_point(pair.partner_idx)?;
+    Some(BracketRender {
+        cursor_line,
+        cursor_col,
+        partner_line,
+        partner_col,
+    })
+}
+
+fn cursor_in_string_or_comment(line: &LineData, col: usize) -> bool {
+    use nit_syntax::HighlightGroup;
+    let Some(segments) = line.mapped_segments.as_ref() else {
+        return false;
+    };
+    segments.iter().any(|seg| {
+        col >= seg.start
+            && col < seg.end
+            && matches!(
+                seg.group,
+                HighlightGroup::String
+                    | HighlightGroup::Char
+                    | HighlightGroup::Comment
+                    | HighlightGroup::DocComment
+            )
+    })
+}
+
+fn apply_bracket_pair_highlight(
+    styles: &mut [Style],
+    line_idx: usize,
+    pair: Option<BracketRender>,
+    theme: &Theme,
+) {
+    let Some(pair) = pair else {
+        return;
+    };
+    let ends = [
+        (pair.cursor_line, pair.cursor_col),
+        (pair.partner_line, pair.partner_col),
+    ];
+    for (target_line, col) in ends {
+        if target_line != line_idx {
+            continue;
+        }
+        let Some(slot) = styles.get_mut(col) else {
+            continue;
+        };
+        *slot = slot
+            .bg(theme.bracket_match)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     }
 }
 

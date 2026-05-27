@@ -64,6 +64,9 @@ impl Buffer {
         // After save, current content becomes the new base for diff.
         self.base_line_hashes = rope_line_hashes(&self.rope);
         self.invalidate_diff_cache();
+        // Pin the current history head as the on-disk anchor so an undo back
+        // to this point no longer reports the buffer as dirty.
+        self.mark_saved();
     }
 
     /// Reload the buffer from disk if the file has changed. Drops undo/redo
@@ -84,8 +87,7 @@ impl Buffer {
         self.version = self.version.wrapping_add(1);
         self.full_reparse = true;
         self.pending_edits.clear();
-        self.undo.clear();
-        self.redo.clear();
+        self.undo_log = super::undo_log::UndoLog::new();
         self.dirty = false;
         self.base_line_hashes = rope_line_hashes(&self.rope);
         self.invalidate_diff_cache();

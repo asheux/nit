@@ -3,7 +3,8 @@ use super::super::Buffer;
 impl Buffer {
     /// vim `J`: join the next line onto the current line, replacing the
     /// joining newline + leading whitespace with a single space when both
-    /// lines have non-whitespace content.
+    /// lines have non-whitespace content. Recorded as one transaction so a
+    /// single undo restores both lines.
     pub fn join_lines(&mut self) {
         self.end_edit_group();
         let line = self.cursor.line;
@@ -18,21 +19,36 @@ impl Buffer {
         let leading_ws = count_leading_blanks(&self.rope, next_start, next_len);
         let strip_end = next_start + leading_ws;
 
-        self.push_undo();
+        self.begin_undo_group();
+        let before = self.cursor;
         if strip_end > join_at {
+            let removed = self.rope.slice(join_at..strip_end).to_string();
             self.record_delete(join_at, strip_end);
             self.rope.remove(join_at..strip_end);
+            self.record_delete_delta(
+                join_at,
+                &removed,
+                before,
+                super::super::undo_log::GroupHint::Explicit,
+            );
         }
         let next_has_content = leading_ws < next_len;
         let line_has_content = line_len > 0;
         if next_has_content && line_has_content {
             self.record_insert(join_at, " ");
             self.rope.insert_char(join_at, ' ');
+            self.record_insert_delta(
+                join_at,
+                " ",
+                before,
+                super::super::undo_log::GroupHint::Explicit,
+            );
         }
         self.cursor.line = line;
         self.cursor.col = if line_has_content { line_len } else { 0 };
         self.dirty = true;
         self.clamp_col();
+        self.end_undo_group();
     }
 
     /// vim `~`: toggle case of the character under the cursor and advance.
@@ -69,14 +85,25 @@ impl Buffer {
         if next == current {
             return true;
         }
-        self.push_undo();
+        let before = self.cursor;
+        self.begin_undo_group();
+        let mut prev_buf = [0u8; 4];
+        let prev_s = current.encode_utf8(&mut prev_buf).to_string();
         self.record_delete(idx, idx + 1);
         self.rope.remove(idx..idx + 1);
+        self.record_delete_delta(
+            idx,
+            &prev_s,
+            before,
+            super::super::undo_log::GroupHint::Explicit,
+        );
         let mut buf = [0u8; 4];
         let s = next.encode_utf8(&mut buf);
         self.record_insert(idx, s);
         self.rope.insert(idx, s);
+        self.record_insert_delta(idx, s, before, super::super::undo_log::GroupHint::Explicit);
         self.dirty = true;
+        self.end_undo_group();
         true
     }
 }
