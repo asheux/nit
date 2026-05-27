@@ -693,6 +693,93 @@ fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> S
 }
 
 #[test]
+fn parallel_plan_keeps_integrate_role_on_non_primary_clones_under_multi_integrator() {
+    // Production repro: an operator-list prompt + parallel template + 12
+    // clones produces a planner DAG with 1 recon + N integrators (one
+    // per ticket) + review + test. With `multi_integrator = true` (the
+    // value `runtime_events.rs:193` now passes for every parallel run),
+    // the role MUST stay `integrate` on every non-primary integrator —
+    // otherwise the roster reads `task.role == None` and shows a blank
+    // role column, and validate_explicit_roles strips writes too.
+    //
+    // Before this fix: `multi_integrator = scope_files > 15`, so a
+    // small-scope parallel run (e.g. the editor-UX 9-bullet prompt
+    // touching ~10 files) got `multi_integrator = false`. The validator
+    // cleared the role on clones-04..N-1, the roster displayed them as
+    // bare `clone NN` rows with no `[integrate]` bracket, and the
+    // integrators dispatched as read-only — exactly the production bug.
+    let planner_message = r#"
+Plan:
+- recon then 3 integrators
+
+```json
+{
+  "version": 2,
+  "template": "parallel",
+  "integrator_agent_id": "primary",
+  "tasks": [
+    { "id": "recon", "agent_id": "recon-agent", "role": "propose", "title": "Survey", "prompt": "survey scope", "writes": false, "deps": [] },
+    { "id": "i1", "agent_id": "primary", "role": "integrate", "title": "Ticket 1", "prompt": "ship t1", "writes": true, "deps": ["recon"] },
+    { "id": "i2", "agent_id": "writer-b", "role": "integrate", "title": "Ticket 2", "prompt": "ship t2", "writes": true, "deps": ["recon"] },
+    { "id": "i3", "agent_id": "writer-c", "role": "integrate", "title": "Ticket 3", "prompt": "ship t3", "writes": true, "deps": ["recon"] }
+  ]
+}
+```
+"#;
+    let available = vec![
+        "primary".to_string(),
+        "recon-agent".to_string(),
+        "writer-b".to_string(),
+        "writer-c".to_string(),
+    ];
+    let parsed = parse_plan_from_planner(
+        planner_message,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        "root prompt",
+        &available,
+        Some("primary"),
+        false,
+        true, // multi_integrator — what runtime_events now passes for Parallel
+    );
+
+    // All four tasks survived parsing.
+    let ids: Vec<&str> = parsed.tasks.iter().map(|t| t.id.as_str()).collect();
+    assert!(
+        ids.contains(&"i1") && ids.contains(&"i2") && ids.contains(&"i3"),
+        "all three integrators must survive parsing under parallel + multi_integrator; got tasks: {ids:?}"
+    );
+
+    // Every integrator keeps role=integrate (the key invariant — before
+    // the fix, i2 and i3 had their role cleared to None by
+    // validate_explicit_roles).
+    for id in ["i1", "i2", "i3"] {
+        let task = parsed.tasks.iter().find(|t| t.id == id).expect(id);
+        assert_eq!(
+            task.role.as_deref(),
+            Some("integrate"),
+            "task `{id}` should keep role=integrate under multi_integrator=true; got {:?}",
+            task.role
+        );
+        assert!(
+            task.writes,
+            "task `{id}` should keep writes=true under multi_integrator=true; got writes=false"
+        );
+    }
+
+    // No "forcing read-only" warnings (those only fire when
+    // multi_integrator=false and a non-primary integrator is detected).
+    assert!(
+        !parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("forcing read-only")),
+        "no read-only coercion expected under multi_integrator=true; got: {:?}",
+        parsed.warnings
+    );
+}
+
+#[test]
 fn plan_v2_enforces_single_writer_integrator() {
     let planner_message = r#"
 Plan:

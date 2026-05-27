@@ -190,7 +190,17 @@ fn handle_completed_planning(
 ) -> RunFate {
     tag_last_agent_message_kind(state, agent_id, &run.mission_id, "plan");
     let available = non_planner_agents(run);
-    let multi_integrator = run.scope_files.len() > 15;
+    // Parallel template is multi-writer by design — every ticket gets
+    // its own integrate task (`INV-17 parallel_min_integrators`). For
+    // lab/bulk we keep the heuristic: large-scope runs ( > 15 files )
+    // get sharded, small-scope runs stay singleton-integrator. Without
+    // the explicit `Parallel` branch here, a parallel run on a small
+    // file set would silently have every non-primary integrator's role
+    // cleared by `validate_explicit_roles` (which checks
+    // `!multi_integrator && agent != integrator → clear role to
+    // None`), breaking the display AND the per-clone scoping.
+    let multi_integrator =
+        run.scope_files.len() > 15 || matches!(run.template, super::types::SwarmTemplate::Parallel);
     let parsed = parse_plan_from_planner(
         message,
         run.template,
@@ -414,7 +424,17 @@ fn handle_failed_planning(
 ) -> RunFate {
     tag_last_agent_message_kind(state, agent_id, &run.mission_id, "plan");
     let available = non_planner_agents(run);
-    let multi_integrator = run.scope_files.len() > 15;
+    // Parallel template is multi-writer by design — every ticket gets
+    // its own integrate task (`INV-17 parallel_min_integrators`). For
+    // lab/bulk we keep the heuristic: large-scope runs ( > 15 files )
+    // get sharded, small-scope runs stay singleton-integrator. Without
+    // the explicit `Parallel` branch here, a parallel run on a small
+    // file set would silently have every non-primary integrator's role
+    // cleared by `validate_explicit_roles` (which checks
+    // `!multi_integrator && agent != integrator → clear role to
+    // None`), breaking the display AND the per-clone scoping.
+    let multi_integrator =
+        run.scope_files.len() > 15 || matches!(run.template, super::types::SwarmTemplate::Parallel);
     let parsed = fallback_tasks(
         run.template,
         run.mission_kind,
