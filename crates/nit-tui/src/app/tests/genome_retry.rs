@@ -197,6 +197,316 @@ fn dispatch_turn_genome_evals_tracks_per_agent_batches_independently() {
     assert_eq!(batch_b.mission_id.as_deref(), Some("mis-B"));
 }
 
+/// Regression for the latent attribution bug in the shadow-eval fallback at
+/// `dispatch_turn_genome_evals`. When a runner fails to emit `FileWrite`
+/// events (tool-format mismatch), the fallback recovers from the GLOBAL
+/// `genome_shadow_evals` map. It must NOT claim paths another agent owns —
+/// directly via `genome_turn_modified` or transitively via an
+/// `ExclusiveWrite` substrate claim — otherwise this agent inherits another
+/// writer's files and the next retry routes to the wrong agent.
+#[test]
+fn dispatch_turn_genome_evals_fallback_skips_paths_owned_by_other_agents() {
+    let mut state = state_for_test_in_workspace("fallback-attribution");
+    state.settings.genome.genome_context_enabled = true;
+
+    let workspace = state.workspace_root.clone();
+    let owned_by_a = workspace.join("a.rs");
+    let claimed_by_b = workspace.join("b.rs");
+    let unowned = workspace.join("u.rs");
+    fs::write(&owned_by_a, "fn a() {}\n").unwrap();
+    fs::write(&claimed_by_b, "fn b() {}\n").unwrap();
+    fs::write(&unowned, "fn u() {}\n").unwrap();
+
+    state
+        .genome_turn_modified
+        .insert("agent-A".into(), [owned_by_a.clone()].into_iter().collect());
+    let claim_id = state.substrate.next_claim_id("agent-B");
+    let claimed_at_gen = state.substrate.current_generation();
+    state
+        .substrate
+        .assert_claim(nit_core::substrate::Claim {
+            id: claim_id,
+            kind: nit_core::substrate::ClaimKind::ExclusiveWrite,
+            target: nit_core::substrate::ClaimTarget::File {
+                path: claimed_by_b.clone(),
+            },
+            claimed_by: "agent-B".into(),
+            claimed_at_gen,
+            ttl_gens: 16,
+            rationale: "seed".into(),
+        })
+        .expect("seed claim asserts cleanly");
+
+    let seed_shadow = |tier| nit_core::GenomeShadowEval {
+        tier,
+        quality: "ok",
+        consistency: 0.5,
+        delta_label: "unchanged",
+        is_new_file: false,
+        at: Instant::now(),
+    };
+    state.genome_shadow_evals.insert(
+        owned_by_a.clone(),
+        seed_shadow(nit_core::GenomeTier::Spaceship),
+    );
+    state.genome_shadow_evals.insert(
+        claimed_by_b.clone(),
+        seed_shadow(nit_core::GenomeTier::Spaceship),
+    );
+    state.genome_shadow_evals.insert(
+        unowned.clone(),
+        seed_shadow(nit_core::GenomeTier::Spaceship),
+    );
+
+    let genome = crate::genome_worker::GenomeWorker::new();
+    super::dispatch_turn_genome_evals(&mut state, &genome, "agent-C", &Some("mis-C".into()));
+
+    let c_files = state
+        .genome_turn_modified
+        .get("agent-C")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        c_files.contains(&unowned),
+        "fallback should pick up the unowned file"
+    );
+    assert!(
+        !c_files.contains(&owned_by_a),
+        "fallback must not claim a path another agent's genome_turn_modified entry already owns"
+    );
+    assert!(
+        !c_files.contains(&claimed_by_b),
+        "fallback must not claim a path covered by another agent's ExclusiveWrite claim"
+    );
+}
+
+/// Regression for the operator-reported bug: when two writers share a turn
+/// and each has a degraded file, the retry must fan out per writer — one
+/// retry prompt per owner, scoped to that owner's failed files only. The
+/// dispatch must not collapse to a single retry, and it must not bleed one
+/// agent's files into another's prompt.
+///
+/// Setup mirrors the `drain_genome_results` per-batch finalization path: A
+/// owns [a1,a2,a3] with a2 degraded; B owns [b1,b2,b3] with b2 degraded.
+/// After both batches finalize, two `build_genome_retry_prompt` calls fire
+/// (one per agent), each scoped to its own failed file.
+#[test]
+fn multi_agent_genome_retry_dispatches_per_owner_scope() {
+    let mut state = state_for_test_in_workspace("multi-agent-retry");
+    state.settings.genome.genome_context_enabled = true;
+
+    let mk_big = |label: &str| -> std::path::PathBuf {
+        let path = state.workspace_root.join(format!("{label}.rs"));
+        let body: String = (0..200)
+            .map(|i| format!("fn f{i}() {{ let _ = {i}; }}\n"))
+            .collect();
+        fs::write(&path, body).unwrap();
+        path
+    };
+    // Agent A's three files; a2 will be marked degraded.
+    let a1 = mk_big("a1");
+    let a2 = mk_big("a2");
+    let a3 = mk_big("a3");
+    // Agent B's three files; b2 will be marked degraded.
+    let b1 = mk_big("b1");
+    let b2 = mk_big("b2");
+    let b3 = mk_big("b3");
+
+    let agent_a = "agent-A".to_string();
+    let agent_b = "agent-B".to_string();
+
+    state.genome_turn_modified.insert(
+        agent_a.clone(),
+        [a1.clone(), a2.clone(), a3.clone()].into_iter().collect(),
+    );
+    state.genome_turn_modified.insert(
+        agent_b.clone(),
+        [b1.clone(), b2.clone(), b3.clone()].into_iter().collect(),
+    );
+
+    let mk_report = |path: &std::path::Path, tier: nit_core::GenomeTier| nit_core::GenomeReport {
+        file_path: path.to_path_buf(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.6,
+        tier,
+        recommendations: Vec::new(),
+        timestamp_ms: 1,
+        grid_size: 32,
+        parsimony: Default::default(),
+        function_scores: Vec::new(),
+    };
+    // Spaceship baselines for all six files.
+    for p in [&a1, &a2, &a3, &b1, &b2, &b3] {
+        state
+            .genome_baselines
+            .insert((*p).clone(), mk_report(p, nit_core::GenomeTier::Spaceship));
+    }
+    // Post-turn reports: most files unchanged; a2 and b2 dropped a tier.
+    for p in [&a1, &a3, &b1, &b3] {
+        state
+            .genome_reports
+            .insert((*p).clone(), mk_report(p, nit_core::GenomeTier::Spaceship));
+    }
+    state
+        .genome_reports
+        .insert(a2.clone(), mk_report(&a2, nit_core::GenomeTier::Oscillator));
+    state
+        .genome_reports
+        .insert(b2.clone(), mk_report(&b2, nit_core::GenomeTier::Oscillator));
+
+    // Each batch finalises with a negative worst-delta (per-agent).
+    state.genome_quality_deltas.insert(agent_a.clone(), -1);
+    state.genome_quality_deltas.insert(agent_b.clone(), -1);
+
+    // Build the retry prompts the way `drain_genome_results` does on each
+    // batch finalisation — once per agent. Two distinct calls, not one.
+    let (prompt_a, files_a) = super::build_genome_retry_prompt(&mut state, &agent_a)
+        .expect("agent A's batch must produce its own retry");
+    let (prompt_b, files_b) = super::build_genome_retry_prompt(&mut state, &agent_b)
+        .expect("agent B's batch must produce its own retry");
+
+    // Per-owner file scope: each retry list is exactly that agent's failed file.
+    assert_eq!(
+        files_a,
+        vec![a2.clone()],
+        "A's retry must scope to A's failed file only"
+    );
+    assert_eq!(
+        files_b,
+        vec![b2.clone()],
+        "B's retry must scope to B's failed file only"
+    );
+
+    // Cross-bleed guard: no agent's prompt references another agent's files.
+    let a2_name = a2.file_name().and_then(|n| n.to_str()).unwrap();
+    let b2_name = b2.file_name().and_then(|n| n.to_str()).unwrap();
+    assert!(
+        prompt_a.contains(a2_name),
+        "A's prompt must name its degraded file"
+    );
+    assert!(
+        !prompt_a.contains(b2_name),
+        "A's prompt must NOT mention B's degraded file"
+    );
+    assert!(
+        prompt_b.contains(b2_name),
+        "B's prompt must name its degraded file"
+    );
+    assert!(
+        !prompt_b.contains(a2_name),
+        "B's prompt must NOT mention A's degraded file"
+    );
+
+    // Each writer's retry budget advances independently — proves two
+    // distinct dispatch decisions, not one combined retry. `GENOME_RETRY_LIMIT`
+    // remains per-agent (mirrors the recon's confirmation).
+    assert_eq!(
+        state.genome_retry_counts.get(&agent_a).copied(),
+        Some(1),
+        "agent A's retry budget advanced once"
+    );
+    assert_eq!(
+        state.genome_retry_counts.get(&agent_b).copied(),
+        Some(1),
+        "agent B's retry budget advanced once"
+    );
+    assert_eq!(
+        state.genome_retry_counts.len(),
+        2,
+        "exactly two writers were retried — bug would have collapsed to one"
+    );
+}
+
+/// Per-agent retry budgets stay isolated under the per-owner dispatch loop:
+/// agent A exhausting its retry credits must not block agent B's first retry.
+#[test]
+fn multi_agent_genome_retry_budgets_are_independent_per_writer() {
+    let mut state = state_for_test_in_workspace("multi-agent-retry-budget");
+    state.settings.genome.genome_context_enabled = true;
+
+    let mk_big = |label: &str| -> std::path::PathBuf {
+        let path = state.workspace_root.join(format!("{label}.rs"));
+        let body: String = (0..200)
+            .map(|i| format!("fn f{i}() {{ let _ = {i}; }}\n"))
+            .collect();
+        fs::write(&path, body).unwrap();
+        path
+    };
+    let file_a = mk_big("only_a");
+    let file_b = mk_big("only_b");
+
+    let agent_a = "agent-A".to_string();
+    let agent_b = "agent-B".to_string();
+    state
+        .genome_turn_modified
+        .insert(agent_a.clone(), [file_a.clone()].into_iter().collect());
+    state
+        .genome_turn_modified
+        .insert(agent_b.clone(), [file_b.clone()].into_iter().collect());
+
+    let baseline = |path: &std::path::Path| nit_core::GenomeReport {
+        file_path: path.to_path_buf(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.6,
+        tier: nit_core::GenomeTier::Spaceship,
+        recommendations: Vec::new(),
+        timestamp_ms: 1,
+        grid_size: 32,
+        parsimony: Default::default(),
+        function_scores: Vec::new(),
+    };
+    let degraded = |path: &std::path::Path| nit_core::GenomeReport {
+        file_path: path.to_path_buf(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.4,
+        tier: nit_core::GenomeTier::Oscillator,
+        recommendations: Vec::new(),
+        timestamp_ms: 2,
+        grid_size: 32,
+        parsimony: Default::default(),
+        function_scores: Vec::new(),
+    };
+    state
+        .genome_baselines
+        .insert(file_a.clone(), baseline(&file_a));
+    state
+        .genome_baselines
+        .insert(file_b.clone(), baseline(&file_b));
+    state
+        .genome_reports
+        .insert(file_a.clone(), degraded(&file_a));
+    state
+        .genome_reports
+        .insert(file_b.clone(), degraded(&file_b));
+    state.genome_quality_deltas.insert(agent_a.clone(), -1);
+    state.genome_quality_deltas.insert(agent_b.clone(), -1);
+
+    // Agent A is already at the per-agent retry ceiling.
+    state
+        .genome_retry_counts
+        .insert(agent_a.clone(), super::GENOME_RETRY_LIMIT);
+
+    // A's retry is blocked (budget exhausted) — must NOT silently consume B's.
+    assert!(
+        super::build_genome_retry_prompt(&mut state, &agent_a).is_none(),
+        "A at the ceiling must not produce a retry"
+    );
+    // B's first retry still fires — its budget is independent.
+    let (_prompt_b, files_b) = super::build_genome_retry_prompt(&mut state, &agent_b)
+        .expect("B's first retry must fire even when A is exhausted");
+    assert_eq!(files_b, vec![file_b]);
+    assert_eq!(
+        state.genome_retry_counts.get(&agent_b).copied(),
+        Some(1),
+        "B's budget advanced independently of A"
+    );
+    assert_eq!(
+        state.genome_retry_counts.get(&agent_a).copied(),
+        Some(super::GENOME_RETRY_LIMIT),
+        "A's budget stayed at the ceiling — B's retry did not reset it"
+    );
+}
+
 /// Each authoritative eval request must carry the dispatching agent_id all
 /// the way to the worker's output so `drain_genome_results` can route
 /// decrements to the right batch.

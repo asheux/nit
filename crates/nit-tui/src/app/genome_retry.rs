@@ -810,6 +810,35 @@ pub(super) fn dispatch_shadow_outcome(
     );
 }
 
+// Exclusion set for the shadow-eval fallback: every path another agent
+// already owns, taken from both per-turn attributions and the substrate's
+// live `ExclusiveWrite` claims. The fallback uses this to keep a parallel
+// swarm's writers from inheriting each other's files when runner-side
+// `FileWrite` attribution drops a turn's writes.
+fn paths_attributed_to_other_agents(
+    state: &AppState,
+    agent_id: &str,
+) -> HashSet<std::path::PathBuf> {
+    let mut excluded: HashSet<std::path::PathBuf> = state
+        .genome_turn_modified
+        .iter()
+        .filter(|(other, _)| other.as_str() != agent_id)
+        .flat_map(|(_, paths)| paths.iter().cloned())
+        .collect();
+    for claim in state.substrate.claims.values() {
+        if !matches!(claim.kind, nit_core::substrate::ClaimKind::ExclusiveWrite) {
+            continue;
+        }
+        if claim.claimed_by == agent_id {
+            continue;
+        }
+        if let nit_core::substrate::ClaimTarget::File { path } = &claim.target {
+            excluded.insert(path.clone());
+        }
+    }
+    excluded
+}
+
 /// Dispatch authoritative genome evaluations to background threads after a turn completes.
 /// Each modified file is sent to the genome worker; results stream back to `drain_genome_results`.
 pub(super) fn dispatch_turn_genome_evals(
@@ -832,16 +861,28 @@ pub(super) fn dispatch_turn_genome_evals(
         .map(|s| s.iter().cloned().collect())
         .unwrap_or_default();
 
-    // Fallback: if runner attribution found nothing (tool format mismatch),
-    // use shadow-eval-detected files. The file watcher saw changes during
-    // the turn — shadow evals prove files were modified. This is less precise
-    // for parallel agents but ensures retries fire when quality degrades.
+    // Fallback: if runner attribution found nothing (tool-format mismatch),
+    // recover from shadow-eval-detected files. The file watcher saw changes
+    // during the turn — shadow evals prove files were modified.
+    //
+    // `genome_shadow_evals` is GLOBAL (keyed by path, not agent_id). In a
+    // parallel swarm we MUST exclude paths another agent already owns —
+    // either via its own `genome_turn_modified` entry or via a live
+    // `ExclusiveWrite` claim — otherwise this agent inherits another
+    // writer's files and the retry routes to the wrong agent.
     if modified.is_empty() && !state.genome_shadow_evals.is_empty() {
-        modified = state.genome_shadow_evals.keys().cloned().collect();
-        // Store for genome context and retry prompts.
-        state
-            .genome_turn_modified
-            .insert(agent_id.to_string(), modified.iter().cloned().collect());
+        let excluded = paths_attributed_to_other_agents(state, agent_id);
+        modified = state
+            .genome_shadow_evals
+            .keys()
+            .filter(|p| !excluded.contains(*p))
+            .cloned()
+            .collect();
+        if !modified.is_empty() {
+            state
+                .genome_turn_modified
+                .insert(agent_id.to_string(), modified.iter().cloned().collect());
+        }
     }
 
     // Genome metrics only apply to code. Filter docs/config out so agent
