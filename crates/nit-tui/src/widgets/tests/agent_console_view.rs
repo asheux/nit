@@ -1549,9 +1549,13 @@ fn swarm_exec_label_falls_back_to_executing_when_runtime_missing() {
 }
 
 #[test]
-fn swarm_exec_label_returns_executing_for_mixed_running_roles() {
-    // Different running roles (e.g. propose + integrate) should not collapse
-    // to either-or — the breather falls back to the generic label.
+fn swarm_exec_label_picks_dominant_role_for_mixed_running_roles() {
+    // Different running roles (e.g. propose + integrate) used to collapse
+    // to the generic "Executing ..." fallback — uninformative when concrete
+    // DAG roles are in flight. The dominant-role pass now picks the role
+    // furthest along the swarm pipeline (integrate > propose), so the
+    // breather surfaces the current frontier instead of the lowest common
+    // denominator.
     let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
     let clone_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
     let state = state_with_active_clones(&[clone_a.as_str(), clone_b.as_str()]);
@@ -1564,7 +1568,35 @@ fn swarm_exec_label_returns_executing_for_mixed_running_roles() {
     );
 
     let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
-    assert_eq!(label, "Executing ...");
+    assert_eq!(label, "Integrating ...");
+}
+
+#[test]
+fn swarm_exec_label_review_wins_over_integrate_when_mixed() {
+    // Operator complaint that triggered this: a review clone running
+    // alongside a tail of integrators showed "Executing ..." instead of
+    // "Reviewing ...". The breather should surface the latest pipeline
+    // stage with live work.
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-04".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-05".to_string();
+    let clone_review = "claude-opus-4-7#swarm-mis-001-clone-06".to_string();
+    let state =
+        state_with_active_clones(&[clone_a.as_str(), clone_b.as_str(), clone_review.as_str()]);
+    let runtime = test_runtime_with_running_tasks(
+        "mis-001",
+        &[
+            (clone_a.as_str(), "integrate"),
+            (clone_b.as_str(), "integrate"),
+            (clone_review.as_str(), "review"),
+        ],
+    );
+
+    let label = swarm_exec_label(
+        &state,
+        &[clone_a.clone(), clone_b.clone(), clone_review.clone()],
+        Some(&runtime),
+    );
+    assert_eq!(label, "Reviewing ...");
 }
 
 #[test]

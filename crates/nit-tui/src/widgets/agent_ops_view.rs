@@ -966,9 +966,9 @@ fn parse_roster_truncation_disabled(value: Option<&str>) -> bool {
 /// in `roster_grouped_agent_indices::cap_visible` for the rationale.
 ///
 /// Returned tuple: `(parent_priority, parent_idx, is_clone, secondary)`.
-fn roster_group_sort_key(state: &AppState, agent_idx: usize) -> (u8, usize, u8, usize) {
+fn roster_group_sort_key(state: &AppState, agent_idx: usize) -> (u8, usize, u8, u8, usize) {
     let Some(agent) = state.agents.agents.get(agent_idx) else {
-        return (4, usize::MAX, 0, agent_idx);
+        return (4, usize::MAX, 0, 4, agent_idx);
     };
 
     // Clones anchor on their parent lane so they sort right after it
@@ -988,18 +988,17 @@ fn roster_group_sort_key(state: &AppState, agent_idx: usize) -> (u8, usize, u8, 
             .unwrap_or(agent_idx);
         let parent_priority = roster_running_priority(state, parent_idx);
         // is_clone = 1 sorts after the parent's own row (is_clone = 0).
-        // secondary = agent_idx keeps clone-01 ahead of clone-02 in the
-        // common case where they were appended in numbered order.
-        (parent_priority, parent_idx, 1, agent_idx)
+        // own_priority surfaces RUNNING clones at the top of the parent's
+        // clone block — without it, an idle clone-01 would render before a
+        // running clone-02 just because it has a lower agent_idx.
+        let own_priority = roster_running_priority(state, agent_idx);
+        (parent_priority, parent_idx, 1, own_priority, agent_idx)
     } else {
         // Base lane: its own priority + index. is_clone = 0 ensures it
-        // sorts ahead of its own clones in the same group.
-        (
-            roster_running_priority(state, agent_idx),
-            agent_idx,
-            0,
-            agent_idx,
-        )
+        // sorts ahead of its own clones in the same group. The 4th slot
+        // mirrors own_priority so the tuple shape matches the clone branch.
+        let own = roster_running_priority(state, agent_idx);
+        (own, agent_idx, 0, own, agent_idx)
     }
 }
 
@@ -1061,12 +1060,11 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
     let selected = state.agents.roster_selected;
     let truncate = !roster_truncation_disabled();
     let cap_visible = |mut v: Vec<usize>| -> Vec<usize> {
-        if !truncate || v.len() <= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
-            return v;
-        }
         // Promote running agents to the front so the visible window always
         // reflects the live work, BUT keep clones adjacent to their parent
-        // lane. The compound key sorts by:
+        // lane. Applied unconditionally — even when the group fits within
+        // the visible cap, RUNNING clones should sit above IDLE siblings.
+        // The compound key sorts by:
         //   1. parent's running priority — a parent with a running turn
         //      drags its (otherwise-idle) clones to the front with it,
         //      and an idle parent keeps its clones together at its rank;
@@ -1075,13 +1073,18 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
         //      idle base lanes);
         //   3. is-clone flag — base lane sorts before its own clones in
         //      the same group;
-        //   4. clone-row index — keeps clone-01 before clone-02 within
-        //      a group.
+        //   4. clone's OWN running priority — bubbles RUNNING clones to
+        //      the top of their parent's clone block, ahead of IDLE
+        //      siblings with a lower agent_idx;
+        //   5. agent_idx — keeps clone-01 before clone-02 among ties.
         // Without (1)+(2), an idle base lane could land between a running
-        // parent and its clones (the bug fixed here: clones rendered with
-        // `↳ ↳` glyph immediately under a sibling base lane look like
+        // parent and its clones (the bug fixed earlier: clones rendered
+        // with `↳ ↳` glyph immediately under a sibling base lane look like
         // children of that sibling).
         v.sort_by_key(|idx| roster_group_sort_key(state, *idx));
+        if !truncate || v.len() <= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
+            return v;
+        }
         // Preserve selection visibility: if the selected agent is in this
         // group but past the cap, swap it into the last visible slot before
         // truncating.

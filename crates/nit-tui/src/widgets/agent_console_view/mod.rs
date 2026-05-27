@@ -3303,7 +3303,71 @@ pub(super) fn swarm_exec_label(
     if let Some(label) = uniform_role_gerund_label(&roles) {
         return label;
     }
+    // (3a) Mixed roles running — uniformity check failed. The mission-kind
+    // fallback would give "Executing ..." for General missions, which is
+    // uninformative when concrete DAG roles are in flight. Promote the
+    // role furthest along the swarm pipeline (test → review → integrate
+    // → propose → research) so the breather surfaces the current frontier.
+    // Research / ComputationalResearch missions short-circuit this —
+    // their fallback is already "Researching ...", which is the right
+    // headline for the whole run regardless of which DAG sub-role is
+    // currently active.
+    if fallback_label == "Executing ..." {
+        if let Some(label) = dominant_role_gerund_label(&roles) {
+            return label;
+        }
+    }
     fallback_label
+}
+
+/// (3a) When `active_turns` carry more than one distinct DAG role, pick
+/// the role furthest along the swarm pipeline (test → review → integrate
+/// → judge → propose → research/recon/design). Operators want the
+/// breather to tell them which *stage* the swarm is in — when a review
+/// clone is running, the right answer is "Reviewing ..." even if some
+/// integrators haven't finished their turn yet. Unknown / planner-emitted
+/// roles fall to the back of the precedence; if every role is unknown
+/// the function returns `None` and the caller hits the mission-kind
+/// fallback as before.
+fn dominant_role_gerund_label(roles: &[String]) -> Option<String> {
+    let mut best: Option<(u8, &str)> = None;
+    for raw in roles {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rank = role_pipeline_rank(trimmed);
+        match best {
+            Some((br, _)) if rank >= br => {}
+            _ => best = Some((rank, trimmed)),
+        }
+    }
+    let (_, role) = best?;
+    Some(format!("{} ...", to_gerund_phrase(role)))
+}
+
+/// Pipeline position for breather precedence. Lower = later in the
+/// pipeline = preferred for the headline label. Compound roles
+/// (`computational-research`, `genome-reviewer`) take the rank of their
+/// last whitespace/`-`/`_` token, mirroring `to_gerund_phrase`. Unknown
+/// roles get the highest number so they yield to any known role.
+fn role_pipeline_rank(role: &str) -> u8 {
+    let lower = role.to_ascii_lowercase();
+    let key = match lower.rfind([' ', '-', '_']) {
+        Some(idx) => &lower[idx + 1..],
+        None => lower.as_str(),
+    };
+    match key {
+        "test" | "verify" | "verifier" => 0,
+        "review" | "reviewer" => 1,
+        "integrate" | "integrator" | "integration" => 2,
+        "judge" => 3,
+        "propose" | "proposer" => 4,
+        "design" => 5,
+        "research" => 6,
+        "recon" => 7,
+        _ => u8::MAX,
+    }
 }
 
 /// (1) If every active turn surfaces the *same* semantic-intent stage,
