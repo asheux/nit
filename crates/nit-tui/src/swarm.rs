@@ -185,6 +185,8 @@ use dashboard::{
 };
 use fallback::fallback_tasks;
 use gate_retry::{build_verify_prompt, parse_gate_report, truncate_chars, try_dispatch_gate_retry};
+#[cfg(test)]
+use graph_exec::build_task_prompt_for_test;
 use graph_exec::{
     dispatch_ready_tasks, initialize_task_graph, mark_task_finished, mark_task_running,
     maybe_resolve_deadlock, refresh_task_readiness, structural_compliance_missing_files,

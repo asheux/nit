@@ -778,7 +778,7 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, formatters, or any verification commands — text analysis only, based on the proposals and (if present) the GENOME LANDSCAPE below. List any commands you'd recommend as suggestions for the integrator/reviewer, not actions you take yourself. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
             "LANDSCAPE-AWARE JUDGING: if a GENOME LANDSCAPE or THRESHOLDS BREACHED section is attached below, your decision MUST be grounded in it. Prefer proposals whose recommendations target the lowest-tier / highest-leverage files (mega-files, parsimony-capped, low-density). Reject or downgrade proposals that recommend changes uncorrelated with the landscape (e.g. cosmetic tweaks on tier-IV files while tier-I/II files go untouched). Name the specific landscape metrics in your verdict.",
             "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",
-            "FILES ARRAY = LOAD-BEARING HANDOFF: your `swarm_artifacts.files` is the canonical scope for the integrator's structural-compliance check. The unified plan you produce MUST list every file path the integrator is expected to MODIFY or CREATE — existing files to edit, plus every new submodule path the chosen split plan introduces. Do NOT include files you decided are audit-only / no-changes-needed; mention those in your prose verdict or `notes`, not in `files`. The compliance check requires every entry to be modified. Files omitted from `files` are files the integrator can silently skip without retry; files that get touched only as stub doc-comment shells get caught by the runtime's stub detector. If a proposer's split plan you accepted introduces 8 new submodule paths, all 8 MUST be in `files` — not just the original source path. Be exhaustive here even if it duplicates content from the proposers.",
+            "FILES ARRAY = AUTHORITATIVE SELECTION: your `swarm_artifacts.files` is the canonical scope for the integrator's structural-compliance check. When non-empty, the runtime drops the proposer arrays entirely and uses ONLY your list — proposer-nominated paths you omit are NOT included in the integrator's checklist, and the integrator is NOT re-dispatched for failing to modify them. The unified plan you produce MUST list every file path the integrator is expected to MODIFY or CREATE — existing files to edit, plus every new submodule path the chosen split plan introduces. Do NOT include files you decided are audit-only / no-changes-needed; mention those in your prose verdict or `notes`, not in `files`. The compliance check requires every entry in your list to be modified, but files you LEAVE OUT are not added back by the proposers' arrays — you have full authority to prune. Files that get touched only as stub doc-comment shells get caught by the runtime's stub detector. If a proposer's split plan you accepted introduces 8 new submodule paths, all 8 MUST be in your `files` — but if you rejected that split plan, leave every one of those 8 paths out and they will not appear in the checklist. An EMPTY array falls back to the proposer union as a backward-compat safety net; always publish a deliberate selection rather than relying on the fallback.",
         ],
         "integrate" => &[
             "Implement the chosen plan and convert it into concrete edits.",
@@ -1141,7 +1141,7 @@ fn append_task_shard_section(out: &mut String, task: &SwarmTask, shard_files: Op
 
 fn append_task_integrate_checklist(out: &mut String, scope_files: &[String]) {
     out.push_str("\n## FILE CHECKLIST (non-negotiable)\n");
-    out.push_str("This list is sourced from the propose/judge `swarm_artifacts.files` arrays (your dependency outputs below) — it's the canonical scope the runtime's structural-compliance check enforces. Modifying every file here is required; touching only some, or creating others as stub doc-comment shells, triggers automatic re-dispatch.\n");
+    out.push_str("This list is the canonical scope the runtime's structural-compliance check enforces. When a judge dep published a non-empty `swarm_artifacts.files` array, this list IS that selection (judge-authoritative); otherwise it's the union of every proposer dep's `files` array. Modifying every file here is required; touching only some, or creating others as stub doc-comment shells, triggers automatic re-dispatch.\n");
     out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
     out.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
     out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
@@ -1162,29 +1162,28 @@ fn append_task_propose_scope(out: &mut String, scope_files: &[String]) {
     }
 }
 
-/// Judge-facing view of what the integrator's FILE CHECKLIST will look
-/// like if this judge does nothing. The list is the *union* of every
-/// upstream proposer's `swarm_artifacts.files` array — the same union
-/// `collect_integrate_scope` will compute when the integrator dispatches.
+/// Judge-facing view of what the proposers nominated. Renders the
+/// proposer-only union so the judge can see — at decision time — every
+/// path that was suggested upstream, then explicitly choose which set
+/// becomes the integrator's FILE CHECKLIST via its own
+/// `swarm_artifacts.files` array.
 ///
-/// Operator-observed failure mode: when a proposer's split plan (e.g.
-/// Lens B's "split `equilibrium.py` into a package with 5 submodules")
-/// gets rejected in the judge's prose verdict but the proposer's
-/// `files` array still lists the rejected split paths, those paths
-/// stay in the integrator's checklist via the union. The integrator
-/// then has a no-win choice between honoring the judge (refactor
-/// in-place) and honoring the checklist (create the rejected
-/// submodules) — and routinely lands on a compromise like emitting
-/// inert shadow files just to satisfy the structural-compliance
-/// check.
+/// As of v0.2.10, the judge's `files` array is **authoritative** when
+/// non-empty: `aggregate_judge_or_proposer_files` returns just the
+/// judge's list, dropping proposer paths the judge omitted. The block
+/// describes that contract explicitly so the judge sets its array
+/// deliberately — the prior visibility-only behavior left the judge
+/// believing it could only ADD via prose, when the runtime semantics
+/// now let it ADD, REMOVE, or REPLACE the entire scope mechanically.
 ///
-/// The block names that dynamic explicitly so the judge can either
-/// (a) put a deliberately smaller `files` array in its own artifacts
-/// (the operator-recommended pattern: judge becomes authoritative by
-/// being explicit), or (b) at least know what list the integrator is
-/// about to be handed and address rejected files in the verdict
-/// prose so the integrator can interpret intent. Adding files to
-/// the union still works the same way it did before.
+/// Operator-observed failure that drove this: when a proposer's
+/// rejected split-plan paths stayed in the proposer's `files` array,
+/// the union pulled them into the integrator's checklist and the
+/// integrator was forced into a no-win loop — three re-dispatches,
+/// ending with the integrator executing the rejected split just to
+/// clear the gate. The judge's `files` array now BEING the checklist
+/// closes that gap end-to-end (prompt + compliance check both honor
+/// the same authority rule).
 ///
 /// No block is rendered when no proposer artifacts have published
 /// (`scope_files.is_empty()` after aggregation) — usually means the
@@ -1194,17 +1193,19 @@ fn append_task_judge_checklist(out: &mut String, scope_files: &[String]) {
     if scope_files.is_empty() {
         return;
     }
-    out.push_str("\n## PROPOSER-DECLARED FILES (what the integrator will see)\n");
-    out.push_str("This is the union of every upstream proposer's `swarm_artifacts.files` array. When the integrator dispatches, the runtime aggregates the union of THIS list and your own `swarm_artifacts.files` to build the FILE CHECKLIST the integrator is required to modify. Files NOT modified by the integrator trigger an automatic re-dispatch.\n");
+    out.push_str("\n## PROPOSER-NOMINATED FILES (your authoritative selection set)\n");
+    out.push_str("Every path below was nominated by an upstream proposer's `swarm_artifacts.files` array. Your `swarm_artifacts.files` is AUTHORITATIVE: when non-empty, the runtime drops the proposer arrays entirely and uses ONLY your list as the integrator's FILE CHECKLIST. The structural-compliance check, the prompt the integrator sees, and the re-dispatch logic all consult the same selection.\n");
     out.push('\n');
     for (i, path) in scope_files.iter().enumerate() {
         out.push_str(&format!("{}. {path}\n", i + 1));
     }
     out.push('\n');
     out.push_str("Your levers on this list:\n");
-    out.push_str("- Files you ACCEPT into your unified plan: include them in your `swarm_artifacts.files`. The integrator will see them (whether or not the proposer also listed them).\n");
-    out.push_str("- Files you REJECT (e.g. a proposer split-plan you didn't adopt, an audit-only file the proposer mistakenly included): DO NOT add them to your `swarm_artifacts.files`. They will still appear in the integrator's checklist via the proposers' arrays — call the rejection out explicitly in your `notes` / verdict prose with reasoning, so the integrator interprets them as audit-only rather than as required edits. The runtime's structural-compliance check looks at filenames, not prose; an explicit rejection note is the integrator's only signal to treat a listed file as already-handled.\n");
-    out.push_str("- Files you want to ADD (e.g. a callsite the proposers missed, a new submodule path your accepted plan introduces): include the path in your `swarm_artifacts.files`. It gets unioned in.\n");
+    out.push_str("- Files you ACCEPT: include them in your `swarm_artifacts.files`. The integrator will be required to modify each one.\n");
+    out.push_str("- Files you REJECT (e.g. a proposer split-plan you didn't adopt, an audit-only file the proposer mistakenly included): leave them OUT of your `swarm_artifacts.files`. The runtime will not include them in the integrator's checklist, and the integrator will not be re-dispatched for failing to touch them. Call the rejection out in your `notes` so the integrator and the operator understand the reasoning.\n");
+    out.push_str("- Files you want to ADD that no proposer mentioned (e.g. a callsite the proposers missed): include the path in your `swarm_artifacts.files`. It enters the checklist via your authority.\n");
+    out.push('\n');
+    out.push_str("If you publish an EMPTY `files` array — or omit the field — the runtime falls back to the proposer union as a backward-compat safety net. Always publish a deliberate selection; an empty array means \"defer to the proposers\", not \"no files are required\".\n");
 }
 
 // Inject the exact crate scope so test/review agents can't drift into

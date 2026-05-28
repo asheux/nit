@@ -5449,6 +5449,192 @@ fn compliance_check_for_runtime_shard_flags_only_its_partition() {
     assert_eq!(sorted, vec!["c.rs".to_string(), "d.rs".to_string()]);
 }
 
+// Helper: build a judge task whose artifacts declare the listed files.
+// Mirrors `propose_with_files` so judge-authority tests can construct
+// the same DAG shape with the judge marked Done and its file array
+// populated.
+fn judge_with_files(id: &str, deps: Vec<&str>, files: &[&str]) -> SwarmTask {
+    let mut t = make_task(id, "j", Some("judge"), deps);
+    t.state = SwarmTaskState::Done;
+    t.parsed_artifacts = Some(super::SwarmTaskArtifacts {
+        summary: None,
+        files: files
+            .iter()
+            .map(|f| super::SwarmArtifactFile {
+                path: (*f).into(),
+                notes: None,
+            })
+            .collect(),
+        diffs: Vec::new(),
+        commands: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+        findings: Vec::new(),
+    });
+    t
+}
+
+#[test]
+fn compliance_check_honors_judge_authority_when_judge_files_non_empty() {
+    // Operator-reported failure mode that drove v0.2.10: judge wrote
+    // `files: ['core/evolve.py']` and prose-rejected propose-02's
+    // 7-path package split. Pre-fix, the compliance check unioned every
+    // proposer's files into the integrator's contract; the judge's
+    // narrower selection was contributed alongside, not enforced. The
+    // integrator was re-dispatched twice for "missing" files the judge
+    // had explicitly directed it not to create, then capitulated on
+    // attempt 3 and executed the rejected refactor.
+    //
+    // Post-fix: the judge's `files` array IS the contract when
+    // non-empty. The 7 rejected paths are dropped from the
+    // checklist; the integrator's first attempt clears the gate by
+    // modifying `core/evolve.py` only.
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files(
+        "propose-02",
+        &[
+            "core/evolve.py",
+            "core/evolve/__init__.py",
+            "core/evolve/_seed.py",
+            "core/evolve/_orchestrator.py",
+        ],
+    );
+    let judge = judge_with_files("judge", vec!["propose-02"], &["core/evolve.py"]);
+    let mut integrate = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-02", "judge"],
+    );
+    integrate.writes = true;
+    integrate.state = SwarmTaskState::Done;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, judge, integrate]);
+    run.mission_id = "mis-evolve".into();
+    // Only `core/evolve.py` was modified — exactly what the judge directed.
+    let state = fresh_state_with_writes("mis-evolve", &["core/evolve.py"]);
+
+    let missing = structural_compliance_missing_files(&run, "integrate", &state);
+    assert!(
+        missing.is_empty(),
+        "judge's `files=['core/evolve.py']` should drop the 3 rejected proposer paths \
+         from the integrator's contract; got missing={missing:?}"
+    );
+}
+
+#[test]
+fn compliance_check_falls_back_to_proposer_union_when_judge_files_empty() {
+    // Backward-compat safety net: if the judge publishes an EMPTY
+    // `files` array (or omits it entirely), the runtime falls back to
+    // the proposer union. This preserves the v0.2.9 behavior for plans
+    // where the judge consolidates via prose only and expects the
+    // proposer arrays to drive the checklist.
+    use super::structural_compliance_missing_files;
+    let propose = propose_with_files("propose-01", &["a.rs", "b.rs", "c.rs"]);
+    // Judge dep present, but with empty files array.
+    let judge = judge_with_files("judge", vec!["propose-01"], &[]);
+    let mut integrate = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-01", "judge"],
+    );
+    integrate.writes = true;
+    integrate.state = SwarmTaskState::Done;
+
+    let mut run = make_run_with_tasks(SwarmTemplate::Parallel, vec![propose, judge, integrate]);
+    run.mission_id = "mis-empty-judge".into();
+    // Only a.rs and b.rs touched; c.rs from the proposer union should still
+    // be flagged because the judge didn't override.
+    let state = fresh_state_with_writes("mis-empty-judge", &["a.rs", "b.rs"]);
+
+    let missing = structural_compliance_missing_files(&run, "integrate", &state);
+    assert_eq!(
+        missing,
+        vec!["c.rs".to_string()],
+        "empty judge.files must fall back to proposer union; got missing={missing:?}"
+    );
+}
+
+#[test]
+fn compliance_check_uses_proposer_union_when_no_judge_in_plan() {
+    // Plans without any judge dep (lab without judge, or small-fanout
+    // parallel) keep the prior union semantics — there's no judge to
+    // override with, so every proposer's files contribute equally.
+    use super::structural_compliance_missing_files;
+    let propose_a = propose_with_files("propose-01", &["a.rs", "b.rs"]);
+    let propose_b = propose_with_files("propose-02", &["b.rs", "c.rs"]);
+    let mut integrate = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-01", "propose-02"],
+    );
+    integrate.writes = true;
+    integrate.state = SwarmTaskState::Done;
+
+    let mut run = make_run_with_tasks(
+        SwarmTemplate::Parallel,
+        vec![propose_a, propose_b, integrate],
+    );
+    run.mission_id = "mis-no-judge".into();
+    let state = fresh_state_with_writes("mis-no-judge", &["a.rs", "b.rs", "c.rs"]);
+
+    let missing = structural_compliance_missing_files(&run, "integrate", &state);
+    assert!(
+        missing.is_empty(),
+        "all three proposer-union files modified should clear the check; got missing={missing:?}"
+    );
+}
+
+#[test]
+fn integrator_prompt_checklist_shows_judge_authoritative_selection_only() {
+    // End-to-end prompt-side check: when the judge's `files` array is
+    // non-empty, the integrator's prompt-side FILE CHECKLIST must show
+    // ONLY the judge's selection — not the union. Pre-fix, the prompt
+    // builder and the compliance check used the same union semantics;
+    // the integrator's prompt enumerated the rejected paths so even an
+    // agent trying to honor the verdict prose still saw the paths
+    // listed under "(non-negotiable)".
+    use super::build_task_prompt_for_test;
+    let propose = propose_with_files(
+        "propose-02",
+        &[
+            "core/evolve.py",
+            "core/evolve/__init__.py",
+            "core/evolve/_seed.py",
+        ],
+    );
+    let judge = judge_with_files("judge", vec!["propose-02"], &["core/evolve.py"]);
+    let mut integrate = make_task(
+        "integrate",
+        "w1",
+        Some("integrate"),
+        vec!["propose-02", "judge"],
+    );
+    integrate.writes = true;
+
+    let run = make_run_with_tasks(
+        SwarmTemplate::Parallel,
+        vec![propose, judge, integrate.clone()],
+    );
+
+    let prompt = build_task_prompt_for_test(&run, &integrate);
+    assert!(
+        prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        "integrate prompt should still render the checklist header; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("core/evolve.py"),
+        "checklist must include the judge's selected file; got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("core/evolve/__init__.py")
+            && !prompt.contains("core/evolve/_seed.py"),
+        "checklist must NOT include proposer paths the judge omitted from its `files` array; got:\n{prompt}"
+    );
+}
+
 // End-to-end check that wrap_task_prompt actually injects the YOUR SHARD
 // section when shard_files is provided. Catches drift if the dispatcher
 // stops passing shard_files through.
@@ -5832,16 +6018,22 @@ fn propose_role_contract_calls_out_files_array_as_load_bearing() {
 }
 
 #[test]
-fn judge_role_contract_calls_out_files_array_as_load_bearing() {
+fn judge_role_contract_calls_out_files_array_as_authoritative_selection() {
     use super::role_contract_lines;
     let lines = role_contract_lines("judge");
     let joined = lines.join(" || ");
     assert!(
-        joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"),
-        "judge contract should call out files array semantics; got: {joined}"
+        joined.contains("FILES ARRAY = AUTHORITATIVE SELECTION"),
+        "judge contract should call out the authoritative-selection semantics; got: {joined}"
     );
     assert!(joined.contains("every file path the integrator is expected to MODIFY or CREATE"));
-    assert!(joined.contains("Be exhaustive"));
+    // Authority phrasing: judge can prune; proposer-nominated paths the
+    // judge omits are dropped from the integrator's checklist.
+    assert!(
+        joined.contains("full authority to prune")
+            || joined.contains("proposer-nominated paths you omit"),
+        "judge contract should describe the judge's pruning authority; got: {joined}"
+    );
 }
 
 #[test]
@@ -6379,7 +6571,7 @@ fn judge_role_contract_excludes_audit_only_files_from_array() {
     use super::role_contract_lines;
     let lines = role_contract_lines("judge");
     let joined = lines.join(" || ");
-    assert!(joined.contains("FILES ARRAY = LOAD-BEARING HANDOFF"));
+    assert!(joined.contains("FILES ARRAY = AUTHORITATIVE SELECTION"));
     assert!(
         joined.contains("Do NOT include files you decided are audit-only"),
         "judge contract should explicitly exclude audit-only files; got: {joined}"
@@ -6427,8 +6619,12 @@ fn integrate_file_checklist_sourced_from_propose_artifacts() {
         !prompt.contains("operator/d.rs"),
         "operator-prompt files should not appear in integrate file checklist"
     );
-    // Sourcing breadcrumb should be present.
-    assert!(prompt.contains("sourced from the propose/judge"));
+    // Sourcing breadcrumb should describe the judge-authoritative-or-union rule.
+    assert!(
+        prompt.contains("judge-authoritative")
+            && prompt.contains("union of every proposer"),
+        "checklist breadcrumb should name the new sourcing rule; got:\n{prompt}"
+    );
 }
 
 #[test]
@@ -6898,18 +7094,19 @@ fn judge_prompt_renders_proposer_declared_files_block_when_scope_present() {
         false,
     );
     assert!(
-        prompt.contains("PROPOSER-DECLARED FILES"),
-        "judge prompt should render the proposer-declared files header; got:\n{prompt}"
+        prompt.contains("PROPOSER-NOMINATED FILES"),
+        "judge prompt should render the proposer-nominated files header; got:\n{prompt}"
     );
     assert!(
-        prompt.contains("union of every upstream proposer"),
-        "judge prompt should explain the union semantics; got:\n{prompt}"
+        prompt.contains("AUTHORITATIVE")
+            && prompt.contains("when non-empty, the runtime drops the proposer arrays entirely"),
+        "judge prompt should explain the new authority semantics; got:\n{prompt}"
     );
     assert!(
         prompt.contains("1. core/equilibrium.py")
             && prompt.contains("2. core/equilibrium/__init__.py")
             && prompt.contains("3. core/equilibrium/bandit.py"),
-        "judge prompt should enumerate every proposer-declared file; got:\n{prompt}"
+        "judge prompt should enumerate every proposer-nominated file; got:\n{prompt}"
     );
     assert!(
         prompt.contains("Files you REJECT"),
@@ -6941,7 +7138,7 @@ fn judge_prompt_omits_block_when_no_proposer_artifacts_yet() {
         false,
     );
     assert!(
-        !prompt.contains("PROPOSER-DECLARED FILES"),
+        !prompt.contains("PROPOSER-NOMINATED FILES"),
         "judge prompt should skip the block when no proposers have declared files; got:\n{prompt}"
     );
 }
@@ -6970,7 +7167,7 @@ fn integrate_prompt_still_uses_file_checklist_after_judge_block_added() {
         "integrate prompt must keep its checklist framing; got:\n{prompt}"
     );
     assert!(
-        !prompt.contains("PROPOSER-DECLARED FILES"),
+        !prompt.contains("PROPOSER-NOMINATED FILES"),
         "integrate prompt must NOT render the judge-only block; got:\n{prompt}"
     );
 }
@@ -6996,7 +7193,7 @@ fn propose_prompt_does_not_render_judge_block() {
         "propose prompt should keep its scope block; got:\n{prompt}"
     );
     assert!(
-        !prompt.contains("PROPOSER-DECLARED FILES"),
+        !prompt.contains("PROPOSER-NOMINATED FILES"),
         "propose prompt must not render the judge block; got:\n{prompt}"
     );
 }

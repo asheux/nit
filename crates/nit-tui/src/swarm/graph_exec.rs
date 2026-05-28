@@ -310,25 +310,7 @@ fn compute_integrator_scope(
     task: &SwarmTask,
     integrator_task_id: &str,
 ) -> Option<Vec<String>> {
-    let mut declared: Vec<String> = Vec::new();
-    for dep_id in task.deps.iter() {
-        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
-            continue;
-        };
-        let role = dep.role.as_deref().and_then(normalize_role_label);
-        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
-            continue;
-        }
-        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
-            continue;
-        };
-        for entry in artifacts.files.iter() {
-            let rel = entry.path.trim();
-            if !rel.is_empty() {
-                declared.push(rel.to_string());
-            }
-        }
-    }
+    let mut declared = aggregate_judge_or_proposer_files(run, task);
     if declared.is_empty() {
         return Some(Vec::new());
     }
@@ -341,6 +323,63 @@ fn compute_integrator_scope(
     declared.sort();
     declared.dedup();
     Some(declared)
+}
+
+// Judge-authoritative file aggregation. When a judge dep has published a
+// non-empty `swarm_artifacts.files` array, that array is the integrator's
+// canonical scope — proposer file arrays become advisory inputs to the
+// judge, not co-authors of the integrator's contract.
+//
+// Operator-observed failure mode that drove this change: when one
+// proposer's split-plan paths get rejected in the judge's prose verdict
+// but stay in the proposer's `files` array, the prior union semantics
+// pulled the rejected paths into the integrator's FILE CHECKLIST. The
+// integrator was re-dispatched twice for "missing" files the judge had
+// explicitly told it not to create, then capitulated on attempt 3 and
+// executed the rejected refactor just to clear the dispatch loop. The
+// judge's prose visibility (v0.2.9) was honor-system; the compliance
+// check reads filenames. Making the judge's `files` array authoritative
+// closes that gap — the judge's selection is now what the integrator
+// must satisfy.
+//
+// Falls back to the proposer+judge union when:
+//   * no judge dep exists (lab plans without a judge, parallel small-
+//     fanout plans), OR
+//   * the judge dep has not produced `parsed_artifacts` yet, OR
+//   * the judge's `files` array is empty (judge passively delegated
+//     to the proposers — usually a planner bug, but preserves
+//     backward compatibility with plans relying on the old shape).
+//
+// Multiple judge deps (shouldn't happen — `INV-16 singleton_judge`
+// prevents it — but defensive) union among themselves before
+// overriding the proposers.
+fn aggregate_judge_or_proposer_files(run: &SwarmRun, task: &SwarmTask) -> Vec<String> {
+    let mut judge_files: Vec<String> = Vec::new();
+    let mut proposer_files: Vec<String> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        let bucket: &mut Vec<String> = match role.as_deref() {
+            Some("judge") => &mut judge_files,
+            Some("propose") => &mut proposer_files,
+            _ => continue,
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if !rel.is_empty() {
+                bucket.push(rel.to_string());
+            }
+        }
+    }
+    if !judge_files.is_empty() {
+        return judge_files;
+    }
+    proposer_files
 }
 
 fn abs_path(rel: &str, workspace: &std::path::Path) -> std::path::PathBuf {
@@ -657,6 +696,11 @@ fn capture_pre_dispatch_file_state(
     out
 }
 
+#[cfg(test)]
+pub(super) fn build_task_prompt_for_test(run: &SwarmRun, task: &SwarmTask) -> String {
+    build_task_prompt(run, task, &[])
+}
+
 fn build_task_prompt(
     run: &SwarmRun,
     task: &SwarmTask,
@@ -751,25 +795,7 @@ pub(super) fn effective_dep_count_for_payload(run: &SwarmRun, task: &SwarmTask) 
 // caller falls back to operator scope). Sorted + deduped so the prompt is
 // stable across re-dispatches.
 fn collect_integrate_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
-    let mut declared: Vec<String> = Vec::new();
-    for dep_id in task.deps.iter() {
-        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
-            continue;
-        };
-        let role = dep.role.as_deref().and_then(normalize_role_label);
-        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
-            continue;
-        }
-        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
-            continue;
-        };
-        for entry in artifacts.files.iter() {
-            let rel = entry.path.trim();
-            if !rel.is_empty() {
-                declared.push(rel.to_string());
-            }
-        }
-    }
+    let mut declared = aggregate_judge_or_proposer_files(run, task);
     if declared.is_empty() {
         return None;
     }
