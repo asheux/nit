@@ -6621,8 +6621,7 @@ fn integrate_file_checklist_sourced_from_propose_artifacts() {
     );
     // Sourcing breadcrumb should describe the judge-authoritative-or-union rule.
     assert!(
-        prompt.contains("judge-authoritative")
-            && prompt.contains("union of every proposer"),
+        prompt.contains("judge-authoritative") && prompt.contains("union of every proposer"),
         "checklist breadcrumb should name the new sourcing rule; got:\n{prompt}"
     );
 }
