@@ -17,6 +17,27 @@ use super::{
 /// output as incomplete and re-dispatches a continuation.
 pub(super) const TASK_COMPLETE_SENTINEL: &str = "<SWARM_TASK_COMPLETE>";
 
+/// Shared LENS definitions used by Lab and Parallel templates to make
+/// multiple proposers diverge on a real optimisation axis. Each lens names
+/// the axis it optimises for in one line so the judge / integrator can
+/// weigh tradeoffs explicitly. Without distinct lenses, proposers produce
+/// correlated output and the judge has nothing to choose between.
+const PROPOSER_LENS_TABLE: &str = "\
+-   LENS A (minimal-diff, focused): favor the smallest change that solves the request. Avoid new abstractions, new modules, new types, new dependencies unless strictly required. Blast radius as small as possible.\n\
+-   LENS B (architectural coherence): if the shape of the code is what's causing the problem, propose the consolidation, split, or abstraction the system is asking for. Larger diff fine when it lands on a better overall shape.\n\
+-   LENS C (incremental/staged): prefer a multi-step plan that converts the current shape into the target shape through atomic, reversible steps. Optimise for safety and roll-back at each step.\n\
+-   LENS D (performance/genome-first): target the files the GENOME LANDSCAPE flags as lowest-tier or highest-leverage. Accept more invasive changes when they unlock a tier jump or eliminate parsimony bloat.\n\
+-   LENS E (safety/invariants): prioritise invariants, error handling, edge cases the tests don't cover. Be defensive about assumptions; flag anything the current tests don't exercise.\n";
+
+/// Floor at which the parallel template upgrades from a single-recon shape
+/// to multi-proposer + judge + integrators. Below this, integrators
+/// directly consume the recon document; at or above, the extra lens
+/// diversity is worth the proposer/judge budget. Operator-observed: lab
+/// and bulk consistently produce higher-quality refactors than the
+/// single-recon parallel shape, and the missing ingredient is lens
+/// diversity feeding the writers.
+const PARALLEL_MULTI_PROPOSER_FLOOR: usize = 3;
+
 /// Returns `Some(reason)` when an agent's output looks like an early exit /
 /// human-style "should I proceed?" stop rather than a real task completion.
 /// Returns `None` when the output passes the sign-off check. Reasons are
@@ -405,11 +426,38 @@ fn append_template_specific_constraints(
             out.push_str(
                 "- DISTINCT SCOPE: each integrate task's `task_prompt` MUST clearly state which files / which ticket(s) it owns. Two integrators with overlapping scope is a plan failure (the integrators race on the same files).\n",
             );
+            // Switch the proposer shape on fanout. Small parallel runs (1-2
+            // integrators) don't justify the lens-divergence budget — one
+            // recon document is fine. At PARALLEL_MULTI_PROPOSER_FLOOR
+            // (currently 3) and above, the upstream lens-diversity work
+            // pays off in the integrators' output quality. Operator
+            // observation: lab/bulk consistently beat single-recon parallel
+            // on the same prompt because the integrators get a
+            // judge-synthesised view of multiple lenses, not one recon's
+            // single perspective.
+            if floor >= PARALLEL_MULTI_PROPOSER_FLOOR {
+                out.push_str(
+                    "- LENS PROPOSERS — MUST: produce 2-3 `role=propose` tasks (max 3) running in parallel before the integrators. Each proposer surveys the SAME scope but commits to a distinct LENS framing so the judge synthesises across orthogonal axes instead of three samples of the same view. Proposers are read-only; their `deps` MUST be empty. Use these lenses (pick the 2-3 that fit the scope; invent a sharper axis if none of the canned ones apply):\n",
+                );
+                out.push_str(PROPOSER_LENS_TABLE);
+                out.push_str(
+                    "  Bake the lens name AND a one-line restatement of its axis into the first paragraph of each proposer's `task_prompt`. The judge and integrators need the axis explicit so they can weigh tradeoffs.\n",
+                );
+                out.push_str(
+                    "- JUDGE LANE — MUST: produce exactly ONE `role=judge` task. Its `deps` MUST include EVERY propose task id. The judge synthesises the proposers into a unified per-area recommendation (which lens wins where, what's the consolidated file map, what conflicts surfaced). Without a judge, integrators consume raw multi-lens output and have to merge it themselves — exactly the failure mode this shape is designed to avoid.\n",
+                );
+                out.push_str(
+                    "- INTEGRATOR DEPS (parallel multi-proposer): every `role=integrate` task's `deps` MUST be `[judge]` (and ONLY judge — do not also depend on the proposers; the judge already covers them). Integrators consume the judge's synthesis, not the raw proposals.\n",
+                );
+            } else {
+                // Small-fanout shape: preserved verbatim for 1-2 integrator
+                // runs where lens divergence is overkill.
+                out.push_str(
+                    "- RECON LANE: reserve ONE non-integrate lane for a `propose` (or `research` / `recon`) task that surveys the target scope first. The integrators depend on it (so they share a consistent view of the codebase) but the integrators themselves run in parallel after recon completes.\n",
+                );
+            }
             out.push_str(
-                "- RECON LANE: reserve ONE non-integrate lane for a `propose` (or `research` / `recon`) task that surveys the target scope first. The integrators depend on it (so they share a consistent view of the codebase) but the integrators themselves run in parallel after recon completes.\n",
-            );
-            out.push_str(
-                "- Prefer tasks that can run in parallel (deps should usually be empty), except where the recon lane feeds the integrate tasks.\n",
+                "- Prefer tasks that can run in parallel (deps should usually be empty), except where the recon / propose / judge lanes feed the integrate tasks.\n",
             );
             out.push_str(
                 "- If you assign producer/consumer-style roles (e.g. research or computational-research → judge), use deps to express required ordering.\n",
@@ -434,13 +482,11 @@ fn append_template_specific_constraints(
                 "- PROPOSER PARALLELISM (lab): if you assign multiple propose tasks, they MUST have empty `deps` and run concurrently. Do NOT chain them (propose-02 depending on propose-01 etc.) — proposers are independent investigators, not a pipeline. A judge task then fans in via `deps = [propose-01, propose-02, ...]` and waits for all of them in parallel, not serially. Sequential proposers just waste wall-clock time; the judge has to wait for the last one regardless.\n",
             );
             out.push_str(
-                "- PROPOSER LENSES (lab): if you assign multiple propose tasks, each one's `task_prompt` MUST open with a distinct LENS framing so the proposers diverge on a real optimisation axis instead of producing three samples of the same prompt. Without distinct lenses, correlated output gives the judge nothing to choose between. Use one of these framings per proposer (pick the ones that fit the request, or invent a sharper axis for the specific scope):\n\
-                 -   LENS A (minimal-diff, focused): favor the smallest change that solves the request. Avoid new abstractions, new modules, new types, new dependencies unless strictly required. Blast radius as small as possible.\n\
-                 -   LENS B (architectural coherence): if the shape of the code is what's causing the problem, propose the consolidation, split, or abstraction the system is asking for. Larger diff fine when it lands on a better overall shape.\n\
-                 -   LENS C (incremental/staged): prefer a multi-step plan that converts the current shape into the target shape through atomic, reversible steps. Optimise for safety and roll-back at each step.\n\
-                 -   LENS D (performance/genome-first): target the files the GENOME LANDSCAPE flags as lowest-tier or highest-leverage. Accept more invasive changes when they unlock a tier jump or eliminate parsimony bloat.\n\
-                 -   LENS E (safety/invariants): prioritise invariants, error handling, edge cases the tests don't cover. Be defensive about assumptions; flag anything the current tests don't exercise.\n\
-                 Bake the lens name AND a one-line restatement of its axis into the first paragraph of the task's `task_prompt`. The judge and integrator need to see the axis the proposer was optimising for so they can weigh tradeoffs.\n",
+                "- PROPOSER LENSES (lab): if you assign multiple propose tasks, each one's `task_prompt` MUST open with a distinct LENS framing so the proposers diverge on a real optimisation axis instead of producing three samples of the same prompt. Without distinct lenses, correlated output gives the judge nothing to choose between. Use one of these framings per proposer (pick the ones that fit the request, or invent a sharper axis for the specific scope):\n",
+            );
+            out.push_str(PROPOSER_LENS_TABLE);
+            out.push_str(
+                "Bake the lens name AND a one-line restatement of its axis into the first paragraph of the task's `task_prompt`. The judge and integrator need to see the axis the proposer was optimising for so they can weigh tradeoffs.\n",
             );
         }
         SwarmTemplate::Bulk => {

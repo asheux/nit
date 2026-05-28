@@ -404,3 +404,189 @@ fn lab_template_skips_parallel_fanout_invariant() {
         "lab plan must not trip INV-17; got {violations:?}"
     );
 }
+
+#[test]
+fn parallel_single_proposer_no_judge_is_clean() {
+    // The small-fanout shape: one recon proposer + N integrators, no judge.
+    // INV-18 must NOT fire — it only kicks in once the planner emits ≥2
+    // propose tasks under Parallel.
+    let mut tasks = vec![task("recon", "agent-recon", "propose", &[])];
+    for n in 1..=3 {
+        let id = format!("integrate-{n:02}");
+        let agent = format!("agent-int-{n:02}");
+        tasks.push(task(&id, &agent, "integrate", &["recon"]));
+    }
+    let available = agents(&[
+        "agent-recon",
+        "agent-int-01",
+        "agent-int-02",
+        "agent-int-03",
+    ]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let prompt = "Tickets:\n- a\n- b\n- c\n";
+    let intent = nit_tui::swarm::intent::detect_intent(prompt);
+    let ctx = ValidationContext {
+        tasks: &tasks,
+        available_agents: &available,
+        integrator_agent_id: Some("agent-int-01"),
+        role_hints: &hints,
+        template: SwarmTemplate::Parallel,
+        mission_kind: SwarmMissionKind::General,
+        root_prompt: prompt,
+        intent,
+    };
+    let violations = validate_plan(&ctx);
+    assert!(
+        !has_violation_id(&violations, "parallel_multi_proposer_needs_judge"),
+        "single-proposer parallel plan must not trip INV-18; got {violations:?}"
+    );
+}
+
+#[test]
+fn parallel_multi_proposer_without_judge_is_must_fix() {
+    // The planner emitted 3 lens proposers but forgot the judge. INV-18
+    // must surface MustFix so the repair loop catches it before dispatch
+    // — without a judge, integrators consume raw multi-lens output and
+    // the upgraded shape's whole point (synthesised guidance) is lost.
+    let tasks = vec![
+        task("propose-01", "agent-p1", "propose", &[]),
+        task("propose-02", "agent-p2", "propose", &[]),
+        task("propose-03", "agent-p3", "propose", &[]),
+        task(
+            "integrate-01",
+            "agent-int-01",
+            "integrate",
+            &["propose-01", "propose-02", "propose-03"],
+        ),
+        task(
+            "integrate-02",
+            "agent-int-02",
+            "integrate",
+            &["propose-01", "propose-02", "propose-03"],
+        ),
+        task(
+            "integrate-03",
+            "agent-int-03",
+            "integrate",
+            &["propose-01", "propose-02", "propose-03"],
+        ),
+    ];
+    let available = agents(&[
+        "agent-p1",
+        "agent-p2",
+        "agent-p3",
+        "agent-int-01",
+        "agent-int-02",
+        "agent-int-03",
+    ]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let prompt = "Tickets:\n- a\n- b\n- c\n";
+    let intent = nit_tui::swarm::intent::detect_intent(prompt);
+    let ctx = ValidationContext {
+        tasks: &tasks,
+        available_agents: &available,
+        integrator_agent_id: Some("agent-int-01"),
+        role_hints: &hints,
+        template: SwarmTemplate::Parallel,
+        mission_kind: SwarmMissionKind::General,
+        root_prompt: prompt,
+        intent,
+    };
+    let violations = validate_plan(&ctx);
+    let inv18: Vec<&Violation> = violations
+        .iter()
+        .filter(|v| v.id.contains("parallel_multi_proposer_needs_judge"))
+        .collect();
+    assert_eq!(inv18.len(), 1, "expected INV-18; got {violations:?}");
+    assert!(matches!(inv18[0].severity, Severity::MustFix));
+    // Hint should mention every proposer id so the planner knows what to wire.
+    assert!(
+        inv18[0].hint.contains("propose-01")
+            && inv18[0].hint.contains("propose-02")
+            && inv18[0].hint.contains("propose-03"),
+        "hint should enumerate proposer ids; got: {}",
+        inv18[0].hint
+    );
+}
+
+#[test]
+fn parallel_multi_proposer_with_judge_is_clean() {
+    // The full upgraded shape: 3 lens proposers + judge + N integrators
+    // (deps=[judge]). INV-18 must be silent.
+    let tasks = vec![
+        task("propose-01", "agent-p1", "propose", &[]),
+        task("propose-02", "agent-p2", "propose", &[]),
+        task("propose-03", "agent-p3", "propose", &[]),
+        task(
+            "judge",
+            "agent-judge",
+            "judge",
+            &["propose-01", "propose-02", "propose-03"],
+        ),
+        task("integrate-01", "agent-int-01", "integrate", &["judge"]),
+        task("integrate-02", "agent-int-02", "integrate", &["judge"]),
+        task("integrate-03", "agent-int-03", "integrate", &["judge"]),
+    ];
+    let available = agents(&[
+        "agent-p1",
+        "agent-p2",
+        "agent-p3",
+        "agent-judge",
+        "agent-int-01",
+        "agent-int-02",
+        "agent-int-03",
+    ]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let prompt = "Tickets:\n- a\n- b\n- c\n";
+    let intent = nit_tui::swarm::intent::detect_intent(prompt);
+    let ctx = ValidationContext {
+        tasks: &tasks,
+        available_agents: &available,
+        integrator_agent_id: Some("agent-int-01"),
+        role_hints: &hints,
+        template: SwarmTemplate::Parallel,
+        mission_kind: SwarmMissionKind::General,
+        root_prompt: prompt,
+        intent,
+    };
+    let violations = validate_plan(&ctx);
+    assert!(
+        !has_violation_id(&violations, "parallel_multi_proposer_needs_judge"),
+        "upgraded parallel shape must not trip INV-18; got {violations:?}"
+    );
+}
+
+#[test]
+fn lab_multi_proposer_without_judge_skips_inv18() {
+    // INV-18 is parallel-template-only. A lab plan with 2 proposers
+    // and no judge is a different invariant's concern (and lab's own
+    // singleton rules), not INV-18.
+    let tasks = vec![
+        task("propose-01", "agent-p1", "propose", &[]),
+        task("propose-02", "agent-p2", "propose", &[]),
+        task(
+            "integrate",
+            "agent-int",
+            "integrate",
+            &["propose-01", "propose-02"],
+        ),
+    ];
+    let available = agents(&["agent-p1", "agent-p2", "agent-int"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let intent = nit_tui::swarm::intent::OperatorIntent::default();
+    let ctx = ValidationContext {
+        tasks: &tasks,
+        available_agents: &available,
+        integrator_agent_id: Some("agent-int"),
+        role_hints: &hints,
+        template: SwarmTemplate::Lab,
+        mission_kind: SwarmMissionKind::General,
+        root_prompt: "refactor x",
+        intent,
+    };
+    let violations = validate_plan(&ctx);
+    assert!(
+        !has_violation_id(&violations, "parallel_multi_proposer_needs_judge"),
+        "lab plan must not trip INV-18; got {violations:?}"
+    );
+}

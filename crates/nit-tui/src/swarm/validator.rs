@@ -82,6 +82,7 @@ pub fn validate_plan(ctx: &ValidationContext<'_>) -> Vec<Violation> {
     violations.extend(invariant_artifacts_field_shape(ctx));
     violations.extend(invariant_bulk_max_proposers(ctx));
     violations.extend(invariant_parallel_min_integrators(ctx));
+    violations.extend(invariant_parallel_multi_proposer_needs_judge(ctx));
     violations
 }
 
@@ -193,6 +194,47 @@ fn invariant_parallel_min_integrators(ctx: &ValidationContext<'_>) -> Vec<Violat
              template + intent indicate ≥ {floor}. {intent_hint}"
         ),
         hint,
+    }]
+}
+
+/// A parallel-template plan with 2+ proposers must also carry a judge. The
+/// shape was introduced so multi-lens proposals get *synthesised* before
+/// hitting the integrators — raw multi-lens output bypasses the merge step
+/// and integrators end up doing it themselves, which is the failure mode
+/// the upgraded shape exists to prevent. Field rule: if the planner emits
+/// ≥2 `propose` tasks under Parallel, it MUST also emit exactly one
+/// `judge` task.
+fn invariant_parallel_multi_proposer_needs_judge(ctx: &ValidationContext<'_>) -> Vec<Violation> {
+    if !matches!(ctx.template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
+    let proposers = proposer_tasks(ctx);
+    if proposers.len() < 2 {
+        return Vec::new();
+    }
+    if !judge_tasks(ctx).is_empty() {
+        return Vec::new();
+    }
+    let proposer_ids: Vec<String> = proposers.iter().map(|t| t.id.clone()).collect();
+    let proposer_ids_csv = proposer_ids.join(", ");
+    vec![Violation {
+        id: "INV-18 parallel_multi_proposer_needs_judge",
+        task_id: None,
+        agent_id: None,
+        severity: Severity::MustFix,
+        human: format!(
+            "Parallel plan has {} proposer task(s) but no judge. Multi-lens \
+             proposals must be synthesised before reaching the integrators \
+             — without a judge, integrators consume raw multi-lens output \
+             and merge it ad-hoc, defeating the lens-diversity shape.",
+            proposers.len()
+        ),
+        hint: format!(
+            "Add one `role=judge` task whose `deps` include EVERY proposer \
+             ({proposer_ids_csv}). Every `role=integrate` task's `deps` \
+             should then be `[<judge-id>]` so the integrators consume the \
+             judge's synthesis, not the raw proposals."
+        ),
     }]
 }
 
@@ -771,6 +813,9 @@ pub(super) fn planner_invariants_for_prompt(template: SwarmTemplate) -> Vec<&'st
         );
         lines.push(
             "PARALLEL DISTINCT SCOPE: each integrate task MUST declare a distinct scope (different files / different ticket). Two integrators with the same scope is a plan failure.",
+        );
+        lines.push(
+            "PARALLEL MULTI-PROPOSER → JUDGE: when you emit ≥2 `role=propose` tasks under the parallel template, you MUST also emit exactly one `role=judge` task whose `deps` include every proposer. Integrators then depend on the judge (not the raw proposals). Multi-lens proposals without a synthesiser is auto-rejected (INV-18).",
         );
     }
     lines
