@@ -667,14 +667,19 @@ fn build_task_prompt(
     let shard_slice: Option<&[String]> = shard_files.as_deref();
     // For integrate tasks, prefer the propose/judge declared file list as
     // the FILE CHECKLIST source — that's what the runtime's structural-
-    // compliance check actually enforces. Operator-prompt scope_files only
-    // applies for non-integrate roles or as a fallback when no propose/judge
-    // artifacts are available yet.
+    // compliance check actually enforces. For judge tasks, surface the
+    // upstream proposer union so the judge can SEE what the integrator's
+    // checklist will look like and either accept it (default) or
+    // explicitly reject paths in its verdict prose. Operator-prompt
+    // scope_files only applies for the other non-writer roles or as a
+    // fallback when no propose/judge artifacts are available yet.
     let role_kind = task.role.as_deref().and_then(normalize_role_label);
-    let effective_scope = if role_kind.as_deref() == Some("integrate") {
-        collect_integrate_scope(run, task).unwrap_or_else(|| run.scope_files.clone())
-    } else {
-        run.scope_files.clone()
+    let effective_scope = match role_kind.as_deref() {
+        Some("integrate") => {
+            collect_integrate_scope(run, task).unwrap_or_else(|| run.scope_files.clone())
+        }
+        Some("judge") => collect_proposer_scope(run, task).unwrap_or_default(),
+        _ => run.scope_files.clone(),
     };
     let proposers_skipped = integrate_proposers_skipped(run, task);
     let mut prompt = wrap_task_prompt(
@@ -753,6 +758,41 @@ fn collect_integrate_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<Strin
         };
         let role = dep.role.as_deref().and_then(normalize_role_label);
         if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if !rel.is_empty() {
+                declared.push(rel.to_string());
+            }
+        }
+    }
+    if declared.is_empty() {
+        return None;
+    }
+    declared.sort();
+    declared.dedup();
+    Some(declared)
+}
+
+// Proposer-only file aggregation for a judge task. Surfaces the union
+// the integrator will (also) inherit, so the judge can see — at decision
+// time — exactly what list its downstream integrator will be required
+// to modify. The judge's own `swarm_artifacts.files` array will be
+// unioned in alongside; this helper returns just the upstream proposer
+// contributions so the judge's prompt block can label the source
+// honestly ("what the proposers declared, before your additions").
+fn collect_proposer_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
+    let mut declared: Vec<String> = Vec::new();
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        if role.as_deref() != Some("propose") {
             continue;
         }
         let Some(artifacts) = dep.parsed_artifacts.as_ref() else {

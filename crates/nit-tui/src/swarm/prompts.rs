@@ -1098,6 +1098,8 @@ fn append_task_scope_section(
     let role_kind = role.as_deref();
     if role_kind == Some("integrate") {
         append_task_integrate_checklist(out, scope_files);
+    } else if role_kind == Some("judge") {
+        append_task_judge_checklist(out, scope_files);
     } else if role_kind == Some("propose") {
         append_task_propose_scope(out, scope_files);
     } else if matches!(role_kind, Some("test") | Some("review")) && is_cargo_workspace(spawn_cwd) {
@@ -1158,6 +1160,51 @@ fn append_task_propose_scope(out: &mut String, scope_files: &[String]) {
     for (i, path) in scope_files.iter().enumerate() {
         out.push_str(&format!("{}. {path}\n", i + 1));
     }
+}
+
+/// Judge-facing view of what the integrator's FILE CHECKLIST will look
+/// like if this judge does nothing. The list is the *union* of every
+/// upstream proposer's `swarm_artifacts.files` array — the same union
+/// `collect_integrate_scope` will compute when the integrator dispatches.
+///
+/// Operator-observed failure mode: when a proposer's split plan (e.g.
+/// Lens B's "split `equilibrium.py` into a package with 5 submodules")
+/// gets rejected in the judge's prose verdict but the proposer's
+/// `files` array still lists the rejected split paths, those paths
+/// stay in the integrator's checklist via the union. The integrator
+/// then has a no-win choice between honoring the judge (refactor
+/// in-place) and honoring the checklist (create the rejected
+/// submodules) — and routinely lands on a compromise like emitting
+/// inert shadow files just to satisfy the structural-compliance
+/// check.
+///
+/// The block names that dynamic explicitly so the judge can either
+/// (a) put a deliberately smaller `files` array in its own artifacts
+/// (the operator-recommended pattern: judge becomes authoritative by
+/// being explicit), or (b) at least know what list the integrator is
+/// about to be handed and address rejected files in the verdict
+/// prose so the integrator can interpret intent. Adding files to
+/// the union still works the same way it did before.
+///
+/// No block is rendered when no proposer artifacts have published
+/// (`scope_files.is_empty()` after aggregation) — usually means the
+/// judge is dispatching before its proposer deps have completed, in
+/// which case there's nothing to show yet.
+fn append_task_judge_checklist(out: &mut String, scope_files: &[String]) {
+    if scope_files.is_empty() {
+        return;
+    }
+    out.push_str("\n## PROPOSER-DECLARED FILES (what the integrator will see)\n");
+    out.push_str("This is the union of every upstream proposer's `swarm_artifacts.files` array. When the integrator dispatches, the runtime aggregates the union of THIS list and your own `swarm_artifacts.files` to build the FILE CHECKLIST the integrator is required to modify. Files NOT modified by the integrator trigger an automatic re-dispatch.\n");
+    out.push('\n');
+    for (i, path) in scope_files.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
+    }
+    out.push('\n');
+    out.push_str("Your levers on this list:\n");
+    out.push_str("- Files you ACCEPT into your unified plan: include them in your `swarm_artifacts.files`. The integrator will see them (whether or not the proposer also listed them).\n");
+    out.push_str("- Files you REJECT (e.g. a proposer split-plan you didn't adopt, an audit-only file the proposer mistakenly included): DO NOT add them to your `swarm_artifacts.files`. They will still appear in the integrator's checklist via the proposers' arrays — call the rejection out explicitly in your `notes` / verdict prose with reasoning, so the integrator interprets them as audit-only rather than as required edits. The runtime's structural-compliance check looks at filenames, not prose; an explicit rejection note is the integrator's only signal to treat a listed file as already-handled.\n");
+    out.push_str("- Files you want to ADD (e.g. a callsite the proposers missed, a new submodule path your accepted plan introduces): include the path in your `swarm_artifacts.files`. It gets unioned in.\n");
 }
 
 // Inject the exact crate scope so test/review agents can't drift into

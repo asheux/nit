@@ -6874,6 +6874,133 @@ fn quota_exhausted_in_result_skips_assistant_prose() {
     ));
 }
 
+#[test]
+fn judge_prompt_renders_proposer_declared_files_block_when_scope_present() {
+    // Operator-visible regression target: the judge previously got NO scope
+    // block at all, so it couldn't see what list its downstream integrator
+    // would be forced to modify. Surfacing the union lets the judge either
+    // accept it (default) or call out rejected paths in its verdict prose
+    // so the integrator interprets intent.
+    let task = make_task("judge-01", "agent-j", Some("judge"), vec!["propose-01"]);
+    let scope = vec![
+        "core/equilibrium.py".to_string(),
+        "core/equilibrium/__init__.py".to_string(),
+        "core/equilibrium/bandit.py".to_string(),
+    ];
+    let prompt = wrap_task_prompt(
+        "refactor core/",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &scope,
+        std::path::Path::new("."),
+        None,
+        false,
+    );
+    assert!(
+        prompt.contains("PROPOSER-DECLARED FILES"),
+        "judge prompt should render the proposer-declared files header; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("union of every upstream proposer"),
+        "judge prompt should explain the union semantics; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("1. core/equilibrium.py")
+            && prompt.contains("2. core/equilibrium/__init__.py")
+            && prompt.contains("3. core/equilibrium/bandit.py"),
+        "judge prompt should enumerate every proposer-declared file; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Files you REJECT"),
+        "judge prompt should describe the rejection lever; got:\n{prompt}"
+    );
+    // The FILE CHECKLIST framing is for integrators only — the judge gets
+    // a different label so the role contract isn't muddied.
+    assert!(
+        !prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        "judge prompt must NOT render the integrator's checklist framing; got:\n{prompt}"
+    );
+}
+
+#[test]
+fn judge_prompt_omits_block_when_no_proposer_artifacts_yet() {
+    // Edge case: judge dispatches before its proposer deps have published
+    // any `swarm_artifacts.files`. The aggregation returns empty; the
+    // judge block must not render an empty list (the framing implies
+    // proposers contributed something).
+    let task = make_task("judge-01", "agent-j", Some("judge"), vec!["propose-01"]);
+    let prompt = wrap_task_prompt(
+        "refactor core/",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &[],
+        std::path::Path::new("."),
+        None,
+        false,
+    );
+    assert!(
+        !prompt.contains("PROPOSER-DECLARED FILES"),
+        "judge prompt should skip the block when no proposers have declared files; got:\n{prompt}"
+    );
+}
+
+#[test]
+fn integrate_prompt_still_uses_file_checklist_after_judge_block_added() {
+    // Regression guard: adding the judge branch to `append_task_scope_section`
+    // must not accidentally route the integrate role through the judge
+    // helper. The integrator still gets the strict "FILE CHECKLIST
+    // (non-negotiable)" framing the runtime's structural-compliance check
+    // is keyed to.
+    let task = make_task("integrate-01", "agent-i", Some("integrate"), Vec::new());
+    let scope = vec!["src/lib.rs".to_string(), "src/main.rs".to_string()];
+    let prompt = wrap_task_prompt(
+        "refactor",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &scope,
+        std::path::Path::new("."),
+        None,
+        false,
+    );
+    assert!(
+        prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        "integrate prompt must keep its checklist framing; got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("PROPOSER-DECLARED FILES"),
+        "integrate prompt must NOT render the judge-only block; got:\n{prompt}"
+    );
+}
+
+#[test]
+fn propose_prompt_does_not_render_judge_block() {
+    // Belt-and-braces: a propose task with a non-empty scope must keep its
+    // existing SCOPE block, not the judge block.
+    let task = make_task("propose-01", "agent-p", Some("propose"), Vec::new());
+    let scope = vec!["a.py".to_string()];
+    let prompt = wrap_task_prompt(
+        "refactor",
+        SwarmMissionKind::General,
+        &task,
+        None,
+        &scope,
+        std::path::Path::new("."),
+        None,
+        false,
+    );
+    assert!(
+        prompt.contains("SCOPE — files in the target module"),
+        "propose prompt should keep its scope block; got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("PROPOSER-DECLARED FILES"),
+        "propose prompt must not render the judge block; got:\n{prompt}"
+    );
+}
+
 #[cfg(unix)]
 mod scope_tests {
     use super::*;
