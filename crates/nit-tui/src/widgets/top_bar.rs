@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use nit_core::AppState;
@@ -13,6 +14,50 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::theme::Theme;
 use crate::vitals::{LabCriticality, LabVitalsSnapshot};
 
+/// Render an absolute path as the shortest meaningful label for the
+/// top-bar's "where am I" indicator.
+///
+/// Priority:
+///   1. If `path` is under `workspace_root`, strip the prefix and return
+///      the relative segment (`core/diagnostics.py` instead of the full
+///      `/Users/.../source/loopseed/core/diagnostics.py`). This is the
+///      common case once the operator has opened a project — paths are
+///      almost always inside the workspace.
+///   2. Otherwise, if `path` is under the user's home directory, fold
+///      `$HOME` to `~` so a stray scratchpad like `~/Downloads/x.py` is
+///      still readable even when it's outside the project root.
+///   3. Otherwise, fall back to the full absolute path. Anything not
+///      under home or workspace is presumed important enough to surface
+///      verbatim (e.g. `/tmp/...`, `/etc/...`).
+///
+/// `home` is passed in rather than looked up from `env::var("HOME")` so
+/// the function is pure and unit-testable on hosts whose `$HOME` doesn't
+/// match the path the test wants to assert against.
+pub(super) fn format_path_label(path: &Path, workspace_root: &Path, home: Option<&Path>) -> String {
+    if let Ok(rel) = path.strip_prefix(workspace_root) {
+        let rel_str = rel.to_string_lossy();
+        if !rel_str.is_empty() {
+            return rel_str.into_owned();
+        }
+        // path == workspace_root → no relative segment; fall through to
+        // home/absolute so the operator still sees a meaningful label.
+    }
+    if let Some(home) = home {
+        if let Ok(rel) = path.strip_prefix(home) {
+            let rel_str = rel.to_string_lossy();
+            if rel_str.is_empty() {
+                return "~".into();
+            }
+            return format!("~/{rel_str}");
+        }
+    }
+    path.display().to_string()
+}
+
+fn host_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
 pub fn render(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -22,10 +67,12 @@ pub fn render(
 ) {
     let mode = format!("{:?}", state.mode).to_uppercase();
     let app_label = state.app_kind.label();
+    let home = host_home_dir();
+    let workspace_root = state.workspace_root.as_path();
     let file = state
         .editor_buffer()
         .path()
-        .map(|p| p.display().to_string());
+        .map(|p| format_path_label(p, workspace_root, home.as_deref()));
     let dirty = if state.editor_buffer().is_dirty() {
         "*"
     } else {
@@ -34,7 +81,11 @@ pub fn render(
     let buffer_name = state.editor_buffer().name().to_string();
     let file_text = match file {
         Some(path) => path,
-        None if buffer_name == "untitled" => state.file_tree.root.display().to_string(),
+        None if buffer_name == "untitled" => format_path_label(
+            state.file_tree.root.as_path(),
+            workspace_root,
+            home.as_deref(),
+        ),
         None => buffer_name,
     };
     let status_text_raw = state.status.as_deref().unwrap_or_default();

@@ -1,11 +1,81 @@
+use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    build_status_label, build_vitals_spans, criticality_style, minify_status_text, status_style,
+    build_status_label, build_vitals_spans, criticality_style, format_path_label,
+    minify_status_text, status_style,
 };
 use crate::vitals::severity_scaled_samples;
 use crate::vitals::{LabCriticality, LabVitalsSnapshot};
 use crate::Theme;
+
+#[test]
+fn format_path_label_strips_workspace_root_prefix() {
+    // The operator-visible case: opened a project, opened a file inside
+    // it. Top-bar should show the relative segment, not the
+    // 8-directory-deep absolute path that drives the label off-screen.
+    let workspace = Path::new("/Users/nitrika/Projects/Mywork/src/loopseed");
+    let file = Path::new("/Users/nitrika/Projects/Mywork/src/loopseed/core/diagnostics.py");
+    let home = Path::new("/Users/nitrika");
+    assert_eq!(
+        format_path_label(file, workspace, Some(home)),
+        "core/diagnostics.py"
+    );
+}
+
+#[test]
+fn format_path_label_folds_home_for_files_outside_workspace() {
+    // Operator opened a scratch file outside the project but inside
+    // their home directory — fold `$HOME` to `~` so the label still
+    // fits even when the workspace prefix doesn't apply.
+    let workspace = Path::new("/Users/nitrika/Projects/Configs/nit");
+    let file = Path::new("/Users/nitrika/Downloads/scratch.py");
+    let home = Path::new("/Users/nitrika");
+    assert_eq!(
+        format_path_label(file, workspace, Some(home)),
+        "~/Downloads/scratch.py"
+    );
+}
+
+#[test]
+fn format_path_label_preserves_absolute_when_outside_workspace_and_home() {
+    // System paths like /tmp/, /etc/ stay verbatim — they're outside
+    // both the project and the user's home, so the absolute path is the
+    // only meaningful disambiguator. (Length isn't our concern at this
+    // layer; the truncate_start pass downstream handles overflow.)
+    let workspace = Path::new("/Users/nitrika/Projects/nit");
+    let file = Path::new("/tmp/scratch.log");
+    let home = Path::new("/Users/nitrika");
+    assert_eq!(
+        format_path_label(file, workspace, Some(home)),
+        "/tmp/scratch.log"
+    );
+}
+
+#[test]
+fn format_path_label_handles_workspace_equal_to_path_via_home() {
+    // Edge case: the buffer's path *is* the workspace root (only
+    // happens for the file-tree-root fallback when the buffer is
+    // `untitled`). `strip_prefix` returns an empty relative path, which
+    // we treat as "no useful relative label" and fall through to the
+    // home-fold branch so the operator at least sees `~/Projects/foo`
+    // instead of an empty string or `/Users/...`.
+    let workspace = Path::new("/Users/nitrika/Projects/foo");
+    let home = Path::new("/Users/nitrika");
+    assert_eq!(
+        format_path_label(workspace, workspace, Some(home)),
+        "~/Projects/foo"
+    );
+}
+
+#[test]
+fn format_path_label_handles_no_home_dir() {
+    // If `$HOME` isn't set (CI sandbox, headless container), the home
+    // branch is skipped and we fall straight to the absolute path.
+    let workspace = Path::new("/srv/app");
+    let file = Path::new("/var/log/app.log");
+    assert_eq!(format_path_label(file, workspace, None), "/var/log/app.log");
+}
 
 #[test]
 fn status_label_non_compact_keeps_full_message() {
