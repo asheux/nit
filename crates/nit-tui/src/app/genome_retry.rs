@@ -16,10 +16,19 @@ use super::*;
 /// detector is likely to fire on the next one.
 pub(super) const GENOME_RETRY_LIMIT: u8 = 3;
 
-/// Minimum file line count for genome retry eligibility. Files smaller than
-/// this are skipped so agents aren't pushed to over-engineer trivial code —
-/// below the threshold, any structural change looks like a quality swing.
-pub(super) const GENOME_RETRY_MIN_LINES: usize = 120;
+// `GENOME_RETRY_MIN_LINES = 120` is intentionally removed (was a duplicated,
+// more conservative arbitrary threshold on top of the encoder's auto-pass
+// at <20 significant lines). Two defensive layers already handle the
+// "don't push agents to over-engineer trivial code" concern:
+//   1. The encoder auto-passes files under ~20 sig lines to Tier III, so
+//      genuinely tiny files never appear in the retry path as below-tier.
+//   2. The parsimony detector fires on over-engineered diffs at the next
+//      pass, surfacing the over-engineering with bloat-specific guidance.
+// Operator-observed failure mode: agents split a 341-line file into
+// ~85-100-line submodules at Tier II / parsimony-flagged, and slipped
+// past retry because each submodule was one line shy of the 120 floor.
+// The encoder + parsimony detector are now the sole gates for "is this
+// file substantive enough to retry on", and they're authoritative.
 
 pub(super) fn push_genome_retry_message(
     state: &mut AppState,
@@ -395,15 +404,13 @@ pub(super) fn build_genome_retry_prompt(
             continue;
         }
 
-        // Skip small files (< 120 lines) — retrying on them pushes agents to
-        // over-engineer trivial code.  Larger files have enough structure that
-        // a retry is worthwhile.
-        let line_count = std::fs::read_to_string(file_path)
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
-        if line_count < GENOME_RETRY_MIN_LINES {
-            continue;
-        }
+        // No file-size gate. The encoder's <20-sig-line auto-pass to
+        // Tier III + the parsimony detector together cover "don't push
+        // agents to over-engineer trivial code" — a separate retry-side
+        // threshold (was 120 lines) duplicated that work and let agents
+        // slip below-tier mission-authored files past retry just by
+        // making them small enough. See the constant block above for the
+        // operator-reported failure mode this removal closes.
 
         let mut should_include = false;
 

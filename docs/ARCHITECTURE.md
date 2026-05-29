@@ -521,7 +521,7 @@ The wiring for Codex runtime configuration is intentionally explicit:
 
 ### Genome feedback + auto-retry
 
-When an agent edits files (tracked via `AgentBusEvent::FileWrite`), nit re-runs the genome/parsimony analyzer on the changed files and compares tiers against a baseline captured before the turn. If quality degraded OR the parsimony detector flags bloat, `build_genome_retry_prompt` (in `crates/nit-tui/src/app/genome_retry.rs`) re-dispatches a follow-up prompt to the writer. Constants live in the same file: `GENOME_RETRY_LIMIT = 3` and `GENOME_RETRY_MIN_LINES = 120` (files shorter than that are skipped to avoid over-engineering trivial modules). See `docs/SEEDS.md` for the parsimony rule and tier system.
+When an agent edits files (tracked via `AgentBusEvent::FileWrite`), nit re-runs the genome/parsimony analyzer on the changed files and compares tiers against a baseline captured before the turn. If quality degraded OR the parsimony detector flags bloat, `build_genome_retry_prompt` (in `crates/nit-tui/src/app/genome_retry.rs`) re-dispatches a follow-up prompt to the writer. `GENOME_RETRY_LIMIT = 3` lives in the same file. There is no separate retry-side file-size gate — the encoder's <20-sig-line auto-pass to Tier III filters out genuinely trivial files, and the parsimony detector catches over-engineering on the next pass, so a duplicated retry-side threshold (was 120 lines until 0.2.12) only created blind spots for mission-authored sub-120-line files. See `docs/SEEDS.md` for the parsimony rule and tier system.
 
 ### Thread + mission context
 

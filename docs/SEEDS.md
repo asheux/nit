@@ -240,7 +240,6 @@ Agents receive an equilibrium rule in their system prompt that explicitly lists 
 | `PARSIMONY_DUPLICATE_COMMENT_THRESHOLD` | 1 | Min duplicate comment lines before flag |
 | `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Max generation lift from soft bottleneck |
 | `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn (defined in `crates/nit-tui/src/app/genome_retry.rs`) |
-| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility (defined in `crates/nit-tui/src/app/genome_retry.rs`) |
 
 ## Key Files
 
@@ -253,4 +252,4 @@ Agents receive an equilibrium rule in their system prompt that explicitly lists 
 | `crates/nit-tui/src/seed_render/` | GENOME view rendering, render cache, component analysis, preview modes |
 | `crates/nit-tui/src/seed_snapshot.rs` | Snapshot I/O, deduplication, metadata persistence |
 | `crates/nit-tui/src/genome_worker.rs` | Off-thread genome evaluation worker |
-| `crates/nit-tui/src/app/genome_retry.rs` | Retry-prompt builder + cap (`GENOME_RETRY_LIMIT = 3`, `GENOME_RETRY_MIN_LINES = 120`) |
+| `crates/nit-tui/src/app/genome_retry.rs` | Retry-prompt builder + cap (`GENOME_RETRY_LIMIT = 3`) |

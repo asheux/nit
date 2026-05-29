@@ -10,8 +10,10 @@ fn shadow_main_agent_retry_fires_like_swarm_writer() {
 
     let main_agent = "codex-main".to_string();
 
-    // Seed a >=120-line code file (retry threshold) on disk. Synthetic body
-    // with enough lines to pass GENOME_RETRY_MIN_LINES.
+    // Seed a code file on disk. The retry path no longer applies any
+    // size threshold (encoder auto-pass + parsimony detector cover
+    // trivial-code protection), but the 200-line body keeps the test
+    // realistic and matches the pre-fix fixture.
     let file_path = state.workspace_root.join("src").join("big.rs");
     fs::create_dir_all(file_path.parent().unwrap()).unwrap();
     let body: String = (0..200)
@@ -538,4 +540,125 @@ fn genome_worker_evaluate_from_disk_tags_result_with_agent_id() {
     assert!(result.report.is_some());
 
     let _ = fs::remove_dir_all(&workspace);
+}
+
+/// Operator-reported failure mode that drove v0.2.12: an agent
+/// split a 341-line file into ~85-100-line submodules at Tier II,
+/// some flagged for parsimony bloat. Pre-fix the retry path's
+/// 120-line `GENOME_RETRY_MIN_LINES` floor silently skipped every
+/// new submodule, so the retry never fired and the sub-tier code
+/// landed. Post-fix the encoder's <20-sig-line auto-pass + the
+/// parsimony detector are the only "is this substantive enough to
+/// act on" gates; mission-authored sub-120-line files now fire
+/// retries when they're below tier.
+#[test]
+fn small_new_file_below_tier_now_fires_retry() {
+    let mut state = state_for_test_in_workspace("small-new-file-retry");
+    state.settings.genome.genome_context_enabled = true;
+
+    let agent = "claude-opus-4-7#swarm-mis-001-clone-01".to_string();
+
+    // Build a 60-line Python file (well under the old 120 floor, well
+    // over the encoder's ~20 sig-line auto-pass) — exactly the
+    // submodule shape the screenshot reported.
+    let file_path = state
+        .workspace_root
+        .join("core")
+        .join("metatuner")
+        .join("numerics.py");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let body: String = (0..60)
+        .map(|i| format!("def fn_{i}():\n    return {i}\n"))
+        .collect();
+    fs::write(&file_path, body).unwrap();
+
+    state
+        .genome_turn_modified
+        .insert(agent.clone(), [file_path.clone()].into_iter().collect());
+
+    // No baseline — this is a new mission-authored file. Tier II
+    // (Oscillator) is below the default min tier (Spaceship / III).
+    let post_turn = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.41,
+        tier: nit_core::GenomeTier::Oscillator,
+        recommendations: Vec::new(),
+        timestamp_ms: 2,
+        grid_size: 32,
+        parsimony: Default::default(),
+        function_scores: Vec::new(),
+    };
+    state.genome_reports.insert(file_path.clone(), post_turn);
+    state.genome_quality_deltas.insert(agent.clone(), -1);
+
+    let result = super::build_genome_retry_prompt(&mut state, &agent);
+    let (_prompt, degraded) = result.expect(
+        "60-line new file at Tier II below threshold MUST fire retry; \
+         pre-v0.2.12 the 120-line floor silently skipped this",
+    );
+    assert_eq!(degraded, vec![file_path.clone()]);
+    assert_eq!(state.genome_retry_counts.get(&agent).copied(), Some(1));
+}
+
+/// Sibling guard: a small new file flagged for parsimony bloat must
+/// also fire retry now. Bloat is the writer's responsibility to
+/// undo (consolidate over-split helpers, trim comment padding),
+/// and the screenshot's `controller.py` was tier II with "2 hard-cap
+/// breaches" — exactly this case. Pre-fix the line floor blocked
+/// bloat-driven retries for small files; post-fix the parsimony
+/// detector is authoritative regardless of size.
+#[test]
+fn small_new_file_with_bloat_now_fires_retry() {
+    let mut state = state_for_test_in_workspace("small-bloated-new-file");
+    state.settings.genome.genome_context_enabled = true;
+
+    let agent = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+
+    let file_path = state
+        .workspace_root
+        .join("core")
+        .join("metatuner")
+        .join("controller.py");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let body: String = (0..80)
+        .map(|i| format!("def fn_{i}():\n    return {i}\n"))
+        .collect();
+    fs::write(&file_path, body).unwrap();
+
+    state
+        .genome_turn_modified
+        .insert(agent.clone(), [file_path.clone()].into_iter().collect());
+
+    // Tier II AND parsimony bloat detected — the worst case the
+    // screenshot reported. With v0.2.12 either signal alone is enough
+    // to trigger retry, and the combination definitively must.
+    let bloated_parsimony = nit_core::ParsimonyInfo {
+        bloat_detected: true,
+        ..Default::default()
+    };
+    let post_turn = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.20,
+        tier: nit_core::GenomeTier::Oscillator,
+        recommendations: Vec::new(),
+        timestamp_ms: 2,
+        grid_size: 32,
+        parsimony: bloated_parsimony,
+        function_scores: Vec::new(),
+    };
+    state.genome_reports.insert(file_path.clone(), post_turn);
+    // No quality_delta entry — the gate uses `any_bloat` to fall
+    // through the `agent_delta >= 0 && !any_bloat` short-circuit, so
+    // bloat alone (no baseline degradation) MUST be enough to fire.
+
+    let result = super::build_genome_retry_prompt(&mut state, &agent);
+    let (prompt, degraded) =
+        result.expect("bloat-flagged new file MUST fire retry regardless of size");
+    assert_eq!(degraded, vec![file_path.clone()]);
+    assert!(
+        prompt.contains("PARSIMONY BLOAT") || prompt.contains("parsimony bloat"),
+        "retry prompt should call out the bloat finding; got:\n{prompt}"
+    );
 }

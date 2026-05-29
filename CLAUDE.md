@@ -28,7 +28,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 ## Key source files
 
-- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch, genome retry logic (`GENOME_RETRY_LIMIT = 3`, `GENOME_RETRY_MIN_LINES = 120`)
+- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch, genome retry logic (`GENOME_RETRY_LIMIT = 3`; no file-size gate — the encoder's <20-sig-line auto-pass + the parsimony detector handle "trivial code" protection)
 - `crates/nit-tui/src/app/dispatch.rs` — agent prompt dispatch (Codex and Claude routing, queue management)
 - `crates/nit-tui/src/app/chat_input.rs` — chat input command parsing (`@all`, `@swarm`, `@shadow`, `@new`, `@queue`)
 - `crates/nit-core/src/agent_bus.rs` — `AgentBusEvent` enum and state application
