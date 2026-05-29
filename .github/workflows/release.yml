@@ -513,3 +513,30 @@ jobs:
           gh release edit "${TAG}" \
             --repo "${{ github.repository }}" \
             --draft=false ${PRE_FLAG}
+
+  # Kick the stats aggregator after every release. The aggregator was
+  # already wired to a daily cron, but operator-observed: a release
+  # shipped at 14:00 UTC had only ~19h of CloudFront log buffer before
+  # the next 09:00 UTC aggregator run, so early-window downloads of the
+  # new tag showed `latest_release.downloads: 0` on the website for up
+  # to 24h. Firing the aggregator from the release pipeline collapses
+  # that window — it runs once at promotion time (catching any logs
+  # CloudFront has already delivered) and then again on its normal
+  # daily cron (catching the residual buffer). \`continue-on-error\`
+  # because the aggregator depends on AWS creds that aren't critical
+  # to the release pipeline succeeding; the daily cron is still the
+  # ultimate safety net.
+  refresh-stats:
+    name: Refresh download stats
+    needs: [publish-release]
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - name: Trigger stats aggregator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run stats-aggregator.yml \
+            --repo "${{ github.repository }}" \
+            --ref main
