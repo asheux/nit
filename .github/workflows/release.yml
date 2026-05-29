@@ -532,6 +532,14 @@ jobs:
     if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
     runs-on: ubuntu-24.04
     continue-on-error: true
+    # `actions: write` is required for the auto-injected GITHUB_TOKEN
+    # to dispatch another workflow. The workflow-level permissions
+    # block only grants `contents: write` (used by gh release edit
+    # in publish-release); narrowing this elevation to just this job
+    # keeps the rest of the pipeline at the existing minimum scope.
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: Trigger stats aggregator
         env:
