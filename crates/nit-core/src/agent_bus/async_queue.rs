@@ -55,6 +55,7 @@ mod tests {
             backend: BackendKind::Claude,
             models: vec![format!("model-{seq}")],
             error: None,
+            metadata: None,
         }
     }
 

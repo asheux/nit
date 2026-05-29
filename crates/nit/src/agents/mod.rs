@@ -135,11 +135,20 @@ fn spawn_background_probe(args: BackgroundProbeArgs) {
             // clears as soon as each finishes (Claude usually returns
             // first; Gemini's CLI is heavier).
             if args.want_claude {
+                // Populate metadata before emitting — pre-fix the event
+                // carried only model names, and the handler couldn't
+                // know context-window sizes / supported efforts, leaving
+                // the roster with blank size cells until a restart hit
+                // the freshly written cache (which DID populate via
+                // `populate_claude_model_metadata`).
+                let claude_metadata = (!claude_models.is_empty())
+                    .then(|| claude::build_claude_model_metadata(&claude_models));
                 nit_core::agent_bus::async_queue::push(
                     nit_core::AgentBusEvent::BackendModelsLoaded {
                         backend: nit_core::BackendKind::Claude,
                         models: claude_models,
                         error: claude_error,
+                        metadata: claude_metadata,
                     },
                 );
             }
@@ -149,6 +158,7 @@ fn spawn_background_probe(args: BackgroundProbeArgs) {
                         backend: nit_core::BackendKind::Gemini,
                         models: gemini_models,
                         error: gemini_error,
+                        metadata: None,
                     },
                 );
             }

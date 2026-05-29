@@ -34,7 +34,10 @@ pub mod viewport;
 pub(crate) mod test_helpers;
 
 pub use actions::Action;
-pub use agent_bus::{AgentBusEvent, AgentTokenCount, BackendKind, OPERATOR_CANCEL_TURN_MESSAGE};
+pub use agent_bus::{
+    AgentBusEvent, AgentTokenCount, BackendKind, BackendModelsMetadata,
+    OPERATOR_CANCEL_TURN_MESSAGE,
+};
 pub use arbiters::{
     Arbiter, ArbiterFn, InterventionKind, InterventionProposal, InterventionTarget,
     ARBITER_INITIAL_STRENGTH, ARBITER_RETRY_LIMIT, REGISTERED_ARBITERS,

@@ -166,11 +166,36 @@ pub enum AgentBusEvent {
     /// placeholder in Agent Ops until this lands; on apply it populates
     /// the matching `*_models` / `*_models_error` fields, clears the
     /// `*_models_loading` flag, and re-materializes per-model lanes.
+    ///
+    /// `metadata` carries the per-model context window / supported
+    /// efforts / default effort maps the probe thread populated.
+    /// Operator-observed gap before this field existed: after a cache
+    /// nuke, the probe thread emitted models but no metadata; the
+    /// roster showed model names with blank context-window sizes, and
+    /// only a restart (which then hit the freshly written cache that
+    /// triggers `populate_claude_model_metadata`) made sizes appear.
+    /// `None` preserves the pre-field behaviour for any caller that
+    /// hasn't been updated yet.
     BackendModelsLoaded {
         backend: BackendKind,
         models: Vec<String>,
         error: Option<String>,
+        #[serde(default)]
+        metadata: Option<BackendModelsMetadata>,
     },
+}
+
+/// Per-model metadata pushed by the async probe alongside the model
+/// list. Replaces the matching maps on `AgentsState` for the backend
+/// the event is for (Claude or Gemini). Empty maps are valid — they
+/// mean "the probe completed but didn't populate metadata for this
+/// backend" (e.g. Gemini, where we don't track effort tiers).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BackendModelsMetadata {
+    pub effective_context_window_tokens: std::collections::HashMap<String, u32>,
+    pub supported_efforts: std::collections::HashMap<String, Vec<String>>,
+    pub default_effort: std::collections::HashMap<String, String>,
+    pub selected_effort: std::collections::HashMap<String, String>,
 }
 
 /// Discriminates the two backends whose model probes run asynchronously.
@@ -336,8 +361,9 @@ impl AgentBusEvent {
                 backend,
                 models,
                 error,
+                metadata,
             } => {
-                apply_backend_models_loaded(state, *backend, models, error);
+                apply_backend_models_loaded(state, *backend, models, error, metadata.as_ref());
             }
         }
 
@@ -352,18 +378,36 @@ fn apply_backend_models_loaded(
     backend: BackendKind,
     models: &[String],
     error: &Option<String>,
+    metadata: Option<&BackendModelsMetadata>,
 ) {
     let (display_name, kind) = match backend {
         BackendKind::Claude => {
             state.agents.claude_models = models.to_vec();
             state.agents.claude_models_error = error.clone();
             state.agents.claude_models_loading = false;
+            // Replace per-model metadata maps in lock-step with the
+            // model list. Pre-fix the async-probe path emitted only
+            // models, leaving these maps empty until a restart hit
+            // the freshly written cache (`populate_claude_model_metadata`).
+            // The roster widget keys context-window sizes off these
+            // maps, so an empty map meant blank size cells — exactly
+            // the "sizes don't show until I quit and reopen" symptom.
+            if let Some(meta) = metadata {
+                state.agents.claude_effective_context_window_tokens =
+                    meta.effective_context_window_tokens.clone();
+                state.agents.claude_supported_efforts = meta.supported_efforts.clone();
+                state.agents.claude_default_effort = meta.default_effort.clone();
+                state.agents.claude_selected_effort = meta.selected_effort.clone();
+            }
             ("Claude", AgentLaneKind::Claude)
         }
         BackendKind::Gemini => {
             state.agents.gemini_models = models.to_vec();
             state.agents.gemini_models_error = error.clone();
             state.agents.gemini_models_loading = false;
+            // Gemini has no per-model effort/context map today, so
+            // metadata is currently unused for this backend — the
+            // field is reserved for symmetry with Claude.
             ("Gemini", AgentLaneKind::Gemini)
         }
     };
