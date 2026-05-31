@@ -82,6 +82,11 @@ pub(crate) enum Command {
     },
     /// Multipane mode: a grid of independent chat panes, one cwd each.
     Multipane(MultipaneArgs),
+    /// Check for a newer release and install it (Homebrew if installed
+    /// that way, the install-script one-liner otherwise; Windows
+    /// prints the PowerShell snippet). Honors `NIT_NO_VERSION_CHECK=1`.
+    #[command(alias = "upgrade")]
+    Update,
 }
 
 #[derive(Args, Debug)]

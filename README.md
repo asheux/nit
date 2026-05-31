@@ -19,10 +19,10 @@ curl -fsSL https://download.nit.tools/install.sh | bash
 **Windows (PowerShell):**
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; irm https://download.nit.tools/install.ps1 | iex
+irm https://download.nit.tools/install.ps1 | iex
 ```
 
-The `Set-ExecutionPolicy` prefix is scoped to the current PowerShell process only — it doesn't change any system-wide settings. Without it, PowerShell's default `Restricted` policy blocks the install script.
+If PowerShell's execution policy blocks it (rare on default Windows installs but common on managed/corporate machines), prefix with `Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; ` — the bypass is scoped to the current PowerShell process and never touches system-wide settings.
 
 **Homebrew (macOS / Linux):**
 

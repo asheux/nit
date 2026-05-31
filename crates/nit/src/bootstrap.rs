@@ -35,8 +35,11 @@ pub(crate) fn resolve_app_target(
     match command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
         Some(Command::Games { path, .. }) => (AppKind::Games, path),
-        // Multipane short-circuits before this resolver runs.
-        Some(Command::Multipane(_)) => (LabId::from(lab), fallback_path),
+        // Multipane and Update short-circuit in `main.rs` before this
+        // resolver runs; the arms are here only to satisfy the
+        // compiler's exhaustiveness check. If either is reached the
+        // safe default is the lab fallback — same as the `None` case.
+        Some(Command::Multipane(_) | Command::Update) => (LabId::from(lab), fallback_path),
         None => (LabId::from(lab), fallback_path),
     }
 }

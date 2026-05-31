@@ -7,6 +7,7 @@ mod games;
 mod graph;
 mod logging;
 mod multipane_setup;
+mod update;
 mod workspace;
 
 use std::path::Path;
@@ -23,9 +24,18 @@ use crate::workspace::{find_theme, load_notes, open_target_games, open_target_go
 fn main() -> anyhow::Result<()> {
     let mut cli = Cli::parse_from(cli::normalize_lab_args(std::env::args()));
 
+    if let Some(Command::Update) = cli.command {
+        return update::run_update();
+    }
+
     if let Some(result) = try_dispatch_games(&mut cli.command) {
         return result;
     }
+
+    // Best-effort update banner before the TUI takes over. Honors
+    // NIT_NO_VERSION_CHECK and is silent on any failure — a missed
+    // notice is far better than a 5s blocked launch on a flaky link.
+    update::print_update_notice_if_newer();
 
     let (runtime_mode, codex_runner_config, claude_runner_config) =
         bootstrap::build_runner_configs(&cli);
