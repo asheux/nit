@@ -38,6 +38,14 @@ cargo build --release
 # Binaries land at target/release/{nit, nit-mcp-server}
 ```
 
+**Upgrade (any platform, any install method):**
+
+```bash
+nit update
+```
+
+Detects whether nit was installed via Homebrew or one of the install scripts and runs the right upgrade command (Homebrew users get `brew upgrade asheux/tap/nit`; others get `install.sh`; Windows prints the PowerShell snippet to run from a fresh PS session, since a running `.exe` can't replace itself in place). On launch, nit also prompts you with `[i]nstall / [s]kip / [m]ute` if a newer release is available — silenceable via `NIT_NO_VERSION_CHECK=1`.
+
 Binaries are distributed via `https://download.nit.tools/<tag>/`, backed by Amazon CloudFront. The bucket also hosts a `SHA256SUMS` file per release and `latest.json` for tag resolution.
 
 ### Supported platforms
