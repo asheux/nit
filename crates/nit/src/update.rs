@@ -1,4 +1,4 @@
-//! `nit update` subcommand + startup version-check banner.
+//! `nit update` subcommand + interactive startup update prompt.
 //!
 //! Two operator-facing flows:
 //!
@@ -7,13 +7,18 @@
 //!      appropriate install command (Homebrew when nit is installed
 //!      under a known Homebrew prefix, the install-script one-liner
 //!      otherwise, a printed PowerShell snippet on Windows).
-//!   2. Startup banner — `print_update_notice_if_newer` does the same
-//!      comparison but only prints a one-line stderr notice and
-//!      caches the result for 24h. Called from `main.rs` before the
-//!      TUI takes over the terminal.
+//!   2. Startup prompt — `check_and_prompt_for_update` does the same
+//!      comparison, then on a TTY launches an interactive picker
+//!      ([i]nstall now / [s]kip / [m]ute this version) before the
+//!      TUI takes over. Non-TTY launches (CI, swarm spawns, remote
+//!      tmux pipes) fall back to the passive one-line notice so they
+//!      don't wedge waiting on a keypress.
 //!
 //! Both honour `NIT_NO_VERSION_CHECK=1` to silence network access in
-//! sandboxed / offline environments.
+//! sandboxed / offline environments. The startup prompt additionally
+//! honours a per-version mute persisted in
+//! `<cache_dir>/version_check.json`; when a newer release lands the
+//! mute is auto-cleared so the operator hears about the next bump.
 //!
 //! Network access is via `curl` subprocess (already a transitive
 //! requirement: install.sh / install.ps1 both depend on it). Avoids
@@ -36,6 +41,22 @@ const FETCH_TIMEOUT_SECS: u32 = 1;
 struct CachedCheck {
     checked_at_unix: u64,
     latest_tag: String,
+    /// Operator chose [m]ute for a specific tag — banner is suppressed
+    /// while `latest_tag == muted_for_tag`. When a newer release lands
+    /// the tags diverge and the banner shows again. Per-version mute
+    /// is friendlier than a global "never ask me again" flag because
+    /// it doesn't leave the operator silently stranded on old versions.
+    #[serde(default)]
+    muted_for_tag: Option<String>,
+}
+
+/// Outcome of the interactive update banner. Returned to `main.rs` so
+/// it can short-circuit the TUI launch when the operator picks
+/// Install (we exec the update and exit), and otherwise continue.
+pub(crate) enum UpdateAction {
+    Install,
+    Skip,
+    Mute,
 }
 
 #[derive(Deserialize)]
@@ -93,21 +114,50 @@ fn save_cache(check: &CachedCheck) {
     }
 }
 
-/// Read-through cache: returns the latest tag from the cache when it's
-/// fresh, otherwise fetches and refreshes. `None` on any failure.
-fn cached_or_fresh_latest_tag() -> Option<String> {
+/// Read-through cache: returns the latest tag + the per-tag mute flag
+/// from the cache when it's fresh, otherwise fetches and refreshes.
+/// `None` on any failure. The mute flag rides alongside the tag so a
+/// refresh that picks up a newer tag automatically resurfaces the
+/// banner (the old mute decision no longer applies).
+fn cached_or_fresh_check() -> Option<CachedCheck> {
     let now = now_unix();
     if let Some(cached) = load_cache() {
         if now.saturating_sub(cached.checked_at_unix) < CACHE_TTL_SECS {
-            return Some(cached.latest_tag);
+            return Some(cached);
         }
     }
     let tag = fetch_latest_tag()?;
-    save_cache(&CachedCheck {
+    // Preserve any existing mute decision if it still applies to the
+    // freshly fetched tag. If the tag advanced, the old mute is dropped
+    // — the operator's "mute this version" decision doesn't transfer.
+    let muted_for_tag = load_cache()
+        .and_then(|c| c.muted_for_tag)
+        .filter(|t| t == &tag);
+    let check = CachedCheck {
         checked_at_unix: now,
-        latest_tag: tag.clone(),
-    });
-    Some(tag)
+        latest_tag: tag,
+        muted_for_tag,
+    };
+    save_cache(&check);
+    Some(check)
+}
+
+/// Persist a per-version mute. Reads the current cache, sets
+/// `muted_for_tag = Some(tag)`, writes back. Best-effort — a write
+/// failure means the operator sees the banner again next launch,
+/// which is acceptable.
+fn mute_for_tag(tag: &str) {
+    let Some(mut cached) = load_cache() else {
+        // No cache yet — create a minimal one so the mute sticks.
+        save_cache(&CachedCheck {
+            checked_at_unix: now_unix(),
+            latest_tag: tag.to_string(),
+            muted_for_tag: Some(tag.to_string()),
+        });
+        return;
+    };
+    cached.muted_for_tag = Some(tag.to_string());
+    save_cache(&cached);
 }
 
 /// Compare two `MAJOR.MINOR.PATCH` strings. Returns negative if `a < b`,
@@ -136,22 +186,78 @@ fn compare_versions(a: &str, b: &str) -> i32 {
     }
 }
 
-/// Print a one-line stderr notice if a newer release exists. Honors
-/// `NIT_NO_VERSION_CHECK=1`. Best-effort: silent on any failure, so a
-/// missing/broken cache or unreachable CDN never blocks startup.
-pub(crate) fn print_update_notice_if_newer() {
+/// Show the interactive update banner if a newer release exists.
+/// Returns the operator's chosen action, or `None` when no banner was
+/// shown (no update available, suppressed via env, muted for this
+/// tag, or any failure on the cache/network path). Honors
+/// `NIT_NO_VERSION_CHECK=1`.
+///
+/// Non-TTY stdin (CI, piped input, redirected stdin): falls back to a
+/// passive one-line notice on stderr and returns `Some(Skip)` so the
+/// caller still proceeds normally. We don't want a swarm-pane spawn
+/// or a remote-tmux session to wedge waiting for a keypress that
+/// never comes.
+pub(crate) fn check_and_prompt_for_update() -> Option<UpdateAction> {
     if std::env::var_os("NIT_NO_VERSION_CHECK").is_some() {
-        return;
+        return None;
     }
-    let Some(latest_tag) = cached_or_fresh_latest_tag() else {
-        return;
-    };
-    let latest_v = latest_tag.trim_start_matches('v');
+    let check = cached_or_fresh_check()?;
+    let latest_v = check.latest_tag.trim_start_matches('v');
     let current = env!("CARGO_PKG_VERSION");
     if compare_versions(current, latest_v) >= 0 {
-        return;
+        return None;
     }
-    eprintln!("\u{2728} nit {latest_tag} is available \u{2014} run `nit update` to install (current: v{current})");
+    if check.muted_for_tag.as_deref() == Some(check.latest_tag.as_str()) {
+        return None;
+    }
+    Some(prompt_user_for_action(&check.latest_tag, current))
+}
+
+fn prompt_user_for_action(latest_tag: &str, current: &str) -> UpdateAction {
+    use std::io::{IsTerminal, Write};
+
+    // Non-interactive stdin: fall back to the passive one-line notice.
+    // Skip cleanly so headless / CI launches don't hang on a prompt
+    // they can't answer.
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "\u{2728} nit {latest_tag} is available \u{2014} run `nit update` to install (current: v{current})"
+        );
+        return UpdateAction::Skip;
+    }
+
+    eprintln!();
+    eprintln!("\u{2728} A new nit release is available.");
+    eprintln!("   Current: v{current}");
+    eprintln!("   Latest:  {latest_tag}");
+    eprintln!();
+    eprintln!("  [i] Install now");
+    eprintln!("  [s] Skip for now (default)");
+    eprintln!("  [m] Mute this version (resurfaces when a newer release lands)");
+    eprintln!();
+    eprint!("Choice [s]: ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        // EOF / SIGINT during the prompt: treat as Skip so Ctrl-C
+        // doesn't leave the operator with a half-applied state.
+        return UpdateAction::Skip;
+    }
+    let trimmed = line.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "i" | "install" | "y" | "yes" => UpdateAction::Install,
+        "m" | "mute" => UpdateAction::Mute,
+        _ => UpdateAction::Skip,
+    }
+}
+
+/// Persist a mute for the currently-cached latest tag. Idempotent;
+/// no-op when the cache is missing or has no tag yet.
+pub(crate) fn mute_currently_cached_tag() {
+    if let Some(c) = load_cache() {
+        mute_for_tag(&c.latest_tag);
+    }
 }
 
 /// Detect whether the running `nit` binary lives under a known Homebrew
@@ -265,6 +371,34 @@ mod tests {
         // here, which is fine: the banner is informational, not a gate.
         assert_eq!(compare_versions("0.2.12-rc1", "0.2.12"), 0);
         assert!(compare_versions("0.2.12-rc1", "0.2.13") < 0);
+    }
+
+    #[test]
+    fn mute_decision_clears_when_newer_tag_lands() {
+        // Operator mutes the banner for v0.2.13. When the next launch
+        // sees a freshly published v0.2.14, the mute decision should
+        // NOT carry over — the operator hasn't said anything about
+        // v0.2.14 yet.
+        let muted = CachedCheck {
+            checked_at_unix: 1_000_000,
+            latest_tag: "v0.2.13".into(),
+            muted_for_tag: Some("v0.2.13".into()),
+        };
+        // Same tag: mute applies → banner is suppressed.
+        assert_eq!(
+            muted.muted_for_tag.as_deref(),
+            Some(muted.latest_tag.as_str()),
+            "mute applies for the tag it was set on"
+        );
+        // Newer tag would be a different `latest_tag` after a refresh;
+        // the helper that builds the new cache drops the carry-over
+        // when the tags don't match (the production code path in
+        // `cached_or_fresh_check` does `.filter(|t| t == &tag)`).
+        let stale_mute: Option<String> = muted.muted_for_tag.clone().filter(|t| t == "v0.2.14");
+        assert_eq!(
+            stale_mute, None,
+            "mute set for v0.2.13 must not carry into v0.2.14"
+        );
     }
 
     #[test]

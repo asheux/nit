@@ -32,10 +32,22 @@ fn main() -> anyhow::Result<()> {
         return result;
     }
 
-    // Best-effort update banner before the TUI takes over. Honors
-    // NIT_NO_VERSION_CHECK and is silent on any failure — a missed
-    // notice is far better than a 5s blocked launch on a flaky link.
-    update::print_update_notice_if_newer();
+    // Interactive update prompt before the TUI takes over. The
+    // operator picks Install (run the upgrade and exit, they
+    // re-launch fresh), Skip (continue to TUI), or Mute (silence
+    // the banner for this specific tag, resurfaces when a newer
+    // release lands). Honors NIT_NO_VERSION_CHECK and falls back
+    // to a passive one-liner on non-TTY stdin. Silent on any
+    // network/cache failure — a missed prompt never blocks startup.
+    match update::check_and_prompt_for_update() {
+        Some(update::UpdateAction::Install) => {
+            return update::run_update();
+        }
+        Some(update::UpdateAction::Mute) => {
+            update::mute_currently_cached_tag();
+        }
+        Some(update::UpdateAction::Skip) | None => {}
+    }
 
     let (runtime_mode, codex_runner_config, claude_runner_config) =
         bootstrap::build_runner_configs(&cli);
