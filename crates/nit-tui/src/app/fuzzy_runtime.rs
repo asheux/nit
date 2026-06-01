@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use nit_core::{AppState, SearchMode};
+use nit_core::{AppState, Buffer, SearchMode};
 
 use crate::{
     fuzzy_preview_runner::{PreviewModel, PreviewRunner},
@@ -231,6 +231,7 @@ impl FuzzySearchRuntime {
         if self.last_preview_key.as_ref() == Some(&key) {
             return;
         }
+        let override_content = dirty_buffer_override(&state.buffers, &path);
         self.preview_scroll_delta = 0;
         self.last_preview_key = Some(key);
         self.preview_gen = self.preview_gen.wrapping_add(1);
@@ -240,6 +241,24 @@ impl FuzzySearchRuntime {
             path,
             line_hint,
             query,
+            override_content,
         );
     }
+}
+
+/// Live unsaved-buffer content for `path`, so previews reflect edits not disk.
+pub(crate) fn dirty_buffer_override(buffers: &[Buffer], path: &Path) -> Option<String> {
+    let target = std::fs::canonicalize(path).ok();
+    buffers.iter().find_map(|buf| {
+        if !buf.is_dirty() {
+            return None;
+        }
+        let buf_path = buf.path()?;
+        let same = match (&target, std::fs::canonicalize(buf_path).ok()) {
+            (Some(t), Some(b)) => t.as_path() == b.as_path(),
+            // Unsaved buffer with no on-disk twin: compare lexically instead.
+            _ => buf_path.as_path() == path,
+        };
+        same.then(|| buf.content_as_string())
+    })
 }

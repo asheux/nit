@@ -775,6 +775,36 @@ fn report_structural_compliance(state: &mut AppState, run: &SwarmRun, task_id: &
     if missing.is_empty() {
         return;
     }
+    // Soft mode (default): the checklist is informational — surface the
+    // gap as an Info diag so the operator can see "agent didn't touch
+    // every proposer-nominated file" but don't escalate. Strict mode
+    // (`NIT_STRICT_CHECKLIST=1`) restores the old Warning substrate
+    // signal which also feeds the re-dispatch path in
+    // `handle_structural_compliance_gap`.
+    let strict = std::env::var_os("NIT_STRICT_CHECKLIST").is_some();
+    if !strict {
+        let preview: Vec<String> = missing.iter().take(3).cloned().collect();
+        let more = if missing.len() > preview.len() {
+            format!(" (+{} more)", missing.len() - preview.len())
+        } else {
+            String::new()
+        };
+        state
+            .agents
+            .diag_events
+            .push(nit_core::AgentDiagnosticEvent {
+                severity: nit_core::AgentAlertSeverity::Info,
+                source: "swarm".into(),
+                message: format!(
+                    "[{task_id}] checklist hint: {} file(s) not touched: {}{more}",
+                    missing.len(),
+                    preview.join(", "),
+                ),
+                at: super::mission::timestamp_label(state),
+            });
+        state.agents.note_event();
+        return;
+    }
     let id = state.substrate.next_signal_id(task_id);
     let posted_at_gen = state.substrate.current_generation();
     state.substrate.emit_signal(nit_core::substrate::Signal {
@@ -804,15 +834,26 @@ fn report_structural_compliance(state: &mut AppState, run: &SwarmRun, task_id: &
 // failure modes firing on the same turn would consume two attempts for a
 // single re-dispatch.
 fn handle_structural_compliance_gap(state: &mut AppState, run: &mut SwarmRun, task_id: &str) {
-    // Combine three failure modes:
-    //   1. files declared but never touched (mission_writes miss)
-    //   2. newly-created stub files (existence-only compliance)
-    //   3. declared "huge" sources whose split didn't actually move content
-    // All three feed into the same retry slot — the agent is told about
-    // every gap on the next dispatch.
-    let mut entries: Vec<String> = structural_compliance_missing_files(run, task_id, state);
-    let split_gaps = structural_split_gaps(run, task_id, state);
-    entries.extend(split_gaps);
+    // The FILE CHECKLIST is now informational rather than authoritative
+    // — the judge's verdict prose is what binds the integrator, not the
+    // proposer/judge files arrays. So we only auto-re-dispatch on
+    // signals that mean the agent's actual work product is broken:
+    //   1. NEW stub files (a newly-created declared file is < 20 lines
+    //      — performative compliance, the agent created a shell)
+    //   2. INCOMPLETE splits (declared "huge" source didn't shrink
+    //      ≥30% but sibling submodules were created — the move never
+    //      happened)
+    // The pre-relax third mode — "checklist file declared but never
+    // touched" — fires an Info diag (see `report_structural_compliance`
+    // upstream) but no longer triggers a re-dispatch. An operator who
+    // wants the old strict behaviour can set `NIT_STRICT_CHECKLIST=1`
+    // to re-enable missing-files re-dispatch alongside the structural
+    // gap detection.
+    let mut entries: Vec<String> = structural_split_gaps(run, task_id, state);
+    if std::env::var_os("NIT_STRICT_CHECKLIST").is_some() {
+        let missing = structural_compliance_missing_files(run, task_id, state);
+        entries.extend(missing);
+    }
     if entries.is_empty() {
         return;
     }

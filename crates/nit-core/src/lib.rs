@@ -99,8 +99,8 @@ pub use state::{
     McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, MultipaneState,
     PaneSelection, PaneSession, PatchProposal, PatchStatus, PendingIntake, QueuedClaudeTurn,
     QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,
-    SavedRunHistoryPendingAction, SubstrateOverlayTab, SyntaxDebugInfo, UiSelection,
-    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    SavedRunHistoryPendingAction, SubstrateOverlayTab, SyntaxDebugInfo, TerminalPopupState,
+    UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
     CONSOLE_SCROLL_BOTTOM,
 };
 pub use substrate::{

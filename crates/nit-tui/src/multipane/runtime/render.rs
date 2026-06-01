@@ -19,6 +19,100 @@ const MIN_PANE_WIDTH: u16 = 20;
 const MIN_PANE_HEIGHT: u16 = 10;
 const BOTTOM_HINT: &str = "MULTIPANE  ·  Tab cycle  ·  Ctrl+Q quit  ·  F1 help";
 
+/// Title-bar pill-button labels for each multipane cell. Same idea
+/// as the single-pane `CHAT_TAB_*` constants but shortened so the
+/// label still fits when panes are 4-wide or smaller.
+pub(super) const PANE_TAB_NIT_LABEL: &str = " NIT ";
+pub(super) const PANE_TAB_TERM_LABEL: &str = " TERM ";
+pub(super) const PANE_TAB_SEP_WIDTH: u16 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PaneTab {
+    /// The agent/chat surface (the default chat console or roster picker).
+    Nit,
+    /// The per-pane PTY shell (`pane.terminal_active`).
+    Terminal,
+}
+
+/// Build the pill-button tab line shown in each multipane cell's
+/// title bar. Mirrors the visualizer pane's title-button styling
+/// (active = `bg = title_color`, `fg = background`; inactive = muted
+/// border-tone outline) so the buttons read as clickable affordances.
+pub(super) fn pane_tabs_line(
+    idx: usize,
+    selected: PaneTab,
+    cwd_text: &str,
+    focused: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let title_color = if focused {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+    let prefix_style = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let active_btn_style = Style::default()
+        .fg(theme.background)
+        .bg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let inactive_btn_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(title_color);
+    let path_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let nit_style = if matches!(selected, PaneTab::Nit) {
+        active_btn_style
+    } else {
+        inactive_btn_style
+    };
+    let term_style = if matches!(selected, PaneTab::Terminal) {
+        active_btn_style
+    } else {
+        inactive_btn_style
+    };
+    Line::from(vec![
+        Span::styled(format!(" pane {idx} "), prefix_style),
+        Span::styled(PANE_TAB_NIT_LABEL, nit_style),
+        Span::styled(" ", sep_style),
+        Span::styled(PANE_TAB_TERM_LABEL, term_style),
+        Span::styled(format!(" · {cwd_text} "), path_style),
+    ])
+}
+
+/// Width of the title prefix (`" pane N "`) that precedes the tab
+/// pills, in cells. The hit-tester subtracts this so a click at the
+/// pill columns maps correctly regardless of the pane index width.
+pub(super) fn pane_tab_prefix_width(idx: usize) -> u16 {
+    (" pane ".len() + idx.to_string().len() + " ".len()) as u16
+}
+
+/// Returns the tab a title-row click at `col_in_rect` hits. Mirrors
+/// `agent_console_view::chat_tab_at_column`: col 0 is the border
+/// corner; the prefix `" pane N "` is skipped; the two pills sit
+/// side by side separated by one space.
+pub(super) fn pane_tab_at_column(idx: usize, col_in_rect: u16) -> Option<PaneTab> {
+    if col_in_rect == 0 {
+        return None;
+    }
+    let after_prefix = col_in_rect
+        .saturating_sub(1)
+        .saturating_sub(pane_tab_prefix_width(idx));
+    let nit_end = PANE_TAB_NIT_LABEL.len() as u16;
+    let term_start = nit_end + PANE_TAB_SEP_WIDTH;
+    let term_end = term_start + PANE_TAB_TERM_LABEL.len() as u16;
+    if after_prefix < nit_end {
+        Some(PaneTab::Nit)
+    } else if (term_start..term_end).contains(&after_prefix) {
+        Some(PaneTab::Terminal)
+    } else {
+        None
+    }
+}
+
 pub(super) fn pane_at(state: &AppState, pane_idx: usize) -> Option<&nit_core::PaneSession> {
     state.multipane.as_ref()?.panes.get(pane_idx)
 }
@@ -382,19 +476,33 @@ fn render_pane_dir_search_overlay(
         return inner;
     };
     let ds = pane.dir_search.as_ref().unwrap();
-    let bar_text = format!(
-        " search: {}{} ",
-        ds.query,
-        if ds.show_hidden { "  [hidden]" } else { "" }
-    );
     let bar_style = Style::default()
         .fg(theme.title_focused)
         .bg(theme.background)
         .add_modifier(Modifier::BOLD);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(bar_text, bar_style))),
-        bar_rect,
-    );
+    // Inline placeholder while the query is empty so the operator
+    // discovers the `../<term>` (parent) and `./<term>` (current dir)
+    // navigation tokens without having to read the keybindings strip
+    // up top. The placeholder uses the muted border tone so it
+    // visually reads as a hint, not real query text.
+    let placeholder_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(" search: ", bar_style));
+    if ds.query.is_empty() {
+        spans.push(Span::styled(
+            "(../<term> back · ./<term> current dir)",
+            placeholder_style,
+        ));
+    } else {
+        spans.push(Span::styled(ds.query.clone(), bar_style));
+    }
+    if ds.show_hidden {
+        spans.push(Span::styled("  [hidden]", bar_style));
+    }
+    spans.push(Span::styled(" ", bar_style));
+    frame.render_widget(Paragraph::new(Line::from(spans)), bar_rect);
     let visible_usize = visible_rows as usize;
     let end = ds
         .view_offset
@@ -487,23 +595,12 @@ fn paint_pane_chrome(
         return rect;
     };
     let cwd_text = pane_path_label(state, &pane.cwd);
-    let mode_label = if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
-        "roster"
-    } else {
-        "chat"
-    };
-    let title_prefix = format!(" pane {idx} · {mode_label} · ");
-    let title_path = format!("{cwd_text} ");
     let border_color = if focused {
         theme.border_focused
     } else {
         theme.border
     };
-    let title_color = if focused {
-        theme.title_focused
-    } else {
-        theme.title
-    };
+    let title_line = pane_tabs_line(idx, PaneTab::Nit, &cwd_text, focused, theme);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(if focused {
@@ -512,20 +609,7 @@ fn paint_pane_chrome(
             BorderType::Plain
         })
         .border_style(Style::default().fg(border_color))
-        .title(Line::from(vec![
-            Span::styled(
-                title_prefix,
-                Style::default()
-                    .fg(title_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                title_path,
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM),
-            ),
-        ]))
+        .title(title_line)
         .style(Style::default().bg(theme.background));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -548,7 +632,7 @@ fn pane_dir_search_active(state: &AppState, idx: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn pane_path_label(state: &AppState, cwd: &Path) -> String {
+pub(super) fn pane_path_label(state: &AppState, cwd: &Path) -> String {
     let workspace_root = state.workspace_root.as_path();
     if let Ok(rel) = cwd.strip_prefix(workspace_root) {
         let rel_str = rel.to_string_lossy();
@@ -601,7 +685,7 @@ fn paint_hint_line(
     } else if in_roster {
         " ↑/↓ j/k · h/l fold · Space check · Enter commit · Tab pane "
     } else {
-        " /abort · Ctrl+C · Esc Esc · Ctrl+R roster · PgUp/PgDn scroll "
+        " /abort · Ctrl+C · Esc Esc · Ctrl+/ cd · Ctrl+R roster · PgUp/PgDn scroll "
     };
     let hint = Line::from(Span::styled(
         hint_text,

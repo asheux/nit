@@ -13,6 +13,8 @@ mod auto_pair;
 mod change_ops;
 #[path = "state/count_prefix.rs"]
 mod count_prefix;
+#[path = "state/definition.rs"]
+mod definition;
 #[path = "state/games_family_build.rs"]
 mod games_family_build;
 #[path = "state/games_inspect.rs"]

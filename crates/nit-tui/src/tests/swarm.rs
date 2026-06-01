@@ -5621,7 +5621,7 @@ fn integrator_prompt_checklist_shows_judge_authoritative_selection_only() {
 
     let prompt = build_task_prompt_for_test(&run, &integrate);
     assert!(
-        prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        prompt.contains("FILE CHECKLIST (informational hint)"),
         "integrate prompt should still render the checklist header; got:\n{prompt}"
     );
     assert!(
@@ -6018,21 +6018,23 @@ fn propose_role_contract_calls_out_files_array_as_load_bearing() {
 }
 
 #[test]
-fn judge_role_contract_calls_out_files_array_as_authoritative_selection() {
+fn judge_role_contract_calls_out_files_array_as_scope_hint() {
     use super::role_contract_lines;
     let lines = role_contract_lines("judge");
     let joined = lines.join(" || ");
     assert!(
-        joined.contains("FILES ARRAY = AUTHORITATIVE SELECTION"),
-        "judge contract should call out the authoritative-selection semantics; got: {joined}"
+        joined.contains("FILES ARRAY = SCOPE HINT"),
+        "judge contract should describe the files array as a scope hint; got: {joined}"
     );
-    assert!(joined.contains("every file path the integrator is expected to MODIFY or CREATE"));
-    // Authority phrasing: judge can prune; proposer-nominated paths the
-    // judge omits are dropped from the integrator's checklist.
+    // New contract phrasing: verdict prose is authoritative, files array is advisory.
     assert!(
-        joined.contains("full authority to prune")
-            || joined.contains("proposer-nominated paths you omit"),
-        "judge contract should describe the judge's pruning authority; got: {joined}"
+        joined.contains("VERDICT PROSE") && joined.contains("advisory"),
+        "judge contract should distinguish prose from files-array; got: {joined}"
+    );
+    // The mechanical opt-in for the old strict behaviour is surfaced.
+    assert!(
+        joined.contains("NIT_STRICT_CHECKLIST"),
+        "judge contract should mention the strict-mode opt-in; got: {joined}"
     );
 }
 
@@ -6567,14 +6569,17 @@ fn propose_role_contract_excludes_audit_only_files_from_array() {
 }
 
 #[test]
-fn judge_role_contract_excludes_audit_only_files_from_array() {
+fn judge_role_contract_describes_verdict_prose_as_authoritative() {
     use super::role_contract_lines;
     let lines = role_contract_lines("judge");
     let joined = lines.join(" || ");
-    assert!(joined.contains("FILES ARRAY = AUTHORITATIVE SELECTION"));
+    assert!(joined.contains("FILES ARRAY = SCOPE HINT"));
+    // Under the v0.2.15 contract, the judge's verdict prose binds the
+    // integrator; the files array is advisory. The runtime no longer
+    // auto-re-dispatches the integrator for skipped files in soft mode.
     assert!(
-        joined.contains("Do NOT include files you decided are audit-only"),
-        "judge contract should explicitly exclude audit-only files; got: {joined}"
+        joined.contains("no longer auto-re-dispatches"),
+        "judge contract should state that missing-file re-dispatch is off by default; got: {joined}"
     );
 }
 
@@ -6619,10 +6624,10 @@ fn integrate_file_checklist_sourced_from_propose_artifacts() {
         !prompt.contains("operator/d.rs"),
         "operator-prompt files should not appear in integrate file checklist"
     );
-    // Sourcing breadcrumb should describe the judge-authoritative-or-union rule.
+    // Sourcing breadcrumb should describe the propose/judge `swarm_artifacts.files` source.
     assert!(
-        prompt.contains("judge-authoritative") && prompt.contains("union of every proposer"),
-        "checklist breadcrumb should name the new sourcing rule; got:\n{prompt}"
+        prompt.contains("propose/judge `swarm_artifacts.files`"),
+        "checklist breadcrumb should name the source arrays; got:\n{prompt}"
     );
 }
 
@@ -7114,7 +7119,7 @@ fn judge_prompt_renders_proposer_declared_files_block_when_scope_present() {
     // The FILE CHECKLIST framing is for integrators only — the judge gets
     // a different label so the role contract isn't muddied.
     assert!(
-        !prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        !prompt.contains("FILE CHECKLIST (informational hint)"),
         "judge prompt must NOT render the integrator's checklist framing; got:\n{prompt}"
     );
 }
@@ -7162,7 +7167,7 @@ fn integrate_prompt_still_uses_file_checklist_after_judge_block_added() {
         false,
     );
     assert!(
-        prompt.contains("FILE CHECKLIST (non-negotiable)"),
+        prompt.contains("FILE CHECKLIST (informational hint)"),
         "integrate prompt must keep its checklist framing; got:\n{prompt}"
     );
     assert!(

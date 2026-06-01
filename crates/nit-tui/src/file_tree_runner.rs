@@ -14,7 +14,29 @@ pub enum FileTreeCommand {
         show_hidden: bool,
         show_ignored: bool,
     },
+    Mutate {
+        workspace_root: PathBuf,
+        parent: PathBuf,
+        op: FileTreeMutation,
+        show_hidden: bool,
+        show_ignored: bool,
+    },
     Shutdown,
+}
+
+pub enum FileTreeMutation {
+    Rename { from: PathBuf, to: PathBuf },
+    CreateFile { path: PathBuf },
+    CreateDir { path: PathBuf },
+}
+
+impl FileTreeMutation {
+    fn target(&self) -> &Path {
+        match self {
+            FileTreeMutation::Rename { to, .. } => to,
+            FileTreeMutation::CreateFile { path } | FileTreeMutation::CreateDir { path } => path,
+        }
+    }
 }
 
 pub enum FileTreeEvent {
@@ -75,7 +97,60 @@ fn runner_loop(cmd_rx: Receiver<FileTreeCommand>, event_tx: Sender<FileTreeEvent
                 };
                 let _ = event_tx.send(event);
             }
+            FileTreeCommand::Mutate {
+                workspace_root,
+                parent,
+                op,
+                show_hidden,
+                show_ignored,
+            } => {
+                // Re-list `parent` on success so the existing DirListed handler
+                // refreshes the affected directory; surface failures as Error.
+                let event = match apply_mutation(&workspace_root, &op) {
+                    Ok(()) => match list_dir(&parent, show_hidden, show_ignored) {
+                        Ok(entries) => FileTreeEvent::DirListed {
+                            dir: parent,
+                            entries,
+                        },
+                        Err(message) => FileTreeEvent::Error {
+                            dir: parent,
+                            message,
+                        },
+                    },
+                    Err(message) => FileTreeEvent::Error {
+                        dir: parent,
+                        message,
+                    },
+                };
+                let _ = event_tx.send(event);
+            }
             FileTreeCommand::Shutdown => break,
+        }
+    }
+}
+
+// Re-checks the workspace jail at write time (TOCTOU): a symlink swapped in
+// after the submit-time check still cannot redirect the write outside the tree.
+fn apply_mutation(workspace_root: &Path, op: &FileTreeMutation) -> Result<(), String> {
+    let target = op.target();
+    if !nit_utils::paths::path_within(workspace_root, target) {
+        return Err(format!(
+            "refused: {} escapes the workspace",
+            target.display()
+        ));
+    }
+    if target.exists() {
+        return Err(format!("{} already exists", target.display()));
+    }
+    match op {
+        FileTreeMutation::Rename { from, to } => {
+            fs::rename(from, to).map_err(|e| format!("rename failed: {e}"))
+        }
+        FileTreeMutation::CreateFile { path } => fs::File::create(path)
+            .map(drop)
+            .map_err(|e| format!("create file failed: {e}")),
+        FileTreeMutation::CreateDir { path } => {
+            fs::create_dir(path).map_err(|e| format!("create dir failed: {e}"))
         }
     }
 }
@@ -169,3 +244,7 @@ fn git_check_ignore(dir: &Path, paths: &[Vec<u8>]) -> Result<HashSet<Vec<u8>>, S
         .map(<[u8]>::to_vec)
         .collect())
 }
+
+#[cfg(test)]
+#[path = "tests/file_tree.rs"]
+mod tests;

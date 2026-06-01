@@ -12,6 +12,10 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }
 
+# OS-shell terminal pane (T6) + modal terminal popup (T7): pty + VT parser.
+portable-pty = { workspace = true }
+vt100 = { workspace = true }
+
 # Serialization, logging, channels
 serde = { workspace = true, features = ["derive"] }
 # serde_json writes `.nit/swarm/<id>/{run,summary,tasks,gates/report}.json`

@@ -109,6 +109,13 @@ impl PtySession {
         self.exited.load(Ordering::SeqCst)
     }
 
+    /// OS pid of the spawned shell, or `None` if the platform backend
+    /// doesn't expose one. Used by the popup title bar to poll the
+    /// shell's live cwd via sysinfo so `cd` updates the header.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// Idempotent kill + reader-thread join. Called by `Drop` AND quit teardown.
     pub fn shutdown(&mut self) {
         let _ = self.child.kill();

@@ -1,4 +1,5 @@
-//! Process-lifetime cached project directories; all inputs are compile-time constants.
+//! XDG project directories (process-lifetime cached) and the workspace
+//! path-jail checks the file tree uses to confine rename/create edits.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -39,4 +40,30 @@ pub fn state_dir() -> Option<PathBuf> {
 #[must_use]
 pub fn cache_dir() -> Option<PathBuf> {
     project_path(|pd| Some(pd.cache_dir()))
+}
+
+/// A proposed leaf name must be a single in-tree path component: the file
+/// tree joins it onto a parent directory, so a separator, `.`/`..`, or an
+/// empty/whitespace value could redirect or escape the write and is refused.
+#[must_use]
+pub fn is_safe_leaf_name(name: &str) -> bool {
+    if name.trim().is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    !name.contains(['/', '\\'])
+}
+
+/// True when `candidate`'s parent canonicalises to a location inside
+/// `workspace_root`. The leaf need not exist (it is the create/rename
+/// target); the parent must. Canonicalising both ends defeats `..` segments
+/// and symlink hops that a lexical prefix check would miss.
+#[must_use]
+pub fn path_within(workspace_root: &Path, candidate: &Path) -> bool {
+    let Some(parent) = candidate.parent() else {
+        return false;
+    };
+    let (Ok(root), Ok(parent)) = (workspace_root.canonicalize(), parent.canonicalize()) else {
+        return false;
+    };
+    parent.starts_with(&root)
 }

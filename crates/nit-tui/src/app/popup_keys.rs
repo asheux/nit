@@ -1000,6 +1000,43 @@ pub(super) fn handle_substrate_overlay_key(key: &KeyEvent, state: &mut AppState)
     }
 }
 
+pub(super) fn handle_definition_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+) -> bool {
+    if state.definition_popup.is_none() {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+        state.definition_popup = None;
+        return true;
+    }
+    let area = dynamic_popup_rect(
+        screen,
+        crate::widgets::definition_popup::preferred_size(screen),
+    );
+    let viewport = popup_text_area(area).height as usize;
+    let Some(view) = state.definition_popup.as_mut() else {
+        return false;
+    };
+    let max_scroll = view.lines.len().saturating_sub(viewport);
+    let page = viewport.max(1) as i32;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => bump_scroll_clamped(&mut view.scroll, -1, max_scroll),
+        KeyCode::Down | KeyCode::Char('j') => bump_scroll_clamped(&mut view.scroll, 1, max_scroll),
+        KeyCode::PageUp => bump_scroll_clamped(&mut view.scroll, -page, max_scroll),
+        KeyCode::PageDown => bump_scroll_clamped(&mut view.scroll, page, max_scroll),
+        KeyCode::Home => view.scroll = 0,
+        KeyCode::End => view.scroll = max_scroll,
+        _ => {}
+    }
+    true
+}
+
 pub(super) fn handle_help_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -1057,5 +1094,106 @@ pub(super) fn handle_help_popup_key(
             }
             _ => true,
         }
+    }
+}
+
+/// Outcome of a key pressed while the modal terminal popup owns input.
+pub(crate) enum TerminalPopupKey {
+    /// `Ctrl+Shift+T` — hide the popup; the shell keeps running.
+    Close,
+    /// Encoded bytes to forward to the shell stdin.
+    Forward(Vec<u8>),
+    /// Forward `bytes` to the shell AND hide the popup. Used by the
+    /// double-Esc close affordance: the first Esc reaches vim/less/fzf
+    /// inside the shell; the second within
+    /// `chat_input::ESC_ESC_ABORT_WINDOW` (~500ms) also closes the popup.
+    ForwardAndClose(Vec<u8>),
+    /// A key with no terminal byte sequence — absorbed, never forwarded.
+    Ignore,
+}
+
+// Per-thread tracker for the popup's double-Esc close affordance.
+// Mirrors `chat_input::record_chat_esc_press`'s pattern — independent
+// from chat's tracker so an Esc in chat then Esc in popup doesn't
+// trigger a phantom close.
+thread_local! {
+    static LAST_POPUP_ESC_AT: std::cell::Cell<Option<std::time::Instant>>
+        = const { std::cell::Cell::new(None) };
+}
+
+/// Returns true when an Esc key event lands within
+/// `ESC_ESC_ABORT_WINDOW` of the previous one. Updates the timestamp
+/// regardless. Caller resets via `clear_popup_esc_state` once the
+/// close fires so a third Esc doesn't immediately re-trigger.
+pub(crate) fn record_popup_esc_press() -> bool {
+    let now = std::time::Instant::now();
+    LAST_POPUP_ESC_AT.with(|cell| {
+        let prev = cell.get();
+        cell.set(Some(now));
+        prev.is_some_and(|t| now.duration_since(t) <= super::chat_input::ESC_ESC_ABORT_WINDOW)
+    })
+}
+
+pub(crate) fn clear_popup_esc_state() {
+    LAST_POPUP_ESC_AT.with(|cell| cell.set(None));
+}
+
+/// `Ctrl+Shift+T`: the chord that both opens (`key_dispatch`) and closes
+/// (here) the popup. Centralised so the two paths cannot diverge.
+///
+/// Two encoding schemes need to match because terminals vary on how
+/// they report Shift for letter chords:
+///
+///   1. Modern (kitty keyboard protocol / crossterm DISAMBIGUATE
+///      enhancements): modifiers contains BOTH CONTROL and SHIFT,
+///      code is `Char('t')` or `Char('T')`.
+///   2. Legacy (macOS Terminal.app, plain xterm-256color): modifiers
+///      contains only CONTROL, code is `Char('T')` — uppercase IS
+///      the shift signal.
+///
+/// Accepting both keeps `Ctrl+Shift+T` working on every terminal we
+/// support. The lower-case `Ctrl+t` (no shift) is deliberately NOT
+/// matched — that's an unrelated chord operators may want for
+/// future bindings.
+pub(crate) fn is_terminal_popup_toggle_key(key: &KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    let shift_explicit = key.modifiers.contains(KeyModifiers::SHIFT);
+    let shift_implicit_via_uppercase = matches!(key.code, KeyCode::Char('T'));
+    if !(shift_explicit || shift_implicit_via_uppercase) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+}
+
+/// Route a key while the terminal popup is focused. Three close
+/// affordances exist; everything else encodes to PTY bytes:
+///
+///   * `Ctrl+Shift+T` — direct close, no PTY forwarding.
+///   * `Esc Esc` within ~500ms — first Esc reaches the shell so vim /
+///     less / fzf can react, second Esc also closes the popup.
+///   * Click outside the popup rect — handled in the runner's mouse
+///     branch, not here.
+pub(crate) fn terminal_popup_key(key: &KeyEvent) -> TerminalPopupKey {
+    if is_terminal_popup_toggle_key(key) {
+        clear_popup_esc_state();
+        return TerminalPopupKey::Close;
+    }
+    if matches!(key.code, KeyCode::Esc) {
+        let bytes = crate::pty::encode_key(*key).unwrap_or_else(|| b"\x1b".to_vec());
+        let double_tap = record_popup_esc_press();
+        if double_tap {
+            clear_popup_esc_state();
+            return TerminalPopupKey::ForwardAndClose(bytes);
+        }
+        return TerminalPopupKey::Forward(bytes);
+    }
+    // Any other key in the popup resets the double-Esc tracker so a
+    // stray Esc minutes ago can't pair with a fresh one to close.
+    clear_popup_esc_state();
+    match crate::pty::encode_key(*key) {
+        Some(bytes) => TerminalPopupKey::Forward(bytes),
+        None => TerminalPopupKey::Ignore,
     }
 }

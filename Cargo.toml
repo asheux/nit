@@ -1,9 +1,9 @@
-# Workspace manifest. The vim-cluster PR (T1–T11) deliberately does NOT
-# add or bump any workspace dependency: `.env` files ride on the
-# existing `tree-sitter-bash` 0.23 (see `crates/nit-syntax/Cargo.toml`),
-# and Wolfram ships without a grammar (no crate vendored). Keeping
-# `Cargo.lock` untouched preserves CI's `--locked` invariant per
-# `CLAUDE.md`.
+# Workspace manifest. The terminal-pane/popup tickets (T6 pane, T7 modal
+# popup) are the only entries here that pull new workspace deps: a real OS
+# shell needs a PTY (`portable-pty`) and an ANSI/VT parser (`vt100`) — raw
+# pty bytes render as garbage in a ratatui `Rect` without one. `Cargo.lock`
+# is regenerated intentionally for these two; CI's `--locked` invariant per
+# `CLAUDE.md` still holds against the committed lock.
 [workspace]
 members = [
     "crates/nit",
@@ -22,7 +22,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.2.14"
+version = "0.2.15"
 authors = ["nit contributors"]
 rust-version = "1.88.0"
 
@@ -34,6 +34,9 @@ criterion = "0.5"
 crossbeam-channel = "0.5"
 crossterm = "0.27"
 directories = "5.0"
+# Cross-platform pty spawn/resize/kill for the OS-shell terminal pane (T6)
+# and modal terminal popup (T7). Paired with `vt100` (below).
+portable-pty = "0.9"
 ratatui = { version = "0.26", default-features = false, features = ["crossterm", "serde"] }
 rayon = "1.10"
 ropey = "1.6"
@@ -48,6 +51,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter", "time"] }
 unicode-segmentation = "1.10"
 unicode-width = "0.1"
+# VT/ANSI parser feeding the terminal pane/popup cell grid (pairs with
+# `portable-pty`). Without it, shell escape sequences render as garbage.
+vt100 = "0.16"
 
 [profile.release]
 debug = true

@@ -37,6 +37,15 @@ pub(super) fn handle_normal_chords(
             }
         }
         KeyCode::Char('d') => {
+            // `gd`: a pending `g` half-chord still inside the chord window opens
+            // the goto-definition popup before `d` becomes the delete operator.
+            if is_normal_mode(state)
+                && input.normal_last_char == Some('g')
+                && now.duration_since(input.normal_last_time) <= CHORD_TIMEOUT
+            {
+                input.normal_last_char = None;
+                return Some(Action::GotoDefinition);
+            }
             // `d` opens an operator-pending state: the next key picks the
             // motion (`w`/`W`/`e`/`E`/`b`/`B`/`d`/`$`). The chord half-key
             // tracker is cleared so a stale `g`/`y` doesn't accidentally

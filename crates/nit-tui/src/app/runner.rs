@@ -172,6 +172,7 @@ pub(super) fn run_loop(
     let mut file_tree_runner = FileTreeRunner::spawn();
     let mut file_watcher = FileWatcher::spawn();
     let genome_worker = crate::genome_worker::GenomeWorker::new();
+    let compile_gate = crate::compile_gate_worker::CompileGateWorker::new();
     let mut workspace_scan = crate::workspace_scan::WorkspaceScanRuntime::new();
     // Parse .gitignore for directory exclusions (shared with file watcher and FILESCORES view).
     state.gitignored_dirs = crate::file_watcher::parse_gitignore_dirs(&state.workspace_root);
@@ -254,6 +255,16 @@ pub(super) fn run_loop(
     // Released on Drop, so a panic / hard-exit can't leave caffeinate behind.
     let mut idle_sleep_guard = crate::power::IdleSleepGuard::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
+    // The single-pane terminal pane's PtySession lives here (nit-core owns no
+    // subprocess); reconciled against `state.terminal_pane_active` each tick.
+    let mut terminal_pane: Option<crate::pty::PtySession> = None;
+    // The modal terminal popup's PtySession. Distinct from the pane: closing
+    // the popup HIDES it (the session persists) — it is killed only at quit.
+    let mut terminal_popup_session: Option<crate::pty::PtySession> = None;
+    // Polls the popup shell's cwd via sysinfo (throttled inside the probe)
+    // so the popup title bar follows `cd` instead of staying pinned to the
+    // spawn dir.
+    let mut popup_cwd_probe = crate::shell_cwd::ShellCwdProbe::new();
     let (mut seed_runtime, mut gol_petri, mut games_petri, mut games_config_preview) =
         spawn_app_runtimes(state);
     let mut vitals = VitalsState::default();
@@ -334,6 +345,30 @@ pub(super) fn run_loop(
                         continue;
                     }
                     handled_input = true;
+                    // Top-level modal: while the terminal popup is visible it
+                    // swallows every key — forwarding to the shell — except the
+                    // two intercepts (Ctrl+Shift+T / Esc) that close it.
+                    if state.terminal_popup.visible {
+                        match terminal_popup_key(&key) {
+                            TerminalPopupKey::Close => {
+                                state.terminal_popup.toggle_requested = true;
+                            }
+                            TerminalPopupKey::Forward(bytes) => {
+                                if let Some(session) = terminal_popup_session.as_ref() {
+                                    let _ = session.write_input(&bytes);
+                                }
+                            }
+                            TerminalPopupKey::ForwardAndClose(bytes) => {
+                                if let Some(session) = terminal_popup_session.as_ref() {
+                                    let _ = session.write_input(&bytes);
+                                }
+                                state.terminal_popup.toggle_requested = true;
+                            }
+                            TerminalPopupKey::Ignore => {}
+                        }
+                        needs_redraw = true;
+                        continue;
+                    }
                     if is_job_pause_key(&key) {
                         if state.app_kind == AppKind::Games
                             && state.command_line.is_none()
@@ -433,6 +468,13 @@ pub(super) fn run_loop(
                     if state.protocol_picker.open && protocol_picker::handle_key(&key, state) {
                         needs_redraw = true;
                         continue;
+                    }
+                    if state.definition_popup.is_some() {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_definition_popup_key(&key, state, screen) {
+                            needs_redraw = true;
+                            continue;
+                        }
                     }
                     if state.agents.artifacts_popup_open {
                         let screen = terminal.size().unwrap_or_default();
@@ -555,6 +597,35 @@ pub(super) fn run_loop(
                             continue;
                         }
                     }
+                    // Terminal pane owns input while live; the Ctrl+\ toggle and
+                    // the global quit fall through so the operator can escape.
+                    if state.terminal_pane_active
+                        && !crate::pty::is_terminal_toggle_key(&key)
+                        && !is_global_quit_key(&key)
+                    {
+                        if let Some(session) = terminal_pane.as_ref() {
+                            if let Some(bytes) = crate::pty::encode_key(key) {
+                                let _ = session.write_input(&bytes);
+                            }
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    // Top-level overlay chord: `Ctrl+Shift+T` opens/closes the
+                    // modal terminal popup from any focus (Editor, Chat,
+                    // FileTree, AgentOps). Intercepted BEFORE the pane-
+                    // specific handlers below so the chat input doesn't
+                    // swallow it as a character keystroke. Mirrors the
+                    // existing chord-precedence pattern for Ctrl+P / Ctrl+F.
+                    if super::popup_keys::is_terminal_popup_toggle_key(&key) {
+                        let outcome =
+                            apply_action_with_syntax(state, syntax, Action::ToggleTerminalPopup);
+                        if outcome.should_exit {
+                            break;
+                        }
+                        needs_redraw = true;
+                        continue;
+                    }
                     if state.file_tree.open && state.focus == PaneId::Editor {
                         let screen = terminal.size().unwrap_or_default();
                         let layout = layout::split(screen);
@@ -603,6 +674,26 @@ pub(super) fn run_loop(
                 }
                 Event::Mouse(mouse) => {
                     handled_input = true;
+                    // The popup absorbs mouse events so clicks can't fall
+                    // through to the dimmed layout behind it. A Left-button
+                    // down OUTSIDE the popup rect is the outside-click close
+                    // affordance (mirrors definition_popup et al.); every
+                    // other mouse event inside or outside is dropped so a
+                    // drag-select on the chat below doesn't leak through.
+                    if state.terminal_popup.visible {
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        ) {
+                            let screen = terminal.size().unwrap_or_default();
+                            let area = crate::widgets::terminal_popup::popup_rect(screen);
+                            if !point_in_rect(mouse.column, mouse.row, area) {
+                                state.terminal_popup.toggle_requested = true;
+                                needs_redraw = true;
+                            }
+                        }
+                        continue;
+                    }
                     let screen = terminal.size().unwrap_or_default();
                     let is_scroll = matches!(
                         mouse.kind,
@@ -812,6 +903,7 @@ pub(super) fn run_loop(
                     &mut swarm,
                     &mut shadow,
                     Some(&genome_worker),
+                    Some(&compile_gate),
                     event,
                 );
                 if outcome.redraw {
@@ -833,6 +925,7 @@ pub(super) fn run_loop(
                     &mut swarm,
                     &mut shadow,
                     Some(&genome_worker),
+                    Some(&compile_gate),
                     event,
                 );
                 if outcome.redraw {
@@ -851,6 +944,14 @@ pub(super) fn run_loop(
         }
 
         if file_tree_tick(state, &file_tree_runner) {
+            needs_redraw = true;
+        }
+
+        if reconcile_terminal_pane(state, &mut terminal_pane, terminal) {
+            needs_redraw = true;
+        }
+
+        if reconcile_terminal_popup(state, &mut terminal_popup_session, terminal) {
             needs_redraw = true;
         }
 
@@ -1046,6 +1147,13 @@ pub(super) fn run_loop(
                 &codex_runner,
                 &claude_runner,
             );
+            super::compile_gate::drain_compile_results(
+                state,
+                &compile_gate,
+                &mut vitals,
+                &codex_runner,
+                &claude_runner,
+            );
             // EVALUATE click → walk + queue stale files. `rescan` no-ops
             // while a scan is in flight, so a stuck flag can't double-queue.
             if state.agents.workspace_scan_requested {
@@ -1134,6 +1242,14 @@ pub(super) fn run_loop(
                 );
             }
 
+            let popup_live_cwd = if state.terminal_popup.visible {
+                terminal_popup_session
+                    .as_ref()
+                    .and_then(|s| s.process_id())
+                    .and_then(|pid| popup_cwd_probe.cwd(pid))
+            } else {
+                None
+            };
             draw(
                 terminal,
                 state,
@@ -1147,6 +1263,9 @@ pub(super) fn run_loop(
                 &mut games_petri,
                 fuzzy_runtime.preview_model.as_ref(),
                 &mut fuzzy_runtime.preview_scroll_delta,
+                terminal_pane.as_ref(),
+                terminal_popup_session.as_ref(),
+                popup_live_cwd.as_deref(),
                 &vitals_snapshot,
             )?;
             needs_redraw = false;
@@ -1159,10 +1278,130 @@ pub(super) fn run_loop(
     codex_runner.shutdown();
     claude_runner.shutdown();
     fuzzy_runtime.shutdown();
+    if let Some(mut session) = terminal_pane.take() {
+        session.shutdown();
+    }
+    // The popup shell persists across hide; quitting nit kills it here.
+    if let Some(mut session) = terminal_popup_session.take() {
+        session.shutdown();
+    }
     if let Some(runtime) = games_config_preview.as_mut() {
         runtime.shutdown();
     }
     Ok(())
+}
+
+/// Inner chat-pane dimensions for the terminal PTY winsize. The chat pane draws
+/// an all-borders block, so the shell fills the area minus one cell per side.
+fn terminal_pane_size(terminal: &Terminal<CrosstermBackend<Stdout>>) -> crate::pty::PtySize {
+    let screen = terminal.size().unwrap_or_default();
+    let notes = layout::split(screen).notes;
+    crate::pty::PtySize {
+        rows: notes.height.saturating_sub(2).max(1),
+        cols: notes.width.saturating_sub(2).max(1),
+    }
+}
+
+/// Spawn the shell on first toggle-on; keep it parked across tab swaps so
+/// re-opening AGENT CHAT → TERMINAL resumes the same shell with its history
+/// and live processes intact. Mirrors the modal popup's hide-not-kill
+/// semantics. The shell is only torn down when:
+///
+///   * the operator runs `exit` (or it dies) — pane reverts to chat,
+///   * `nit` shuts down (the runner's drop path takes the session).
+///
+/// Returns whether a redraw is needed.
+fn reconcile_terminal_pane(
+    state: &mut AppState,
+    terminal_pane: &mut Option<crate::pty::PtySession>,
+    terminal: &Terminal<CrosstermBackend<Stdout>>,
+) -> bool {
+    if state.terminal_pane_active {
+        // Operator ran `exit` (or the shell crashed) while the pane was
+        // visible — flip back to chat so they don't see a dead shell
+        // sitting there. Re-clicking TERMINAL spawns a fresh session.
+        if terminal_pane.as_ref().is_some_and(|s| s.has_exited()) {
+            if let Some(mut session) = terminal_pane.take() {
+                session.shutdown();
+            }
+            state.terminal_pane_active = false;
+            state.focus = PaneId::Editor;
+            return true;
+        }
+        if terminal_pane.is_none() {
+            match crate::pty::PtySession::spawn(&state.workspace_root, terminal_pane_size(terminal))
+            {
+                Ok(session) => {
+                    *terminal_pane = Some(session);
+                    return true;
+                }
+                Err(err) => {
+                    state.terminal_pane_active = false;
+                    state.focus = PaneId::Editor;
+                    state.status = Some(format!("Terminal: {err}"));
+                    return true;
+                }
+            }
+        }
+        if let Some(session) = terminal_pane.as_ref() {
+            let _ = session.resize(terminal_pane_size(terminal));
+        }
+        false
+    } else {
+        // PARKED: keep the session alive so the operator can flip back
+        // to TERMINAL and pick up where they left off. The only cleanup
+        // here is reaping a parked session that died on its own; an
+        // owner-driven shutdown happens at `nit` quit.
+        if terminal_pane.as_ref().is_some_and(|s| s.has_exited()) {
+            if let Some(mut session) = terminal_pane.take() {
+                session.shutdown();
+            }
+        }
+        false
+    }
+}
+
+/// Inner dimensions of the modal terminal popup for the PTY winsize. The popup
+/// draws an all-borders block, so the shell fills its area minus one cell/side.
+fn terminal_popup_size(terminal: &Terminal<CrosstermBackend<Stdout>>) -> crate::pty::PtySize {
+    let area = crate::widgets::terminal_popup::popup_rect(terminal.size().unwrap_or_default());
+    crate::pty::PtySize {
+        rows: area.height.saturating_sub(2).max(1),
+        cols: area.width.saturating_sub(2).max(1),
+    }
+}
+
+/// Service a pending popup toggle and keep the shell live. Unlike the pane,
+/// closing only HIDES (the session persists, killed at quit), so re-opening
+/// resumes the same shell — unless it exited, in which case a fresh one spawns
+/// in the re-pinned cwd. A visible popup always redraws so live shell output
+/// appears without waiting on a keystroke.
+fn reconcile_terminal_popup(
+    state: &mut AppState,
+    popup: &mut Option<crate::pty::PtySession>,
+    terminal: &Terminal<CrosstermBackend<Stdout>>,
+) -> bool {
+    if std::mem::take(&mut state.terminal_popup.toggle_requested) {
+        let exited = popup.as_ref().is_some_and(|s| s.has_exited());
+        let cwd = state.workspace_root.clone();
+        state.terminal_popup.apply_toggle(&cwd, exited);
+        let needs_spawn = popup.is_none() || popup.as_ref().is_some_and(|s| s.has_exited());
+        if state.terminal_popup.visible && needs_spawn {
+            if let Some(mut dead) = popup.take() {
+                dead.shutdown();
+            }
+            let dir = state.terminal_popup.cwd.clone().unwrap_or(cwd);
+            match crate::pty::PtySession::spawn(&dir, terminal_popup_size(terminal)) {
+                Ok(session) => *popup = Some(session),
+                Err(err) => {
+                    state.terminal_popup.visible = false;
+                    state.status = Some(format!("Terminal popup: {err}"));
+                }
+            }
+        }
+        return true;
+    }
+    state.terminal_popup.visible
 }
 
 pub(super) fn settle_initial_terminal_size(

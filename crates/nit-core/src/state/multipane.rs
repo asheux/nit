@@ -89,6 +89,11 @@ pub struct PaneSession {
     pub selected_effort: BTreeMap<String, String>,
     #[serde(skip)]
     pub selection: Option<PaneSelection>,
+    /// Per-pane `Ctrl+\` flag: when set this pane renders an OS-shell terminal
+    /// instead of chat. Session-local — a relaunched pane starts in chat mode
+    /// (the prior shell is already gone). The event loop owns the PtySession.
+    #[serde(skip)]
+    pub terminal_active: bool,
 }
 
 /// Pane-local text selection. Coordinates are pane-thread row indices
@@ -142,6 +147,7 @@ impl Default for PaneSession {
             has_run_mission: false,
             selected_effort: BTreeMap::new(),
             selection: None,
+            terminal_active: false,
         }
     }
 }

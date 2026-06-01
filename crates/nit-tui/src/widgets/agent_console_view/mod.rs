@@ -45,6 +45,104 @@ const CHAT_INPUT_SCROLL_AUTO: usize = usize::MAX;
 const AGENT_BADGE_MAX_CHARS: usize = 24;
 const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 
+/// Title-bar tab labels for the chat pane. Kept as constants so the
+/// renderer and the mouse hit-tester (`chat_tab_at_column`) can never
+/// disagree on the label widths.
+pub(crate) const CHAT_TAB_AGENT_LABEL: &str = " AGENT CHAT ";
+pub(crate) const CHAT_TAB_TERMINAL_LABEL: &str = " TERMINAL ";
+/// Single-space gap between the two pill buttons (matches the
+/// visualizer pane's title-button spacing).
+const CHAT_TAB_SEP_WIDTH: u16 = 1;
+
+/// Which tab a click on the chat-pane title row maps to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatPaneTab {
+    /// Default chat console (popup hidden).
+    AgentChat,
+    /// Modal terminal popup (toggles `state.terminal_popup`).
+    Terminal,
+}
+
+/// Returns the tab a click at `col_in_rect` hits, or `None` for
+/// non-tab columns. `col_in_rect` is the column relative to the
+/// chat pane rect's left edge (i.e. `mouse.column - layout.notes.x`).
+///
+/// Mirrors `visualizer_view::title_button_hit`'s "subtract 1 for the
+/// border corner, then walk fixed-width labels left-to-right" pattern.
+/// `col_in_rect == 0` is the border corner — never a tab hit.
+pub fn chat_tab_at_column(col_in_rect: u16) -> Option<ChatPaneTab> {
+    if col_in_rect == 0 {
+        return None;
+    }
+    // Title text starts one cell in from the left border corner.
+    let col = col_in_rect - 1;
+    let agent_end = CHAT_TAB_AGENT_LABEL.len() as u16;
+    let terminal_start = agent_end + CHAT_TAB_SEP_WIDTH;
+    let terminal_end = terminal_start + CHAT_TAB_TERMINAL_LABEL.len() as u16;
+    if col < agent_end {
+        Some(ChatPaneTab::AgentChat)
+    } else if (terminal_start..terminal_end).contains(&col) {
+        Some(ChatPaneTab::Terminal)
+    } else {
+        None
+    }
+}
+
+/// Build the chat-pane title line with the AGENT CHAT / TERMINAL tab
+/// pair. Shared between the chat console renderer (`render`, which
+/// passes `ChatPaneTab::AgentChat`) and the inline terminal pane
+/// (`draw.rs`, which passes `ChatPaneTab::Terminal`) so the column
+/// math used by `chat_tab_at_column` always matches what the operator
+/// sees on screen.
+///
+/// Buttons are styled to match the visualizer pane: the active tab is
+/// a solid pill (`bg = title_color`, `fg = background`, BOLD), the
+/// inactive tab keeps the same outline but uses muted border-tone fg
+/// so it reads as a clickable button while staying secondary. `focused`
+/// shifts the title accent color between `title_focused` and `title`.
+pub fn chat_pane_title_line(selected: ChatPaneTab, focused: bool, theme: &Theme) -> Line<'static> {
+    let title_color = if focused {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+    let active_btn_style = Style::default()
+        .fg(theme.background)
+        .bg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let inactive_btn_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(title_color);
+    let agent_style = if matches!(selected, ChatPaneTab::AgentChat) {
+        active_btn_style
+    } else {
+        inactive_btn_style
+    };
+    let terminal_style = if matches!(selected, ChatPaneTab::Terminal) {
+        active_btn_style
+    } else {
+        inactive_btn_style
+    };
+    let hint_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let hint_text = match selected {
+        ChatPaneTab::AgentChat => "   [Enter] send ",
+        // The inline terminal absorbs typed keys; the only escape is
+        // either clicking AGENT CHAT or Ctrl+\, which the operator may
+        // not remember. Spell the chord out next to the tabs so this
+        // surface stays self-documenting.
+        ChatPaneTab::Terminal => "   [Ctrl+\\] exit ",
+    };
+    Line::from(vec![
+        Span::styled(CHAT_TAB_AGENT_LABEL, agent_style),
+        Span::styled(" ", sep_style),
+        Span::styled(CHAT_TAB_TERMINAL_LABEL, terminal_style),
+        Span::styled(hint_text, hint_style),
+    ])
+}
+
 /// Computed layout for the console UI within a pane: thread area, input box,
 /// context hints, and cursor tracking.
 pub(super) struct ConsoleLayout {
@@ -174,19 +272,16 @@ pub fn render(
     } else {
         BorderType::Plain
     };
-    let title_color = if focused {
-        theme.title_focused
-    } else {
-        theme.title
-    };
+    // Two-tab title bar — mirrors the visualizer pane's ROSTER /
+    // MISSIONS / DAG / … tab styling. AGENT CHAT is the active tab on
+    // this surface because the chat console is only rendered when the
+    // inline terminal pane is inactive (`draw.rs` swaps to a TERMINAL-
+    // active title when `terminal_pane_active`). Both labels are
+    // clickable — see chat_tab_at_column + app/mouse.rs.
+    let title_line = chat_pane_title_line(ChatPaneTab::AgentChat, focused, theme);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(
-            "AGENT CHAT  [ Enter send ]",
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(title_line)
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(theme.background));

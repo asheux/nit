@@ -219,14 +219,20 @@ impl Buffer {
             .line
             .min(self.rope.len_lines().saturating_sub(1));
         let idx = self.rope.line_to_char(line);
+        // Linewise paste opens a fresh line: terminate the payload so its last
+        // line can't fuse into the line it pushes down.
+        let mut insert_text = text.to_string();
+        if !insert_text.ends_with('\n') {
+            insert_text.push('\n');
+        }
         let before = self.cursor;
-        self.record_insert(idx, text);
-        self.rope.insert(idx, text);
+        self.record_insert(idx, &insert_text);
+        self.rope.insert(idx, &insert_text);
         self.cursor.line = line;
         self.cursor.col = 0;
         self.dirty = true;
         self.clamp_col();
-        self.record_insert_delta(idx, text, before, GroupHint::Atomic);
+        self.record_insert_delta(idx, &insert_text, before, GroupHint::Atomic);
     }
 
     pub fn paste_line_below(&mut self, text: &str) {
@@ -246,6 +252,12 @@ impl Buffer {
             insert_text.push('\n');
         }
         insert_text.push_str(text);
+        // Terminate the payload so the block's last line lands on its own row
+        // instead of fusing into the existing next line (the `}    args = …`
+        // collision when a visual `y` slice ends mid-line).
+        if !insert_text.ends_with('\n') {
+            insert_text.push('\n');
+        }
         let before = self.cursor;
         self.record_insert(idx, &insert_text);
         self.rope.insert(idx, &insert_text);

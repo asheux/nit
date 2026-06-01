@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "buffer/bracket_match.rs"]
 mod bracket_match;
+#[path = "buffer/case_convert.rs"]
+mod case_convert;
 #[path = "buffer/cursor_sticky.rs"]
 mod cursor_sticky;
 #[path = "buffer/indent_block.rs"]

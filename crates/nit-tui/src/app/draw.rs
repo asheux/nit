@@ -24,15 +24,16 @@ use crate::{
     vitals::LabVitalsSnapshot,
     widgets::{
         agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
-        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
-        games_match_history_popup, games_replay_popup, games_run_browser_popup,
+        definition_popup, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
+        games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
         games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, rule_picker, substrate_overlay, top_bar, visualizer_view,
+        help_overlay, rule_picker, substrate_overlay, terminal_view, top_bar, visualizer_view,
     },
 };
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -46,6 +47,9 @@ pub(super) fn draw(
     games_petri: &mut Option<GamesPetriDishRuntime>,
     fuzzy_preview: Option<&PreviewModel>,
     fuzzy_preview_scroll_delta: &mut i32,
+    terminal_pane: Option<&crate::pty::PtySession>,
+    terminal_popup: Option<&crate::pty::PtySession>,
+    terminal_popup_live_cwd: Option<&std::path::Path>,
     vitals: &LabVitalsSnapshot,
 ) -> io::Result<()> {
     let start = Instant::now();
@@ -124,7 +128,33 @@ pub(super) fn draw(
                 search,
             )
         };
-        let notes_cursor = agent_console_view::render(f, layout.notes, state, swarm, theme);
+        let mut terminal_cursor: Option<(u16, u16)> = None;
+        let notes_cursor = match (state.terminal_pane_active, terminal_pane) {
+            (true, Some(session)) => {
+                let focused = state.focus == PaneId::Notes;
+                // Render the same AGENT CHAT / TERMINAL tab line the
+                // chat console uses so the operator can click AGENT
+                // CHAT to switch back. `chat_tab_at_column` in
+                // app/mouse.rs hit-tests the same columns.
+                let title_line = agent_console_view::chat_pane_title_line(
+                    agent_console_view::ChatPaneTab::Terminal,
+                    focused,
+                    theme,
+                );
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Thick)
+                    .title(title_line)
+                    .border_style(Style::default().fg(theme.border_focused))
+                    .style(Style::default().bg(theme.background));
+                let inner = block.inner(layout.notes);
+                f.render_widget(block, layout.notes);
+                terminal_view::render_screen(f, inner, session, theme);
+                terminal_cursor = terminal_view::cursor_position(inner, session);
+                None
+            }
+            _ => agent_console_view::render(f, layout.notes, state, swarm, theme),
+        };
         {
             let text_area = job_output_text_area(layout.job);
             state.agents.ops_viewport_width = text_area.width.max(1) as usize;
@@ -305,6 +335,15 @@ pub(super) fn draw(
             let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
             help_overlay::render(f, area, state, theme);
         }
+        if state.definition_popup.is_some() {
+            // Same-file v1: reuse the editor's live snapshot so the snippet
+            // matches the buffer's own colors with no second parse.
+            let area = dynamic_popup_rect(screen, definition_popup::preferred_size(screen));
+            let render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
+            if let Some(view) = state.definition_popup.as_ref() {
+                definition_popup::render(f, area, view, render.snapshot, render.line_map, theme);
+            }
+        }
         if state.show_substrate_overlay {
             let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
             substrate_overlay::render(f, area, state, theme);
@@ -350,6 +389,19 @@ pub(super) fn draw(
             None
         };
 
+        // Modal terminal popup: drawn last so it dims and overlays every other
+        // pane/overlay; its shell cursor takes precedence below. The live cwd
+        // (polled via ShellCwdProbe in the runner) wins over the cwd pinned at
+        // spawn time so `cd` inside the popup updates the title.
+        let terminal_popup_cursor = if state.terminal_popup.visible {
+            terminal_popup.and_then(|session| {
+                let title_cwd = terminal_popup_live_cwd.or(state.terminal_popup.cwd.as_deref());
+                crate::widgets::terminal_popup::render(f, screen, session, title_cwd, theme)
+            })
+        } else {
+            None
+        };
+
         // Cursor: only set it when we actually want a visible caret. If we don't set a cursor,
         // ratatui will hide it; calling `set_cursor(0, 0)` makes it look like the cursor is
         // jumping to the top-left corner.
@@ -360,7 +412,9 @@ pub(super) fn draw(
                 .map(|p| p.is_visible())
                 .unwrap_or(false),
         };
-        let cursor = if let Some((x, y)) = command_cursor {
+        let cursor = if let Some((x, y)) = terminal_popup_cursor {
+            Some((x, y))
+        } else if let Some((x, y)) = command_cursor {
             Some((x, y))
         } else if let Some((x, y)) = fuzzy_cursor {
             Some((x, y))
@@ -374,6 +428,8 @@ pub(super) fn draw(
             && state.agents.dock_tab == AgentOpsTab::Scratchpad
         {
             job_cursor.map(|pos| (pos.x, pos.y))
+        } else if state.terminal_pane_active {
+            terminal_cursor
         } else {
             notes_cursor.map(|pos| (pos.x, pos.y))
         };

@@ -261,6 +261,10 @@ pub struct AppState {
     pub command_line: Option<CommandLine>,
     #[serde(skip)]
     pub ui_selection: Option<UiSelection>,
+    /// Active `gd` goto-definition popup; `Some` while the same-file
+    /// definition view is open. Transient UI — never serialized.
+    #[serde(skip)]
+    pub definition_popup: Option<DefinitionView>,
     #[serde(skip)]
     pub help_scroll: usize,
     #[serde(skip)]
@@ -322,6 +326,16 @@ pub struct AppState {
     /// Per-agent retry counters. Missing entry treated as 0.
     #[serde(skip)]
     pub genome_retry_counts: HashMap<String, u8>,
+    /// Per-agent compile-gate retry counters. Bumped by the
+    /// `compile_gate` drain in `app::runner` when a `cargo check`
+    /// fired after a writer turn reports an error in a file the
+    /// agent wrote. Capped by `COMPILE_GATE_RETRY_LIMIT` so a
+    /// genuinely-broken integrator can't loop forever. Separate from
+    /// `genome_retry_counts` because compile failure is a structural
+    /// gate (must-fix) while genome retry is a quality signal
+    /// (advisory).
+    #[serde(skip)]
+    pub compile_retry_counts: HashMap<String, u8>,
     /// Per-agent quality delta from the last authoritative evaluation batch.
     /// Read by `build_genome_retry_prompt` to decide whether to retry.
     /// Missing entry treated as 0 (no data → no retry).
@@ -387,11 +401,49 @@ pub struct AppState {
     pub substrate_overlay_last_max_scroll: usize,
     #[serde(default)]
     pub substrate: crate::substrate::SubstrateState,
+    /// Single-pane `Ctrl+\` flag: when set the chat pane renders an OS-shell
+    /// terminal instead. The TUI runner owns the `PtySession` (nit-core spawns
+    /// no subprocess) and reconciles spawn/kill against this flag.
+    #[serde(skip)]
+    pub terminal_pane_active: bool,
     /// Multipane launch mode state. When `Some`, the standard single-pane
     /// run loop is never entered — the multipane event loop owns rendering
     /// and input. Per-launch only; not persisted.
     #[serde(skip)]
     pub multipane: Option<MultipaneState>,
+    /// Modal terminal popup (`Ctrl+Shift+T`). Pure UI intent: `visible` drives
+    /// the overlay, `cwd` is pinned at open, `toggle_requested` is the
+    /// nit-core→TUI handoff — the persistent `PtySession` lives in the event
+    /// loop, unreachable from `apply_action`.
+    #[serde(skip)]
+    pub terminal_popup: TerminalPopupState,
+}
+
+/// Modal terminal-popup intent shared between `apply_action` and the TUI event
+/// loop. The loop owns the `PtySession`; this carries only what nit-core can
+/// decide without touching a subprocess.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalPopupState {
+    pub visible: bool,
+    pub cwd: Option<PathBuf>,
+    pub toggle_requested: bool,
+}
+
+impl TerminalPopupState {
+    /// Service one toggle: hide when shown, else show — pinning `cwd` to
+    /// `context_cwd` only on first open or after the prior shell exited. A
+    /// re-open never silently follows a newly-focused pane's directory while
+    /// the old session is still alive.
+    pub fn apply_toggle(&mut self, context_cwd: &Path, prior_shell_exited: bool) {
+        if self.visible {
+            self.visible = false;
+        } else {
+            if self.cwd.is_none() || prior_shell_exited {
+                self.cwd = Some(context_cwd.to_path_buf());
+            }
+            self.visible = true;
+        }
+    }
 }
 
 /// Sub-view toggle for the CODE STRUCTURAL QUALITY pane.
@@ -449,6 +501,79 @@ impl YankRegister {
     pub fn is_line_wise(&self) -> bool {
         matches!(self, Self::LineWise(_))
     }
+}
+
+/// Backing data for the `gd` goto-definition popup: a resolved same-file
+/// definition rendered as a scrollable snippet. Pure data — tree-sitter
+/// highlighting is applied at render time in the TUI layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefinitionView {
+    pub title: String,
+    pub path: String,
+    /// 1-based buffer line of the definition (the first snippet line).
+    pub start_line: usize,
+    pub lines: Vec<String>,
+    pub scroll: usize,
+}
+
+/// Definition-introducing keywords shared across the languages nit edits.
+/// v1 `gd` is a same-file lexical scan — a tree-sitter resolver backed by a
+/// project index is deferred to a follow-up ticket.
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn",
+    "func",
+    "function",
+    "def",
+    "class",
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "type",
+    "const",
+    "let",
+    "var",
+    "static",
+    "mod",
+    "namespace",
+    "impl",
+    "package",
+    "macro_rules",
+];
+
+/// First line index (0-based) whose text declares `word`, or `None` when no
+/// definition-shaped line is found.
+pub fn find_definition_line(lines: &[&str], word: &str) -> Option<usize> {
+    lines.iter().position(|line| line_defines(line, word))
+}
+
+/// A line "defines" `word` when it either opens with a `word =` / `word :=`
+/// assignment or places `word` immediately after a definition keyword. Both
+/// arms enforce whole-word boundaries so `args` never matches `argsmap`.
+fn line_defines(line: &str, word: &str) -> bool {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(word) {
+        let bounded = rest
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let rest = rest.trim_start();
+        if bounded && (rest.starts_with(":=") || (rest.starts_with('=') && !rest.starts_with("==")))
+        {
+            return true;
+        }
+    }
+    let mut prev: Option<&str> = None;
+    for token in trimmed
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+    {
+        if token == word && prev.is_some_and(|p| DEFINITION_KEYWORDS.contains(&p)) {
+            return true;
+        }
+        prev = Some(token);
+    }
+    false
 }
 
 pub struct ActionOutcome {
@@ -643,6 +768,7 @@ impl AppState {
             jumplist: JumpList::new(),
             command_line: None,
             ui_selection: None,
+            definition_popup: None,
             help_scroll: 0,
             logs_scroll: 0,
             syntax_status: String::new(),
@@ -661,6 +787,7 @@ impl AppState {
             genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
             genome_retry_counts: HashMap::new(),
+            compile_retry_counts: HashMap::new(),
             genome_quality_deltas: HashMap::new(),
             pending_claim_retries: Vec::new(),
             pending_interventions: Vec::new(),
@@ -677,7 +804,9 @@ impl AppState {
             substrate_overlay_scroll: 0,
             substrate_overlay_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
+            terminal_pane_active: false,
             multipane: None,
+            terminal_popup: TerminalPopupState::default(),
         }
     }
 

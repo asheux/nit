@@ -1,16 +1,23 @@
+use std::collections::HashMap;
 use std::io::{self, Stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEventKind, MouseEvent, MouseEventKind};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use nit_core::AppState;
-use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::Rect,
+    style::Style,
+    widgets::{Block, BorderType, Borders, Clear},
+    Terminal,
+};
 
 use super::keys::handle_key;
 use super::mouse::handle_mouse;
 use super::render::render_grid;
-use crate::app::clear_chat_esc_state;
+use crate::app::{clear_chat_esc_state, is_global_quit_key};
 use crate::claude_runner::{ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
 use crate::multipane::dir_search_runner::{DirSearchEvent, DirSearchRunner};
@@ -50,6 +57,12 @@ pub fn run_loop(
     let mut idle_sleep_guard = crate::power::IdleSleepGuard::default();
     clear_chat_esc_state();
     let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
+    // Per-pane terminal PTYs (Ctrl+\), keyed by pane index and reconciled
+    // against each pane's `terminal_active` flag. nit-core owns no subprocess.
+    let mut terminals: HashMap<usize, crate::pty::PtySession> = HashMap::new();
+    // The one-per-process modal terminal popup (Ctrl+Shift+T), overlaid on the
+    // whole grid. Persists across hide; killed at quit via `finalize_session`.
+    let mut terminal_popup: Option<crate::pty::PtySession> = None;
 
     let workspace_root = state.workspace_root.clone();
     let had_prior_session = persistence::session_path(&workspace_root)
@@ -91,12 +104,20 @@ pub fn run_loop(
                 &mut swarm,
                 &mut shadow,
                 &dir_search_runner,
+                &mut terminals,
+                &terminal_popup,
                 &mut clipboard,
                 theme,
                 area,
             )?;
             if should_quit {
-                finalize_session(state, &workspace_root, had_prior_session);
+                finalize_session(
+                    state,
+                    &workspace_root,
+                    had_prior_session,
+                    &mut terminals,
+                    &mut terminal_popup,
+                );
                 return Ok(());
             }
         }
@@ -121,6 +142,7 @@ pub fn run_loop(
                     &mut swarm,
                     &mut shadow,
                     None,
+                    None,
                     event,
                 );
             }
@@ -136,6 +158,7 @@ pub fn run_loop(
                     &claude,
                     &mut swarm,
                     &mut shadow,
+                    None,
                     None,
                     event,
                 );
@@ -196,6 +219,10 @@ pub fn run_loop(
 
         capture_pane_mission_ids(state);
 
+        let term_area = terminal_size(terminal)?;
+        reconcile_pane_terminals(state, &mut terminals, term_area);
+        reconcile_grid_terminal_popup(state, &mut terminal_popup, term_area);
+
         // Render only when the per-frame minimum interval has elapsed.
         // `frame_count` advances INSIDE the gate so the breather phase
         // tracks real frames rather than loop iterations — without this,
@@ -208,11 +235,30 @@ pub fn run_loop(
             terminal.draw(|frame| {
                 let area = frame.size();
                 let cursor = render_grid(frame, area, state, &swarm, theme);
+                let term_cursor = overlay_pane_terminals(frame, area, state, &terminals, theme);
                 if state.agents.artifacts_popup_open {
                     let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
                     artifacts_popup::render(frame, popup_area, state, &swarm, theme);
                 }
-                if let Some(c) = cursor {
+                // Modal terminal popup overlays the entire grid, topmost.
+                let popup_cursor = if state.terminal_popup.visible {
+                    terminal_popup.as_ref().and_then(|session| {
+                        crate::widgets::terminal_popup::render(
+                            frame,
+                            area,
+                            session,
+                            state.terminal_popup.cwd.as_deref(),
+                            theme,
+                        )
+                    })
+                } else {
+                    None
+                };
+                if let Some((x, y)) = popup_cursor {
+                    frame.set_cursor(x, y);
+                } else if let Some((x, y)) = term_cursor {
+                    frame.set_cursor(x, y);
+                } else if let Some(c) = cursor {
                     frame.set_cursor(c.x, c.y);
                 }
             })?;
@@ -254,12 +300,20 @@ pub fn run_loop(
             &mut swarm,
             &mut shadow,
             &dir_search_runner,
+            &mut terminals,
+            &terminal_popup,
             &mut clipboard,
             theme,
             area,
         )?;
         if should_quit {
-            finalize_session(state, &workspace_root, had_prior_session);
+            finalize_session(
+                state,
+                &workspace_root,
+                had_prior_session,
+                &mut terminals,
+                &mut terminal_popup,
+            );
             return Ok(());
         }
 
@@ -288,6 +342,8 @@ fn drain_input_burst(
     swarm: &mut SwarmRuntime,
     shadow: &mut ShadowRuntime,
     dir_runner: &DirSearchRunner,
+    terminals: &mut HashMap<usize, crate::pty::PtySession>,
+    terminal_popup: &Option<crate::pty::PtySession>,
     clipboard: &mut Option<arboard::Clipboard>,
     theme: &Theme,
     area: Rect,
@@ -312,9 +368,16 @@ fn drain_input_burst(
                 if let Some(drag) = pending_drag.take() {
                     handle_mouse(state, swarm, theme, clipboard, area, drag);
                 }
-                if handle_key(
-                    state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard, area,
-                ) {
+                // The modal popup is top-level: while visible it swallows every
+                // key, forwarding to its shell except the two close intercepts.
+                if state.terminal_popup.visible {
+                    forward_key_to_terminal_popup(state, terminal_popup, key);
+                } else if !forward_key_to_focused_terminal(state, terminals, key)
+                    && handle_key(
+                        state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard,
+                        area,
+                    )
+                {
                     return Ok(true);
                 }
             }
@@ -328,7 +391,9 @@ fn drain_input_burst(
                 }
                 handle_paste(state, &text);
             }
-            Event::Mouse(mouse) => {
+            // The popup absorbs the mouse (falls to `_`) so clicks can't reach
+            // the dimmed grid behind it.
+            Event::Mouse(mouse) if !state.terminal_popup.visible => {
                 if matches!(mouse.kind, MouseEventKind::Drag(_)) {
                     pending_drag = Some(mouse);
                 } else {
@@ -369,7 +434,19 @@ fn handle_paste(state: &mut AppState, text: &str) {
 
 // Discard the session file if nothing was run yet and no prior file
 // existed; otherwise persist so the operator can resume.
-fn finalize_session(state: &AppState, workspace_root: &Path, had_prior: bool) {
+fn finalize_session(
+    state: &AppState,
+    workspace_root: &Path,
+    had_prior: bool,
+    terminals: &mut HashMap<usize, crate::pty::PtySession>,
+    terminal_popup: &mut Option<crate::pty::PtySession>,
+) {
+    for (_, mut session) in terminals.drain() {
+        session.shutdown();
+    }
+    if let Some(mut session) = terminal_popup.take() {
+        session.shutdown();
+    }
     let Some(mp) = state.multipane.as_ref() else {
         return;
     };
@@ -479,4 +556,285 @@ pub(super) fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent
     ds.results = results;
     ds.selected = ds.selected.min(last);
     ds.view_offset = 0;
+}
+
+/// Forward a keystroke to the focused pane's live terminal. The `Ctrl+\` toggle
+/// and the global quit fall through to `handle_key` so the operator can always
+/// escape. Returns whether the terminal consumed the key.
+fn forward_key_to_focused_terminal(
+    state: &AppState,
+    terminals: &HashMap<usize, crate::pty::PtySession>,
+    key: KeyEvent,
+) -> bool {
+    let idx = super::keys::focused_pane_idx(state);
+    let active = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(idx))
+        .map(|pane| pane.terminal_active)
+        .unwrap_or(false);
+    if !active || crate::pty::is_terminal_toggle_key(&key) || is_global_quit_key(&key) {
+        return false;
+    }
+    if let Some(session) = terminals.get(&idx) {
+        if let Some(bytes) = crate::pty::encode_key(key) {
+            let _ = session.write_input(&bytes);
+        }
+    }
+    true
+}
+
+/// Route a key to the focused modal popup: the two intercepts request a close
+/// (serviced by `reconcile_grid_terminal_popup`), everything else forwards to
+/// the shell.
+fn forward_key_to_terminal_popup(
+    state: &mut AppState,
+    popup: &Option<crate::pty::PtySession>,
+    key: KeyEvent,
+) {
+    match crate::app::popup_keys::terminal_popup_key(&key) {
+        crate::app::popup_keys::TerminalPopupKey::Close => {
+            state.terminal_popup.toggle_requested = true;
+        }
+        crate::app::popup_keys::TerminalPopupKey::Forward(bytes) => {
+            if let Some(session) = popup.as_ref() {
+                let _ = session.write_input(&bytes);
+            }
+        }
+        crate::app::popup_keys::TerminalPopupKey::ForwardAndClose(bytes) => {
+            if let Some(session) = popup.as_ref() {
+                let _ = session.write_input(&bytes);
+            }
+            state.terminal_popup.toggle_requested = true;
+        }
+        crate::app::popup_keys::TerminalPopupKey::Ignore => {}
+    }
+}
+
+/// cwd for a popup opened in multipane: the focused pane's directory, falling
+/// back to the workspace root when that pane has none.
+fn focused_pane_cwd(state: &AppState) -> PathBuf {
+    state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .map(|pane| pane.cwd.clone())
+        .filter(|cwd| !cwd.as_os_str().is_empty())
+        .unwrap_or_else(|| state.workspace_root.clone())
+}
+
+/// Service a pending popup toggle over the grid: pin the focused pane's cwd
+/// (re-pinned only after the prior shell exits), flip visibility, and spawn a
+/// fresh shell when opening without a live one. Close only HIDES.
+fn reconcile_grid_terminal_popup(
+    state: &mut AppState,
+    popup: &mut Option<crate::pty::PtySession>,
+    area: Rect,
+) {
+    if !std::mem::take(&mut state.terminal_popup.toggle_requested) {
+        return;
+    }
+    let exited = popup.as_ref().is_some_and(|s| s.has_exited());
+    let cwd = focused_pane_cwd(state);
+    state.terminal_popup.apply_toggle(&cwd, exited);
+    let needs_spawn = popup.is_none() || popup.as_ref().is_some_and(|s| s.has_exited());
+    if state.terminal_popup.visible && needs_spawn {
+        if let Some(mut dead) = popup.take() {
+            dead.shutdown();
+        }
+        let dir = state.terminal_popup.cwd.clone().unwrap_or(cwd);
+        let popup_area = crate::widgets::terminal_popup::popup_rect(area);
+        let size = crate::pty::PtySize {
+            rows: popup_area.height.saturating_sub(2).max(1),
+            cols: popup_area.width.saturating_sub(2).max(1),
+        };
+        match crate::pty::PtySession::spawn(&dir, size) {
+            Ok(session) => *popup = Some(session),
+            Err(err) => {
+                state.terminal_popup.visible = false;
+                state.status = Some(format!("Terminal popup: {err}"));
+            }
+        }
+    }
+}
+
+/// Spawn/kill per-pane terminals to match each pane's `terminal_active` flag,
+/// resync live winsizes, and revert a pane to chat when its shell exits.
+fn reconcile_pane_terminals(
+    state: &mut AppState,
+    terminals: &mut HashMap<usize, crate::pty::PtySession>,
+    area: Rect,
+) {
+    let snapshot: Vec<(usize, bool, PathBuf)> = match state.multipane.as_ref() {
+        Some(mp) => mp
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(idx, pane)| (idx, pane.terminal_active, pane.cwd.clone()))
+            .collect(),
+        None => return,
+    };
+    let (cols, rows) = state
+        .multipane
+        .as_ref()
+        .map(|mp| (mp.grid_cols, mp.grid_rows))
+        .unwrap_or((0, 0));
+    terminals.retain(|idx, _| *idx < snapshot.len());
+    for (idx, active, cwd) in snapshot {
+        // Reap a session that exited (operator ran `exit`, or it
+        // crashed). If the pane was visible, also revert it to chat
+        // so the operator doesn't stare at a dead shell. If it was
+        // parked we just drop the dead session silently — flipping
+        // back to TERM will spawn fresh.
+        if terminals.get(&idx).is_some_and(|s| s.has_exited()) {
+            if let Some(mut session) = terminals.remove(&idx) {
+                session.shutdown();
+            }
+            if active {
+                set_pane_terminal_active(state, idx, false);
+            }
+            continue;
+        }
+        let size = pane_terminal_inner(area, cols, rows, idx)
+            .map(|inner| crate::pty::PtySize {
+                rows: inner.height,
+                cols: inner.width,
+            })
+            .unwrap_or(crate::pty::PtySize { rows: 24, cols: 80 });
+        match (active, terminals.contains_key(&idx)) {
+            (true, false) => match crate::pty::PtySession::spawn(&cwd, size) {
+                Ok(session) => {
+                    terminals.insert(idx, session);
+                }
+                Err(_) => set_pane_terminal_active(state, idx, false),
+            },
+            (true, true) => {
+                if let Some(session) = terminals.get(&idx) {
+                    let _ = session.resize(size);
+                }
+            }
+            // PARKED: keep the session alive across NIT → TERM → NIT
+            // flips so history, running commands and the shell's
+            // $PWD survive. The only teardown is reaping above (on
+            // natural exit) and the runner's drop path at quit, which
+            // takes every session.
+            (false, true) => {}
+            (false, false) => {}
+        }
+    }
+}
+
+fn set_pane_terminal_active(state: &mut AppState, idx: usize, value: bool) {
+    if let Some(mp) = state.multipane.as_mut() {
+        if let Some(pane) = mp.panes.get_mut(idx) {
+            pane.terminal_active = value;
+        }
+    }
+}
+
+/// Inner (chrome-stripped) rect for a pane's terminal grid. Mirrors
+/// `render_grid`'s reserved top/bottom strips plus an all-borders block, so the
+/// PTY winsize matches what `overlay_pane_terminals` paints.
+fn pane_terminal_inner(area: Rect, cols: usize, rows: usize, idx: usize) -> Option<Rect> {
+    let chrome = area.height >= 4;
+    let grid_area = if chrome {
+        Rect::new(area.x, area.y + 1, area.width, area.height - 2)
+    } else {
+        area
+    };
+    let rect = crate::multipane::grid::pane_rect(grid_area, cols, rows, idx);
+    if rect.width < 2 || rect.height < 2 {
+        return None;
+    }
+    Some(Rect::new(
+        rect.x + 1,
+        rect.y + 1,
+        rect.width - 2,
+        rect.height - 2,
+    ))
+}
+
+/// Paint each active pane's terminal over the chat render it replaces. Returns
+/// the focused pane's cursor cell — rendered last so it wins the frame slot.
+fn overlay_pane_terminals(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    state: &AppState,
+    terminals: &HashMap<usize, crate::pty::PtySession>,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
+    if terminals.is_empty() {
+        return None;
+    }
+    let (focused, cols, rows) = state
+        .multipane
+        .as_ref()
+        .map(|mp| (mp.focused, mp.grid_cols, mp.grid_rows))?;
+    let chrome = area.height >= 4;
+    let grid_area = if chrome {
+        Rect::new(area.x, area.y + 1, area.width, area.height - 2)
+    } else {
+        area
+    };
+    // Only paint sessions whose pane is currently showing the TERM
+    // tab. `reconcile_pane_terminals` keeps parked sessions alive in
+    // the HashMap across NIT ↔ TERM flips so history survives, but
+    // we must NOT render them over the chat when the operator
+    // switched back to NIT — without this filter the chat is
+    // invisible behind the parked terminal block.
+    let mp_panes = state.multipane.as_ref().map(|mp| &mp.panes);
+    let mut order: Vec<usize> = terminals.keys().copied().collect();
+    order.sort_unstable_by_key(|idx| *idx == focused);
+    let mut focused_cursor = None;
+    for idx in order {
+        let active = mp_panes
+            .and_then(|panes| panes.get(idx))
+            .is_some_and(|pane| pane.terminal_active);
+        if !active {
+            continue;
+        }
+        let Some(session) = terminals.get(&idx) else {
+            continue;
+        };
+        let rect = crate::multipane::grid::pane_rect(grid_area, cols, rows, idx);
+        if rect.width < 2 || rect.height < 2 {
+            continue;
+        }
+        let is_focused = idx == focused;
+        let cwd_text = state
+            .multipane
+            .as_ref()
+            .and_then(|mp| mp.panes.get(idx))
+            .map(|pane| crate::multipane::runtime::render::pane_path_label(state, &pane.cwd))
+            .unwrap_or_default();
+        let title_line = crate::multipane::runtime::render::pane_tabs_line(
+            idx,
+            crate::multipane::runtime::render::PaneTab::Terminal,
+            &cwd_text,
+            is_focused,
+            theme,
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if is_focused {
+                BorderType::Thick
+            } else {
+                BorderType::Plain
+            })
+            .border_style(Style::default().fg(if is_focused {
+                theme.border_focused
+            } else {
+                theme.border
+            }))
+            .title(title_line)
+            .style(Style::default().bg(theme.background));
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+        crate::widgets::terminal_view::render_screen(frame, inner, session, theme);
+        if is_focused {
+            focused_cursor = crate::widgets::terminal_view::cursor_position(inner, session);
+        }
+    }
+    focused_cursor
 }

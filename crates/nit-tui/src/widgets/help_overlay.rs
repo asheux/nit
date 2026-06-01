@@ -68,6 +68,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+T", " toggle NITTree (file tree)"),
                 ("Ctrl+P", " fuzzy file search"),
                 ("Ctrl+F", " content search"),
+                ("Ctrl+Shift+T", " open / close terminal popup"),
                 ("F1 / ?", " toggle help"),
                 ("Tab/Shift+Tab", " focus panes"),
                 ("Ctrl+1/2/3", " focus Editor / Agent Ops / Agent Chat"),

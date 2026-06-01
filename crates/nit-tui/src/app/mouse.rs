@@ -289,6 +289,18 @@ fn handle_scroll_event(
         scroll_fuzzy_search_popup(&mouse, screen, state, fuzzy_runtime, delta);
         return true;
     }
+    if state.definition_popup.is_some() {
+        let area = dynamic_popup_rect(
+            screen,
+            crate::widgets::definition_popup::preferred_size(screen),
+        );
+        let viewport = popup_text_area(area).height as usize;
+        if let Some(view) = state.definition_popup.as_mut() {
+            let max_scroll = view.lines.len().saturating_sub(viewport);
+            scroll_clamped_in_rect(&mouse, area, delta, &mut view.scroll, max_scroll);
+        }
+        return true;
+    }
     if state.agents.artifacts_popup_open {
         scroll_artifacts_popup(&mouse, screen, swarm, state, delta, theme);
         return true;
@@ -772,6 +784,18 @@ pub(super) fn handle_mouse_down_with_swarm(
     if state.rule_picker.open || state.protocol_picker.open {
         return true;
     }
+    if state.definition_popup.is_some() {
+        // Modal: a click outside closes the goto-definition popup; clicks
+        // inside are absorbed so they don't fall through to the editor.
+        let area = dynamic_popup_rect(
+            screen,
+            crate::widgets::definition_popup::preferred_size(screen),
+        );
+        if !point_in_rect(mouse.column, mouse.row, area) {
+            state.definition_popup = None;
+        }
+        return true;
+    }
     if state.agents.artifacts_popup_open {
         // Check if the click is inside the popup's chat input box first.
         let popup_area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
@@ -1119,6 +1143,29 @@ pub(super) fn handle_mouse_down_with_swarm(
             col: state.editor_buffer().cursor.col,
         });
         return true;
+    }
+    // Chat-pane title tabs: clicking " AGENT CHAT " or " TERMINAL "
+    // on the top border row swaps the chat-pane surface between the
+    // chat console and the inline T6 PTY pane via Action::Toggle
+    // TerminalPane. The Ctrl+Shift+T popup stays its own keybinding
+    // and is NOT triggered here — see `popup_keys.rs`. No-op when the
+    // click already matches the active surface. Mirrors the visualizer
+    // / gate-monitor title-button pattern.
+    if mouse.row == layout.notes.y && point_in_rect(mouse.column, mouse.row, layout.notes) {
+        let col_in_rect = mouse.column.saturating_sub(layout.notes.x);
+        if let Some(tab) = agent_console_view::chat_tab_at_column(col_in_rect) {
+            reset_ui_selection(state, input_state);
+            state.focus = PaneId::Notes;
+            input_state.mouse_select_anchor = None;
+            let need_toggle = match tab {
+                agent_console_view::ChatPaneTab::AgentChat => state.terminal_pane_active,
+                agent_console_view::ChatPaneTab::Terminal => !state.terminal_pane_active,
+            };
+            if need_toggle {
+                apply_action(state, Action::ToggleTerminalPane);
+            }
+            return true;
+        }
     }
     if let Some(cursor_char_idx) = agent_console_view::map_chat_input_point_to_cursor(
         layout.notes,

@@ -1,13 +1,14 @@
 #![allow(clippy::too_many_arguments)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{actions::Action, AppState, Mode, PaneId, SearchMode, YankKind};
+use nit_core::state::file_tree::{FileTreePrompt, FileTreePromptKind};
+use nit_core::{actions::Action, AppState, FileTreeKind, Mode, PaneId, SearchMode, YankKind};
 
 use crate::{
     file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeRunner},
+    file_tree_runner::{FileTreeCommand, FileTreeMutation, FileTreeRunner},
     file_watcher::FileWatcher,
     fuzzy_preview_runner::PreviewEvent,
     fuzzy_search_runner::{ContentEvent, FuzzyEvent, IndexEvent},
@@ -19,6 +20,9 @@ use super::*;
 pub(super) fn file_tree_tick(state: &mut AppState, runner: &FileTreeRunner) -> bool {
     if !state.file_tree.open {
         return false;
+    }
+    if dispatch_submitted_prompt(state, runner) {
+        return true;
     }
 
     let preserve = file_tree::selected_path(state);
@@ -280,6 +284,11 @@ pub(super) fn handle_file_tree_key(
     if is_global_quit_key(key) {
         return false;
     }
+    // While the inline name prompt is open every other key feeds the input
+    // (so typing `r`/`q`/`:` edits the name instead of firing tree actions).
+    if state.file_tree.prompt.is_some() {
+        return handle_file_tree_prompt_key(key, state);
+    }
     if is_petri_show_key(key, state) {
         return false;
     }
@@ -310,9 +319,21 @@ pub(super) fn handle_file_tree_key(
             state.file_tree.open = false;
             true
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('R') => {
             file_tree::clear_cache(state);
             state.status = Some("NITTree refreshed".into());
+            true
+        }
+        KeyCode::Char('r') => {
+            open_file_tree_prompt(state, FileTreePromptKind::Rename);
+            true
+        }
+        KeyCode::Char('n') => {
+            open_file_tree_prompt(state, FileTreePromptKind::NewFile);
+            true
+        }
+        KeyCode::Char('N') => {
+            open_file_tree_prompt(state, FileTreePromptKind::NewDir);
             true
         }
         KeyCode::Char('.') => {
@@ -405,6 +426,133 @@ pub(super) fn handle_file_tree_key(
         }
         _ => true,
     }
+}
+
+fn open_file_tree_prompt(state: &mut AppState, kind: FileTreePromptKind) {
+    let root = state.file_tree.root.clone();
+    let selected = state
+        .file_tree
+        .rows
+        .get(state.file_tree.selected)
+        .filter(|r| matches!(r.kind, FileTreeKind::File | FileTreeKind::Dir))
+        .map(|r| (r.path.clone(), matches!(r.kind, FileTreeKind::Dir)));
+
+    let (target_dir, source) = match kind {
+        FileTreePromptKind::Rename => {
+            let Some((path, _)) = selected else {
+                state.status = Some("NITTree: nothing to rename".into());
+                return;
+            };
+            let parent = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.clone());
+            (parent, Some(path))
+        }
+        // Create inside a selected directory, alongside a selected file, or in
+        // the tree root when nothing is selected.
+        _ => {
+            let dir = match selected {
+                Some((path, true)) => path,
+                Some((path, false)) => path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.clone()),
+                None => root.clone(),
+            };
+            (dir, None)
+        }
+    };
+
+    state.file_tree.prompt = Some(FileTreePrompt {
+        kind,
+        input: String::new(),
+        target_dir,
+        source,
+        submitted: false,
+    });
+}
+
+fn handle_file_tree_prompt_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    match key.code {
+        KeyCode::Esc => state.file_tree.prompt = None,
+        KeyCode::Enter => submit_file_tree_prompt(state),
+        KeyCode::Backspace => {
+            if let Some(prompt) = state.file_tree.prompt.as_mut() {
+                prompt.input.pop();
+            }
+        }
+        KeyCode::Char(c) if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(prompt) = state.file_tree.prompt.as_mut() {
+                prompt.input.push(c);
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
+// Validates the typed name at submit time; on success flags the prompt so the
+// per-frame tick dispatches it, otherwise reports the refusal and leaves the
+// prompt open for another attempt.
+fn submit_file_tree_prompt(state: &mut AppState) {
+    let Some((name, target)) = state.file_tree.prompt.as_ref().map(|p| {
+        let name = p.input.trim().to_string();
+        let target = p.target_dir.join(&name);
+        (name, target)
+    }) else {
+        return;
+    };
+    let rejection = if !nit_utils::paths::is_safe_leaf_name(&name) {
+        Some(format!("invalid name '{name}'"))
+    } else if target.exists() {
+        Some(format!("'{name}' already exists"))
+    } else if !nit_utils::paths::path_within(&state.file_tree.root, &target) {
+        Some(format!("'{name}' escapes the workspace"))
+    } else {
+        None
+    };
+    match rejection {
+        Some(message) => state.status = Some(format!("NITTree: {message}")),
+        None => {
+            if let Some(prompt) = state.file_tree.prompt.as_mut() {
+                prompt.submitted = true;
+            }
+        }
+    }
+}
+
+fn dispatch_submitted_prompt(state: &mut AppState, runner: &FileTreeRunner) -> bool {
+    if !matches!(state.file_tree.prompt.as_ref(), Some(p) if p.submitted) {
+        return false;
+    }
+    let prompt = state
+        .file_tree
+        .prompt
+        .take()
+        .expect("submitted prompt present");
+    let name = prompt.input.trim().to_string();
+    let target = prompt.target_dir.join(&name);
+    let op = match (prompt.kind, prompt.source) {
+        (FileTreePromptKind::Rename, Some(from)) => FileTreeMutation::Rename { from, to: target },
+        (FileTreePromptKind::Rename, None) => return true,
+        (FileTreePromptKind::NewFile, _) => FileTreeMutation::CreateFile { path: target },
+        (FileTreePromptKind::NewDir, _) => FileTreeMutation::CreateDir { path: target },
+    };
+    runner.send(FileTreeCommand::Mutate {
+        workspace_root: state.file_tree.root.clone(),
+        parent: prompt.target_dir,
+        op,
+        show_hidden: state.file_tree.show_hidden,
+        show_ignored: state.file_tree.show_ignored,
+    });
+    let verb = match prompt.kind {
+        FileTreePromptKind::Rename => "rename",
+        FileTreePromptKind::NewFile => "new file",
+        FileTreePromptKind::NewDir => "new dir",
+    };
+    state.status = Some(format!("NITTree: {verb} {name}"));
+    true
 }
 
 pub(super) fn handle_fuzzy_search_key(

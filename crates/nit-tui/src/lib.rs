@@ -24,6 +24,8 @@ pub mod file_tree_runner;
 pub mod file_watcher;
 pub mod fuzzy_preview_runner;
 pub mod fuzzy_search_runner;
+pub mod pty;
+pub mod shell_cwd;
 pub mod syntax;
 
 pub mod games_analysis;
@@ -36,6 +38,7 @@ pub mod seed_render;
 pub mod seed_runtime;
 pub mod seed_snapshot;
 
+pub mod compile_gate_worker;
 pub mod genome_worker;
 pub mod power;
 pub mod system_stats;

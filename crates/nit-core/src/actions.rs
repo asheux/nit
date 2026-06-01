@@ -216,4 +216,20 @@ pub enum Action {
     /// Visual-mode `<` / normal-mode `<<`: strip up to one indent unit of
     /// leading whitespace from each line in the block. One undo step.
     DedentSelection,
+    /// Visual-mode `U`: uppercase the selection with Unicode-correct folding, one undo group.
+    UppercaseSelection,
+    /// Visual-mode `u`: lowercase the selection with Unicode-correct folding, one undo group.
+    LowercaseSelection,
+    /// `gd`: open the same-file goto-definition popup for the identifier under
+    /// the cursor. v1 resolves heuristically (no project index) — see
+    /// `state::find_definition_line`.
+    GotoDefinition,
+    /// `Ctrl+\`: swap the chat pane for an OS-shell terminal (per-pane in
+    /// multipane). Flips a render flag; the TUI event loop spawns/kills the
+    /// PTY by reconciling it, since nit-core owns no subprocess.
+    ToggleTerminalPane,
+    /// `Ctrl+Shift+T`: toggle the modal terminal popup. Records the intent;
+    /// the TUI event loop pins the cwd and reconciles the persistent PTY
+    /// (close hides, quit kills) since nit-core owns no subprocess.
+    ToggleTerminalPopup,
 }

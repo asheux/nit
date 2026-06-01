@@ -535,6 +535,11 @@ pub(super) fn map_key_to_action(
         if is_games_history_open_key(&key, state) {
             return Some(Action::GamesHistoryOpen);
         }
+        // Top-level overlay: `Ctrl+Shift+T` opens the modal terminal popup from
+        // Normal mode and (via the chat-input passthrough) chat focus alike.
+        if is_terminal_popup_toggle_key(&key) {
+            return Some(Action::ToggleTerminalPopup);
+        }
         match key {
             KeyEvent {
                 code: KeyCode::Char('p') | KeyCode::Char('P'),
@@ -643,6 +648,8 @@ pub(super) fn map_key_to_action(
             KeyCode::Char('y') => return Some(Action::YankSelection),
             KeyCode::Char('d') => return Some(Action::DeleteSelection),
             KeyCode::Char('v') => return Some(Action::ExitVisual),
+            KeyCode::Char('U') => return Some(Action::UppercaseSelection),
+            KeyCode::Char('u') => return Some(Action::LowercaseSelection),
             _ => {}
         }
     }
@@ -717,6 +724,10 @@ pub(super) fn map_key_to_action(
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::ToggleFileTree),
+        // `Ctrl+\` swaps the chat pane to/from the terminal. While the terminal
+        // is live the runner intercepts keys first, so this only fires the
+        // toggle-on (and the toggle-off that falls through past the PTY).
+        key if crate::pty::is_terminal_toggle_key(&key) => Some(Action::ToggleTerminalPane),
         KeyEvent {
             code: KeyCode::Char('z') | KeyCode::Char('Z'),
             modifiers,

@@ -461,8 +461,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 match (is_normal, register) {
                     (true, YankRegister::LineWise(text)) => buf.paste_line_below(&text),
                     (true, YankRegister::CharWise(text)) => {
+                        // Seal append + insert as one transaction so a single
+                        // undo rewinds the whole paste, like the linewise path.
+                        buf.begin_undo_group();
                         buf.append();
                         buf.insert_str(&text);
+                        buf.end_undo_group();
                     }
                     (false, register) => buf.insert_str(register.as_str()),
                 }
@@ -1161,6 +1165,14 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.mode = Mode::Normal;
             }
         }
+        Action::UppercaseSelection => {
+            with_focused_buffer(state, |buf| buf.uppercase_selection());
+            state.mode = Mode::Normal;
+        }
+        Action::LowercaseSelection => {
+            with_focused_buffer(state, |buf| buf.lowercase_selection());
+            state.mode = Mode::Normal;
+        }
         Action::MoveFirstNonBlank => {
             with_focused_buffer(state, |buf| buf.move_first_non_blank());
         }
@@ -1504,6 +1516,26 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             }
         }
+        Action::GotoDefinition => {
+            open_definition_popup(state);
+        }
+        Action::ToggleTerminalPane => {
+            state.terminal_pane_active = !state.terminal_pane_active;
+            // Focus the chat slot so the terminal owns input; restore the
+            // editor on toggle-off. The runner reconciles the PtySession.
+            if state.terminal_pane_active {
+                state.focus = PaneId::Notes;
+                state.mode = Mode::Normal;
+            } else {
+                state.focus = PaneId::Editor;
+            }
+        }
+        Action::ToggleTerminalPopup => {
+            // Record the intent only — the event loop pins the cwd and
+            // reconciles the persistent PtySession (close hides, quit kills),
+            // since nit-core owns no subprocess.
+            state.terminal_popup.toggle_requested = true;
+        }
     }
 
     if !preserve_count {
@@ -1514,4 +1546,54 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         should_exit,
         state_changed: changed,
     }
+}
+
+/// Hard cap on the snippet captured for the goto-definition popup. The view is
+/// scrollable, so this only bounds how far past the definition line we read.
+const DEFINITION_SNIPPET_LINES: usize = 80;
+
+/// `gd`: resolve the identifier under the editor cursor to its first same-file
+/// definition-shaped line and open the scrollable popup. No-ops (with a status
+/// hint) when there is no identifier or no match.
+fn open_definition_popup(state: &mut AppState) {
+    let Some(word) = state.editor_buffer().word_at_cursor() else {
+        state.status = Some("No identifier under cursor".into());
+        return;
+    };
+    let content = state.editor_buffer().content_as_string();
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(idx) = find_definition_line(&lines, &word) else {
+        state.status = Some(format!("No definition found: {word}"));
+        return;
+    };
+    let path = definition_display_path(state);
+    let snippet = lines
+        .iter()
+        .skip(idx)
+        .take(DEFINITION_SNIPPET_LINES)
+        .map(|line| line.to_string())
+        .collect();
+    let title = format!("Definition: {word} ({path}:{})", idx + 1);
+    state.definition_popup = Some(DefinitionView {
+        title,
+        path,
+        start_line: idx + 1,
+        lines: snippet,
+        scroll: 0,
+    });
+}
+
+/// Workspace-relative display path for the active editor buffer, falling back
+/// to `buffer` for an unsaved scratch buffer with no path.
+fn definition_display_path(state: &AppState) -> String {
+    state
+        .editor_buffer()
+        .path()
+        .map(|p| {
+            p.strip_prefix(&state.workspace_root)
+                .unwrap_or(p)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| "buffer".to_string())
 }

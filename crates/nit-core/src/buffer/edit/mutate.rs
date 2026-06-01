@@ -67,6 +67,29 @@ impl Buffer {
         self.transform_char_at_cursor(|_| new_c);
     }
 
+    pub fn uppercase_selection(&mut self) {
+        self.map_selection_case(true);
+    }
+
+    pub fn lowercase_selection(&mut self) {
+        self.map_selection_case(false);
+    }
+
+    // str::to_uppercase/to_lowercase (not byte ASCII) so length-growing folds like ß→SS survive; cursor pins to the selection start for vim U/u parity.
+    fn map_selection_case(&mut self, upper: bool) {
+        let Some((start, end)) = self.selection_range() else {
+            return;
+        };
+        let source = self.rope.slice(start..end).to_string();
+        let mapped = if upper {
+            source.to_uppercase()
+        } else {
+            source.to_lowercase()
+        };
+        self.replace_selection_with_str(&mapped);
+        self.set_cursor_from_char_index(start);
+    }
+
     /// Apply `f` to the char at the cursor and write the result back. Returns
     /// `false` when there is nothing to transform (cursor past end / on
     /// newline) so callers can short-circuit any cursor advance.

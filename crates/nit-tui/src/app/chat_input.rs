@@ -889,6 +889,17 @@ pub(crate) fn handle_chat_input_editing_key(
             follow_cursor = true;
         }
         KeyEvent {
+            code: KeyCode::Char('t') | KeyCode::Char('T'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+            && modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            // Yield Ctrl+Shift+T to the top-level popup binding: the chat
+            // editor must never capture it as text, even if the char-insert
+            // guard below is ever broadened to admit modified chords.
+        }
+        KeyEvent {
             code: KeyCode::Char(c),
             modifiers,
             ..

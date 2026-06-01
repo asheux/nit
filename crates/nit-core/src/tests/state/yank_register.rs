@@ -120,3 +120,66 @@ fn yank_then_clear_clears_register() {
     state.clear_yank_register();
     assert!(state.yank_register().is_none());
 }
+
+fn visual_yank_two_lines(state: &mut AppState) {
+    // Select (0,0)..=(1,3): a multi-line slice whose last line ("beta") has
+    // no trailing newline — the shape that used to fuse on paste.
+    state.mode = Mode::Visual;
+    let buf = state.editor_buffer_mut();
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    buf.set_selection_anchor();
+    buf.cursor.line = 1;
+    buf.cursor.col = 3;
+    apply_action(state, Action::YankSelection);
+}
+
+#[test]
+fn visual_yank_multiline_then_p_does_not_fuse_next_line() {
+    // Repro for the `}    args = …` collision: a multi-line visual `y` is
+    // classified line-wise, so `p` must open fresh rows rather than running
+    // the block's tail into the following line.
+    let mut state = state_with("alpha\nbeta\ngamma\n");
+    visual_yank_two_lines(&mut state);
+    assert!(matches!(
+        state.yank_register(),
+        Some(YankRegister::LineWise(_))
+    ));
+
+    state.editor_buffer_mut().cursor.line = 0;
+    apply_action(&mut state, Action::Paste);
+    assert_eq!(text(&state), "alpha\nalpha\nbeta\nbeta\ngamma\n");
+}
+
+#[test]
+fn visual_yank_paste_then_undo_restores_exactly() {
+    // The line-wise paste is one undo group: a single undo removes the whole
+    // pasted block and restores the buffer byte-for-byte.
+    let mut state = state_with("alpha\nbeta\ngamma\n");
+    visual_yank_two_lines(&mut state);
+
+    state.editor_buffer_mut().cursor.line = 0;
+    apply_action(&mut state, Action::Paste);
+    assert_eq!(text(&state), "alpha\nalpha\nbeta\nbeta\ngamma\n");
+
+    apply_action(&mut state, Action::Undo);
+    assert_eq!(text(&state), "alpha\nbeta\ngamma\n");
+}
+
+#[test]
+fn charwise_paste_seals_as_one_undo_group() {
+    // The char-wise paste seals append + insert, so a later keystroke is a
+    // *separate* undo step — one undo peels off the typing and leaves the
+    // pasted run intact. Without the seal the two would coalesce.
+    let mut state = state_with("ab\n");
+    state.editor_buffer_mut().cursor.line = 0;
+    state.editor_buffer_mut().cursor.col = 0;
+    state.set_yank_register(YankRegister::CharWise("X".into()));
+
+    apply_action(&mut state, Action::Paste);
+    apply_action(&mut state, Action::InsertChar('Y'));
+    assert_eq!(text(&state), "aXYb\n");
+
+    apply_action(&mut state, Action::Undo);
+    assert_eq!(text(&state), "aXb\n");
+}

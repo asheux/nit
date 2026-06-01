@@ -72,6 +72,7 @@ use ratatui::{
 
 mod artifacts_popup_handler;
 mod chat_input;
+mod compile_gate;
 mod dispatch;
 pub(crate) mod event_drain;
 

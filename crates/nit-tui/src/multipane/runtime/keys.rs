@@ -47,6 +47,14 @@ pub(super) fn handle_key(
         clear_chat_esc_state();
     }
 
+    if try_toggle_terminal(state, &key) {
+        return false;
+    }
+
+    if try_toggle_terminal_popup(state, &key) {
+        return false;
+    }
+
     if try_cycle_focus(state, &key) {
         return false;
     }
@@ -124,6 +132,34 @@ fn try_cycle_focus(state: &mut AppState, key: &KeyEvent) -> bool {
             focus::cycle_backward(mp);
         }
     }
+    true
+}
+
+/// `Ctrl+\` flips the focused pane between chat and terminal. The event loop
+/// reconciles this flag into a PtySession; while the terminal is live it
+/// intercepts keystrokes before this handler runs, so the toggle-off reaches
+/// here by falling through the forwarder.
+fn try_toggle_terminal(state: &mut AppState, key: &KeyEvent) -> bool {
+    if !crate::pty::is_terminal_toggle_key(key) {
+        return false;
+    }
+    let idx = focused_pane_idx(state);
+    if let Some(mp) = state.multipane.as_mut() {
+        if let Some(pane) = mp.panes.get_mut(idx) {
+            pane.terminal_active = !pane.terminal_active;
+        }
+    }
+    true
+}
+
+/// `Ctrl+Shift+T` toggles the one-per-process modal terminal popup over the
+/// whole grid (not per-pane). The event loop pins the focused pane's cwd and
+/// reconciles the persistent PtySession.
+fn try_toggle_terminal_popup(state: &mut AppState, key: &KeyEvent) -> bool {
+    if !crate::app::popup_keys::is_terminal_popup_toggle_key(key) {
+        return false;
+    }
+    state.terminal_popup.toggle_requested = true;
     true
 }
 

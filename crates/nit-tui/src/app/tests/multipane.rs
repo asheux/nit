@@ -81,6 +81,7 @@ fn multipane_runtime_drains_swarm_completion_into_completed_runs() {
         &mut swarm,
         &mut shadow,
         None,
+        None,
         planner_event,
     );
 
@@ -159,6 +160,7 @@ fn multipane_runtime_drains_queued_codex_turn_on_finish() {
         &claude,
         &mut swarm,
         &mut shadow,
+        None,
         None,
         finish,
     );

@@ -5,9 +5,10 @@
 
 use super::{
     artifact_message_index_for_line, build_pane_thread_rows_with_breathers,
-    chat_input_scroll_metrics, chat_input_text_area, ecg_indicator, format_message_rows,
-    map_chat_input_point_to_cursor, swarm_exec_label, thread_lines, thread_rows, user_prompt_bg,
-    wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
+    chat_input_scroll_metrics, chat_input_text_area, chat_tab_at_column, ecg_indicator,
+    format_message_rows, map_chat_input_point_to_cursor, swarm_exec_label, thread_lines,
+    thread_rows, user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ChatPaneTab, ThreadRow,
+    ThreadRowKind,
 };
 use crate::swarm::{test_runtime_with_running_tasks, SwarmRuntime, SwarmSize};
 use crate::theme::Theme;
@@ -1989,4 +1990,23 @@ fn multipane_system_message_not_an_artifact_callout() {
             .all(|row| matches!(row.kind, ThreadRowKind::StatusSubRow)),
         "all rendered rows must be StatusSubRow"
     );
+}
+
+#[test]
+fn chat_tab_at_column_maps_agent_chat_and_terminal_labels() {
+    // Border corner at rel col 0 → None.
+    assert_eq!(chat_tab_at_column(0), None);
+    // First char of " AGENT CHAT " (the leading space) at rel col 1.
+    assert_eq!(chat_tab_at_column(1), Some(ChatPaneTab::AgentChat));
+    // Last char of " AGENT CHAT " at rel col 12 (label is 12 chars wide).
+    assert_eq!(chat_tab_at_column(12), Some(ChatPaneTab::AgentChat));
+    // Single-space separator falls in the gap.
+    assert_eq!(chat_tab_at_column(13), None);
+    // " TERMINAL " starts after the separator at rel col 14.
+    assert_eq!(chat_tab_at_column(14), Some(ChatPaneTab::Terminal));
+    // " TERMINAL " is 10 chars wide → last hit at rel col 23.
+    assert_eq!(chat_tab_at_column(23), Some(ChatPaneTab::Terminal));
+    // The trailing "[Enter] send" hint is not a tab.
+    assert_eq!(chat_tab_at_column(24), None);
+    assert_eq!(chat_tab_at_column(40), None);
 }

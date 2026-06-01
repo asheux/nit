@@ -26,6 +26,7 @@ use super::popup_keys::maybe_follow_swarm_artifact_in_popup;
 use super::vitals_log::record_agent_bus_vitals;
 use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::CodexRunner;
+use crate::compile_gate_worker::CompileGateWorker;
 use crate::genome_worker::GenomeWorker;
 use crate::intake::{self, IntakeResume};
 use crate::shadow::ShadowRuntime;
@@ -51,6 +52,7 @@ pub(crate) fn drain_codex_event(
     swarm: &mut SwarmRuntime,
     shadow: &mut ShadowRuntime,
     genome_worker: Option<&GenomeWorker>,
+    compile_gate: Option<&CompileGateWorker>,
     event: AgentBusEvent,
 ) -> EventDrainOutcome {
     drain_event_inner(
@@ -61,6 +63,7 @@ pub(crate) fn drain_codex_event(
         swarm,
         shadow,
         genome_worker,
+        compile_gate,
         event,
         pending_codex_thread_clear,
         |state, event| event.apply(state),
@@ -77,6 +80,7 @@ pub(crate) fn drain_claude_event(
     swarm: &mut SwarmRuntime,
     shadow: &mut ShadowRuntime,
     genome_worker: Option<&GenomeWorker>,
+    compile_gate: Option<&CompileGateWorker>,
     event: AgentBusEvent,
 ) -> EventDrainOutcome {
     drain_event_inner(
@@ -87,6 +91,7 @@ pub(crate) fn drain_claude_event(
         swarm,
         shadow,
         genome_worker,
+        compile_gate,
         event,
         pending_claude_session_clear,
         apply_claude_event,
@@ -103,6 +108,7 @@ fn drain_event_inner(
     swarm: &mut SwarmRuntime,
     shadow: &mut ShadowRuntime,
     genome_worker: Option<&GenomeWorker>,
+    compile_gate: Option<&CompileGateWorker>,
     event: AgentBusEvent,
     pending_clear: impl FnOnce(&AgentBusEvent) -> Option<(String, Option<String>)>,
     apply_fn: impl FnOnce(&mut AppState, &AgentBusEvent),
@@ -150,6 +156,9 @@ fn drain_event_inner(
         cleanup_chat_clone_for_finished_event(state, &event);
         if let Some(genome) = genome_worker {
             maybe_dispatch_genome_evals(state, genome, &event);
+        }
+        if let Some(gate) = compile_gate {
+            maybe_dispatch_compile_check_on_event(state, gate, &event);
         }
     }
 
@@ -374,4 +383,36 @@ fn maybe_dispatch_genome_evals(state: &mut AppState, genome: &GenomeWorker, even
         }
         _ => {}
     }
+}
+
+// Compile-gate trigger: same shape as `maybe_dispatch_genome_evals`.
+// Fires on integrate-role TurnCompleted / TurnFailed when the agent
+// has at least one tracked file in `genome_turn_modified`. Failure
+// turns are gated too because a writer that hit max_turns mid-edit
+// still left a half-applied diff that needs to compile.
+fn maybe_dispatch_compile_check_on_event(
+    state: &AppState,
+    gate: &CompileGateWorker,
+    event: &AgentBusEvent,
+) {
+    let (agent_id, mission_id) = match event {
+        AgentBusEvent::TurnCompleted {
+            agent_id,
+            mission_id,
+            ..
+        } => (agent_id, mission_id),
+        AgentBusEvent::TurnFailed {
+            agent_id,
+            mission_id,
+            ..
+        } if state
+            .genome_turn_modified
+            .get(agent_id)
+            .is_some_and(|s| !s.is_empty()) =>
+        {
+            (agent_id, mission_id)
+        }
+        _ => return,
+    };
+    super::compile_gate::maybe_dispatch_compile_check(state, gate, agent_id, mission_id);
 }

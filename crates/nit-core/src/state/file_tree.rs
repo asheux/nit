@@ -26,6 +26,25 @@ pub struct FileTreeRow {
     pub depth: usize,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FileTreePromptKind {
+    Rename,
+    NewFile,
+    NewDir,
+}
+
+/// Live state of the inline name prompt shown at the bottom of the NITTREE
+/// pane. `source` carries the original path for `Rename`; `submitted` flips
+/// once the operator presses Enter so the per-frame tick dispatches the edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileTreePrompt {
+    pub kind: FileTreePromptKind,
+    pub input: String,
+    pub target_dir: PathBuf,
+    pub source: Option<PathBuf>,
+    pub submitted: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FileTreeState {
     pub open: bool,
@@ -42,4 +61,6 @@ pub struct FileTreeState {
     pub loading_dirs: HashSet<PathBuf>,
     #[serde(skip)]
     pub cache: HashMap<PathBuf, Vec<DirEntryModel>>,
+    #[serde(skip)]
+    pub prompt: Option<FileTreePrompt>,
 }

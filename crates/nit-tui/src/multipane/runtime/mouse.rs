@@ -200,6 +200,31 @@ fn handle_mouse_left_down(
         }
         return;
     }
+    // Pane title tabs: clicking the NIT or TERM pill on the focused
+    // pane's title row flips that pane's `terminal_active` flag (the
+    // same flag Ctrl+\ toggles). Tested BEFORE the input-box / chat-
+    // thread hit-tests so a click on the title row never falls into
+    // the chat surface below.
+    if let Some(mp) = state.multipane.as_ref() {
+        if let Some(pane_idx) = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y) {
+            let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+            if y == pane_rect.y {
+                let col_in_rect = x.saturating_sub(pane_rect.x);
+                if let Some(tab) = super::render::pane_tab_at_column(pane_idx, col_in_rect) {
+                    if let Some(mp_mut) = state.multipane.as_mut() {
+                        mp_mut.focused = pane_idx;
+                        if let Some(pane) = mp_mut.panes.get_mut(pane_idx) {
+                            let want_terminal = matches!(tab, super::render::PaneTab::Terminal);
+                            if pane.terminal_active != want_terminal {
+                                pane.terminal_active = want_terminal;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
     // Input-box click: position cursor + seed input selection anchor.
     // Mirrors single-pane behaviour at `app/mouse.rs:1127-1148`.
     // Tested BEFORE the chat-thread hit-test so an input-box click
