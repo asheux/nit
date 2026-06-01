@@ -39,6 +39,12 @@ pub enum PreviewCommand {
         path: PathBuf,
         line_hint: Option<usize>,
         query: String,
+        /// Live dirty-buffer content for `path` when an open editor
+        /// buffer matches the path and has unsaved edits. When
+        /// `Some`, the preview reads from this string instead of
+        /// re-reading the on-disk file — closes the stale-preview
+        /// gap operators saw via Ctrl+F / Ctrl+P after edits.
+        override_content: Option<String>,
     },
     UpdateConfig {
         config: HighlightConfig,
@@ -85,6 +91,7 @@ impl PreviewRunner {
         path: PathBuf,
         line_hint: Option<usize>,
         query: String,
+        override_content: Option<String>,
     ) {
         let _ = self.cmd_tx.send(PreviewCommand::Request {
             generation,
@@ -92,6 +99,7 @@ impl PreviewRunner {
             path,
             line_hint,
             query,
+            override_content,
         });
     }
 
@@ -121,6 +129,7 @@ struct PendingRequest {
     path: PathBuf,
     line_hint: Option<usize>,
     query: String,
+    override_content: Option<String>,
 }
 
 struct PreviewCache {
@@ -228,6 +237,7 @@ fn serve_request(
         manager,
         version,
         highlight_enabled,
+        request.override_content.as_deref(),
     ) {
         Ok(model) => {
             cache.insert(key, model.clone());
@@ -281,12 +291,14 @@ fn apply_command(
             path,
             line_hint,
             query,
+            override_content,
         } => ApplyOutcome::Request(PendingRequest {
             generation,
             mode,
             path,
             line_hint,
             query,
+            override_content,
         }),
         PreviewCommand::UpdateConfig { config: cfg } => {
             *config = cfg;
@@ -321,9 +333,15 @@ fn build_preview(
     manager: &mut SyntaxManager,
     version: &mut u64,
     highlight_enabled: bool,
+    override_content: Option<&str>,
 ) -> Result<PreviewModel, String> {
     let (start_line, anchor_line) = preview_window_anchors(mode, line_hint);
-    let (lines, truncated) = read_window(path, start_line, PREVIEW_LINES)?;
+    // Prefer the live dirty-buffer content when the caller supplied it;
+    // skip the disk read so unsaved edits show up in the preview.
+    let (lines, truncated) = match override_content {
+        Some(content) => window_from_string(content, start_line, PREVIEW_LINES),
+        None => read_window(path, start_line, PREVIEW_LINES)?,
+    };
     let snapshot = highlight_enabled
         .then(|| highlight_snapshot(path, &lines, manager, version))
         .flatten();
@@ -418,6 +436,41 @@ fn wait_for_snapshot(
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+// Same windowing semantics as `read_window` but over an in-memory
+// string — used when the caller (the search UI) has a dirty editor
+// buffer for the path and wants the preview to reflect unsaved
+// edits. Truncation rules match `read_window` so a content vs
+// disk source can be swapped without the operator-visible window
+// changing shape.
+fn window_from_string(content: &str, start_line: usize, max_lines: usize) -> (Vec<String>, bool) {
+    let mut out: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let mut total_bytes = 0usize;
+    for (idx, mut line) in content
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.to_string()))
+    {
+        if out.len() >= max_lines {
+            break;
+        }
+        if idx < start_line {
+            continue;
+        }
+        if line.len() > PREVIEW_MAX_LINE_BYTES {
+            line.truncate(PREVIEW_MAX_LINE_BYTES);
+            truncated = true;
+        }
+        total_bytes = total_bytes.saturating_add(line.len());
+        if total_bytes > PREVIEW_MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        out.push(line);
+    }
+    (out, truncated)
 }
 
 fn read_window(
