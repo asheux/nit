@@ -590,3 +590,214 @@ fn lab_multi_proposer_without_judge_skips_inv18() {
         "lab plan must not trip INV-18; got {violations:?}"
     );
 }
+
+// A task that writes regardless of role (the `task` helper marks only
+// integrate tasks as writers).
+fn writing_task(id: &str, agent: &str, role: &str, deps: &[&str]) -> SwarmTask {
+    let dep_strings: Vec<String> = deps.iter().map(|s| (*s).to_string()).collect();
+    SwarmTask::new_for_test(id, agent, Some(role), dep_strings, true)
+}
+
+fn no_must_fix(violations: &[Violation]) -> bool {
+    !violations
+        .iter()
+        .any(|v| matches!(v.severity, Severity::MustFix))
+}
+
+fn research_ctx<'a>(
+    tasks: &'a [SwarmTask],
+    available: &'a [String],
+    hints: &'a HashMap<String, String>,
+    template: SwarmTemplate,
+    mission: SwarmMissionKind,
+) -> ValidationContext<'a> {
+    ValidationContext {
+        tasks,
+        available_agents: available,
+        integrator_agent_id: Some("int"),
+        role_hints: hints,
+        template,
+        mission_kind: mission,
+        root_prompt: "research X and write each area to its own file with a master index",
+        intent: nit_tui::swarm::intent::OperatorIntent::default(),
+    }
+}
+
+#[test]
+fn parallel_research_pipeline_is_clean() {
+    // survey lenses → judge-A (map) → writers → judge-B (reconcile) → index → review.
+    let tasks = vec![
+        task("survey-1", "a", "research", &[]),
+        task("survey-2", "b", "computational-research", &[]),
+        task("judge-a", "j1", "judge", &["survey-1", "survey-2"]),
+        writing_task("write-1", "a", "research", &["judge-a"]),
+        writing_task("write-2", "b", "computational-research", &["judge-a"]),
+        task("judge-b", "j2", "judge", &["write-1", "write-2"]),
+        task("index", "int", "integrate", &["judge-b"]),
+        task("review", "r", "review", &["index"]),
+    ];
+    let available = agents(&["a", "b", "j1", "j2", "int", "r"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let ctx = research_ctx(
+        &tasks,
+        &available,
+        &hints,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::ComputationalResearch,
+    );
+    let violations = validate_plan(&ctx);
+    assert!(
+        no_must_fix(&violations),
+        "parallel research pipeline must be MustFix-clean; got {violations:?}"
+    );
+}
+
+#[test]
+fn parallel_research_allows_two_judges_but_not_three() {
+    let mk = |n: usize| {
+        let mut t = vec![
+            task("survey-1", "a", "research", &[]),
+            task("survey-2", "b", "research", &[]),
+        ];
+        for i in 0..n {
+            t.push(task(
+                Box::leak(format!("judge-{i}").into_boxed_str()),
+                "j",
+                "judge",
+                &["survey-1", "survey-2"],
+            ));
+        }
+        t.push(writing_task("write-1", "a", "research", &[]));
+        t.push(task("index", "int", "integrate", &[]));
+        t
+    };
+    let available = agents(&["a", "b", "j", "int"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    // 2 judges = OK under parallel research.
+    let two = mk(2);
+    let ctx = research_ctx(
+        &two,
+        &available,
+        &hints,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::Research,
+    );
+    assert!(
+        !has_violation_id(&validate_plan(&ctx), "singleton_judge"),
+        "2 judges must be allowed under parallel research"
+    );
+    // 3 judges = singleton_judge fires.
+    let three = mk(3);
+    let ctx = research_ctx(
+        &three,
+        &available,
+        &hints,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::Research,
+    );
+    assert!(
+        has_violation_id(&validate_plan(&ctx), "singleton_judge"),
+        "3 judges must be rejected even under parallel research"
+    );
+}
+
+#[test]
+fn parallel_research_caps_integrate_at_one() {
+    let tasks = vec![
+        task("survey-1", "a", "research", &[]),
+        task("judge-a", "j", "judge", &["survey-1"]),
+        task("index-1", "int", "integrate", &["judge-a"]),
+        task("index-2", "b", "integrate", &["judge-a"]),
+    ];
+    let available = agents(&["a", "j", "int", "b"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let ctx = research_ctx(
+        &tasks,
+        &available,
+        &hints,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::Research,
+    );
+    assert!(
+        has_violation_id(&validate_plan(&ctx), "singleton_integrate"),
+        "parallel research must cap integrate at one (the index)"
+    );
+}
+
+#[test]
+fn bulk_research_convergence_is_clean() {
+    // read-only research lenses → 1 judge → 1 integrate → review (bulk single-writer).
+    let tasks = vec![
+        task("survey-1", "a", "computational-research", &[]),
+        task("survey-2", "b", "computational-research", &[]),
+        task("judge", "j", "judge", &["survey-1", "survey-2"]),
+        task("index", "int", "integrate", &["judge"]),
+        task("review", "r", "review", &["index"]),
+    ];
+    let available = agents(&["a", "b", "j", "int", "r"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let ctx = research_ctx(
+        &tasks,
+        &available,
+        &hints,
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::ComputationalResearch,
+    );
+    let violations = validate_plan(&ctx);
+    assert!(
+        no_must_fix(&violations),
+        "bulk research convergence must be MustFix-clean; got {violations:?}"
+    );
+}
+
+#[test]
+fn bulk_research_rejects_non_integrate_writer() {
+    // Bulk is single-writer: a research-role writer is rejected even in research.
+    let tasks = vec![
+        task("survey-1", "a", "research", &[]),
+        task("judge", "j", "judge", &["survey-1"]),
+        writing_task("write-1", "a", "research", &["judge"]),
+        task("index", "int", "integrate", &["judge"]),
+    ];
+    let available = agents(&["a", "j", "int"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let ctx = research_ctx(
+        &tasks,
+        &available,
+        &hints,
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::Research,
+    );
+    assert!(
+        has_violation_id(&validate_plan(&ctx), "writes_only_on_integrator"),
+        "bulk research must reject a research-role writer (single-writer convergence)"
+    );
+}
+
+#[test]
+fn general_parallel_rejects_two_judges() {
+    // General keeps the single-judge rule even under parallel.
+    let tasks = vec![
+        task("propose-1", "a", "propose", &[]),
+        task("propose-2", "b", "propose", &[]),
+        task("judge-1", "j", "judge", &["propose-1", "propose-2"]),
+        task("judge-2", "k", "judge", &["propose-1", "propose-2"]),
+        task("integrate", "int", "integrate", &["judge-1"]),
+    ];
+    let available = agents(&["a", "b", "j", "k", "int"]);
+    let hints: HashMap<String, String> = HashMap::new();
+    let ctx = ValidationContext {
+        tasks: &tasks,
+        available_agents: &available,
+        integrator_agent_id: Some("int"),
+        role_hints: &hints,
+        template: SwarmTemplate::Parallel,
+        mission_kind: SwarmMissionKind::General,
+        root_prompt: "refactor things",
+        intent: nit_tui::swarm::intent::OperatorIntent::default(),
+    };
+    assert!(
+        has_violation_id(&validate_plan(&ctx), "singleton_judge"),
+        "general parallel must keep the single-judge rule"
+    );
+}

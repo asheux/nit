@@ -79,6 +79,25 @@ Guardrail: prompts starting with `@` (e.g. `@all ...`) are never auto-converted 
 Tip: if you temporarily don’t want implicit swarm launches, switch the roster template back to
 `lab`.
 
+### Research missions (the producers write their own findings)
+
+For `mission=research` / `mission=computational-research`, the producers ARE the writers — there
+is no separate writer fleet — and findings are always persisted to files (never just answered in
+chat). The shape depends on the template:
+
+- **parallel** — survey lenses (read-only `research` / `computational-research`; comp-research is
+  the default producer in a computational-research mission) → **judge-A** dedups the survey and
+  maps each topic to exactly one output file → **writers** (`research` / `computational-research`,
+  `writes=true`) each write their own topic file → **judge-B** reconciles the written files and
+  specs the master index → one `integrate` writes the master index → `review`. This is the only
+  shape where **two** `role=judge` tasks are allowed.
+- **bulk** — read-only research lenses → one `judge` → one `integrate` writes the consolidated
+  output → `review` (bulk’s single-writer convergence).
+
+Output format: an operator-named extension is honored (`Links.nb` → `.nb`); otherwise the planner
+matches the project’s convention (a Wolfram project → `.nb`, a docs repo → `.md`), falling back to
+Markdown when there is no clear convention.
+
 ---
 
 ## How Swarm Works (high level)

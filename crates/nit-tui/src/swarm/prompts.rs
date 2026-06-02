@@ -178,14 +178,14 @@ fn build_planner_prompt_with_intent(
         &scope_files,
         large_scope,
     );
-    append_template_specific_constraints(&mut out, template, intent, agent_ids.len());
+    append_template_specific_constraints(&mut out, template, mission_kind, intent, agent_ids.len());
     out.push_str(
         "- When the operator request involves refactoring or modifying a module/directory, the plan MUST cover ALL files in that scope. Assign a recon or propose task to survey the full directory tree first, and ensure the integrate task prompt lists every affected file.\n",
     );
     out.push_str(
         "- Each task prompt should be specific about which files or areas to focus on, not generic. The more concrete the prompt, the better the agent output.\n",
     );
-    append_planner_validator_invariants(&mut out, template);
+    append_planner_validator_invariants(&mut out, template, mission_kind);
     append_planner_output_format(&mut out, template);
     append_planner_scope_section(&mut out, &scope_files);
     append_planner_memory_hits(&mut out, memory_hits, workspace_root);
@@ -216,9 +216,18 @@ fn append_planner_header(
     // additional integrate tasks. Lab and Bulk are convergence templates
     // and keep the single-writer invariant.
     match (template, integrator_agent_id) {
-        (SwarmTemplate::Parallel, Some(integrator_agent_id)) => {
+        (SwarmTemplate::Parallel, Some(integrator_agent_id))
+            if matches!(mission_kind, SwarmMissionKind::General) =>
+        {
             out.push_str(&format!(
                 "Primary integrator: `{integrator_agent_id}` (additional `integrate` tasks may be assigned to other agents when the work splits naturally — e.g., topical subareas covered by different proposers. The runtime allows multi-writer dispatch under the parallel template.).\n\n"
+            ));
+        }
+        (SwarmTemplate::Parallel, Some(integrator_agent_id)) => {
+            // Research / computational-research: the researchers are the writers;
+            // the single `integrate` task writes only the master index.
+            out.push_str(&format!(
+                "Index integrator: `{integrator_agent_id}` (research mission — the researchers write their own findings files; this single `integrate` task writes the master index over them).\n\n"
             ));
         }
         (SwarmTemplate::Lab | SwarmTemplate::Bulk, Some(integrator_agent_id)) => {
@@ -281,8 +290,12 @@ fn append_planner_constraints(
         SwarmTemplate::Bulk => out.push_str(
             "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
         ),
+        SwarmTemplate::Parallel if matches!(mission_kind, SwarmMissionKind::General) => out
+            .push_str(
+                "- Treat `judge` as a singleton role. The `integrate` role MAY be split across multiple tasks when the work splits naturally — e.g., one integrate task per topical subarea covered by a different proposer. The runtime allows multi-writer dispatch under parallel; use it when topical coherence beats alphabetical sharding. If you keep one integrate task, the runtime will auto-shard it for large scopes.\n",
+            ),
         SwarmTemplate::Parallel => out.push_str(
-            "- Treat `judge` as a singleton role. The `integrate` role MAY be split across multiple tasks when the work splits naturally — e.g., one integrate task per topical subarea covered by a different proposer. The runtime allows multi-writer dispatch under parallel; use it when topical coherence beats alphabetical sharding. If you keep one integrate task, the runtime will auto-shard it for large scopes.\n",
+            "- Research mission: the `integrate` role is the SINGLE master-index writer (research producers write their own files). Two `role=judge` tasks are expected here (map + reconcile); do not split `integrate`.\n",
         ),
         SwarmTemplate::Lab => {}
     }
@@ -320,7 +333,10 @@ fn append_mission_kind_lines(out: &mut String, mission_kind: SwarmMissionKind) {
                 "- `research` is the primary mission-specific role here; only use `computational-research` if the mission clearly needs simulations, modeling, or quantitative analysis.\n",
             );
             out.push_str(
-                "- Prefer read-only investigation and synthesis tasks unless the operator explicitly asked for repo edits or docs changes.\n",
+                "- Producer roles WRITE the output: research missions ALWAYS persist findings to files. On the PARALLEL template the researchers write their own topic files (`writes=true`); on BULK the single `integrate` writes the consolidated output. Do not just answer in chat without producing the file(s).\n",
+            );
+            out.push_str(
+                "- OUTPUT FORMAT: if the operator named a file or extension (e.g. `Links.nb`, `notes.md`), use exactly that. Otherwise match the project's obvious convention — a Wolfram/Mathematica project writes `.nb`, a docs/markdown repo writes `.md` — and when there's no clear convention, default to Markdown (`.md`).\n",
             );
         }
         SwarmMissionKind::ComputationalResearch => {
@@ -328,10 +344,13 @@ fn append_mission_kind_lines(out: &mut String, mission_kind: SwarmMissionKind) {
                 "- This is a computational-research mission: prefer a workflow like source survey -> modeling / experiments / analysis -> synthesis / ranked strategy recommendation.\n",
             );
             out.push_str(
-                "- `computational-research` is valid and preferred for quantitative or tool-driven lanes; `research` can support source survey and literature/context gathering.\n",
+                "- `computational-research` is the DEFAULT producer role for this mission (both the survey lenses and the writers); reserve `research` for at most one pure literature/prior-art lens, and `research` lenses MUST NOT outnumber `computational-research` lenses.\n",
             );
             out.push_str(
-                "- Prefer read-only investigation and synthesis tasks unless the operator explicitly asked for repo edits or docs changes.\n",
+                "- Producer roles WRITE the output: research missions ALWAYS persist findings to files. On the PARALLEL template the researchers write their own topic files (`writes=true`); on BULK the single `integrate` writes the consolidated output. Do not just answer in chat without producing the file(s).\n",
+            );
+            out.push_str(
+                "- OUTPUT FORMAT: if the operator named a file or extension (e.g. `Links.nb`, `notes.md`), use exactly that. Otherwise match the project's obvious convention — a Wolfram/Mathematica project writes `.nb`, a docs/markdown repo writes `.md` — and when there's no clear convention, default to Markdown (`.md`).\n",
             );
         }
     }
@@ -357,9 +376,16 @@ fn append_integrator_constraints(
                 "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
             ));
         }
-        SwarmTemplate::Parallel => {
+        SwarmTemplate::Parallel if matches!(mission_kind, SwarmMissionKind::General) => {
             out.push_str(&format!(
                 "- Code changes require `writes=true` and `role=integrate`. The PRIMARY integrator is `{integrator_agent_id}`; you MAY assign additional `integrate` tasks to other agents when work splits naturally (each with `writes=true`). Each integrate task's `task_prompt` MUST clearly state which files it owns.\n"
+            ));
+        }
+        SwarmTemplate::Parallel => {
+            // Research / computational-research: single index integrator (the
+            // researchers write their own files).
+            out.push_str(&format!(
+                "- The `integrate` role is EXACTLY ONE task, assigned to `{integrator_agent_id}`, writing only the master index over the research producers' own files. Do not fan out `integrate`.\n"
             ));
         }
     }
@@ -380,14 +406,59 @@ fn append_integrator_constraints(
     }
 }
 
+// The research / computational-research + parallel pipeline: survey lenses →
+// judge-A (map) → researcher-writers → judge-B (reconcile) → one index
+// integrator → review. The researchers ARE the writers, two judges are
+// expected (the only shape that allows >1 judge), and research always persists
+// findings to files. Mirrors the validator's research-aware invariants.
+fn append_research_parallel_pipeline(out: &mut String, mission_kind: SwarmMissionKind) {
+    let (default_role, role_note) = match mission_kind {
+        SwarmMissionKind::ComputationalResearch => (
+            "computational-research",
+            "Use `computational-research` as the DEFAULT producer role for both the survey lenses and the writers; at most ONE lens may be `role=research` for a pure literature/prior-art survey, and `research` lenses must not outnumber `computational-research` lenses.",
+        ),
+        _ => (
+            "research",
+            "Use `role=research` for the lenses and writers; reserve `computational-research` only for lenses that are genuinely quantitative / tool-driven.",
+        ),
+    };
+    out.push_str(
+        "OPERATOR INTENT: research mission — the RESEARCHERS are the writers (each writes its own findings file), with TWO judges (map + reconcile) and ONE master index. Research missions ALWAYS persist findings to files, even when the operator only asked for a summary.\n",
+    );
+    out.push_str(&format!(
+        "- RESEARCH PIPELINE (parallel) — MUST produce EXACTLY this DAG, in order:\n  \
+         (1) SURVEY LENSES — 2-4 `role={default_role}` tasks, READ-ONLY (`writes=false`), empty `deps`, each surveying the SAME scope through a distinct LENS (use the lens table below or invent a sharper axis). {role_note}\n  \
+         (2) JUDGE-A (MAP) — exactly ONE `role=judge` task whose `deps` are ALL the survey lenses. It dedups the survey and assigns each topic/source to exactly ONE output file → a per-file content map (this is what stops the writers from overlapping).\n  \
+         (3) WRITERS — one `role={default_role}` task per output file, `writes=true`, `deps`=[judge-A]. Each writes ONLY its assigned file per the map. The producers ARE the writers (never a separate integrator fleet), and writers MUST NOT outnumber the survey lenses. Name each task's owned file in its `prompt` and `swarm_artifacts.files`.\n  \
+         (4) JUDGE-B (RECONCILE) — exactly ONE MORE `role=judge` task whose `deps` are ALL the writer tasks. It reads the written files, fixes cross-file duplication / coverage gaps / conflicts, and specs the master index.\n  \
+         (5) INDEX — exactly ONE `role=integrate` task, `writes=true`, `deps`=[judge-B], writing ONLY the master index file (the entry-point the operator named) that links every writer's file.\n  \
+         (6) REVIEW — one `role=review` task, `deps`=[index], validating syntax / full coverage / no cross-file duplication / index correctness.\n",
+    ));
+    out.push_str(
+        "- TWO JUDGES ARE EXPECTED here (judge-A map + judge-B reconcile) — this is the ONLY shape where more than one `role=judge` is allowed; do not collapse them, and do not emit a separate `propose` lane.\n",
+    );
+    out.push_str(
+        "- DISTINCT FILES: every writer (each producer + the index) owns a DISTINCT file so they never race.\n",
+    );
+    out.push_str("- Lens framings for the survey lenses (step 1):\n");
+    out.push_str(PROPOSER_LENS_TABLE);
+}
+
 fn append_template_specific_constraints(
     out: &mut String,
     template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
     intent: &super::intent::OperatorIntent,
     agent_count: usize,
 ) {
     match template {
         SwarmTemplate::Parallel => {
+            // Research / computational-research take the dedicated two-judge
+            // writers-and-index pipeline, NOT the general multi-writer fanout.
+            if !matches!(mission_kind, SwarmMissionKind::General) {
+                append_research_parallel_pipeline(out, mission_kind);
+                return;
+            }
             // Compute the fanout floor up front so the planner sees the
             // exact integer it MUST hit, not just "split the work".
             // This number is the same one the validator's
@@ -490,6 +561,17 @@ fn append_template_specific_constraints(
             );
         }
         SwarmTemplate::Bulk => {
+            if !matches!(mission_kind, SwarmMissionKind::General) {
+                let default_role =
+                    if matches!(mission_kind, SwarmMissionKind::ComputationalResearch) {
+                        "computational-research"
+                    } else {
+                        "research"
+                    };
+                out.push_str(&format!(
+                    "- RESEARCH (bulk) — the producer lenses are `role={default_role}` (read-only survey, one distinct lens each), NOT `propose`; use ids like `survey-01`, `survey-02`. They converge through ONE `role=judge` (`deps` = ALL lenses) and ONE `role=integrate` (`writes=true`, `deps`=[judge]) that writes the consolidated output the operator asked for; then a `role=review` (`deps`=[integrate]). SINGLE WRITER — bulk converges to one integrator, and research missions ALWAYS produce the output file. Follow the bulk rules below, reading each `propose` as your research lens.\n",
+                ));
+            }
             out.push_str(
                 "- Bulk orchestration: explore multiple solution candidates in parallel, then converge.\n",
             );
@@ -518,8 +600,12 @@ fn append_template_specific_constraints(
 // the same rules the post-parse check enforces. Single source of truth:
 // editing `validator::planner_invariants_for_prompt` updates both the prompt
 // and the check.
-fn append_planner_validator_invariants(out: &mut String, template: SwarmTemplate) {
-    let lines = super::validator::planner_invariants_for_prompt(template);
+fn append_planner_validator_invariants(
+    out: &mut String,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+) {
+    let lines = super::validator::planner_invariants_for_prompt(template, mission_kind);
     if lines.is_empty() {
         return;
     }
@@ -1063,13 +1149,36 @@ fn append_task_mission_contract(out: &mut String, mission_kind: SwarmMissionKind
     }
 }
 
+// Role contract for a `research` / `computational-research` producer that WRITES
+// its own findings file (parallel research, step 3 — see validator INV-06).
+// Keeps the no-verification discipline of the read-only research contract but
+// flips the deliverable: investigate AND persist the findings to the file this
+// task owns, leaving the master index to the single `integrate` task.
+fn research_writer_contract_lines() -> &'static [&'static str] {
+    &[
+        "You are a research WRITER: investigate your assigned topic AND write your findings to the output file this task owns. Produce real, well-sourced content in the file — not just notes for a downstream writer.",
+        "Use your file-writing tools to create or update ONLY your assigned file (named in your task / the FILE CHECKLIST below). Do NOT write, edit, or delete any other file — the `integrate` task owns the master index, and your peers own their own files.",
+        "Follow the judge's per-file content map: write exactly the sources/topics assigned to your file, structured so the index integrator can link to it. Surface sources, methods, assumptions, and the strongest findings with evidence.",
+        "ROLE DISCIPLINE: Do NOT run tests, builds, lints, formatters, or any CI / verification commands — that belongs to the review agent. Do NOT duplicate investigation an upstream dependency already produced; cite it and build on it.",
+    ]
+}
+
 fn append_task_role_contract(out: &mut String, task: &SwarmTask) {
     let Some(role) = task.role.as_deref().and_then(normalize_role_label) else {
         return;
     };
     out.push_str("ROLE CONTRACT:\n");
     out.push_str("- Act strictly as the assigned role for this task.\n");
-    for line in role_contract_lines(role.as_str()) {
+    // A research / computational-research producer that writes its own findings
+    // (parallel research) gets the writer contract instead of the read-only one.
+    let research_writer =
+        task.writes && matches!(role.as_str(), "research" | COMPUTATIONAL_RESEARCH_ROLE);
+    let contract_lines = if research_writer {
+        research_writer_contract_lines()
+    } else {
+        role_contract_lines(role.as_str())
+    };
+    for line in contract_lines {
         out.push_str(&format!("- {line}\n"));
     }
     if let Some(lines) = role_response_format_lines(role.as_str()) {

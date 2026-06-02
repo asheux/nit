@@ -139,6 +139,12 @@ fn invariant_parallel_min_integrators(ctx: &ValidationContext<'_>) -> Vec<Violat
     if !matches!(ctx.template, SwarmTemplate::Parallel) {
         return Vec::new();
     }
+    // Research / computational-research converge on ONE index integrator
+    // (INV-05 keeps it singleton), so the multi-writer fanout floor doesn't
+    // apply — forcing ≥2 integrators would contradict the single-index shape.
+    if is_research_mission(ctx) {
+        return Vec::new();
+    }
     let writer_budget = ctx.available_agents.len();
     let floor = parallel_integrate_floor(&ctx.intent, writer_budget);
     let over_capacity = parallel_intent_exceeds_capacity(&ctx.intent, writer_budget);
@@ -256,13 +262,25 @@ fn is_role(task: &SwarmTask, want: &str) -> bool {
     task_role(task).as_deref() == Some(want)
 }
 
+fn is_research_mission(ctx: &ValidationContext<'_>) -> bool {
+    !matches!(ctx.mission_kind, SwarmMissionKind::General)
+}
+
 fn proposer_tasks<'a>(ctx: &ValidationContext<'a>) -> Vec<&'a SwarmTask> {
+    // In research / computational-research missions the producer lenses are
+    // `research` / `computational-research` (read-only survey), not `propose`,
+    // so count those as proposers too — but NOT the writers (`writes=true`),
+    // which are a downstream write phase (parallel research), not survey lenses.
+    let research = is_research_mission(ctx);
     ctx.tasks
         .iter()
         .filter(|t| {
             is_role(t, "propose")
                 || t.id.to_ascii_lowercase().starts_with("propose-")
                 || t.id.eq_ignore_ascii_case("propose")
+                || (research
+                    && !t.writes
+                    && (is_role(t, "research") || is_role(t, "computational-research")))
         })
         .collect()
 }
@@ -345,7 +363,16 @@ fn invariant_agent_ids_allowed(ctx: &ValidationContext<'_>) -> Vec<Violation> {
 
 fn invariant_singleton_judge(ctx: &ValidationContext<'_>) -> Vec<Violation> {
     let judges = judge_tasks(ctx);
-    if judges.len() <= 1 {
+    // Research / computational-research on the PARALLEL template runs a
+    // two-judge pipeline: judge-A maps the survey before the writers run,
+    // judge-B reconciles the written files. All other cases keep one judge.
+    let max_judges = if is_research_mission(ctx) && matches!(ctx.template, SwarmTemplate::Parallel)
+    {
+        2
+    } else {
+        1
+    };
+    if judges.len() <= max_judges {
         return Vec::new();
     }
     let ids = judges
@@ -358,15 +385,24 @@ fn invariant_singleton_judge(ctx: &ValidationContext<'_>) -> Vec<Violation> {
         task_id: None,
         agent_id: None,
         severity: Severity::MustFix,
-        human: format!("Plan has {} judge tasks: {ids}.", judges.len()),
-        hint: "Collapse to exactly one `role=judge` task that depends on every proposer.".into(),
+        human: format!(
+            "Plan has {} judge tasks (max {max_judges} for this mission/template): {ids}.",
+            judges.len()
+        ),
+        hint: format!(
+            "Collapse to at most {max_judges} `role=judge` task(s); each judge depends on the producers it synthesises."
+        ),
     }]
 }
 
 fn invariant_singleton_integrate(ctx: &ValidationContext<'_>) -> Vec<Violation> {
-    // Parallel template intentionally allows multi-writer integrate fan-out
-    // for topical sharding; only enforce singleton on lab/bulk.
-    if matches!(ctx.template, SwarmTemplate::Parallel) {
+    // Parallel allows multi-writer integrate fan-out — but only for GENERAL
+    // missions (topical file sharding). Research / computational-research
+    // missions converge on ONE `integrate` (the master index), so they keep
+    // the singleton rule even under parallel. Lab/bulk always singleton.
+    let allows_multi_writer =
+        matches!(ctx.template, SwarmTemplate::Parallel) && !is_research_mission(ctx);
+    if allows_multi_writer {
         return Vec::new();
     }
     let integrates = integrate_tasks(ctx);
@@ -393,16 +429,24 @@ fn invariant_singleton_integrate(ctx: &ValidationContext<'_>) -> Vec<Violation> 
 }
 
 fn invariant_writes_only_on_integrator(ctx: &ValidationContext<'_>) -> Vec<Violation> {
-    // Parallel writers may legitimately be multiple agents — that constraint
-    // is enforced elsewhere via role hints; here we only complain when the
-    // writer's role isn't `integrate`.
+    // General missions and BULK research keep the strict rule: only `integrate`
+    // writes. Research / computational-research on the PARALLEL template let
+    // their producer roles (`research`, `computational-research`) write their
+    // OWN findings files — the researcher is the writer. `propose` stays
+    // read-only; the `integrate` role (the master-index writer) is always
+    // allowed.
+    let research_writers_allowed =
+        is_research_mission(ctx) && matches!(ctx.template, SwarmTemplate::Parallel);
     let mut violations = Vec::new();
     for task in ctx.tasks.iter() {
         if !task.writes {
             continue;
         }
         let role = task_role(task);
-        if role.as_deref() != Some("integrate") {
+        let writer_ok = role.as_deref() == Some("integrate")
+            || (research_writers_allowed
+                && matches!(role.as_deref(), Some("research" | "computational-research")));
+        if !writer_ok {
             violations.push(Violation {
                 id: "INV-06 writes_only_on_integrator",
                 task_id: Some(task.id.clone()),
@@ -414,7 +458,9 @@ fn invariant_writes_only_on_integrator(ctx: &ValidationContext<'_>) -> Vec<Viola
                     role.as_deref().unwrap_or("<none>")
                 ),
                 hint: format!(
-                    "Either set `role=integrate` for task `{}` or set `writes=false`.",
+                    "Set `role=integrate` for task `{}`, or `writes=false` — on parallel \
+                     research missions, `research` / `computational-research` tasks may also \
+                     write their own findings files.",
                     task.id
                 ),
             });
@@ -454,6 +500,13 @@ fn invariant_integrator_assignment(ctx: &ValidationContext<'_>) -> Vec<Violation
 }
 
 fn invariant_judge_depends_on_all_proposers(ctx: &ValidationContext<'_>) -> Vec<Violation> {
+    // Parallel research runs TWO judges over TWO producer groups (judge-A over
+    // the survey lenses, judge-B over the writers), so "every judge depends on
+    // every proposer" doesn't fit — those per-judge deps are prompt-driven.
+    // Bulk research (one judge over the lenses) and general missions keep it.
+    if is_research_mission(ctx) && matches!(ctx.template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
     let proposers = proposer_tasks(ctx);
     let judges = judge_tasks(ctx);
     if proposers.is_empty() || judges.is_empty() {
@@ -781,28 +834,51 @@ fn root_prompt_requests_code_change(root_prompt: &str) -> bool {
 /// step with what the validator actually enforces — both sides read the same
 /// list, so drift between the prompt and the check is impossible by
 /// construction.
-pub(super) fn planner_invariants_for_prompt(template: SwarmTemplate) -> Vec<&'static str> {
+pub(super) fn planner_invariants_for_prompt(
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+) -> Vec<&'static str> {
+    let research = !matches!(mission_kind, SwarmMissionKind::General);
+    let research_parallel = research && matches!(template, SwarmTemplate::Parallel);
     let mut lines: Vec<&'static str> = vec![
         "Every task must have a unique `id`.",
         "Every task's `agent_id` must be in the allowed agent list.",
-        "At most one `role=judge` task. The judge MUST depend on every proposer task.",
-        "Every task with `writes=true` MUST have `role=integrate`.",
-        "Every `integrate` task MUST depend on the judge task when a judge is present.",
-        "All `deps` must reference task ids that exist in the same plan.",
-        "Tasks must form a DAG (no cycles).",
-        "When an agent has a non-`all` role hint, you MUST assign that agent a task with the matching role.",
-        "Proposers (`role=propose`) must run in parallel; never make one proposer depend on another.",
     ];
-    if !matches!(template, SwarmTemplate::Parallel) {
+    // Judge count + writer rule differ for parallel research (two judges, the
+    // researchers are the writers); everything else keeps the single-judge,
+    // only-integrate-writes rules. This mirrors the research-aware validator.
+    if research_parallel {
         lines.push(
-            "At most one `role=integrate` task. The integrate task MUST be assigned to the designated integrator agent.",
+            "UP TO TWO `role=judge` tasks are allowed here (judge-A maps the survey before the writers run, judge-B reconciles the written files); each judge depends on the producers it synthesises.",
+        );
+        lines.push(
+            "`writes=true` is allowed on the single `role=integrate` (the index) AND on `role=research` / `role=computational-research` producers writing their OWN findings files; `role=propose` stays read-only.",
+        );
+    } else {
+        lines.push("At most one `role=judge` task. The judge MUST depend on every proposer task.");
+        lines.push("Every task with `writes=true` MUST have `role=integrate`.");
+    }
+    lines.push("Every `integrate` task MUST depend on a judge task when a judge is present.");
+    lines.push("All `deps` must reference task ids that exist in the same plan.");
+    lines.push("Tasks must form a DAG (no cycles).");
+    lines.push("When an agent has a non-`all` role hint, you MUST assign that agent a task with the matching role.");
+    lines.push("Proposers / survey lenses must run in parallel; never make one depend on another.");
+    // Singleton integrate: every shape EXCEPT general-parallel converges on one
+    // integrate task (lab/bulk always, research-parallel = the single index).
+    if !matches!(template, SwarmTemplate::Parallel) || research_parallel {
+        lines.push(
+            "Exactly one `role=integrate` task, assigned to the designated integrator agent.",
         );
     }
     if matches!(template, SwarmTemplate::Bulk) {
-        lines.push("Emit at least 2 proposer tasks when there are 2+ non-integrator agents.");
+        lines.push(
+            "Emit at least 2 producer/proposer tasks when there are 2+ non-integrator agents.",
+        );
         lines.push("Cap proposers at 12 to keep the per-dep budget meaningful.");
     }
-    if matches!(template, SwarmTemplate::Parallel) {
+    // General-parallel fanout rules — these do NOT apply to research, which
+    // converges on a single index integrator.
+    if matches!(template, SwarmTemplate::Parallel) && !research {
         // Parallel-template fanout floor. The actual numeric floor comes
         // from `parallel_integrate_floor` at validation time (operator
         // intent + available-writer count); the prompt-side rule states

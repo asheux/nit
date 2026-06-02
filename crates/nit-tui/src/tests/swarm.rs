@@ -1700,8 +1700,57 @@ fn planner_prompt_describes_computational_research_mission_shape() {
     );
 
     assert!(prompt.contains("source survey -> modeling / experiments / analysis"));
-    assert!(prompt.contains("preferred for quantitative or tool-driven lanes"));
-    assert!(prompt.contains("Prefer read-only investigation and synthesis tasks"));
+    // computational-research is the default producer; research missions always
+    // write their findings (no blanket read-only).
+    assert!(prompt.contains("is the DEFAULT producer role for this mission"));
+    assert!(prompt.contains("Producer roles WRITE the output"));
+}
+
+// Research + parallel uses the two-judge / researchers-write / single-index
+// pipeline — and must NOT leak the general multi-writer-fanout guidance that
+// would contradict it.
+#[test]
+fn parallel_research_prompt_uses_single_index_not_multi_writer() {
+    let prompt = build_planner_prompt(
+        "research Evolutionary AI and write the materials into notebooks",
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::ComputationalResearch,
+        "planner",
+        &[
+            "planner".into(),
+            "a1".into(),
+            "a2".into(),
+            "a3".into(),
+            "a4".into(),
+        ],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+        None,
+        &[],
+    );
+    // The dedicated research pipeline is present.
+    assert!(
+        prompt.contains("RESEARCH PIPELINE (parallel)"),
+        "missing research pipeline block:\n{prompt}"
+    );
+    assert!(prompt.contains("TWO JUDGES ARE EXPECTED"));
+    assert!(prompt.contains("Index integrator:"));
+    // No contradictory multi-writer / general-fanout / propose-lens guidance.
+    assert!(
+        !prompt.contains("additional `integrate` tasks may be assigned"),
+        "research parallel prompt must not invite multi-writer fanout:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("PARALLEL FANOUT — MUST"),
+        "research parallel prompt must not include the general fanout block:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("LENS PROPOSERS — MUST"),
+        "research parallel prompt must not ask for a separate propose lane:\n{prompt}"
+    );
 }
 
 // Bulk planner prompt must keep its existing "distinct lens" guidance —
