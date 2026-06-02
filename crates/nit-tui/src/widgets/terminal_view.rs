@@ -3,6 +3,7 @@
 //! hardware cursor via `cursor_position` so stacked panes/popups never fight
 //! over the single frame cursor slot.
 
+use nit_core::{UiSelection, UiSelectionPane};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -13,8 +14,16 @@ use ratatui::{
 
 use crate::pty::PtySession;
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
 
-pub fn render_screen(frame: &mut Frame, area: Rect, session: &PtySession, theme: &Theme) {
+pub fn render_screen(
+    frame: &mut Frame,
+    area: Rect,
+    session: &PtySession,
+    theme: &Theme,
+    selection: Option<&UiSelection>,
+    pane: UiSelectionPane,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -24,13 +33,18 @@ pub fn render_screen(frame: &mut Frame, area: Rect, session: &PtySession, theme:
     let visible_rows = area.height.min(rows);
     let visible_cols = area.width.min(cols);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(visible_rows as usize);
+    // `cell.contents()` borrows the parser, but `apply_ui_selection` needs
+    // `'static` lines, so each glyph is cloned into an owned span.
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows as usize);
     for row in 0..visible_rows {
-        let mut spans: Vec<Span> = Vec::with_capacity(visible_cols as usize);
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(visible_cols as usize);
         for col in 0..visible_cols {
             match screen.cell(row, col) {
                 Some(cell) if cell.has_contents() => {
-                    spans.push(Span::styled(cell.contents(), cell_style(cell, theme)));
+                    spans.push(Span::styled(
+                        cell.contents().to_string(),
+                        cell_style(cell, theme),
+                    ));
                 }
                 Some(cell) => spans.push(Span::styled(" ".to_string(), cell_style(cell, theme))),
                 None => spans.push(Span::raw(" ".to_string())),
@@ -38,10 +52,43 @@ pub fn render_screen(frame: &mut Frame, area: Rect, session: &PtySession, theme:
         }
         lines.push(Line::from(spans));
     }
+    // The embedded PTY has no scrollback, so the visible grid starts at line 0
+    // and selection rows map 1:1 to screen rows (scroll = 0).
+    let lines = apply_ui_selection(lines, selection, pane, theme.selection_bg, 0);
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme.background)),
         area,
     );
+}
+
+/// The terminal's visible grid as plain strings, one per row, each padded to
+/// the rendered column width so character indices line up with what
+/// `render_screen` paints. Mouse handlers snapshot this (with the inner `area`)
+/// into `AppState::terminal_select_regions` so drag-select + copy can resolve
+/// a click to a row/column and slice the selected text — all without reaching
+/// the `PtySession` from the input layer.
+pub fn visible_text_lines(area: Rect, session: &PtySession) -> Vec<String> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let parser = session.screen();
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let visible_rows = area.height.min(rows);
+    let visible_cols = area.width.min(cols);
+
+    let mut lines = Vec::with_capacity(visible_rows as usize);
+    for row in 0..visible_rows {
+        let mut text = String::with_capacity(visible_cols as usize);
+        for col in 0..visible_cols {
+            match screen.cell(row, col) {
+                Some(cell) if cell.has_contents() => text.push_str(cell.contents()),
+                _ => text.push(' '),
+            }
+        }
+        lines.push(text);
+    }
+    lines
 }
 
 /// Screen-space cursor cell, or `None` when the shell hid it or it sits

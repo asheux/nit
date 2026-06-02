@@ -769,6 +769,44 @@ pub(super) fn normalize_http_url(text: &str) -> Option<String> {
     }
 }
 
+// Start a terminal text selection if the click landed on a selectable terminal
+// grid (modal popup wins over an inline terminal behind it). Mirrors the other
+// pane down-handlers: reset any prior selection, seed a collapsed UiSelection +
+// drag anchor on the terminal pane, and autocopy (a no-op until the drag makes
+// the selection non-empty). Returns false when the point is over no terminal.
+fn try_start_terminal_selection(
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    mouse: MouseEvent,
+) -> bool {
+    let Some((pane, line_idx, col, lines)) =
+        terminal_mouse_down_hit(state, mouse.column, mouse.row)
+    else {
+        return false;
+    };
+    reset_ui_selection(state, input_state);
+    // Focus the chat pane for the inline terminal so a follow-up keystroke goes
+    // to the shell; the popup is a modal overlay and owns focus already.
+    if pane == UiSelectionPane::Terminal {
+        state.focus = PaneId::Notes;
+    }
+    state.ui_selection = Some(UiSelection {
+        pane,
+        start_line: line_idx,
+        start_col: col,
+        end_line: line_idx,
+        end_col: col,
+    });
+    input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+        target: MouseSelectTarget::Ui(pane),
+        line: line_idx,
+        col,
+    });
+    update_ui_selection_text(state, pane, &lines, clipboard, input_state);
+    true
+}
+
 pub(super) fn handle_mouse_down_with_swarm(
     swarm: &SwarmRuntime,
     mouse: MouseEvent,
@@ -782,6 +820,13 @@ pub(super) fn handle_mouse_down_with_swarm(
         return true;
     }
     if state.rule_picker.open || state.protocol_picker.open {
+        return true;
+    }
+    // Modal terminal popup: a click on its grid starts a text selection; any
+    // other click while it's open is absorbed so it can't reach the layout
+    // behind (the runner handles the outside-click close before dispatching).
+    if state.terminal_popup.visible {
+        try_start_terminal_selection(state, input_state, clipboard, mouse);
         return true;
     }
     if state.definition_popup.is_some() {
@@ -1194,6 +1239,12 @@ pub(super) fn handle_mouse_down_with_swarm(
             col: 0,
         });
         copy_chat_input_selection(state, clipboard);
+        return true;
+    }
+    // Inline agent-chat terminal: select its grid before falling into the
+    // chat-console hit-test (the terminal renders in the same notes pane when
+    // its tab is active, so the console mapper returns None there anyway).
+    if try_start_terminal_selection(state, input_state, clipboard, mouse) {
         return true;
     }
     if let Some((line_idx, col, lines)) =
@@ -1772,6 +1823,11 @@ pub(super) fn handle_mouse_drag_with_swarm(
                 }
                 UiSelectionPane::GamesMatchHistoryPopup => {
                     map_match_history_popup_mouse(mouse, screen, state, theme, true)
+                }
+                UiSelectionPane::Terminal | UiSelectionPane::TerminalPopup => {
+                    terminal_region_for_pane(state, pane).and_then(|region| {
+                        map_terminal_region(region, mouse.column, mouse.row, true)
+                    })
                 }
             };
             let Some((line_idx, col, lines)) = result else {

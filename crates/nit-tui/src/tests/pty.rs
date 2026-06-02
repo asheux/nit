@@ -122,6 +122,44 @@ fn spawn_runs_command_and_reports_exit() {
 
 #[cfg(unix)]
 #[test]
+fn scroll_up_enters_scrollback_and_input_snaps_to_bottom() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    // Emit far more lines than the 10-row grid so scrollback fills, then idle
+    // so the session stays alive for write_input.
+    let session = match PtySession::spawn_program(
+        "/bin/sh",
+        &["-c", "for i in $(seq 1 200); do echo line$i; done; sleep 5"],
+        &dir,
+        PtySize { rows: 10, cols: 40 },
+    ) {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+    let mut ready = false;
+    for _ in 0..200 {
+        if session.screen().screen().contents().contains("line200") {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !ready {
+        return; // shell too slow / unavailable — degrade to no-op.
+    }
+    // Live view sits at the bottom.
+    assert_eq!(session.screen().screen().scrollback(), 0);
+    session.scroll_up(5);
+    assert_eq!(session.screen().screen().scrollback(), 5);
+    session.scroll_down(2);
+    assert_eq!(session.screen().screen().scrollback(), 3);
+    // Typing snaps the viewport back to the live bottom.
+    let _ = session.write_input(b"");
+    assert_eq!(session.screen().screen().scrollback(), 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn resize_updates_parser_dimensions() {
     let dir = std::env::temp_dir();
     let session = match PtySession::spawn_program(

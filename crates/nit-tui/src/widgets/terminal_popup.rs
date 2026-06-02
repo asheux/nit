@@ -13,6 +13,8 @@ use ratatui::{
     Frame,
 };
 
+use nit_core::{UiSelection, UiSelectionPane};
+
 use crate::pty::{PtySession, PtySize};
 use crate::theme::Theme;
 use crate::widgets::terminal_view;
@@ -37,6 +39,15 @@ pub fn popup_rect(screen: Rect) -> Rect {
 
 fn pct(value: u16, percent: u16) -> u16 {
     (value as u32 * percent as u32 / 100) as u16
+}
+
+/// Inner content rect of the popup — the area `render_screen` paints. Exposed
+/// so the caller can snapshot the terminal's selectable region for mouse
+/// hit-testing without re-deriving the border math.
+pub fn popup_inner_rect(screen: Rect) -> Rect {
+    Block::default()
+        .borders(Borders::ALL)
+        .inner(popup_rect(screen))
 }
 
 /// Dim every cell behind the popup so the modal reads as focused. Patches the
@@ -64,6 +75,7 @@ pub fn render(
     session: &PtySession,
     cwd: Option<&Path>,
     theme: &Theme,
+    selection: Option<&UiSelection>,
 ) -> Option<(u16, u16)> {
     dim_behind(frame, screen);
     let area = popup_rect(screen);
@@ -99,7 +111,14 @@ pub fn render(
         rows: inner.height,
         cols: inner.width,
     });
-    terminal_view::render_screen(frame, inner, session, theme);
+    terminal_view::render_screen(
+        frame,
+        inner,
+        session,
+        theme,
+        selection,
+        UiSelectionPane::TerminalPopup,
+    );
     terminal_view::cursor_position(inner, session)
 }
 

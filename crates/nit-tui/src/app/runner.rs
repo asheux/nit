@@ -681,15 +681,42 @@ pub(super) fn run_loop(
                     // other mouse event inside or outside is dropped so a
                     // drag-select on the chat below doesn't leak through.
                     if state.terminal_popup.visible {
-                        if matches!(
-                            mouse.kind,
+                        let screen = terminal.size().unwrap_or_default();
+                        let popup_area = crate::widgets::terminal_popup::popup_rect(screen);
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if scroll_terminal_under_pointer(
+                                    state,
+                                    terminal_pane.as_ref(),
+                                    terminal_popup_session.as_ref(),
+                                    &mouse,
+                                ) {
+                                    needs_redraw = true;
+                                }
+                            }
                             MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                        ) {
-                            let screen = terminal.size().unwrap_or_default();
-                            let area = crate::widgets::terminal_popup::popup_rect(screen);
-                            if !point_in_rect(mouse.column, mouse.row, area) {
+                                if !point_in_rect(mouse.column, mouse.row, popup_area) =>
+                            {
+                                // Outside-click closes the modal.
                                 state.terminal_popup.toggle_requested = true;
                                 needs_redraw = true;
+                            }
+                            _ => {
+                                // Inside the popup: route to the mouse handler so a
+                                // drag selects the grid. The handler absorbs
+                                // non-grid clicks (the popup is modal).
+                                if handle_mouse_event_with_swarm(
+                                    &swarm,
+                                    mouse,
+                                    screen,
+                                    state,
+                                    &mut fuzzy_runtime,
+                                    &mut input_state,
+                                    &mut clipboard,
+                                    theme,
+                                ) {
+                                    needs_redraw = true;
+                                }
                             }
                         }
                         continue;
@@ -699,6 +726,19 @@ pub(super) fn run_loop(
                         mouse.kind,
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     );
+                    // Wheel over an inline terminal scrolls its scrollback rather
+                    // than the chat/editor underneath it.
+                    if is_scroll
+                        && scroll_terminal_under_pointer(
+                            state,
+                            terminal_pane.as_ref(),
+                            terminal_popup_session.as_ref(),
+                            &mouse,
+                        )
+                    {
+                        needs_redraw = true;
+                        continue;
+                    }
                     // Coalesce drag events the same way scroll events get
                     // coalesced below: each drag fires the popup-body /
                     // chat-thread mapper which calls `build_lines`
@@ -1289,6 +1329,44 @@ pub(super) fn run_loop(
         runtime.shutdown();
     }
     Ok(())
+}
+
+/// Scroll whichever embedded terminal the pointer sits over, resolving inline
+/// vs popup through the per-frame `terminal_select_regions` snapshot so the
+/// input layer can reach the right `PtySession` (which lives here in the
+/// runner, not in `AppState`). The snapshot rects are absolute screen
+/// coordinates, so a raw `MouseEvent` column/row maps directly. Returns true
+/// when a terminal consumed the wheel (so the generic scroll handler is
+/// skipped).
+fn scroll_terminal_under_pointer(
+    state: &AppState,
+    terminal_pane: Option<&crate::pty::PtySession>,
+    terminal_popup_session: Option<&crate::pty::PtySession>,
+    mouse: &crossterm::event::MouseEvent,
+) -> bool {
+    const TERMINAL_SCROLL_LINES: usize = 3;
+    let Some(region) = state.terminal_select_regions.iter().rev().find(|r| {
+        mouse.column >= r.x
+            && mouse.column < r.x.saturating_add(r.width)
+            && mouse.row >= r.y
+            && mouse.row < r.y.saturating_add(r.height)
+    }) else {
+        return false;
+    };
+    let session = match region.pane {
+        nit_core::UiSelectionPane::TerminalPopup => terminal_popup_session,
+        nit_core::UiSelectionPane::Terminal => terminal_pane,
+        _ => None,
+    };
+    let Some(session) = session else {
+        return false;
+    };
+    match mouse.kind {
+        MouseEventKind::ScrollUp => session.scroll_up(TERMINAL_SCROLL_LINES),
+        MouseEventKind::ScrollDown => session.scroll_down(TERMINAL_SCROLL_LINES),
+        _ => return false,
+    }
+    true
 }
 
 /// Inner chat-pane dimensions for the terminal PTY winsize. The chat pane draws

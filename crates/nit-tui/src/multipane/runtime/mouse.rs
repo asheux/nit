@@ -75,6 +75,12 @@ thread_local! {
     /// chat-thread selection.
     static INPUT_BOX_DRAG_PANE: std::cell::Cell<Option<usize>>
         = const { std::cell::Cell::new(None) };
+    /// Per-gesture sentinel: which terminal pane (`Terminal` inline /
+    /// `TerminalPopup` modal) owns an in-progress text-selection drag. When
+    /// Some, drag events extend the terminal selection rather than a chat
+    /// thread. The grid is read back from `terminal_select_regions`.
+    static TERMINAL_DRAG_PANE: std::cell::Cell<Option<UiSelectionPane>>
+        = const { std::cell::Cell::new(None) };
 }
 
 fn record_popup_anchor(line: usize, col: usize) {
@@ -121,6 +127,64 @@ fn copy_popup_selection_to_clipboard(
     }
 }
 
+// Terminal-grid sibling of `copy_popup_selection_to_clipboard`: copies the
+// current terminal selection's text on every change. Same bounded-gesture
+// rationale (no signature-cache dedup needed).
+fn copy_terminal_selection_to_clipboard(
+    state: &mut AppState,
+    lines: &[String],
+    clipboard: &mut Option<arboard::Clipboard>,
+) {
+    let Some(selection) = state.ui_selection else {
+        return;
+    };
+    if !matches!(
+        selection.pane,
+        UiSelectionPane::Terminal | UiSelectionPane::TerminalPopup
+    ) {
+        return;
+    }
+    let text = crate::app::selection_text(lines, selection);
+    if text.is_empty() {
+        return;
+    }
+    state.yank = Some(text.clone());
+    state.yank_kind = if text.contains('\n') {
+        nit_core::YankKind::Line
+    } else {
+        nit_core::YankKind::Char
+    };
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text);
+    }
+}
+
+// Start a terminal text selection if the click landed on a selectable terminal
+// grid registered in `terminal_select_regions` (the focused pane's inline
+// terminal, or the modal popup). Seeds a collapsed UiSelection + the
+// per-gesture `TERMINAL_DRAG_PANE` sentinel so drag events extend it. Returns
+// false when the point is over no terminal.
+fn try_start_terminal_selection(
+    state: &mut AppState,
+    clipboard: &mut Option<arboard::Clipboard>,
+    x: u16,
+    y: u16,
+) -> bool {
+    let Some((pane, line, col, lines)) = crate::app::terminal_mouse_down_hit(state, x, y) else {
+        return false;
+    };
+    state.ui_selection = Some(UiSelection {
+        pane,
+        start_line: line,
+        start_col: col,
+        end_line: line,
+        end_col: col,
+    });
+    TERMINAL_DRAG_PANE.with(|cell| cell.set(Some(pane)));
+    copy_terminal_selection_to_clipboard(state, &lines, clipboard);
+    true
+}
+
 fn handle_mouse_left_down(
     state: &mut AppState,
     swarm: &SwarmRuntime,
@@ -131,6 +195,12 @@ fn handle_mouse_left_down(
 ) {
     let x = mouse.column;
     let y = mouse.row;
+    // Modal terminal popup: a click on its grid starts a text selection; any
+    // other click is absorbed (the event loop handles the outside-click close).
+    if state.terminal_popup.visible {
+        try_start_terminal_selection(state, clipboard, x, y);
+        return;
+    }
     if state.agents.artifacts_popup_open {
         // Mirror the single-pane handler at `app/mouse.rs:779-836`:
         //   1. Click inside popup body → seed a text-selection anchor
@@ -254,6 +324,13 @@ fn handle_mouse_left_down(
         INPUT_BOX_DRAG_PANE.with(|cell| cell.set(Some(pane_idx)));
         return;
     }
+    // Focused pane's inline terminal: select its grid. Only the focused
+    // pane registers a region (the shared `Terminal` pane id can't
+    // disambiguate multiple grids), so clicking an unfocused terminal first
+    // focuses it and a follow-up drag selects.
+    if !state.terminal_popup.visible && try_start_terminal_selection(state, clipboard, x, y) {
+        return;
+    }
     // Drag-to-select takes precedence over artifact-popup open: seed
     // the selection anchor on Down, defer popup-open to Up so a
     // single click without drag still opens the popup. Selection
@@ -318,6 +395,28 @@ fn handle_mouse_left_drag(
 ) {
     let x = mouse.column;
     let y = mouse.row;
+
+    // Terminal drag: extend the selection on the grid the gesture started on.
+    // Clamping pins an out-of-bounds point to the nearest row/col so the
+    // selection keeps growing past the edge.
+    if let Some(pane) = TERMINAL_DRAG_PANE.with(|cell| cell.get()) {
+        let Some(start) = state.ui_selection else {
+            return;
+        };
+        let mapped = crate::app::terminal_region_for_pane(state, pane)
+            .and_then(|region| crate::app::map_terminal_region(region, x, y, true));
+        if let Some((line, col, lines)) = mapped {
+            state.ui_selection = Some(UiSelection {
+                pane,
+                start_line: start.start_line,
+                start_col: start.start_col,
+                end_line: line,
+                end_col: col,
+            });
+            copy_terminal_selection_to_clipboard(state, &lines, clipboard);
+        }
+        return;
+    }
 
     // Popup body drag: extend the anchor → current point UiSelection
     // and re-copy to clipboard. Mirrors the single-pane drag handler
@@ -465,6 +564,11 @@ fn auto_scroll_drag_pane_chat_thread(
 }
 
 fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, x: u16, y: u16) {
+    // Terminal drag terminator: drop the per-gesture sentinel. A real drag
+    // leaves `ui_selection` populated so Ctrl/Cmd+C can re-copy it.
+    if TERMINAL_DRAG_PANE.with(|cell| cell.replace(None)).is_some() {
+        return;
+    }
     // Popup body anchor lives only for the duration of the gesture.
     // Drop it on Up regardless of pane hit so a stray release outside
     // the popup doesn't leak the anchor across gestures.

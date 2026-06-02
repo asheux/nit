@@ -12,6 +12,10 @@ use std::thread::JoinHandle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize as PtyDims};
 
+/// Rows retained above the live grid for scrollback. Generous so a long build
+/// log stays reachable by mouse-wheel; vt100 caps its history at this many rows.
+const SCROLLBACK_LINES: usize = 10_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtySize {
     pub rows: u16,
@@ -57,7 +61,11 @@ impl PtySession {
         let reader = pair.master.try_clone_reader().map_err(to_io)?;
         let writer = pair.master.take_writer().map_err(to_io)?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            size.rows,
+            size.cols,
+            SCROLLBACK_LINES,
+        )));
         let exited = Arc::new(AtomicBool::new(false));
         let handle = spawn_reader(reader, parser.clone(), exited.clone());
 
@@ -74,12 +82,34 @@ impl PtySession {
 
     /// Forward already-encoded operator bytes to the shell stdin.
     pub fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        // Typing snaps the viewport back to the live bottom, matching how a
+        // real terminal behaves when you start typing while scrolled up.
+        lock(&self.parser).screen_mut().set_scrollback(0);
         let mut writer = self
             .writer
             .lock()
             .map_err(|_| io::Error::other("pty writer poisoned"))?;
         writer.write_all(bytes)?;
         writer.flush()
+    }
+
+    /// Scroll the viewport `lines` rows toward older output. vt100 clamps the
+    /// offset to the oldest retained row, so over-scrolling is a no-op.
+    pub fn scroll_up(&self, lines: usize) {
+        let mut parser = lock(&self.parser);
+        let offset = parser.screen().scrollback();
+        parser
+            .screen_mut()
+            .set_scrollback(offset.saturating_add(lines));
+    }
+
+    /// Scroll the viewport `lines` rows toward the live bottom (offset 0).
+    pub fn scroll_down(&self, lines: usize) {
+        let mut parser = lock(&self.parser);
+        let offset = parser.screen().scrollback();
+        parser
+            .screen_mut()
+            .set_scrollback(offset.saturating_sub(lines));
     }
 
     /// Push winsize to the pty + parser on resize; no-op when unchanged so a

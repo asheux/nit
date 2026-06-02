@@ -1,5 +1,5 @@
 use arboard::Clipboard;
-use nit_core::{AppKind, AppState, UiSelection, UiSelectionPane, YankKind};
+use nit_core::{AppKind, AppState, TerminalSelectRegion, UiSelection, UiSelectionPane, YankKind};
 
 use super::chat_input::slice_by_char;
 use super::input_state::{InputState, MouseSelectAnchor, MouseSelectTarget, UiSelectionSignature};
@@ -224,6 +224,89 @@ pub(super) fn user_bubble_payload_start_col(line: &str) -> Option<usize> {
     is_user_prompt_row(line).then_some(USER_PROMPT_INDENT)
 }
 
+fn point_in_terminal_region(region: &TerminalSelectRegion, x: u16, y: u16) -> bool {
+    x >= region.x
+        && x < region.x.saturating_add(region.width)
+        && y >= region.y
+        && y < region.y.saturating_add(region.height)
+}
+
+/// The on-screen terminal grid under `(x, y)`, topmost first so a terminal
+/// popup overlay wins over an inline terminal painted behind it. `None` when
+/// the point is over no terminal. Used on mouse-down to start a selection.
+pub(crate) fn terminal_region_at(
+    state: &AppState,
+    x: u16,
+    y: u16,
+) -> Option<&TerminalSelectRegion> {
+    state
+        .terminal_select_regions
+        .iter()
+        .rev()
+        .find(|r| point_in_terminal_region(r, x, y))
+}
+
+/// The most-recently-rendered terminal region for `pane`. Used during a drag to
+/// re-resolve the grid the gesture started on even after the cursor leaves it.
+pub(crate) fn terminal_region_for_pane(
+    state: &AppState,
+    pane: UiSelectionPane,
+) -> Option<&TerminalSelectRegion> {
+    state
+        .terminal_select_regions
+        .iter()
+        .rev()
+        .find(|r| r.pane == pane)
+}
+
+/// Resolve a mouse-down point to a terminal selection start, respecting the
+/// popup's modality: while the terminal popup is open only its grid is
+/// selectable, never an inline terminal painted behind it. Returns the pane and
+/// the `(line, col, lines)` start, or `None` when the point is over no
+/// (currently selectable) terminal.
+pub(crate) fn terminal_mouse_down_hit(
+    state: &AppState,
+    x: u16,
+    y: u16,
+) -> Option<(UiSelectionPane, usize, usize, Vec<String>)> {
+    let region = if state.terminal_popup.visible {
+        let region = terminal_region_for_pane(state, UiSelectionPane::TerminalPopup)?;
+        if !point_in_terminal_region(region, x, y) {
+            return None;
+        }
+        region
+    } else {
+        terminal_region_at(state, x, y)?
+    };
+    let pane = region.pane;
+    let (line, col, lines) = map_terminal_region(region, x, y, false)?;
+    Some((pane, line, col, lines))
+}
+
+/// Map a point to a `(line, col, lines)` triple inside a terminal region. With
+/// `clamp = false` (mouse-down) the point must be inside the grid; with
+/// `clamp = true` (drag) an out-of-bounds point is pinned to the nearest
+/// row/column so a drag past the edge keeps extending the selection. `lines` is
+/// the region's snapshot, returned for the shared `selection_text` slicer.
+pub(crate) fn map_terminal_region(
+    region: &TerminalSelectRegion,
+    x: u16,
+    y: u16,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if region.lines.is_empty() {
+        return None;
+    }
+    if !clamp && !point_in_terminal_region(region, x, y) {
+        return None;
+    }
+    let last_line = region.lines.len().saturating_sub(1);
+    let line_idx = (y.saturating_sub(region.y) as usize).min(last_line);
+    let line_len = region.lines[line_idx].chars().count();
+    let col = (x.saturating_sub(region.x) as usize).min(line_len);
+    Some((line_idx, col, region.lines.clone()))
+}
+
 pub(super) fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
     if state.command_line.is_some() || state.prompt.is_some() {
         return false;
@@ -245,6 +328,11 @@ pub(super) fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) ->
 
 fn drag_target_for_modal(state: &AppState, target: MouseSelectTarget) -> Option<bool> {
     use UiSelectionPane::*;
+    if state.terminal_popup.visible {
+        // The terminal popup is a modal overlay: while it's open only its own
+        // grid is selectable, never an inline terminal painted behind it.
+        return Some(matches!(target, MouseSelectTarget::Ui(TerminalPopup)));
+    }
     if state.agents.artifacts_popup_open {
         return Some(matches!(
             target,
@@ -300,4 +388,114 @@ fn drag_target_for_modal(state: &AppState, target: MouseSelectTarget) -> Option<
         ));
     }
     None
+}
+
+#[cfg(test)]
+mod terminal_selection_tests {
+    use super::*;
+    use nit_core::Buffer;
+    use std::path::PathBuf;
+
+    fn region(pane: UiSelectionPane, x: u16, y: u16, lines: &[&str]) -> TerminalSelectRegion {
+        TerminalSelectRegion {
+            pane,
+            x,
+            y,
+            width: lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16,
+            height: lines.len() as u16,
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn state_with_regions(regions: Vec<TerminalSelectRegion>, popup_visible: bool) -> AppState {
+        let mut state = AppState::new(
+            PathBuf::from("/ws"),
+            Buffer::empty("e", None),
+            Buffer::empty("n", None),
+        );
+        state.terminal_select_regions = regions;
+        state.terminal_popup.visible = popup_visible;
+        state
+    }
+
+    #[test]
+    fn map_terminal_region_maps_point_to_row_col() {
+        let r = region(
+            UiSelectionPane::Terminal,
+            10,
+            5,
+            &["hello world", "second line"],
+        );
+        // row 6 → line 1 (y origin 5); col 13 → col 3 (x origin 10).
+        let (line, col, lines) = map_terminal_region(&r, 13, 6, false).unwrap();
+        assert_eq!((line, col), (1, 3));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn map_terminal_region_rejects_outside_when_not_clamping() {
+        let r = region(UiSelectionPane::Terminal, 10, 5, &["hello"]);
+        assert!(map_terminal_region(&r, 0, 0, false).is_none());
+    }
+
+    #[test]
+    fn map_terminal_region_clamps_edges_when_dragging() {
+        let r = region(UiSelectionPane::Terminal, 10, 5, &["hello", "world!!"]);
+        // Drag above-left of the grid pins to (0, 0).
+        assert_eq!(map_terminal_region(&r, 0, 0, true).unwrap().0, 0);
+        assert_eq!(map_terminal_region(&r, 0, 0, true).unwrap().1, 0);
+        // Drag far past the bottom-right pins to the last row's end-of-line.
+        let (line, col, _) = map_terminal_region(&r, 999, 999, true).unwrap();
+        assert_eq!(line, 1);
+        assert_eq!(col, "world!!".chars().count());
+    }
+
+    #[test]
+    fn terminal_region_at_returns_topmost_overlay() {
+        // Inline pushed first, popup last → popup wins for an overlapping point.
+        let inline = region(UiSelectionPane::Terminal, 0, 0, &["aaaaa"]);
+        let popup = region(UiSelectionPane::TerminalPopup, 0, 0, &["bbbbb"]);
+        let state = state_with_regions(vec![inline, popup], true);
+        assert_eq!(
+            terminal_region_at(&state, 1, 0).unwrap().pane,
+            UiSelectionPane::TerminalPopup
+        );
+    }
+
+    #[test]
+    fn terminal_mouse_down_hit_respects_popup_modality() {
+        let inline = region(UiSelectionPane::Terminal, 0, 0, &["inline"]);
+        let popup = region(UiSelectionPane::TerminalPopup, 20, 0, &["popup"]);
+        let state = state_with_regions(vec![inline, popup], true);
+        // Click over the inline terminal while the popup is open → no selection.
+        assert!(terminal_mouse_down_hit(&state, 1, 0).is_none());
+        // Click over the popup grid → popup selection.
+        assert_eq!(
+            terminal_mouse_down_hit(&state, 21, 0).unwrap().0,
+            UiSelectionPane::TerminalPopup
+        );
+    }
+
+    #[test]
+    fn terminal_mouse_down_hit_resolves_inline_when_no_popup() {
+        let inline = region(UiSelectionPane::Terminal, 0, 0, &["inline text"]);
+        let state = state_with_regions(vec![inline], false);
+        let (pane, line, col, _) = terminal_mouse_down_hit(&state, 3, 0).unwrap();
+        assert_eq!(pane, UiSelectionPane::Terminal);
+        assert_eq!((line, col), (0, 3));
+    }
+
+    #[test]
+    fn selection_text_slices_terminal_lines() {
+        let lines: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let selection = UiSelection {
+            pane: UiSelectionPane::Terminal,
+            start_line: 0,
+            start_col: 6,
+            end_line: 1,
+            end_col: 6,
+        };
+        // "world" (col 6 → EOL of line 0) + "second" (col 0..6 of line 1).
+        assert_eq!(selection_text(&lines, selection), "world\nsecond");
+    }
 }

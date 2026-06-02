@@ -101,6 +101,29 @@ pub enum UiSelectionPane {
     GamesCaSimPopupLeft,
     GamesCaSimPopupRight,
     GamesMatchHistoryPopup,
+    /// Embedded terminal grid (agent-chat inline pane or multipane pane).
+    /// Inline and multipane terminals are mutually exclusive at runtime, so
+    /// they share one variant.
+    Terminal,
+    /// Modal terminal popup (`Ctrl+Shift+T`). Distinct from `Terminal` so the
+    /// overlay's selection wins over an inline terminal behind it.
+    TerminalPopup,
+}
+
+/// Per-frame snapshot of an on-screen terminal grid, captured during render so
+/// mouse handlers can hit-test and extract selectable text without reaching the
+/// `PtySession` (which lives in the TUI event loop, not in `AppState`). The
+/// embedded terminal has no scrollback, so `lines` is exactly the visible grid
+/// and selection rows map 1:1 to screen rows. Rebuilt every frame; never
+/// serialized.
+#[derive(Clone, Debug)]
+pub struct TerminalSelectRegion {
+    pub pane: UiSelectionPane,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub lines: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -417,6 +440,11 @@ pub struct AppState {
     /// loop, unreachable from `apply_action`.
     #[serde(skip)]
     pub terminal_popup: TerminalPopupState,
+    /// On-screen terminal grids captured during the last render so mouse
+    /// handlers can hit-test + copy selected terminal text. Cleared and
+    /// rebuilt every frame; never persisted.
+    #[serde(skip)]
+    pub terminal_select_regions: Vec<TerminalSelectRegion>,
 }
 
 /// Modal terminal-popup intent shared between `apply_action` and the TUI event
@@ -805,6 +833,7 @@ impl AppState {
             substrate_overlay_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
             terminal_pane_active: false,
+            terminal_select_regions: Vec::new(),
             multipane: None,
             terminal_popup: TerminalPopupState::default(),
         }

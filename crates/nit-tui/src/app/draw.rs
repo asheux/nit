@@ -3,7 +3,10 @@ use std::io::{self, Stdout};
 use std::time::Instant;
 
 use crossterm::{cursor::SetCursorStyle, execute};
-use nit_core::{AgentOpsTab, AppKind, AppState, Mode, PaneId, Prompt, SearchMode};
+use nit_core::{
+    AgentOpsTab, AppKind, AppState, Mode, PaneId, Prompt, SearchMode, TerminalSelectRegion,
+    UiSelectionPane,
+};
 use ratatui::{
     backend::CrosstermBackend,
     style::Style,
@@ -56,6 +59,11 @@ pub(super) fn draw(
     terminal.draw(|f| {
         let screen = f.size();
         let layout = layout::split(screen);
+
+        // Rebuilt every frame: each terminal grid registers its on-screen
+        // region + visible text here so mouse handlers can hit-test and copy
+        // selections without reaching the PtySession from the input layer.
+        state.terminal_select_regions.clear();
 
         // Update viewports (account for gutters)
         let editor_total = state.editor_buffer().lines_len().max(1);
@@ -149,7 +157,24 @@ pub(super) fn draw(
                     .style(Style::default().bg(theme.background));
                 let inner = block.inner(layout.notes);
                 f.render_widget(block, layout.notes);
-                terminal_view::render_screen(f, inner, session, theme);
+                let lines = terminal_view::visible_text_lines(inner, session);
+                let selection = state.ui_selection;
+                state.terminal_select_regions.push(TerminalSelectRegion {
+                    pane: UiSelectionPane::Terminal,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height,
+                    lines,
+                });
+                terminal_view::render_screen(
+                    f,
+                    inner,
+                    session,
+                    theme,
+                    selection.as_ref(),
+                    UiSelectionPane::Terminal,
+                );
                 terminal_cursor = terminal_view::cursor_position(inner, session);
                 None
             }
@@ -395,8 +420,26 @@ pub(super) fn draw(
         // spawn time so `cd` inside the popup updates the title.
         let terminal_popup_cursor = if state.terminal_popup.visible {
             terminal_popup.and_then(|session| {
+                let inner = crate::widgets::terminal_popup::popup_inner_rect(screen);
+                let lines = terminal_view::visible_text_lines(inner, session);
+                let selection = state.ui_selection;
+                state.terminal_select_regions.push(TerminalSelectRegion {
+                    pane: UiSelectionPane::TerminalPopup,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height,
+                    lines,
+                });
                 let title_cwd = terminal_popup_live_cwd.or(state.terminal_popup.cwd.as_deref());
-                crate::widgets::terminal_popup::render(f, screen, session, title_cwd, theme)
+                crate::widgets::terminal_popup::render(
+                    f,
+                    screen,
+                    session,
+                    title_cwd,
+                    theme,
+                    selection.as_ref(),
+                )
             })
         } else {
             None

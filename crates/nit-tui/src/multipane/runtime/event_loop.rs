@@ -234,6 +234,9 @@ pub fn run_loop(
 
             terminal.draw(|frame| {
                 let area = frame.size();
+                // Rebuilt every frame: terminals register their on-screen region
+                // + visible text so the mouse handler can hit-test + copy.
+                state.terminal_select_regions.clear();
                 let cursor = render_grid(frame, area, state, &swarm, theme);
                 let term_cursor = overlay_pane_terminals(frame, area, state, &terminals, theme);
                 if state.agents.artifacts_popup_open {
@@ -243,12 +246,28 @@ pub fn run_loop(
                 // Modal terminal popup overlays the entire grid, topmost.
                 let popup_cursor = if state.terminal_popup.visible {
                     terminal_popup.as_ref().and_then(|session| {
+                        let inner = crate::widgets::terminal_popup::popup_inner_rect(area);
+                        let lines =
+                            crate::widgets::terminal_view::visible_text_lines(inner, session);
+                        let selection = state.ui_selection;
+                        state
+                            .terminal_select_regions
+                            .push(nit_core::TerminalSelectRegion {
+                                pane: nit_core::UiSelectionPane::TerminalPopup,
+                                x: inner.x,
+                                y: inner.y,
+                                width: inner.width,
+                                height: inner.height,
+                                lines,
+                            });
+                        let cwd = state.terminal_popup.cwd.as_deref();
                         crate::widgets::terminal_popup::render(
                             frame,
                             area,
                             session,
-                            state.terminal_popup.cwd.as_deref(),
+                            cwd,
                             theme,
+                            selection.as_ref(),
                         )
                     })
                 } else {
@@ -333,6 +352,70 @@ pub fn run_loop(
     }
 }
 
+/// Scroll whichever embedded terminal the multipane pointer sits over: the
+/// modal popup when it's open, otherwise the per-pane terminal under the
+/// cursor. Geometry comes straight from the grid (no snapshot), so any visible
+/// pane terminal scrolls, not only the focused one. Returns true when the wheel
+/// was consumed (including a modal-absorbed scroll behind the popup).
+fn scroll_terminal_mp(
+    state: &AppState,
+    terminals: &HashMap<usize, crate::pty::PtySession>,
+    terminal_popup: &Option<crate::pty::PtySession>,
+    area: Rect,
+    mouse: &MouseEvent,
+) -> bool {
+    const LINES: usize = 3;
+    let up = match mouse.kind {
+        MouseEventKind::ScrollUp => true,
+        MouseEventKind::ScrollDown => false,
+        _ => return false,
+    };
+    let scroll = |session: &crate::pty::PtySession| {
+        if up {
+            session.scroll_up(LINES);
+        } else {
+            session.scroll_down(LINES);
+        }
+    };
+    if state.terminal_popup.visible {
+        // Modal: only the popup scrolls; panes behind it stay put.
+        if let Some(session) = terminal_popup.as_ref() {
+            let inner = crate::widgets::terminal_popup::popup_inner_rect(area);
+            if super::mouse::point_in_rect(mouse.column, mouse.row, inner) {
+                scroll(session);
+            }
+        }
+        return true;
+    }
+    let Some(mp) = state.multipane.as_ref() else {
+        return false;
+    };
+    // `handle_mouse` strips the top status strip + bottom hint row before
+    // hit-testing panes; mirror that so the pointer maps to the right pane.
+    let grid_area = if area.height >= 4 {
+        Rect::new(area.x, area.y + 1, area.width, area.height - 2)
+    } else {
+        area
+    };
+    let Some(pane_idx) = crate::multipane::grid::pane_at_point(
+        grid_area,
+        mp.grid_cols,
+        mp.grid_rows,
+        mouse.column,
+        mouse.row,
+    ) else {
+        return false;
+    };
+    if !mp.panes.get(pane_idx).is_some_and(|p| p.terminal_active) {
+        return false;
+    }
+    let Some(session) = terminals.get(&pane_idx) else {
+        return false;
+    };
+    scroll(session);
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drain_input_burst(
     state: &mut AppState,
@@ -391,10 +474,42 @@ fn drain_input_burst(
                 }
                 handle_paste(state, &text);
             }
-            // The popup absorbs the mouse (falls to `_`) so clicks can't reach
-            // the dimmed grid behind it.
-            Event::Mouse(mouse) if !state.terminal_popup.visible => {
-                if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+            Event::Mouse(mouse) => {
+                // Wheel over any terminal grid scrolls that session instead of
+                // the chat thread underneath (modal popup wins when open).
+                if scroll_terminal_mp(state, terminals, terminal_popup, area, &mouse) {
+                    if let Some(drag) = pending_drag.take() {
+                        handle_mouse(state, swarm, theme, clipboard, area, drag);
+                    }
+                } else if state.terminal_popup.visible {
+                    // Modal popup: route selection (down/drag/up) through the
+                    // mouse handler; an outside-left-down closes it. Other
+                    // events behind the popup are absorbed.
+                    let popup_area = crate::widgets::terminal_popup::popup_rect(area);
+                    match mouse.kind {
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                            if !super::mouse::point_in_rect(
+                                mouse.column,
+                                mouse.row,
+                                popup_area,
+                            ) =>
+                        {
+                            if let Some(drag) = pending_drag.take() {
+                                handle_mouse(state, swarm, theme, clipboard, area, drag);
+                            }
+                            state.terminal_popup.toggle_requested = true;
+                        }
+                        MouseEventKind::Drag(_) => {
+                            pending_drag = Some(mouse);
+                        }
+                        _ => {
+                            if let Some(drag) = pending_drag.take() {
+                                handle_mouse(state, swarm, theme, clipboard, area, drag);
+                            }
+                            handle_mouse(state, swarm, theme, clipboard, area, mouse);
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Drag(_)) {
                     pending_drag = Some(mouse);
                 } else {
                     if let Some(drag) = pending_drag.take() {
@@ -759,7 +874,7 @@ fn pane_terminal_inner(area: Rect, cols: usize, rows: usize, idx: usize) -> Opti
 fn overlay_pane_terminals(
     frame: &mut ratatui::Frame,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     terminals: &HashMap<usize, crate::pty::PtySession>,
     theme: &Theme,
 ) -> Option<(u16, u16)> {
@@ -831,7 +946,32 @@ fn overlay_pane_terminals(
         let inner = block.inner(rect);
         frame.render_widget(Clear, rect);
         frame.render_widget(block, rect);
-        crate::widgets::terminal_view::render_screen(frame, inner, session, theme);
+        // Terminal selection is scoped to the focused pane (clicking a pane
+        // focuses it), so only the focused terminal registers a selectable
+        // region and receives the selection overlay — the shared `Terminal`
+        // pane id can't disambiguate multiple simultaneous grids otherwise.
+        let selection = if is_focused { state.ui_selection } else { None };
+        if is_focused {
+            let lines = crate::widgets::terminal_view::visible_text_lines(inner, session);
+            state
+                .terminal_select_regions
+                .push(nit_core::TerminalSelectRegion {
+                    pane: nit_core::UiSelectionPane::Terminal,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height,
+                    lines,
+                });
+        }
+        crate::widgets::terminal_view::render_screen(
+            frame,
+            inner,
+            session,
+            theme,
+            selection.as_ref(),
+            nit_core::UiSelectionPane::Terminal,
+        );
         if is_focused {
             focused_cursor = crate::widgets::terminal_view::cursor_position(inner, session);
         }
