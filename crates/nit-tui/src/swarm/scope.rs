@@ -67,10 +67,18 @@ pub(super) fn sanitize_for_filename(input: &str) -> String {
 /// foreground returns an empty `Vec` so the UI never freezes — the walker
 /// continues in the background and its result is discarded.
 ///
-/// When the prompt contains no path tokens (no token with `/`), the walk
-/// falls back to `git diff --name-only` against the merge-base with `main`
-/// (or `master`) so the verifier can scope to in-progress edits instead of
-/// running `--workspace`. Empty when not a git repo or git is unavailable.
+/// Directory tokens may carry a shell glob or trailing punctuation
+/// (`plugins/*`, `plugins/**`, `plugins/`, `src/auth/*.py`, `plugins/*;`);
+/// each is normalised down to its real directory prefix before resolution
+/// (see `normalize_dir_token`).
+///
+/// When the prompt contains no path tokens at all (no token with `/`), the
+/// walk falls back to `git diff --name-only` against the merge-base with
+/// `main` (or `master`) so the verifier can scope to in-progress edits
+/// instead of running `--workspace`. Empty when not a git repo or git is
+/// unavailable. If the prompt DID name a path that simply failed to resolve,
+/// the walk returns empty rather than git-diff — silently scoping to whatever
+/// is dirty in the tree is a more misleading outcome than no scope at all.
 pub(crate) fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
     enumerate_scope_files_with_deadline(workspace_root, prompt, scope_walk_timeout())
 }
@@ -106,17 +114,44 @@ pub(crate) fn enumerate_scope_files_with_deadline(
     rx.recv_timeout(deadline).unwrap_or_default()
 }
 
+// Result of scanning the operator prompt for directory tokens. Separates
+// "no path-like tokens at all" (a read / verify prompt — safe to fall back to
+// `git diff`) from "the operator named a path we could not resolve" (a
+// `plugins/*` glob, a typo, a not-yet-created dir). A `git diff` fallback in
+// the latter case silently scopes the mission to unrelated working-tree edits.
+struct PromptDirScan {
+    dirs: Vec<PathBuf>,
+    // Tokens that looked like a path (`contains('/')`) but did not resolve to
+    // a real directory after glob / punctuation normalisation.
+    unresolved_path_tokens: usize,
+}
+
 fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<String> {
-    let dirs = collect_prompt_dirs(workspace_root, prompt);
-    if dirs.is_empty() {
-        // No usable path tokens. Fall back to operator's working-tree edits
-        // so the verifier still runs scoped commands instead of collapsing
-        // to `--workspace --all-features`.
+    let scan = collect_prompt_dirs(workspace_root, prompt);
+    if scan.dirs.is_empty() {
+        if scan.unresolved_path_tokens > 0 {
+            // The operator clearly named a path (e.g. `plugins/*`) that did
+            // not resolve. Falling back to `git diff` here would silently
+            // scope the mission to whatever happens to be dirty in the tree —
+            // the exact failure that makes a "refactor all of plugins/" run
+            // quietly touch only the handful of files already changed. Return
+            // empty so the planner / proposers survey from the operator
+            // prompt instead of an unrelated scope.
+            tracing::warn!(
+                unresolved = scan.unresolved_path_tokens,
+                "scope walk: path-like prompt token(s) did not resolve to a \
+                 directory; skipping git-diff fallback to avoid a misleading scope"
+            );
+            return Vec::new();
+        }
+        // No path tokens at all. Fall back to the operator's working-tree
+        // edits so the verifier still runs scoped commands instead of
+        // collapsing to `--workspace --all-features`.
         return git_changed_scope_files(workspace_root);
     }
 
     let mut files = Vec::new();
-    for dir in dirs.iter() {
+    for dir in scan.dirs.iter() {
         collect_source_files(dir, workspace_root, &mut files, 0);
         if files.len() >= SCOPE_WALK_MAX_FILES {
             break;
@@ -128,19 +163,61 @@ fn enumerate_scope_files_blocking(workspace_root: &Path, prompt: &str) -> Vec<St
     files
 }
 
-fn collect_prompt_dirs(workspace_root: &Path, prompt: &str) -> Vec<PathBuf> {
+// Extract directory tokens from the operator prompt. A token is a candidate
+// only when it contains `/` (an explicit path), so a bare English word like
+// `state` can't spuriously match a `state/` dir. Operators routinely write
+// shell globs (`plugins/*`, `plugins/**`, `src/auth/*.py`) and leave trailing
+// punctuation (`plugins/*;`), none of which name a directory literally — each
+// candidate is normalised to its real directory prefix before the `is_dir()`
+// check, and path-like tokens that still don't resolve are counted so the
+// caller can avoid the misleading `git diff` fallback.
+fn collect_prompt_dirs(workspace_root: &Path, prompt: &str) -> PromptDirScan {
     let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut unresolved_path_tokens = 0usize;
     for token in prompt.split_whitespace() {
-        let token = token.trim_matches(|c: char| c == ',' || c == '.' || c == '"' || c == '\'');
+        let token = token.trim_matches(|c: char| {
+            matches!(c, ',' | '.' | '"' | '\'' | ';' | ':' | '`' | '(' | ')')
+        });
         if token.is_empty() || !token.contains('/') {
             continue;
         }
-        let candidate = workspace_root.join(token);
+        let Some(normalized) = normalize_dir_token(token) else {
+            continue;
+        };
+        let candidate = workspace_root.join(&normalized);
         if candidate.is_dir() {
             dirs.push(candidate);
+        } else {
+            unresolved_path_tokens += 1;
         }
     }
-    dirs
+    PromptDirScan {
+        dirs,
+        unresolved_path_tokens,
+    }
+}
+
+// Peel trailing shell-glob and empty path segments off a path-like token so
+// `plugins/*`, `plugins/**`, `plugins/`, and `src/auth/*.py` all collapse to
+// the directory the operator meant (`plugins`, `plugins`, `plugins`,
+// `src/auth`). Returns `None` when nothing usable remains (a bare `/` or
+// `*/`). The caller has already confirmed the raw token contained `/`, so a
+// single-segment result like `plugins` is still an intentional path token.
+fn normalize_dir_token(token: &str) -> Option<String> {
+    let mut segments: Vec<&str> = token.split('/').collect();
+    while let Some(last) = segments.last() {
+        if last.is_empty() || last.contains('*') || last.contains('?') {
+            segments.pop();
+        } else {
+            break;
+        }
+    }
+    let joined = segments.join("/");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 // Last-resort scope source: ask git which files changed in the current

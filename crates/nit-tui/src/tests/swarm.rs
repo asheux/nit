@@ -7239,6 +7239,66 @@ mod scope_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // Regression: `@swarm refactor all files in plugins/*` silently narrowed
+    // to whatever was dirty in the tree because the glob token `plugins/*;`
+    // never resolved to a directory and the walk fell through to git-diff.
+    // Every natural glob / trailing-punctuation phrasing must now resolve to
+    // the `plugins` dir and walk it (subdirs included).
+    #[test]
+    fn glob_and_trailing_punctuation_resolve_to_directory() {
+        let root = fresh_root("glob_dir");
+        fs::create_dir_all(root.join("plugins/sub")).unwrap();
+        fs::write(root.join("plugins/a.py"), "x").unwrap();
+        fs::write(root.join("plugins/sub/c.py"), "x").unwrap();
+        for prompt in [
+            "refactor all files in plugins/*; do not break functionality.",
+            "refactor plugins/**",
+            "refactor plugins/",
+            "refactor plugins/*.py",
+            "refactor (plugins/*)",
+        ] {
+            let scope = enumerate_scope_files_with_deadline(&root, prompt, Duration::from_secs(2));
+            assert!(
+                scope.iter().any(|p| p.ends_with("plugins/a.py")),
+                "prompt {prompt:?} should resolve plugins/, got {scope:?}"
+            );
+            assert!(
+                scope.iter().any(|p| p.ends_with("plugins/sub/c.py")),
+                "prompt {prompt:?} should walk subdirs, got {scope:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // The operator named a path that does not resolve (typo / not-yet-created
+    // dir). We must NOT silently fall back to git-diff and scope the mission
+    // to an unrelated dirty file — that is the misleading-scope failure mode.
+    #[test]
+    fn unresolved_path_token_skips_git_diff_fallback() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("git missing — skipping");
+            return;
+        }
+        let root = fresh_root("unresolved_no_fallback");
+        assert!(run_git(&["init", "-q", "-b", "main"], &root)
+            .status
+            .success());
+        fs::create_dir_all(root.join("plugins")).unwrap();
+        fs::write(root.join("plugins/a.py"), "# initial\n").unwrap();
+        assert!(run_git(&["add", "-A"], &root).status.success());
+        assert!(run_git(&["commit", "-q", "-m", "seed"], &root)
+            .status
+            .success());
+        fs::write(root.join("plugins/a.py"), "# changed\n").unwrap();
+
+        let scope = enumerate_scope_files(&root, "refactor nonexistent/*");
+        assert!(
+            scope.is_empty(),
+            "unresolved path token must skip git-diff fallback, got {scope:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn skips_target_node_modules_and_dot_dirs() {
         let root = fresh_root("skipped");
