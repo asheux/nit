@@ -22,3 +22,17 @@ vendor/
 .cargo-local/
 .claude/
 __pycache__/
+
+# Local secrets / environment — never commit real credentials.
+# (.env.example is intentionally NOT ignored so it can be committed.)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+.netrc
+secrets.json
+credentials.json

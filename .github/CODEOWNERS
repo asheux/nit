@@ -1,0 +1,8 @@
+# Code owners for nit.
+#
+# Owners listed here are automatically requested for review on pull
+# requests that touch matching paths. With the "main-protection" ruleset's
+# "require code-owner review" rule, a code owner must approve before merge.
+#
+# Default owner for everything in the repository:
+* @asheux
