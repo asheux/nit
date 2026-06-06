@@ -1,8 +1,42 @@
 # Code owners for nit.
 #
-# Owners listed here are automatically requested for review on pull
-# requests that touch matching paths. With the "main-protection" ruleset's
-# "require code-owner review" rule, a code owner must approve before merge.
+# Each line maps a path (a crate, module, or top-level folder) to one or
+# more owners. Owners are automatically requested for review on pull
+# requests that touch matching paths, and — with the "main-protection"
+# ruleset's "require code-owner review" rule — at least one listed owner
+# must approve before the PR can merge.
 #
-# Default owner for everything in the repository:
-* @asheux
+# Rules are evaluated top-to-bottom and the LAST matching pattern wins, so
+# the broad default sits first and the per-crate rules below override it
+# for their paths. To add a co-owner, append more @handles to a line:
+#
+#     /crates/nit-tui/    @asheux @collaborator @another
+#
+# Every handle must be a GitHub user (or team) with at least read access
+# to the repo, otherwise GitHub flags the entry as a CODEOWNERS error.
+
+# ----------------------------------------------------------------------
+# Default owner for anything not matched by a more specific rule below.
+# ----------------------------------------------------------------------
+*                       @asheux
+
+# ----------------------------------------------------------------------
+# Crates (Rust workspace members)
+# ----------------------------------------------------------------------
+/crates/nit/            @asheux
+/crates/nit-core/       @asheux
+/crates/nit-tui/        @asheux
+/crates/nit-games/      @asheux
+/crates/nit-gol/        @asheux
+/crates/nit-metal/      @asheux
+/crates/nit-mcp/        @asheux
+/crates/nit-syntax/     @asheux
+/crates/nit-utils/      @asheux
+
+# ----------------------------------------------------------------------
+# Repo infrastructure, tooling & docs
+# ----------------------------------------------------------------------
+/.github/               @asheux
+/docs/                  @asheux
+/scripts/               @asheux
+/vendor/                @asheux

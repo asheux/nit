@@ -353,6 +353,7 @@ nit/
 - `docs/SHADOWS.md` — shadow agents (propose-a/-b → judge → review behind a single agent).
 - `docs/INTAKE.md` — intake preprocessor (hidden Claude-class intent classifier).
 - `docs/MULTIPANE.md` — multipane grid mode (per-pane cwd, dir search, persistence).
+- `docs/TERMINAL.md` — embedded OS shell (agent-chat tab, modal popup, per multipane pane) with selection/copy + scrollback.
 - `docs/SUBSTRATE.md` — stigmergic substrate (signals, claims, assumptions, metabolism, mood).
 - `docs/SUBSTRATE_TESTING.md` — substrate testing recipes + concrete verification steps.
 - `docs/LIVING_SYSTEM.md` — coordination role roster (worker / observer / arbiter / resolver).

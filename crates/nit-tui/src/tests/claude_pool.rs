@@ -2,9 +2,9 @@ use super::*;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // `limits` is a private module under `swarm`; re-exported helpers we need
 // are pulled in below through the parent module's `super::*` glob, but the
