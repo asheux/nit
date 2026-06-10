@@ -68,6 +68,18 @@ fn keeps_only_current_gemini_models_by_family() {
 }
 
 #[test]
+fn surfaces_unknown_gemini_family_without_hardcoding() {
+    // A family the code has never heard of ("ultra") must classify by its own
+    // name rather than being dropped — no allowlist edit required.
+    let filtered = select_current_gemini_models(
+        ["gemini-3.0-ultra", "gemini-2.5-flash"]
+            .map(String::from)
+            .to_vec(),
+    );
+    assert_eq!(filtered, ["gemini-2.5-flash", "gemini-3.0-ultra"]);
+}
+
+#[test]
 fn parses_claude_models_from_backend_binary_strings() {
     let binary_blob = br#"
         foundry
@@ -125,6 +137,27 @@ fn keeps_only_current_claude_models_by_family() {
     assert_eq!(
         latest,
         ["claude-haiku-4-5", "claude-opus-4-6", "claude-sonnet-4-6"]
+    );
+}
+
+#[test]
+fn surfaces_unknown_claude_family_without_hardcoding() {
+    // A newly added family ("fable") must flow through with no allowlist edit:
+    // `claude-code` / `claude-plugin-directory` stay rejected (no version / a
+    // disqualifying keyword), while `claude-fable-5` is recognized by structure.
+    let blob = br#"
+        claude-fable-5
+        Fable 5
+        claude-opus-4-8
+        Opus 4.8
+        claude-code
+        claude-plugin-directory
+    "#;
+    let extracted = parse_claude_models_from_binary(blob);
+    assert_eq!(extracted, ["claude-fable-5", "claude-opus-4-8"]);
+    assert_eq!(
+        select_current_claude_models(extracted),
+        ["claude-fable-5", "claude-opus-4-8"]
     );
 }
 

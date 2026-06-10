@@ -37,7 +37,7 @@ pub(crate) fn select_current_gemini_models(raw_models: Vec<String>) -> Vec<Strin
     deduplicated.sort();
     deduplicated.dedup();
 
-    let mut best_per_family: HashMap<&'static str, ModelCandidate> = HashMap::new();
+    let mut best_per_family: HashMap<String, ModelCandidate> = HashMap::new();
 
     for model_id in &deduplicated {
         let Some(classified) = classify_gemini_model(model_id) else {

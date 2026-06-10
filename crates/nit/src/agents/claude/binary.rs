@@ -4,8 +4,10 @@ use crate::agents::prefer_shorter_model_name;
 
 use super::probe::MIN_ASCII_RUN_LENGTH;
 
-const RECOGNIZED_FAMILIES: &[&str] = &["-haiku", "-sonnet", "-opus"];
-
+// `claude-<word>` strings that are tooling / feature ids rather than models.
+// A genuine model id always carries a numeric version segment (which most of
+// these lack and the structural check below already rejects), but the keyword
+// guard stays as a cheap precision backstop against future collisions.
 const DISQUALIFYING_KEYWORDS: &[&str] = &[
     "api",
     "sdk",
@@ -28,8 +30,6 @@ const DISQUALIFYING_KEYWORDS: &[&str] = &[
     "staging",
 ];
 
-const CLAUDE_DISPLAY_MARKERS: &[&str] = &["Haiku", "Sonnet", "Opus", "Claude "];
-
 const VERSION_DISQUALIFIERS: &[&str] = &["-latest", "-v1", "-v2", "-v3"];
 
 pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
@@ -40,11 +40,19 @@ pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
         let Some(model) = normalize_claude_model_token(&pair[0]) else {
             continue;
         };
+        // A genuine model entry sits next to its human-readable display name.
+        // That name carries the same family the id does (`claude-fable-5` ->
+        // "Fable 5") or starts with "Claude ". Deriving the marker from the
+        // id's own family means new families work with no table to update.
+        let Some((family, _version)) = parse_claude_family_and_version(model) else {
+            continue;
+        };
+        let family_display = capitalize_ascii(&family);
         let label = pair[1].trim();
-        let label_matches_display = !label.is_empty()
+        let label_names_model = !label.is_empty()
             && !label.starts_with("claude-")
-            && CLAUDE_DISPLAY_MARKERS.iter().any(|m| label.contains(m));
-        if label_matches_display {
+            && (label.contains(&family_display) || label.contains("Claude "));
+        if label_names_model {
             models.push(model.to_string());
         }
     }
@@ -58,13 +66,13 @@ pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
     deduped.sort();
     deduped.dedup();
 
-    let mut best_per_family: HashMap<&'static str, (Vec<u32>, String)> = HashMap::new();
+    let mut best_per_family: HashMap<String, (Vec<u32>, String)> = HashMap::new();
     for model in deduped.iter() {
         let Some((family, version)) = parse_claude_family_and_version(model) else {
             continue;
         };
         let dominated = best_per_family
-            .get(family)
+            .get(&family)
             .is_some_and(|(inc_ver, inc_name)| {
                 version < *inc_ver
                     || (version == *inc_ver && !prefer_shorter_model_name(model, inc_name))
@@ -123,41 +131,75 @@ fn is_probable_claude_model(raw: &str) -> bool {
     if VERSION_DISQUALIFIERS.iter().any(|tag| name.contains(tag)) {
         return false;
     }
-    RECOGNIZED_FAMILIES.iter().any(|tag| name.contains(tag))
-        && !DISQUALIFYING_KEYWORDS.iter().any(|kw| name.contains(kw))
+    if DISQUALIFYING_KEYWORDS.iter().any(|kw| name.contains(kw)) {
+        return false;
+    }
+    // Structural check, generic over family: `claude-<family>-<version>` with
+    // exactly one alphabetic family word and at least one numeric version
+    // segment. No hardcoded family allowlist — new families (e.g. `fable`)
+    // are recognized automatically.
+    parse_claude_family_and_version(raw).is_some()
 }
 
-fn parse_claude_family_and_version(model: &str) -> Option<(&'static str, Vec<u32>)> {
-    let normalized = normalize_claude_model_token(model)?;
-    let segments: Vec<&str> = normalized.split('-').collect();
-    if segments.first().copied() != Some("claude") || segments.len() < 3 {
+/// Extract `(family, version)` from a Claude model id without a hardcoded
+/// family list. The family is the lone alphabetic token (`opus`, `sonnet`,
+/// `fable`, …); the version is the numeric segments. Handles both id
+/// orderings — `claude-opus-4-8` and `claude-3-7-sonnet`. Returns `None` for
+/// anything that isn't structurally a versioned `claude-` model (no family
+/// word, no numeric version, a stray second word like `plugin-directory`, or
+/// an over-long segment like a `20250514` date).
+fn parse_claude_family_and_version(model: &str) -> Option<(String, Vec<u32>)> {
+    let token = model.trim();
+    let token = token.strip_suffix("[1m]").unwrap_or(token);
+    let lower = token.to_ascii_lowercase();
+
+    let mut segments = lower.split('-');
+    if segments.next() != Some("claude") {
         return None;
     }
 
-    for family in ["haiku", "sonnet", "opus"] {
-        if segments.get(1).copied() == Some(family) {
-            return parse_version_segments(&segments[2..]).map(|ver| (family, ver));
+    let mut family: Option<String> = None;
+    let mut version: Vec<u32> = Vec::new();
+    let mut any = false;
+    for seg in segments {
+        any = true;
+        if seg.is_empty() {
+            return None;
         }
-        if segments.last().copied() == Some(family) {
-            return parse_version_segments(&segments[1..segments.len() - 1])
-                .map(|ver| (family, ver));
-        }
-    }
-
-    None
-}
-
-fn parse_version_segments(tokens: &[&str]) -> Option<Vec<u32>> {
-    if tokens.is_empty() {
-        return None;
-    }
-    tokens
-        .iter()
-        .map(|seg| {
-            if seg.is_empty() || seg.len() > 2 || !seg.chars().all(|c| c.is_ascii_digit()) {
+        if seg.chars().all(|c| c.is_ascii_digit()) {
+            // Numeric version segment. Cap at two digits so date-stamped ids
+            // (`claude-3-5-haiku-20241022`) are rejected, matching prior behaviour.
+            if seg.len() > 2 {
                 return None;
             }
-            seg.parse::<u32>().ok()
-        })
-        .collect()
+            version.push(seg.parse().ok()?);
+        } else if seg.chars().all(|c| c.is_ascii_alphabetic()) {
+            // Alphabetic family word. Exactly one is allowed; a second
+            // (`plugin-directory`, `sonnet-latest`) means this isn't a model id.
+            if family.is_some() {
+                return None;
+            }
+            family = Some(seg.to_string());
+        } else {
+            // Mixed alphanumeric (`v2`, `4o`) — not a clean family/version segment.
+            return None;
+        }
+    }
+
+    if !any {
+        return None;
+    }
+    let family = family?;
+    if version.is_empty() {
+        return None;
+    }
+    Some((family, version))
+}
+
+fn capitalize_ascii(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
