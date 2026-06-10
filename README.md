@@ -46,7 +46,7 @@ nit update
 
 Detects whether nit was installed via Homebrew or one of the install scripts and runs the right upgrade command (Homebrew users get `brew upgrade asheux/tap/nit`; others get `install.sh`; Windows prints the PowerShell snippet to run from a fresh PS session, since a running `.exe` can't replace itself in place). On launch, nit also prompts you with `[i]nstall / [s]kip / [m]ute` if a newer release is available — silenceable via `NIT_NO_VERSION_CHECK=1`.
 
-Binaries are distributed via `https://download.nit.tools/<tag>/`, backed by Amazon CloudFront. The bucket also hosts a `SHA256SUMS` file per release and `latest.json` for tag resolution.
+Binaries are distributed via `https://download.nit.tools/<tag>/`, with a `SHA256SUMS` file per release for checksum verification.
 
 ### Supported platforms
 
@@ -113,82 +113,27 @@ scripts/healthcheck.sh --deep
 - ropey, unicode-segmentation, unicode-width for text correctness
 - tree-sitter 0.25 for syntax highlighting (28 active grammars; the workspace's language registry — extensions, filenames, shebangs, injection aliases, `is_code` flag — lives in `crates/nit-core/src/languages.rs`) and AST-based seed encoders
 
-### Releasing
-
-Pushing a `v*` tag to GitHub kicks off `.github/workflows/release.yml`, which:
-
-1. Verifies the tag version matches the workspace `Cargo.toml` version (fast-fail if mismatched).
-2. Creates a draft GitHub Release for human-readable notes.
-3. Builds `nit` + `nit-mcp-server` for macOS (universal), Linux x86_64 (glibc), and Windows x86_64 in parallel.
-4. Uploads each archive plus `.sha256` and an aggregated `SHA256SUMS` to `s3://download.nit.tools/<tag>/`.
-5. On non-prerelease tags only: writes `s3://download.nit.tools/latest.json` so `install.sh` can resolve `latest`.
-6. Re-uploads `install.sh` and `install.ps1` to the bucket root and invalidates the relevant CloudFront paths.
-7. Updates the Homebrew formula at `asheux/homebrew-tap` (pre-release tags skip this step).
-8. Promotes the draft Release to published; pre-release tags are marked as such.
-
-Cut a release (e.g. `v0.1.2`):
-
-```bash
-# 1. Bump the workspace version. CI guards against tag/Cargo.toml mismatch.
-$EDITOR Cargo.toml                       # version = "0.1.2" under [workspace.package]
-git commit -am "Bump version to 0.1.2"
-git push origin main
-
-# 2. Tag and push. End-to-end workflow runs in ~6-8 min.
-git tag v0.1.2
-git push origin v0.1.2
-
-# 3. Watch progress.
-gh run watch
-```
-
-Pre-release tags (anything with a hyphen like `v0.2.0-rc1`) are marked as pre-release on GitHub, skip the Homebrew formula update, and don't bump `latest.json`.
-
-#### Re-releasing a botched tag
-
-If a release fails partway through and you need to retry under the same version:
-
-```bash
-git tag -d v0.1.2                        # delete locally
-git push origin :refs/tags/v0.1.2        # delete remote
-gh release delete v0.1.2 --yes           # if a GitHub Release was created
-git tag v0.1.2
-git push origin v0.1.2
-```
-
-If artifacts at the same key were already cached at the CDN, invalidate manually:
-
-```bash
-aws cloudfront create-invalidation \
-  --distribution-id E31XHIF603G4P3 \
-  --paths "/v0.1.2/*" "/latest.json" "/SHA256SUMS"
-```
-
-#### Required GitHub repo secrets
-
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_CF_DISTRIBUTION_ID`, `HOMEBREW_TAP_TOKEN`.
-
-### Download stats aggregator
-
-`.github/workflows/stats-aggregator.yml` runs daily at 06:00 UTC. It walks CloudFront access logs under `s3://${AWS_S3_BUCKET}/AWSLogs/<account>/CloudFront/`, counts successful release-asset downloads by version and platform, and writes `s3://${AWS_S3_BUCKET}/stats.json`. The nit-website's prebuild script reads that file at deploy time and renders the Downloads section on the landing page.
-
-Idempotent — each run only processes logs strictly newer than `last_processed_log_key` in the existing `stats.json`.
-
-```bash
-# Run on demand (e.g. after enabling CloudFront logging for the first time,
-# or after fixing a schema bug).
-gh workflow run stats-aggregator.yml
-gh run watch
-
-# Wipe and rebuild stats from scratch.
-aws s3 rm s3://${AWS_S3_BUCKET}/stats.json
-gh workflow run stats-aggregator.yml
-```
-
 ### Reproducibility
 
 - `Cargo.lock` is checked in; CI uses `--locked`.
 - `time` is patched to a vendored copy at `vendor/time` (see `Cargo.toml`).
+
+## Contributing
+
+Contributions are welcome — bug reports, feature ideas, new tree-sitter
+grammars, Game of Life rules, documentation, and code.
+
+- **Fork** the repo and branch off `main`.
+- **Validate locally** before opening a PR — all gates must pass (clippy runs with `-D warnings`):
+
+```bash
+just ci      # fmt-check + clippy + test + cargo deny
+```
+
+- **Keep changes focused**, match the surrounding style, add tests for new behaviour, and run `just fmt` before committing.
+- **Open a pull request** against `main` with a clear description of the change and its motivation; CI must be green before review.
+
+Good first contributions: new language grammars / highlight queries (`crates/nit-syntax/`), Game of Life rule presets (`docs/RULES.md`), and documentation fixes. For larger or architectural changes, open an issue first to discuss the approach — see `docs/ARCHITECTURE.md` and the subsystem guides under `docs/`.
 
 ## Security Notes
 

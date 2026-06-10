@@ -67,6 +67,27 @@ fn highlights_keywords_per_language() {
 }
 
 #[test]
+fn diag_rust_let_invalid_vs_valid() {
+    for (i, src) in [
+        "let value = 42;\n",
+        "fn main() { let value = 42; }\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = 950 + i;
+        let mut engine = TreeSitterEngine::new();
+        engine.schedule_rehighlight(make_request(id, 1, LanguageId::Rust, src));
+        let snap = wait_for(&mut engine, id, 1);
+        eprintln!(
+            "src={src:?} kw_line0={} num_line0={}",
+            has_group(&snap, 0, HighlightGroup::Keyword),
+            has_group(&snap, 0, HighlightGroup::Number),
+        );
+    }
+}
+
+#[test]
 fn rust_highlights_numbers() {
     let mut engine = TreeSitterEngine::new();
     let req = make_request(1, 1, LanguageId::Rust, "fn main() { let x = 42; }\n");
