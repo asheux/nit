@@ -111,6 +111,15 @@ pub fn render_pane(
 
     let total_rows = thread_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
+    // Cache the true max_scroll so the wheel / PgUp / PgDn handlers clamp to the
+    // exact bound the renderer uses (PaneSession::chat_thread_last_max_scroll).
+    if let Some(p) = state
+        .multipane
+        .as_mut()
+        .and_then(|mp| mp.panes.iter_mut().find(|p| p.pane_id == pane.pane_id))
+    {
+        p.chat_thread_last_max_scroll = max_scroll;
+    }
     let scroll = pane.chat_thread_scroll.min(max_scroll);
     let visible_row_refs: Vec<&ThreadRow> = thread_rows
         .iter()

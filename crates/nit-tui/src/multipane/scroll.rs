@@ -63,41 +63,22 @@ pub(super) fn resolve_chat_scroll_sentinel(scroll: usize, max_scroll: usize) -> 
     }
 }
 
-/// Mirrors the renderer's clamp at `agent_console_view::render_pane`
-/// so wheel / PgUp / PgDn never pin the stored scroll beyond the
-/// rendered window — otherwise the operator has to "drain" stale scroll
-/// before any visible movement happens.
+/// Returns the renderer-cached `max_scroll` for this pane's chat thread
+/// (written every frame by `agent_console_view::render_pane`). Reading the
+/// cached value guarantees the wheel / PgUp / PgDn clamp matches the renderer's
+/// exactly. The previous implementation re-derived the bound from a
+/// reconstructed thread area, which drifted from the renderer's real layout
+/// (chrome + dir-search overlay + dynamic input height) and made scrolling jump
+/// straight to the top or bottom. The extra params are kept so the call sites
+/// (which already hold `state` / `swarm` / `area` / `pane_idx`) stay untouched.
 pub(super) fn focused_pane_chat_thread_max_scroll(
-    state: &AppState,
-    swarm: &SwarmRuntime,
+    _state: &AppState,
+    _swarm: &SwarmRuntime,
     pane: &nit_core::PaneSession,
-    area: Rect,
-    pane_idx: usize,
+    _area: Rect,
+    _pane_idx: usize,
 ) -> usize {
-    if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
-        return 0;
-    }
-    let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, pane) else {
-        return 0;
-    };
-    let agent_id = if pane.agent_id.is_empty() {
-        pane.selected_agent_id.as_deref()
-    } else {
-        Some(pane.agent_id.as_str())
-    };
-    let rows = agent_console_view::build_pane_thread_rows_with_breathers_for_pane(
-        state,
-        Some(swarm),
-        Some(pane.pane_id),
-        agent_id,
-        pane.mission_id.as_deref().or_else(|| {
-            (!pane.chat_mission_id.is_empty()).then_some(pane.chat_mission_id.as_str())
-        }),
-        thread_area.width.max(1) as usize,
-        !pane.has_run_mission,
-    );
-    rows.len()
-        .saturating_sub(thread_area.height.max(1) as usize)
+    pane.chat_thread_last_max_scroll
 }
 
 pub(super) fn pane_thread_area_for_pane(

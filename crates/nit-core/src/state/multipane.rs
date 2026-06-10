@@ -58,6 +58,14 @@ pub struct PaneSession {
     /// delta, otherwise scrolling up from bottom jumps to row 0.
     #[serde(default = "chat_thread_scroll_default")]
     pub chat_thread_scroll: usize,
+    /// Renderer-cached `max_scroll` for this pane's chat thread, written every
+    /// frame by `agent_console_view::render_pane`. Wheel / PgUp / PgDn handlers
+    /// read this instead of re-deriving the layout, so their clamp bound matches
+    /// the renderer's exactly. Re-deriving it drifted from the real thread area
+    /// (chrome + dir-search overlay + dynamic input height) and made scrolling
+    /// snap to an extreme. Transient (not persisted).
+    #[serde(skip)]
+    pub chat_thread_last_max_scroll: usize,
     /// Lane id chosen for this pane. `None` ⇒ render roster picker; `Some`
     /// ⇒ render chat (lane materialises lazily as `<base>#mp-pane-NN` on
     /// commit). Pre-populated by `--backend <specific-id>`.
@@ -139,6 +147,7 @@ impl Default for PaneSession {
             roster_collapsed_agent_ids: HashSet::new(),
             roster_tree_selected: None,
             chat_thread_scroll: chat_thread_scroll_default(),
+            chat_thread_last_max_scroll: 0,
             selected_agent_id: None,
             auto_expanded_backend: None,
             auto_expanded_agent: None,
