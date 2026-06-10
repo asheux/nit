@@ -34,7 +34,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -112,7 +112,7 @@ jobs:
             os: windows-2022
             archive: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         if: matrix.install_deps
@@ -220,7 +220,7 @@ jobs:
           echo "sha=$(cut -d' ' -f1 "${asset}.sha256")" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -248,7 +248,7 @@ jobs:
           aws s3 cp "$checksum" "s3://${BUCKET}/${TAG}/${asset_name}.sha256" --content-type "text/plain; charset=utf-8"
 
       - name: Export checksum for downstream jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checksum-${{ matrix.target }}
           path: ${{ steps.stage.outputs.checksum }}
@@ -259,7 +259,7 @@ jobs:
     needs: [create-release, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: checksum-*
           merge-multiple: true
@@ -279,7 +279,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -294,7 +294,7 @@ jobs:
             --content-type "text/plain; charset=utf-8"
 
       - name: Re-export SHA256SUMS as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sha256sums
           path: SHA256SUMS
@@ -305,10 +305,10 @@ jobs:
     needs: [create-release, build, checksums]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -395,7 +395,7 @@ jobs:
 
       - name: Download aggregated SHA256SUMS
         if: env.skip != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sha256sums
 
