@@ -6,6 +6,7 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
@@ -25,7 +26,10 @@ pub struct PtySize {
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    // PTY writes are handed to a dedicated thread (never written on the UI
+    // thread) so a shell that stops draining its stdin can't stall nit's loop.
+    writer_tx: Option<Sender<Vec<u8>>>,
+    writer_thread: Option<JoinHandle<()>>,
     parser: Arc<Mutex<vt100::Parser>>,
     reader: Option<JoinHandle<()>>,
     exited: Arc<AtomicBool>,
@@ -68,11 +72,14 @@ impl PtySession {
         )));
         let exited = Arc::new(AtomicBool::new(false));
         let handle = spawn_reader(reader, parser.clone(), exited.clone());
+        let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>();
+        let writer_thread = spawn_writer(writer, writer_rx);
 
         Ok(Self {
             master: pair.master,
             child,
-            writer: Mutex::new(writer),
+            writer_tx: Some(writer_tx),
+            writer_thread: Some(writer_thread),
             parser,
             reader: Some(handle),
             exited,
@@ -85,12 +92,16 @@ impl PtySession {
         // Typing snaps the viewport back to the live bottom, matching how a
         // real terminal behaves when you start typing while scrolled up.
         lock(&self.parser).screen_mut().set_scrollback(0);
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| io::Error::other("pty writer poisoned"))?;
-        writer.write_all(bytes)?;
-        writer.flush()
+        // Hand the bytes to the writer thread instead of writing here. A
+        // blocking `write_all` on this (the UI/event-loop) thread would freeze
+        // ALL of nit whenever the shell stops reading its stdin — e.g. a prompt
+        // or program waiting on a terminal-query reply that the vt100 parser
+        // never sends. The writer thread absorbs that block; bytes stay
+        // FIFO-ordered and are never dropped.
+        if let Some(tx) = self.writer_tx.as_ref() {
+            let _ = tx.send(bytes.to_vec());
+        }
+        Ok(())
     }
 
     /// Scroll the viewport `lines` rows toward older output. vt100 clamps the
@@ -146,10 +157,17 @@ impl PtySession {
         self.child.process_id()
     }
 
-    /// Idempotent kill + reader-thread join. Called by `Drop` AND quit teardown.
+    /// Idempotent kill + helper-thread join. Called by `Drop` AND quit teardown.
     pub fn shutdown(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Close the writer channel so the writer thread's `recv()` returns; any
+        // in-flight `write_all` already failed against the now-killed PTY. Join
+        // both helper threads so rapid terminal open/close can't leak them.
+        self.writer_tx.take();
+        if let Some(handle) = self.writer_thread.take() {
+            let _ = handle.join();
+        }
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
@@ -177,6 +195,24 @@ fn spawn_reader(
             }
         }
         exited.store(true, Ordering::SeqCst);
+    })
+}
+
+/// Drains operator keystrokes onto the PTY on a dedicated thread. The blocking
+/// `write_all` lives here so a shell that has stopped reading its stdin stalls
+/// only this thread, never nit's UI/event loop. Exits when the channel closes
+/// (session shutdown) or the PTY write fails (child gone).
+fn spawn_writer(mut writer: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            if writer
+                .write_all(&bytes)
+                .and_then(|()| writer.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
     })
 }
 
