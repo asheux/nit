@@ -1,4 +1,4 @@
-; Go highlights (minimal, editor-grade)
+; Go highlights (editor-grade, full token taxonomy)
 (comment) @comment
 
 (interpreted_string_literal) @string
@@ -22,6 +22,11 @@
   "interface"
   "import"
   "package"
+  "map"
+  "chan"
+] @keyword
+
+[
   "return"
   "if"
   "else"
@@ -36,15 +41,24 @@
   "go"
   "defer"
   "select"
-  "chan"
-  "map"
   "goto"
-] @keyword
+] @keyword.control
+
+(type_identifier) @type
 
 (function_declaration name: (identifier) @function)
 (method_declaration name: (field_identifier) @function)
-(call_expression function: (identifier) @function.call)
-(call_expression function: (selector_expression field: (field_identifier) @function.call))
+(call_expression function: (identifier) @function)
+(call_expression function: (selector_expression field: (field_identifier) @method))
 
-(type_identifier) @type
-(field_identifier) @variable.member
+(parameter_declaration name: (identifier) @parameter)
+
+[
+  "+" "-" "*" "/" "%" "&" "|" "^" "<<" ">>" "&^"
+  "&&" "||" "!" "==" "!=" "<" "<=" ">" ">=" "=" ":="
+  "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>=" "&^="
+  "<-" "++" "--" "..."
+] @operator
+
+["(" ")" "{" "}" "[" "]"] @punctuation.bracket
+["," ";" ":" "."] @punctuation.delimiter
