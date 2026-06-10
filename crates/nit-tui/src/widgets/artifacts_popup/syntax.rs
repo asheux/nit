@@ -14,7 +14,14 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 
-const DOCUMENT_HIGHLIGHT_WAIT: Duration = Duration::from_millis(2000);
+// Upper bound on the *first* (cold) code-block highlight: the worker has to
+// build a tree-sitter config for every grammar before it can answer, which —
+// with the full-taxonomy highlight queries — can take several seconds on a
+// cold/slow machine (matches nit-syntax's own 15s cold-build test budget).
+// Once the worker is warm this returns in well under a frame; the cap only
+// ever bites the first block rendered in a session. A lazy per-language build
+// would remove even that one-time wait (tracked as a follow-up).
+const DOCUMENT_HIGHLIGHT_WAIT: Duration = Duration::from_secs(15);
 const DOCUMENT_HIGHLIGHT_CACHE_LIMIT: usize = 96;
 
 struct DocumentSyntaxHighlighter {
