@@ -31,13 +31,16 @@ You can launch Swarm in two ways:
 1) **Explicit command** (always works):
 
 ```text
-@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>
+@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] [budget=ROLE:N] <prompt>
 ```
 
 Notes:
 
 - `template=` can also be written as `t=`.
 - `mission=` can also be written as `m=`.
+- `budget=ROLE:N` overrides a role's prompt-budget ceiling for this mission only
+  (e.g. `budget=integrate:600k`; the `k`/`K` suffix multiplies by 1024). See
+  [Prompt budget tiers](#prompt-budget-tiers).
 - In **Agent Ops → Roster**, you can pin a default template and a default mission preset.
   `mission=...` or `Mission: ...` overrides the roster preset; otherwise the roster preset applies,
   and `auto` falls back to prompt-based mission detection.
@@ -389,6 +392,57 @@ Three views truncate the displayed agent list when the swarm is large:
 - **Chat-pane breather table**: max 6 visible. Sorted running-first.
 
 `NIT_ROSTER_NO_TRUNCATE=1` disables all three caps when you need to inspect every clone.
+
+---
+
+## Prompt budget tiers
+
+Every swarm dispatch is assembled by `wrap_task_prompt` and then passed through a
+role-aware truncation pass before it ships to the agent
+(`crates/nit-tui/src/swarm/budgets.rs`). This keeps a fan-in task — a judge or
+integrator reading many upstream outputs — from overflowing the model's context
+window. The pass is enabled by default; disable it with `NIT_PROMPT_TIERS=0`.
+
+### Per-role byte ceilings
+
+| Role | Ceiling |
+|------|--------:|
+| `integrate` | 480K |
+| `judge` | 320K |
+| `research` / `computational-research` | 240K |
+| `propose` | 160K |
+| `review` | 120K |
+| `test` | 96K |
+| default | 96K |
+
+Ceilings are sized against Claude's ~200K-token window, reserving ~120K tokens for
+system framing and tool-use accumulation.
+
+### Three-stage truncation
+
+When an assembled prompt exceeds its role ceiling, nit shrinks it in order, stopping
+as soon as it fits:
+
+1. Halve each per-dependency payload.
+2. Drop proposer — then judge — dependency payloads, leaving a one-line breadcrumb in
+   place of each.
+3. Shrink the `## GENOME LANDSCAPE` block.
+
+Invariants **never** dropped at any stage: the `## FILE CHECKLIST`, the role contract,
+the operator request, and the `<SWARM_TASK_COMPLETE>` sign-off.
+
+### Overrides
+
+- **Per-mission**: add `budget=ROLE:N` to the `@swarm` command
+  (e.g. `@swarm budget=integrate:600k …`). The `k`/`K` suffix multiplies by 1024.
+  This writes onto the run and takes precedence over the runtime defaults.
+- **Per-runtime**: `NIT_PROMPT_BUDGET_<ROLE>` sets a byte ceiling for the life of the
+  process — decimal bytes only, no `k` suffix. `<ROLE>` is one of `INTEGRATE`, `JUDGE`,
+  `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, `DEFAULT`.
+- **Off switch**: `NIT_PROMPT_TIERS=0` (or `false`/`no`/`off`) makes the pass a no-op so
+  every prompt ships at full size.
+
+See `docs/ENVIRONMENT.md` for the env-var details.
 
 ---
 
@@ -769,7 +823,8 @@ timeout:
 - `NIT_MCP_TURN_IDLE_TIMEOUT_SECS=600`
 
 This is **disabled by default** because cancelling hung turns can force a new session and may
-affect continuity for long-running prompts.
+affect continuity for long-running prompts. The full set of timeout / planner / budget env vars
+lives in `docs/ENVIRONMENT.md`.
 
 ---
 

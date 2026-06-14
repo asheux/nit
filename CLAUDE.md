@@ -46,11 +46,13 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - No network calls from `nit` itself; external CLIs (`codex`, `claude`, `git`) are spawned directly (no shell).
 - `time` crate is vendored at `vendor/time`.
 - Clippy must pass with zero warnings (`-D warnings`).
-- Tests: `cargo test --all` — ~526 tests across the workspace.
+- Tests: `cargo test --all` — ~700+ tests across the workspace (run it for the live count; the substrate layer added ~280 nit-core tests after the 526-test `docs/REPO_HEALTH.md` snapshot).
 - Agent dispatch: Codex uses MCP or exec runtime; Claude spawns `claude -p` subprocesses.
 - Queue management: `queue_len` on `AgentLane` tracks UI-visible queue depth; increment on enqueue, decrement on `TurnCompleted`/`TurnFailed`.
 
 ## Environment variables
+
+> Canonical, public copy: `docs/ENVIRONMENT.md` (synced to the website). This table is the always-loaded contributor quick-reference — keep the two in sync when adding or changing a variable.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -75,26 +77,16 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 ## Swarm size limits
 
+Operator-facing ceiling table + soft advisories live in `docs/SWARM.md` "Static and effective ceilings". Contributor references:
+
 - Static cap: `MAX_SWARM_SIZE = 256` (`crates/nit-tui/src/swarm/constants.rs`).
-- Effective cap: clamped at runtime by the host's `RLIMIT_NOFILE`. Each
-  in-flight Codex/Claude exec turn opens 4 fds, so the formula is
-  `min(MAX_SWARM_SIZE, max(1, (fd_limit - 32) / 4))` — defined in
-  `crates/nit-tui/src/swarm/limits.rs::compute_effective_max_swarm_size`.
-- macOS default `ulimit -n 256` → effective ceiling **56 agents**. Bump
-  with `ulimit -n 4096` and restart nit to lift it.
-- When `NIT_CLAUDE_POOL=1`, the warm pool keeps `default_claude_pool_size()`
-  workers permanently parked. Each parked worker permanently holds the same
-  4 fds as an in-flight cold-spawn turn, so the effective swarm ceiling
-  drops by `pool_size` in practice. On the macOS default ulimit, this
-  trims the 56-agent ceiling to 48 (8 reserved for the pool).
-- Bulk template caps proposers at `BULK_PRACTICAL_MAX = 12` (per-dep
-  budget collapses past that; see `docs/SWARM.md` "Aborting and limits").
-- Soft advisories pushed to the mission console when triggered:
-  - `agents >= LARGE_SWARM_WARN_THRESHOLD (64)` or the FD-bound 75% of
-    the effective ceiling, whichever is smaller.
-  - Lightweight planner (haiku / mini / nano / flash) with N > 20.
-  - Operator-explicit clamp ("requested X, started Y").
-  - Bulk template proposer cap.
+- Effective cap: `min(MAX_SWARM_SIZE, max(1, (fd_limit - 32) / 4))` —
+  `compute_effective_max_swarm_size` in `crates/nit-tui/src/swarm/limits.rs`
+  (each in-flight Codex/Claude turn opens 4 fds). macOS default `ulimit -n 256`
+  → **56 agents**; bump with `ulimit -n 4096` and restart.
+- `NIT_CLAUDE_POOL=1` parks `default_claude_pool_size()` workers, each holding 4
+  fds, so the effective ceiling drops by the pool size (56 → 48 on macOS default).
+- Bulk proposers cap at `BULK_PRACTICAL_MAX = 12` (per-dep budget collapses past that).
 
 ## Agent commands (in Agent Chat)
 
@@ -127,38 +119,26 @@ work per pane. Operator prompts land in `state.agents.messages`
 tagged with the pane's `mission_id`, and `agent_console_view::render_pane`
 renders inline-breather + agent-table rows scoped to the pane.
 
-Keymap: Tab / Shift+Tab cycle focus, mouse click focuses a pane
-directly, `Ctrl+Q` quits cleanly, `F1` / `?` toggles the multipane
-help overlay, `/abort` / Ctrl+C empty / Esc-Esc target the focused
-pane only, `Ctrl+R` reverts the focused pane to its roster picker.
-Per-pane sessions persist to
-`<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and
-on focus change (debounced ≤ 1 write/sec); `chat_input` is capped at
-4 KB; a "fresh" Ctrl+Q with no prior file drops the session instead
-of writing an empty layout. See `docs/MULTIPANE.md` for the full
-spec.
+Keymap (focus cycling, abort, roster revert): see `docs/KEYBINDINGS.md`
+"Multipane mode". Per-pane sessions persist to
+`<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and on
+focus change (debounced ≤ 1 write/sec); `chat_input` is capped at 4 KB; a
+"fresh" Ctrl+Q with no prior file drops the session instead of writing an
+empty layout. See `docs/MULTIPANE.md` for the full spec.
 
 ## Aborting in-flight work
 
-Five triggers, all routed through `chat_input::handle_abort`. When an
-operator triggers an abort, the swarm runtime moves the run to
-`completed_runs` with `report_status = "ABORTED"`, drains queued turns,
-and pushes a `SYSTEM_ALERT_KIND` message to the chat. The runner-side
-`CancelTurn { agent_id }` command then sets the per-turn cancel
-`AtomicBool`; the worker thread sees it within ~50ms and calls
-`child.kill()` on the subprocess.
+Operator-facing triggers + semantics (the 5-trigger table, what abort does, current-mission resolution) live in `docs/SWARM.md` "Aborting a swarm". Wiring, for contributors:
 
-| Trigger | Scope | Where wired |
-|---|---|---|
-| `/abort` (or `@abort`) typed in chat | Current mission | `app/chat_input.rs::parse_abort_command` |
-| `/abort all` | Every active swarm + runner queues | same |
-| `/abort <agent-id>` | One agent only | same |
-| Ctrl+C with empty chat input | Current mission | `app/agent_station.rs` (KeyCode::Char('c') + CONTROL, plus `\u{3}` raw ETX) |
-| Esc-Esc within ~500ms | Current mission | `chat_input::record_chat_esc_press` (thread-local) |
-| `x` in Missions tab | Highlighted mission | `app/agent_station.rs` |
-
-Operator cancels ride the same `TurnFailed` event but use the
-`OPERATOR_CANCEL_TURN_MESSAGE` sentinel (in `nit-core::agent_bus`) so the
-bus handler routes them to the soft path: `AgentStatus::Idle` (not
-Error), no alert/signal, Info-level diag, no LAB→WARN promotion. See
-`docs/SWARM.md` for the operator-facing description.
+- All triggers route through `chat_input::handle_abort`: `/abort` parsing in
+  `app/chat_input.rs::parse_abort_command`; Ctrl+C and `x` (Missions tab) in
+  `app/agent_station.rs`; Esc-Esc via `chat_input::record_chat_esc_press`
+  (thread-local).
+- The swarm runtime moves the run to `completed_runs` (`report_status = "ABORTED"`),
+  drains queued turns, and pushes a `SYSTEM_ALERT_KIND` message. The runner-side
+  `CancelTurn { agent_id }` sets the per-turn cancel `AtomicBool`; the worker thread
+  sees it within ~50ms and calls `child.kill()`.
+- Operator cancels ride the same `TurnFailed` event but carry the
+  `OPERATOR_CANCEL_TURN_MESSAGE` sentinel (`nit-core::agent_bus`), routing to the soft
+  path: `AgentStatus::Idle` (not Error), no alert/signal, Info-level diag, no LAB→WARN
+  promotion.

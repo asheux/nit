@@ -318,9 +318,10 @@ Agent selection rules:
 
 - The currently selected Codex or Claude model becomes the **planner/synthesizer**.
 - Swarm size:
-  - `@swarm <prompt>` defaults to 4 agents total (planner + 3), capped at 16.
-  - `@swarm N <prompt>` uses `N` agents total (1–16).
-  - `@swarm all <prompt>` uses all available Codex agents (still capped at 16).
+  - `@swarm <prompt>` defaults to 4 agents total (planner + 3).
+  - `@swarm N <prompt>` uses `N` agents total (1–256, clamped at runtime by the host's FD ceiling).
+  - `@swarm all <prompt>` uses all available Codex/Claude agents in the roster, clamped to the FD ceiling.
+  - Note: the `1..=16` cap on `--codex-max-parallel-turns` is a **separate** concept — it bounds how many turns run *concurrently* across all agents, not the total swarm size. See `docs/SWARM.md` "Static and effective ceilings".
 - Agent selection:
   - `lab`: selects additional Codex/Claude agents from the roster (priority agents are preferred).
   - `parallel`/`bulk`: if any roster models are marked **priority**, Swarm restricts worker lanes
@@ -549,7 +550,7 @@ Implementation notes:
   - Turns have an optional total timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default disabled; set to
     `600` to enable; set to `0` to disable).
   - Turns can have an idle timeout via `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` (default disabled; set to
-    `600` to enable; set to `0` to disable).
+    `600` to enable; set to `0` to disable). Full list of timeout/runtime env vars: `docs/ENVIRONMENT.md`.
   - Reconnect robustness: the runner checks for unexpected `codex mcp-server` exit, drops the dead
   handle, and retries with a short backoff (operator can still use MCP tab `r`).
 - Latency: `latency_ms` is best-effort; it is updated on connect and on successful turns.
@@ -589,12 +590,12 @@ Implementation notes:
   `analysis_strategies__*.csv`, `analysis_trajectories__*.csv`) are generated
   via `:games analyze` and summarize per‑match, steady‑state, and trajectory stats.
 
-## Games Engine (Phase 2)
+## Games Engine
 
 See `docs/GAMES.md` for the engine split (kernel vs stepper), deterministic seeding,
 and parallel logging behavior.
 
-## Program Strategies (Phase 3E)
+## Program Strategies
 
 - Strategy implementations live in `crates/nit-games/src/strategy/`:
   FSM (Moore machine), CA (`strategy/ca/`), and one‑sided TM (`strategy/tm/`).

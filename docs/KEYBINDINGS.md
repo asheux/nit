@@ -159,6 +159,28 @@
 - **Esc Esc** (within ~500 ms): Abort the active swarm mission. A single Esc still does its normal selection-clear job; only a fast double-press triggers abort.
 - **Ctrl+C** (with empty input): Abort the active swarm mission. With non-empty input, behaves as before (clear / copy selection).
 
+## Substrate overlay
+
+Inspect the living-system substrate (signals, claims, assumptions) in a popup overlay. See `docs/SUBSTRATE.md` for what each table means.
+
+- F3: Open / close the overlay
+- `:substrate` / `:sub` / `:sig`: Open on the Signals tab
+- `:claims`: Open on the Claims tab
+- `:assumptions` / `:asm`: Open on the Assumptions tab
+- Tab: Cycle sub-tabs (Signals → Claims → Assumptions); clicking a tab label also cycles (clicking the active tab closes)
+- Mouse wheel: Scroll the active table (shared across sub-tabs)
+- Esc or F3: Close
+
+## Terminal (embedded shell)
+
+Embedded OS shell available in the agent-chat tab, a modal popup, and per multipane pane. See `docs/TERMINAL.md`.
+
+- `Ctrl+\`: Toggle the agent-chat terminal tab (also toggles a focused multipane pane's terminal)
+- `Ctrl+Shift+T`: Open / close the modal terminal popup
+- `Esc Esc`: Close the popup (reaches the shell first; closes on the double-tap)
+- Mouse drag (left button): Select a rectangle of terminal text; copies to the system clipboard on release
+- Mouse wheel: Scroll the 10,000-line scrollback (typing snaps back to the live bottom)
+
 ## Visualizer (GoL)
 
 ### Title Bar Buttons (clickable)

@@ -1,7 +1,12 @@
 # Repo Health Report
 
-Date: 2026-03-28
-Repo: `/Users/nitrika/Projects/Configs/nit`
+Repo: `nit`
+
+> **This is a point-in-time snapshot (captured 2026-03-28), not a live status.**
+> The test counts below predate the substrate layer, which added roughly 280
+> nit-core tests — the workspace suite is now ~700+ tests. For current numbers,
+> run `scripts/healthcheck.sh --deep` (or `cargo test --all`) rather than trusting
+> the figures here.
 
 ## Quick Checklist Run
 

@@ -307,7 +307,8 @@ cargo run -p nit -- --agents codex
 - `docs/SEEDS.md` — code-as-genome seed encoders, parsimony rule, retry guardrails.
 - `docs/RULES.md` — Game of Life rule catalog and contribution guide.
 - `docs/SMOKE_TEST.md` — feature tour + manual smoke checklist.
-- `docs/PERF.md` — benchmarks and flamegraphs.
+- `docs/PERF.md` — TUI render budget, games benchmarks, and flamegraphs.
+- `docs/ENVIRONMENT.md` — runtime environment variables and tuning knobs.
 - `docs/SECURITY.md` — security policy, protections, and hardening backlog.
 - `docs/REPO_HEALTH.md` — snapshot of the last repo-health audit (fmt/clippy/tests/deny).
 
@@ -346,14 +347,12 @@ For strategy types (FSM, CA, one-sided TM), config format (payoff, history, scor
 
 `nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid of N independent chat panes (default 8, range `1..=32`), each anchored at its own working directory. `--backend` is optional: omit for a per-pane roster picker, name a family (`claude` / `codex` / `gemini` / `local`) to filter the per-pane roster, or name a specific lane id to pre-pick every pane. Per-pane sessions persist to `<state_dir>/multipane/session-<workspace-hash>.json`.
 
-Per-pane keymap: Tab / Shift+Tab cycle focus, mouse click focuses a pane directly, `Ctrl+Q` quits cleanly, `F1` / `?` toggles the help overlay, `Ctrl+/` (or `F2`) opens the dir-search overlay, `Ctrl+R` reverts a pane to its roster picker. `/abort`, Ctrl+C (empty), Esc-Esc target the focused pane only.
-
-See `docs/MULTIPANE.md` for the full spec.
+Per-pane keymap (focus cycling, dir-search, roster revert, focused-pane abort) lives in `docs/KEYBINDINGS.md` "Multipane mode"; `docs/MULTIPANE.md` has the full spec.
 
 ## Known limitations (MVP)
 
 - Horizontal scrolling uses character columns; tabs before the viewport can shift alignment.
-- Syntax highlighting covers 28 languages (the canonical list lives in `crates/nit-core/src/languages.rs`) and falls back to plain text for the rest or for very large files.
+- Syntax highlighting covers 29 languages (the canonical list lives in `crates/nit-core/src/languages.rs`) and falls back to plain text for the rest or for very large files.
 - Dockerfile detection is wired (it's an entry in the central `LANGUAGES` table) but the grammar crate is pinned to an older tree-sitter ABI; renders as plain text until upstream catches up.
 - Gemini models appear in the roster but are display-only (no runtime runner).
 

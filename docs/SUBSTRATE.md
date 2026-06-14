@@ -485,30 +485,3 @@ Same shape as observer, but also:
 2. Add modulation row in `Mood::modulation()`.
 3. Update `auto_transition` to handle the new state's entry/exit thresholds.
 4. Add TUI glyph in `signals_view.rs`.
-
----
-
-## 14. Session journey (2026-04-16 → 2026-04-18)
-
-The living-system layer was built in 16 commits across three days:
-
-| # | Commit   | What shipped                                                        |
-|---|----------|---------------------------------------------------------------------|
-| 1 | `f55ceda` | Phase 1 — `SubstrateState` scaffold + persistence                   |
-| 2 | `46f0f45` | Phase 2 — typed signals with lazy decay                             |
-| 3 | `be47f24` | Phase 2 — persistence wiring at `TurnCompleted`                     |
-| 4 | `11af8c8` | Micro-2.5 — runtime-derived emission (DoneMarker / Warning)         |
-| 5 | `8513c25` | Phase 3 — Substrate Signals tab in Visualizer pane                  |
-| 6 | `1530451` | Phase 5 — observer role + `repeat_failure` + `global_heat`          |
-| 7 | `bf953ed` | Phase 3-lattice — claim lattice with retry consequence              |
-| 8 | `35ca746` | Claims tab — Visualizer gains third tab                             |
-| 9 | `4aed709` | Phase 7 — metabolism (wall-clock sweep)                             |
-| 10 | `caf47b0` | Phase 4 — assumption manifests                                      |
-| 11 | `a7e6cea` | Phase 8 — cross-mission structural memory                           |
-| 12 | `9cff7e6` | Phase 6 — arbiter role + `persistent_conflict`                      |
-| 13 | `b31cfa6` | Docs — `LIVING_SYSTEM.md` role roster                               |
-| 14 | `1afe566` | Phase 9 — mood (system-wide tuning modulator)                       |
-| 15 | `d89ba22` | Polish — assumptions tab + IDF weighting + mood v2 modulations      |
-| 16 | `c974ed7` | MCP deferred B — `nit-mcp` crate for deliberate agent emission      |
-
-All commits on `main`, not pushed, not merged upstream.

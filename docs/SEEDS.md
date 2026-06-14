@@ -20,7 +20,7 @@ nit ships seven encoders in two categories.
 
 ### AST-Driven Encoders
 
-These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 active grammars; Dockerfile and Wolfram appear in `LANGUAGES` for detection — and Wolfram is highlighted in `nit-syntax` via a vendored grammar — but the seed encoders skip both: Dockerfile's crate is wedged at an older tree-sitter ABI, and Wolfram's vendored grammar is a generic operator parser with no semantic nodes worth encoding). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
+These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 seed-scored grammars, out of 29 highlight grammars total; Dockerfile and Wolfram appear in `LANGUAGES` for detection — and Wolfram is highlighted in `nit-syntax` via a vendored grammar — but the seed encoders skip both: Dockerfile's crate is wedged at an older tree-sitter ABI, and Wolfram's vendored grammar is a generic operator parser with no semantic nodes worth encoding). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
 
 #### Token Spectrum (default)
 
@@ -194,7 +194,7 @@ tier = GenomeTier::from_generations(effective_min)
 When an agent's code degrades genome quality, nit automatically retries:
 
 - **Max 3 retries** per turn (not 10) — avoids retry spirals that compound over-engineering
-- **Files < 100 lines are skipped** — small files don't have enough structure for meaningful retry improvement
+- **No retry-side file-size gate** — the encoder's <20-significant-line auto-pass (Tier III) already filters genuinely trivial files, and the parsimony detector catches over-engineering on the next pass, so a duplicated retry-side threshold (it was 120 lines until 0.2.12) only created blind spots for mission-authored sub-120-line files
 - Retry prompts warn agents against over-engineering during fixes
 
 ### Small-file bypass

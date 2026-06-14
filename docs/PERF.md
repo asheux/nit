@@ -1,6 +1,36 @@
 # Performance
 
-## Benchmarks
+This doc covers two performance surfaces: the **TUI render loop** (frame budget,
+redraw cap, and how output-heavy subsystems stay off the redraw path) and the
+**`nit-games` engine benchmarks** (criterion benches + flamegraphs). For the
+environment variables referenced here, see `docs/ENVIRONMENT.md`.
+
+## TUI render performance
+
+### Frame cap (`NIT_TUI_FPS`)
+
+nit's single-pane and multipane event loops gate `terminal.draw` behind a redraw
+cap, default **60 fps** (16 ms). The cap is read once at startup, clamped to
+`15..=120` (out-of-range values fall back to the default), and applies to the draw
+call only — input handling and agent-bus event application stay unthrottled, so a
+high-volume agent-bus burst can update state on every event but can't repaint faster
+than the terminal compositor keeps up. Lower it (`NIT_TUI_FPS=30`) on slow or remote
+terminals; raise it for smoother scrolling on a fast local terminal.
+
+### PTY / terminal render decoupling
+
+The embedded terminal's rendering is decoupled from shell output: a chatty process
+can't storm the redraw loop. The PTY reader thread keeps the `vt100` grid current on
+its own thread, and nit samples it on the normal frame cadence. See `docs/TERMINAL.md`
+("Notes") for the full model.
+
+### Multipane render budget
+
+Multipane runs the same per-pane render code once per ratatui frame. The grid's render
+and dir-search latency targets (initial 16-pane render < 50 ms, dir-search keystroke →
+result update < 16 ms) are documented in `docs/MULTIPANE.md` ("Performance budget").
+
+## Games benchmarks
 
 Run the nit-games benches:
 
