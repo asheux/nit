@@ -12,9 +12,7 @@ single user-chosen agent backend. Editor, agent ops, visualizer, and
 the rest of the standard nit UI are unavailable in this mode — only
 chat dispatch.
 
-<p align="center">
-  <img src="https://nit.tools/multipane.png" alt="nit multipane mode — sixteen independent agent chat panes in a 4×4 grid" width="900" />
-</p>
+![nit multipane mode — sixteen independent agent chat panes in a 4×4 grid](https://nit.tools/multipane.png)
 
 Use case: drive N concurrent agent sessions across different projects
 from one terminal. Like `tmux` for AI agents.
