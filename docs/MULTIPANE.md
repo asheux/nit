@@ -12,38 +12,9 @@ single user-chosen agent backend. Editor, agent ops, visualizer, and
 the rest of the standard nit UI are unavailable in this mode — only
 chat dispatch.
 
-```
-MULTIPANE  pane 1/9  cwd=nit
-┌── pane 0 · roster · nit ─────┬── pane 1 · roster · nit ─────┬── pane 2 · roster · nit ─────┐
-│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
-│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
-│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
-│                              │                              │                              │
-│  → ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
-│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
-│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
-│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
-├── pane 3 · roster · nit ─────┼── pane 4 · roster · nit ─────┼── pane 5 · roster · nit ─────┤
-│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
-│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
-│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
-│                              │                              │                              │
-│    ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
-│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
-│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
-│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
-├── pane 6 · roster · nit ─────┼── pane 7 · roster · nit ─────┼── pane 8 · roster · nit ─────┤
-│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│ ↑/↓ j/k · h/l fold · Tab pane│
-│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│ Template: [lab] parallel bulk│
-│ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │ Mission:  [auto] general  …  │
-│                              │                              │                              │
-│    ▸ Codex                   │    ▸ Codex                   │    ▸ Codex                   │
-│    ▸ Claude                  │    ▸ Claude                  │    ▸ Claude                  │
-│    ▸ Gemini                  │    ▸ Gemini                  │    ▸ Gemini                  │
-│    ▸ Local                   │    ▸ Local                   │    ▸ Local                   │
-└──────────────────────────────┴──────────────────────────────┴──────────────────────────────┘
-MULTIPANE · Tab cycle · Ctrl+Q quit · F1 help
-```
+<p align="center">
+  <img src="https://nit.tools/multipane.png" alt="nit multipane mode — sixteen independent agent chat panes in a 4×4 grid" width="900" />
+</p>
 
 Use case: drive N concurrent agent sessions across different projects
 from one terminal. Like `tmux` for AI agents.
