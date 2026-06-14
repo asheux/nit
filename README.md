@@ -1,9 +1,5 @@
 # nit - Neural Interface Terminal
 
-<p align="center">
-  <img src="https://nit.tools/HeroImage.png" alt="nit — the Neural Interface Terminal: a vim-keyed editor and agent station" width="900" />
-</p>
-
 AI agents ship code faster than any programmer can keep up with, and the code decays faster than anyone
 can refactor it. nit is a vim-keyed TUI that watches every edit an agent makes and runs it through Conway's
 Game of Life as a fitness function for scoring. Code that scores well propagates and survives, but code
@@ -11,6 +7,10 @@ that scores badly dies out. It is experimental because as of now, we do not quit
 a better quality measure for code written by everyone, not just agents.
 
 [Thesis](https://community.wolfram.com/groups/-/m/t/3720941)
+
+<p align="center">
+  <img src="https://nit.tools/HeroImage.png" alt="nit — the Neural Interface Terminal: a vim-keyed editor and agent station" width="900" />
+</p>
 
 <p align="center">
   <img src="https://nit.tools/multipane.png" alt="nit multipane mode — sixteen independent agent chat panes in a 4×4 grid" width="900" />
