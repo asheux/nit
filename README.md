@@ -6,7 +6,7 @@ Game of Life as a fitness function for scoring. Code that scores well propagates
 that scores badly dies out. It is experimental because as of now, we do not quite know whether GoL is indeed
 a better quality measure for code written by everyone, not just agents.
 
-- [Thesis](https://community.wolfram.com/groups/-/m/t/3720941)
+[Thesis](https://community.wolfram.com/groups/-/m/t/3720941)
 
 ## Install
 
@@ -36,7 +36,7 @@ brew install asheux/tap/nit
 git clone https://github.com/asheux/nit.git && cd nit
 ```
 
-Binaries land at target/release/{nit, nit-mcp-server}
+**Binaries land at target/release/{nit, nit-mcp-server}**
 ```bash
 cargo build --release
 ```
@@ -117,12 +117,12 @@ just test
 just run -- path/to/file
 ```
 
-Full CI gates (fmt-check + clippy + test + cargo deny):
+**Full CI gates (fmt-check + clippy + test + cargo deny):**
 ```bash
 just ci
 ```
 
-Quick repo-health preflight (add --deep to include clippy + tests):
+**Quick repo-health preflight (add --deep to include clippy + tests):**
 ```bash
 scripts/healthcheck.sh
 scripts/healthcheck.sh --deep
@@ -287,42 +287,42 @@ As a prompt augmentation strategy. Disable with `intake_enabled = false` in `con
 
 Examples:
 
-Load all available lanes (default)
+**Load all available lanes (default)**
 ```bash
 nit
 ```
 
-Force Codex agent station
+**Force Codex agent station**
 ```bash
 nit --agents codex
 ```
 
-Force Claude-only agent station with the warm worker pool
+**Force Claude-only agent station with the warm worker pool**
 ```bash
 NIT_CLAUDE_POOL=1 nit --agents claude
 ```
 
-Force Codex agent station, per-turn `codex exec`
+**Force Codex agent station, per-turn `codex exec`**
 ```bash
 nit --agents codex --codex-runtime exec
 ```
 
-Force local-only agent station
+**Force local-only agent station**
 ```bash
 nit --agents local
 ```
 
-Multipane: 8 panes, full roster picker per pane
+**Multipane: 8 panes, full roster picker per pane**
 ```bash
 nit multipane
 ```
 
-Multipane: 4 panes pre-picked to a specific Claude lane
+**Multipane: 4 panes pre-picked to a specific Claude lane**
 ```bash
 nit multipane --backend claude-haiku-4-5 --panes 4
 ```
 
-From source
+**From source**
 ```bash
 cargo run -p nit -- --agents codex
 ```
