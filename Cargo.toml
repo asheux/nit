@@ -23,7 +23,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.2.18"
+version = "0.2.19"
 authors = ["nit contributors"]
 rust-version = "1.88.0"
 
