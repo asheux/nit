@@ -51,11 +51,11 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
         // file content is shell-style `KEY=value`, and tree-sitter-bash
         // is already a workspace dep — no new crate, no Cargo.lock churn.
         LanguageId::Dotenv => Some(tree_sitter_bash::LANGUAGE.into()),
-        // Wolfram has no maintained tree-sitter crate compatible with 0.25.
-        // Mirror the Dockerfile arm: `LANGUAGES` claims `.wl` / `.wls` for
-        // status-bar labelling and code-block alias resolution, but
-        // highlights stay disabled until a usable grammar ships.
-        LanguageId::Wolfram => None,
+        // Wolfram has no crates.io grammar, so we vendor the C parser + C++
+        // scanner from bostick/tree-sitter-wolfram (MIT, ABI 13) at
+        // `vendor/tree-sitter-wolfram` and expose it through a version-agnostic
+        // `LanguageFn` the 0.25 runtime still loads. See that crate's docs.
+        LanguageId::Wolfram => Some(tree_sitter_wolfram::LANGUAGE.into()),
         LanguageId::PlainText => None,
     }
 }
@@ -99,7 +99,7 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
         // assignment as the noisy variable kind; a tighter query keeps
         // names crisp.
         LanguageId::Dotenv => Some(include_str!("../../queries/dotenv/highlights.scm")),
-        LanguageId::Wolfram => None,
+        LanguageId::Wolfram => Some(include_str!("../../queries/wolfram/highlights.scm")),
         LanguageId::PlainText => None,
     }
 }

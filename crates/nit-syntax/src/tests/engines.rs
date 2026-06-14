@@ -52,6 +52,9 @@ fn highlights_keywords_per_language() {
         (115, LanguageId::Lean, "def hello : String := \"world\"\n"),
         (116, LanguageId::Make, "include common.mk\n"),
         (117, LanguageId::Sql, "SELECT 1;\n"),
+        // Wolfram: the vendored grammar has no semantic nodes, so control-flow
+        // builtins like `If` are surfaced as keyword.control by name match.
+        (118, LanguageId::Wolfram, "If[x > 0, x, -x]\n"),
     ];
 
     for &(buffer_id, lang, src) in cases {
@@ -274,6 +277,7 @@ fn expanded_queries_capture_operators_and_punctuation() {
         (LanguageId::Lean, "-- c\ndef add (a : Nat) : Nat := a + 1\n"),
         (LanguageId::Make, "all: foo\n\tgcc -o foo foo.c\n"),
         (LanguageId::Dotenv, "# c\nKEY=value\nNUM=42\nFLAG=true\n"),
+        (LanguageId::Wolfram, "(* c *)\nx = 1 + 2; f[a, b]\n"),
     ];
     // Only the languages whose hand-rolled queries we expanded are asserted
     // here; upstream-query languages (TS/JSON/etc.) and injection-dependent
@@ -294,6 +298,7 @@ fn expanded_queries_capture_operators_and_punctuation() {
         LanguageId::Zig,
         LanguageId::Sql,
         LanguageId::Lean,
+        LanguageId::Wolfram,
     ];
     for &(lang, src) in cases {
         if !must_be_rich.contains(&lang) {

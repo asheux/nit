@@ -5,9 +5,10 @@
 //! `nit-core`. The variant set tracks `nit_syntax::LanguageId`, minus:
 //!   - `PlainText` (enum-only sentinel),
 //!   - `Dockerfile` (grammar crate wedged at an older tree-sitter ABI),
-//!   - `Wolfram` (no tree-sitter crate compatible with 0.25; the
-//!     status-bar label is set in `LANGUAGES` but the encoders have no
-//!     parser to feed).
+//!   - `Wolfram` (highlighting wires a vendored grammar in `nit-syntax`,
+//!     but the seed encoders skip it: that grammar is a generic operator
+//!     parser with no semantic nodes, so it yields little genome signal;
+//!     its status-bar label is still set in `LANGUAGES`).
 //!
 //! `Dotenv` rides on the bash grammar — `.env` files are shell-style
 //! `KEY=value` assignments, and the bash parser produces a usable AST
@@ -60,7 +61,8 @@ pub(crate) enum SeedLanguage {
 impl SeedLanguage {
     /// Map a `LANGUAGES` label back to a `SeedLanguage` variant. Returns
     /// `None` for labels the seed encoders do not parse: `dockerfile`
-    /// (ABI mismatch) and `wolfram` (no compatible grammar).
+    /// (ABI mismatch) and `wolfram` (highlight-only vendored grammar with
+    /// no semantic nodes to encode).
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         Some(match label {
             "rust" => Self::Rust,

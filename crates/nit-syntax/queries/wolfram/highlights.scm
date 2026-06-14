@@ -1,73 +1,51 @@
-; Wolfram Language highlights — placeholder queries.
+; Wolfram Language syntax highlights.
 ;
-; The judge's plan elected to ship Wolfram detection WITHOUT bundling a
-; tree-sitter-wolfram crate (none is mature enough on crates.io as of
-; this PR cluster). Files with extensions `.wl` / `.wls` therefore
-; render as plain text under nit's `Wolfram` language label; the
-; grammar dispatch in `nit-syntax/src/language/grammars.rs` returns
-; `None` and never loads this query.
-;
-; The file exists so:
-;   * the structural-compliance check sees the language directory
-;     populated alongside its peers;
-;   * promoting Wolfram to a tree-sitter-backed language later is a
-;     single Cargo dependency add + one arm flip in `grammars.rs`,
-;     without also having to author the highlights query from scratch.
-;
-; The captures below mirror common Wolfram constructs (symbols,
-; comments, strings, numerics). They are inert until a grammar lands;
-; renaming or rewording them won't change render behaviour today.
+; The vendored bostick/tree-sitter-wolfram grammar is a generic
+; operator-precedence parser: literals (integer / real / string / symbol),
+; comments, and a large table of operator / bracket tokens wrapped in
+; binary / infix / prefix / postfix / call / group nodes. There are no semantic
+; nodes, so symbol roles are inferred from the name (Wolfram builtins are
+; Capitalized). Override patterns run general -> specific; later matches win,
+; the same convention queries/rust/highlights.scm relies on.
 
-; Comments: `(* ... *)`
+; --- Comments & literals ---------------------------------------------------
 (comment) @comment
 
-; String literals — double-quoted.
 (string) @string
+(integer) @number
+(real) @number
 
-; Numeric literals (Integer / Real / Rational / Complex).
-(number) @number
+; --- Symbols ---------------------------------------------------------------
+; Default to a plain variable; Capitalized names are Wolfram builtins surfaced
+; as functions, then control-flow, booleans and constants are carved back out.
+(symbol) @variable
 
-; Built-in symbols start uppercase and follow camel-case (`Plus`,
-; `Module`, `Cases`). Tag them as functions when followed by `[`, and
-; as constants otherwise — the choice is documented here so the
-; promotion PR can wire it without re-litigating the convention.
 ((symbol) @function
- (#match? @function "^[A-Z][A-Za-z0-9]*$"))
+  (#match? @function "^[A-Z]"))
 
-((symbol) @constant
- (#match? @constant "^[A-Z][A-Z0-9_]*$"))
+((symbol) @keyword.control
+  (#match? @keyword.control "^(If|While|For|Do|Switch|Which|Module|Block|With|Function|Return|Throw|Catch|Break|Continue|Goto|Abort)$"))
 
-; Operator tokens.
+((symbol) @boolean
+  (#match? @boolean "^(True|False)$"))
+
+((symbol) @constant.builtin
+  (#match? @constant.builtin "^(Pi|E|I|Infinity|ComplexInfinity|Indeterminate|Null|Degree|GoldenRatio|EulerGamma|Catalan|Glaisher|Khinchin|All|None|Automatic)$"))
+
+; --- Operators -------------------------------------------------------------
 [
-  "->"
-  ":>"
-  ":="
-  "="
-  "=="
-  "!="
-  ":"
-  "/."
-  "//"
-  "@"
-  "/@"
-  "&"
-  "|"
-  "||"
-  "&&"
+  "!" "!!" "!=" "&" "&&" "'"
+  "*" "**" "*=" "+" "++" "+=" "-" "--" "-=" "->"
+  "." ".." "..." "/" "/*" "/." "//" "//." "//=" "//@" "/;" "/=" "/@"
+  ":=" ":>" "<" "<->" "<=" "<>" "=" "=!=" "==" "===" ">" ">=" "?"
+  "@" "@*" "@@" "@@@" "^" "^:=" "^=" "|" "|->" "||" "~~"
 ] @operator
 
-; Brackets and parens.
+; --- Punctuation -----------------------------------------------------------
 [
-  "["
-  "]"
-  "{"
-  "}"
-  "("
-  ")"
+  "(" ")" "[" "]" "{" "}" "<|" "|>"
 ] @punctuation.bracket
 
-; Statement separators.
 [
-  ";"
-  ","
+  "," ";"
 ] @punctuation.delimiter

@@ -636,7 +636,7 @@ nit uses a dedicated crate (`nit-syntax`) to provide fast, incremental, tree-sit
 highlighting with a plain‑text fallback. The pipeline is intentionally split so future
 semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI code.
 
-**Language coverage (28 active grammars on tree-sitter 0.25):**
+**Language coverage (29 active grammars on tree-sitter 0.25):**
 
 The canonical list lives in `crates/nit-core/src/languages.rs` as the
 `LANGUAGES` table (`LanguageInfo` entries with extensions, filenames,
@@ -652,7 +652,7 @@ The grouping below is documentation only:
 | Systems | Rust, Go, C, C++, Zig |
 | JVM | Java, Kotlin |
 | Scripting | Python, JavaScript, TypeScript, Ruby, Lua, PHP, Bash |
-| Functional | OCaml, Haskell, Elixir, Lean |
+| Functional / Symbolic | OCaml, Haskell, Elixir, Lean, Wolfram |
 | Mobile / Apple | Swift |
 | Markup / Config | Markdown, HTML, CSS, JSON, TOML, YAML, Nix |
 | Data / Build | SQL, Makefile |

@@ -3,9 +3,9 @@
 ## Build & test
 
 ```bash
-just ci          # fmt-check + clippy + test + cargo deny
-just test        # cargo test --all
-just clippy      # cargo clippy --all-targets --all-features -- -D warnings
+just ci             # fmt-check + clippy + test + cargo deny
+just test           # cargo test --all
+just clippy         # cargo clippy --all-targets --all-features -- -D warnings
 just run -- <args>  # cargo run -- <args>
 ```
 
@@ -23,7 +23,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `nit-gol` | Game of Life simulation |
 | `nit-metal` | Metal GPU acceleration (macOS) |
 | `nit-mcp` | MCP stdio JSON-RPC server (`nit-mcp-server` binary) — bridges spawned `codex` back into substrate tools (signals/claims/assumptions); spawned by `codex_runner` |
-| `nit-syntax` | Syntax highlighting (tree-sitter 0.25, 28 active grammars; language metadata lives in `nit-core::languages::LANGUAGES`) |
+| `nit-syntax` | Syntax highlighting (tree-sitter 0.25, 29 active grammars; language metadata lives in `nit-core::languages::LANGUAGES`) |
 | `nit-utils` | Shared filesystem/hashing/path utilities |
 
 ## Key source files

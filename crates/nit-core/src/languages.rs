@@ -100,9 +100,10 @@ pub struct LanguageInfo {
 ///
 /// `Wolfram` is listed for `.wl` / `.wls` detection; `.m` is not
 /// claimed (it overlaps MATLAB and Objective-C, and a wrong default
-/// produces visibly broken highlights). No grammar crate currently
-/// targets tree-sitter 0.25 cleanly, so the grammar arm returns `None`
-/// — the file opens as plain text with a "Wolfram" status label.
+/// produces visibly broken highlights). No grammar crate targets
+/// tree-sitter 0.25, so `nit-syntax` vendors one (the C parser + C++
+/// scanner from bostick/tree-sitter-wolfram, ABI 13) and `.wl` / `.wls`
+/// now highlight.
 ///
 /// `Dotenv` reuses `tree-sitter-bash` (shell-style `KEY=value`); no
 /// dedicated dotenv crate is pulled in. Detection covers `.env`,

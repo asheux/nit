@@ -65,4 +65,8 @@ tree-sitter-sequel = "0.3"
 tree-sitter-zig = "1.1"
 tree-sitter-make = "1.1"
 tree-sitter-lean4 = "0.3"
+# Wolfram has no crates.io grammar, so the C parser + C++ scanner are vendored
+# at `vendor/tree-sitter-wolfram` (MIT, from bostick/tree-sitter-wolfram, ABI 13)
+# and exposed via a version-agnostic `LanguageFn` the 0.25 runtime can load.
+tree-sitter-wolfram = { path = "../../vendor/tree-sitter-wolfram" }
 # tree-sitter-graphql — no maintained crate compatible with 0.22 yet.

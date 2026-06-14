@@ -20,7 +20,7 @@ nit ships seven encoders in two categories.
 
 ### AST-Driven Encoders
 
-These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 active grammars; Dockerfile is listed in `LANGUAGES` for filename detection but its grammar crate is wedged at an older tree-sitter ABI, so encoders skip it). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
+These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 active grammars; Dockerfile and Wolfram appear in `LANGUAGES` for detection — and Wolfram is highlighted in `nit-syntax` via a vendored grammar — but the seed encoders skip both: Dockerfile's crate is wedged at an older tree-sitter ABI, and Wolfram's vendored grammar is a generic operator parser with no semantic nodes worth encoding). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
 
 #### Token Spectrum (default)
 

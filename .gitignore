@@ -10,6 +10,8 @@ gol-snapshots/
 games-runs/
 output/
 runs/
+# Local research notebooks / scratch (Wolfram .nb, experiments) — not shipped.
+research/
 *.log
 *.tmp
 perf.data
@@ -19,6 +21,10 @@ flamegraph.svg
 vendor/
 !vendor/time/
 !vendor/time/**
+# Vendored tree-sitter-wolfram grammar (no crates.io release); must be tracked
+# so a fresh checkout can build the nit-syntax path dependency.
+!vendor/tree-sitter-wolfram/
+!vendor/tree-sitter-wolfram/**
 .cargo-local/
 .claude/
 __pycache__/

@@ -111,7 +111,7 @@ scripts/healthcheck.sh --deep
 - Rust 1.88.0 (pinned via `rust-toolchain.toml`)
 - ratatui + crossterm for UI/input
 - ropey, unicode-segmentation, unicode-width for text correctness
-- tree-sitter 0.25 for syntax highlighting (28 active grammars; the workspace's language registry — extensions, filenames, shebangs, injection aliases, `is_code` flag — lives in `crates/nit-core/src/languages.rs`) and AST-based seed encoders
+- tree-sitter 0.25 for syntax highlighting (29 active grammars; the workspace's language registry — extensions, filenames, shebangs, injection aliases, `is_code` flag — lives in `crates/nit-core/src/languages.rs`) and AST-based seed encoders
 
 ### Reproducibility
 
@@ -127,79 +127,13 @@ grammars, Game of Life rules, documentation, and code.
 - **Validate locally** before opening a PR — all gates must pass (clippy runs with `-D warnings`):
 
 ```bash
-just ci      # fmt-check + clippy + test + cargo deny
+just ci
 ```
 
 - **Keep changes focused**, match the surrounding style, add tests for new behaviour, and run `just fmt` before committing.
 - **Open a pull request** against `main` with a clear description of the change and its motivation; CI must be green before review.
 
 Good first contributions: new language grammars / highlight queries (`crates/nit-syntax/`), Game of Life rule presets (`docs/RULES.md`), and documentation fixes. For larger or architectural changes, open an issue first to discuss the approach — see `docs/ARCHITECTURE.md` and the subsystem guides under `docs/`.
-
-## Security Notes
-
-- No plugins.
-- No network calls from `nit` itself.
-- No arbitrary command execution; `nit` may invoke `git`, `codex`, `claude`, and the platform URL launcher (`open`/`xdg-open`/`cmd`) directly (no shell). At startup, `codex`, `claude`, and `gemini` are probed for model detection.
-- `#![forbid(unsafe_code)]` across all crates except `nit-metal` (Metal GPU interop).
-- Atomic file writes.
-- Terminal restored on exit and panic.
-
-For details see `docs/SECURITY.md`.
-
-## Agent Station
-
-nit includes an Agent Station UI (Agent Ops + Agent Chat) with multiple backends: Codex (MCP or exec runtime), Claude (subprocess per turn, optional warm worker pool), and a local mock lane. Gemini models are detected at startup but display-only (no runtime runner yet).
-
-- Default: seeds all available lanes (Codex, Claude, and Gemini models when detected on `PATH`).
-- `nit --agents local` (alias: `mock`) — force local lane only.
-- `nit --agents codex` — force Codex only (loads a model roster from `~/.codex/models_cache.json`).
-- `nit --agents claude` — force Claude only (probes `claude models --json` for available models).
-- `nit --agents all` — include all available lanes.
-- Codex runtime knobs:
-  - `--codex-runtime <mcp|exec>` (default: `mcp` — runs a persistent `codex mcp-server`; `exec` spawns `codex exec` per turn).
-  - `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: Codex config).
-  - `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default: `never`).
-  - `--codex-max-parallel-turns <N>` (alias `--codex-parallel`; default `8`, range `1..=16`). Shared cap across Codex and Claude.
-
-### Agent Chat commands
-
-- `@all <prompt>` — fan-out to multiple agents (Codex and Claude).
-- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). `lab` is the default template. See `docs/SWARM.md`.
-- `@shadow <prompt>` — single-agent dispatch with hidden propose-a / propose-b → judge → review pipeline; auto-enables for heavy prompts (>500 chars or keywords like `refactor`, `rewrite`, `implement`). See `docs/SHADOWS.md`.
-- `@new <prompt>` — spawn a fresh-context clone when the agent is busy.
-- `@queue` / `@q <prompt>` — explicit queue (same as the implicit queueing below).
-- `/abort` (or `@abort`) — cancel the active swarm mission. `/abort all` cancels every running swarm; `/abort <agent-id>` is a surgical strike on one agent.
-- Prompts sent while an agent is busy are automatically queued and dispatched when the agent becomes idle.
-
-In front of every Claude-class dispatch, a hidden **intake agent** classifies the operator's intent and appends a file checklist for write/mixed prompts. Disable with `intake_enabled = false` in `config.toml` or `NIT_INTAKE_DISABLED=1` for a runtime kill switch. See `docs/INTAKE.md`.
-
-Examples:
-
-```bash
-# Load all available lanes (default)
-nit
-
-# Force Codex agent station
-nit --agents codex
-
-# Force Claude-only agent station with the warm worker pool
-NIT_CLAUDE_POOL=1 nit --agents claude
-
-# Force Codex agent station, per-turn `codex exec`
-nit --agents codex --codex-runtime exec
-
-# Force local-only agent station
-nit --agents local
-
-# Multipane: 8 panes, full roster picker per pane
-nit multipane
-
-# Multipane: 4 panes pre-picked to a specific Claude lane
-nit multipane --backend claude-haiku-4-5 --panes 4
-
-# From source
-cargo run -p nit -- --agents codex
-```
 
 ## Project layout
 
@@ -288,6 +222,73 @@ nit/
 ├─ vendor/                Vendored dependencies (`time` crate)
 ├─ scripts/               Build and CI helpers (`healthcheck.sh`)
 └─ assets/                Static assets
+```
+
+## Security Notes
+
+- No plugins.
+- No network calls from `nit` itself.
+- No arbitrary command execution; `nit` may invoke `git`, `codex`, `claude`, and the platform URL launcher (`open`/`xdg-open`/`cmd`) directly (no shell). At startup, `codex`, `claude`, and `gemini` are probed for model detection.
+- `#![forbid(unsafe_code)]` across all crates except `nit-metal` (Metal GPU interop).
+- Atomic file writes.
+- Terminal restored on exit and panic.
+
+For details see `docs/SECURITY.md`.
+
+## Agent Station
+
+nit includes an Agent Station UI (Agent Ops + Agent Chat) with multiple backends: Codex (MCP or exec runtime), Claude (subprocess per turn, optional warm worker pool), and a local mock lane. Gemini models are detected at startup but display-only (no runtime runner yet).
+
+- Default: seeds all available lanes (Codex, Claude, and Gemini models when detected on `PATH`).
+- `nit --agents local` (alias: `mock`) — force local lane only.
+- `nit --agents codex` — force Codex only (loads a model roster from `~/.codex/models_cache.json`).
+- `nit --agents claude` — force Claude only (probes `claude models --json` for available models).
+- `nit --agents all` — include all available lanes.
+- Codex runtime knobs:
+  - `--codex-runtime <mcp|exec>` (default: `mcp` — runs a persistent `codex mcp-server`; `exec` spawns `codex exec` per turn).
+  - `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: Codex config).
+  - `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default: `never`).
+  - `--codex-max-parallel-turns <N>` (alias `--codex-parallel`; default `8`, range `1..=16`). Shared cap across Codex and Claude.
+
+### Agent Chat commands
+
+- `@all <prompt>` — fan-out to multiple agents (Codex and Claude).
+- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). `lab` is the default template. See `docs/SWARM.md`.
+- `@shadow <prompt>` — single-agent dispatch with hidden propose-a / propose-b → judge → review pipeline; auto-enables for heavy prompts (>500 chars or keywords like `refactor`, `rewrite`, `implement`). See `docs/SHADOWS.md`.
+- `@new <prompt>` — spawn a fresh-context clone when the agent is busy.
+- `@queue` / `@q <prompt>` — explicit queue (same as the implicit queueing below).
+- `/abort` (or `@abort`) — cancel the active swarm mission. `/abort all` cancels every running swarm; `/abort <agent-id>` is a surgical strike on one agent.
+- Prompts sent while an agent is busy are automatically queued and dispatched when the agent becomes idle.
+
+In front of every Claude-class dispatch, a hidden **intake agent** classifies the operator's intent and appends a file checklist for write/mixed prompts.
+As a prompt augmentation strategy. Disable with `intake_enabled = false` in `config.toml` or `NIT_INTAKE_DISABLED=1` for a runtime kill switch. See `docs/INTAKE.md`.
+
+Examples:
+
+```bash
+# Load all available lanes (default)
+nit
+
+# Force Codex agent station
+nit --agents codex
+
+# Force Claude-only agent station with the warm worker pool
+NIT_CLAUDE_POOL=1 nit --agents claude
+
+# Force Codex agent station, per-turn `codex exec`
+nit --agents codex --codex-runtime exec
+
+# Force local-only agent station
+nit --agents local
+
+# Multipane: 8 panes, full roster picker per pane
+nit multipane
+
+# Multipane: 4 panes pre-picked to a specific Claude lane
+nit multipane --backend claude-haiku-4-5 --panes 4
+
+# From source
+cargo run -p nit -- --agents codex
 ```
 
 ## Documentation
