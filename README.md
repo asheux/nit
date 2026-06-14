@@ -34,8 +34,11 @@ brew install asheux/tap/nit
 
 ```bash
 git clone https://github.com/asheux/nit.git && cd nit
+```
+
+Binaries land at target/release/{nit, nit-mcp-server}
+```bash
 cargo build --release
-# Binaries land at target/release/{nit, nit-mcp-server}
 ```
 
 **Upgrade (any platform, any install method):**
@@ -79,7 +82,13 @@ The installer doesn't auto-modify your shell config; it prints a `PATH` hint at 
 
 ```bash
 nit path/to/file
+```
+
+```bash
 nit games
+```
+
+```bash
 nit multipane
 ```
 
@@ -94,14 +103,27 @@ nit multipane
 
 ```bash
 just fmt
+```
+
+```bash
 just clippy
+```
+
+```bash
 just test
+```
+
+```bash
 just run -- path/to/file
+```
 
-# Full CI gates (fmt-check + clippy + test + cargo deny):
+Full CI gates (fmt-check + clippy + test + cargo deny):
+```bash
 just ci
+```
 
-# Quick repo-health preflight (add --deep to include clippy + tests):
+Quick repo-health preflight (add --deep to include clippy + tests):
+```bash
 scripts/healthcheck.sh
 scripts/healthcheck.sh --deep
 ```
@@ -135,7 +157,7 @@ just ci
 
 Good first contributions: new language grammars / highlight queries (`crates/nit-syntax/`), Game of Life rule presets (`docs/RULES.md`), and documentation fixes. For larger or architectural changes, open an issue first to discuss the approach — see `docs/ARCHITECTURE.md` and the subsystem guides under `docs/`.
 
-## Project layout
+### Project layout
 
 ```
 nit/
@@ -265,29 +287,43 @@ As a prompt augmentation strategy. Disable with `intake_enabled = false` in `con
 
 Examples:
 
+Load all available lanes (default)
 ```bash
-# Load all available lanes (default)
 nit
+```
 
-# Force Codex agent station
+Force Codex agent station
+```bash
 nit --agents codex
+```
 
-# Force Claude-only agent station with the warm worker pool
+Force Claude-only agent station with the warm worker pool
+```bash
 NIT_CLAUDE_POOL=1 nit --agents claude
+```
 
-# Force Codex agent station, per-turn `codex exec`
+Force Codex agent station, per-turn `codex exec`
+```bash
 nit --agents codex --codex-runtime exec
+```
 
-# Force local-only agent station
+Force local-only agent station
+```bash
 nit --agents local
+```
 
-# Multipane: 8 panes, full roster picker per pane
+Multipane: 8 panes, full roster picker per pane
+```bash
 nit multipane
+```
 
-# Multipane: 4 panes pre-picked to a specific Claude lane
+Multipane: 4 panes pre-picked to a specific Claude lane
+```bash
 nit multipane --backend claude-haiku-4-5 --panes 4
+```
 
-# From source
+From source
+```bash
 cargo run -p nit -- --agents codex
 ```
 
