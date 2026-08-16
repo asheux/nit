@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize as PtyDims};
@@ -17,6 +18,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize 
 /// log stays reachable by mouse-wheel; vt100 caps its history at this many rows.
 const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TERMINAL_TITLE_CHARS: usize = 160;
+const PARSE_BATCH_DELAY: Duration = Duration::from_millis(3);
+const MAX_PARSE_BATCH_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 pub struct TerminalMetadata {
@@ -52,6 +55,7 @@ pub struct PtySession {
     writer_thread: Option<JoinHandle<()>>,
     parser: Arc<Mutex<TerminalParser>>,
     reader: Option<JoinHandle<()>>,
+    parser_thread: Option<JoinHandle<()>>,
     exited: Arc<AtomicBool>,
     size: Mutex<PtySize>,
 }
@@ -106,7 +110,9 @@ impl PtySession {
             TerminalMetadata::default(),
         )));
         let exited = Arc::new(AtomicBool::new(false));
-        let handle = spawn_reader(reader, parser.clone(), exited.clone());
+        let (parser_tx, parser_rx) = mpsc::channel::<Vec<u8>>();
+        let reader = spawn_reader(reader, parser_tx);
+        let parser_thread = spawn_parser(parser_rx, parser.clone(), exited.clone());
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>();
         let writer_thread = spawn_writer(writer, writer_rx);
 
@@ -116,7 +122,8 @@ impl PtySession {
             writer_tx: Some(writer_tx),
             writer_thread: Some(writer_thread),
             parser,
-            reader: Some(handle),
+            reader: Some(reader),
+            parser_thread: Some(parser_thread),
             exited,
             size: Mutex::new(size),
         })
@@ -212,6 +219,9 @@ impl PtySession {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
+        if let Some(handle) = self.parser_thread.take() {
+            let _ = handle.join();
+        }
         self.exited.store(true, Ordering::SeqCst);
     }
 }
@@ -222,18 +232,36 @@ impl Drop for PtySession {
     }
 }
 
-fn spawn_reader(
-    mut reader: Box<dyn Read + Send>,
-    parser: Arc<Mutex<TerminalParser>>,
-    exited: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+fn spawn_reader(mut reader: Box<dyn Read + Send>, parser_tx: Sender<Vec<u8>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => lock(&parser).process(&buf[..n]),
+                Ok(n) if parser_tx.send(buf[..n].to_vec()).is_err() => break,
+                Ok(_) => {}
             }
+        }
+    })
+}
+
+/// Parse short PTY bursts under one lock so a renderer sees the old or new
+/// frame, never the clear-screen chunk between them.
+fn spawn_parser(
+    parser_rx: Receiver<Vec<u8>>,
+    parser: Arc<Mutex<TerminalParser>>,
+    exited: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(mut batch) = parser_rx.recv() {
+            std::thread::sleep(PARSE_BATCH_DELAY);
+            while batch.len() < MAX_PARSE_BATCH_BYTES {
+                match parser_rx.try_recv() {
+                    Ok(chunk) => batch.extend_from_slice(&chunk),
+                    Err(_) => break,
+                }
+            }
+            lock(&parser).process(&batch);
         }
         exited.store(true, Ordering::SeqCst);
     })

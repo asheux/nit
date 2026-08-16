@@ -173,6 +173,34 @@ fn foreground_program_can_publish_a_terminal_title() {
     );
 }
 
+#[test]
+fn adjacent_pty_chunks_are_collected_before_the_parser_is_published() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    let parser = Arc::new(Mutex::new(TerminalParser::new_with_callbacks(
+        4,
+        40,
+        0,
+        TerminalMetadata::default(),
+    )));
+    let exited = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    let worker = spawn_parser(rx, parser.clone(), exited.clone());
+
+    tx.send(b"old frame".to_vec()).unwrap();
+    std::thread::sleep(PARSE_BATCH_DELAY * 2);
+    tx.send(b"\x1b[H\x1b[2J".to_vec()).unwrap();
+    tx.send(b"new frame".to_vec()).unwrap();
+    drop(tx);
+    worker.join().unwrap();
+
+    let contents = lock(&parser).screen().contents();
+    assert!(contents.contains("new frame"), "screen was {contents:?}");
+    assert!(!contents.contains("old frame"), "screen was {contents:?}");
+    assert!(exited.load(Ordering::SeqCst));
+}
+
 #[cfg(unix)]
 #[test]
 fn scroll_up_enters_scrollback_and_input_snaps_to_bottom() {
