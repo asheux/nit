@@ -148,6 +148,33 @@ fn spawn_shell_command_runs_without_typed_input() {
 
 #[cfg(unix)]
 #[test]
+fn foreground_program_can_publish_a_terminal_title() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    let session = match PtySession::spawn_shell_command(
+        &dir,
+        PtySize { rows: 24, cols: 80 },
+        "printf '\\033]2;fraction reduction · cycle 4146\\007'; sleep 2",
+    ) {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+
+    for _ in 0..200 {
+        if session.title().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        session.title().as_deref(),
+        Some("fraction reduction · cycle 4146")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn scroll_up_enters_scrollback_and_input_snaps_to_bottom() {
     use std::time::Duration;
     let dir = std::env::temp_dir();

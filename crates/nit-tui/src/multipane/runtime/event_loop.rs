@@ -932,10 +932,14 @@ fn overlay_pane_terminals(
             .and_then(|mp| mp.panes.get(idx))
             .map(|pane| crate::multipane::runtime::render::pane_path_label(state, &pane.cwd))
             .unwrap_or_default();
+        let context = session
+            .title()
+            .map(|title| format!("{cwd_text} · {title}"))
+            .unwrap_or(cwd_text);
         let title_line = crate::multipane::runtime::render::pane_tabs_line(
             idx,
             crate::multipane::runtime::render::PaneTab::Terminal,
-            &cwd_text,
+            &context,
             is_focused,
             theme,
         );

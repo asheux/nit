@@ -16,6 +16,26 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize 
 /// Rows retained above the live grid for scrollback. Generous so a long build
 /// log stays reachable by mouse-wheel; vt100 caps its history at this many rows.
 const SCROLLBACK_LINES: usize = 10_000;
+const MAX_TERMINAL_TITLE_CHARS: usize = 160;
+
+#[derive(Default)]
+pub struct TerminalMetadata {
+    title: String,
+}
+
+impl vt100::Callbacks for TerminalMetadata {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title)
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(MAX_TERMINAL_TITLE_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_string();
+    }
+}
+
+pub type TerminalParser = vt100::Parser<TerminalMetadata>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtySize {
@@ -30,7 +50,7 @@ pub struct PtySession {
     // thread) so a shell that stops draining its stdin can't stall nit's loop.
     writer_tx: Option<Sender<Vec<u8>>>,
     writer_thread: Option<JoinHandle<()>>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<TerminalParser>>,
     reader: Option<JoinHandle<()>>,
     exited: Arc<AtomicBool>,
     size: Mutex<PtySize>,
@@ -79,10 +99,11 @@ impl PtySession {
         let reader = pair.master.try_clone_reader().map_err(to_io)?;
         let writer = pair.master.take_writer().map_err(to_io)?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+        let parser = Arc::new(Mutex::new(TerminalParser::new_with_callbacks(
             size.rows,
             size.cols,
             SCROLLBACK_LINES,
+            TerminalMetadata::default(),
         )));
         let exited = Arc::new(AtomicBool::new(false));
         let handle = spawn_reader(reader, parser.clone(), exited.clone());
@@ -155,8 +176,14 @@ impl PtySession {
     }
 
     /// Lock the parsed screen grid for one render pass.
-    pub fn screen(&self) -> MutexGuard<'_, vt100::Parser> {
+    pub fn screen(&self) -> MutexGuard<'_, TerminalParser> {
         lock(&self.parser)
+    }
+
+    /// Latest title published by the foreground terminal program via OSC 0/2.
+    pub fn title(&self) -> Option<String> {
+        let title = lock(&self.parser).callbacks().title.clone();
+        (!title.is_empty()).then_some(title)
     }
 
     /// True once the child exited (reader EOF) — caller reverts pane / closes popup.
@@ -197,7 +224,7 @@ impl Drop for PtySession {
 
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<TerminalParser>>,
     exited: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
