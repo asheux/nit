@@ -139,6 +139,37 @@ fn materialise_pane_lane_idempotent_on_repeat() {
 }
 
 #[test]
+fn terminal_commands_activate_matching_panes() {
+    let mut state = fixture_state_with_two_backends();
+    install_filtered(&mut state, None, 2, PathBuf::from("/work")).expect("install");
+    install_terminal_commands(
+        &mut state,
+        &["tail -F one.log".into(), "tail -F two.log".into()],
+    )
+    .expect("commands");
+
+    let panes = &state.multipane.as_ref().expect("multipane").panes;
+    assert!(panes.iter().all(|pane| pane.terminal_active));
+    assert_eq!(
+        panes[0].terminal_command.as_deref(),
+        Some("tail -F one.log")
+    );
+    assert_eq!(
+        panes[1].terminal_command.as_deref(),
+        Some("tail -F two.log")
+    );
+}
+
+#[test]
+fn terminal_commands_require_exact_nonempty_match() {
+    let mut state = fixture_state_with_two_backends();
+    install_filtered(&mut state, None, 2, PathBuf::from("/work")).expect("install");
+
+    assert!(install_terminal_commands(&mut state, &["one".into()]).is_err());
+    assert!(install_terminal_commands(&mut state, &["one".into(), "".into()]).is_err());
+}
+
+#[test]
 fn is_backend_family_recognises_closed_set_case_insensitive() {
     for fam in ["codex", "Claude", "GEMINI", "local"] {
         assert!(is_backend_family(fam), "{fam} should be a family");

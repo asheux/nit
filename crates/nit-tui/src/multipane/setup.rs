@@ -113,6 +113,32 @@ pub fn install_filtered(
     Ok(())
 }
 
+/// Bind launch-time terminal commands to the installed panes.
+pub fn install_terminal_commands(state: &mut AppState, commands: &[String]) -> Result<(), String> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let multipane = state
+        .multipane
+        .as_mut()
+        .ok_or_else(|| "multipane state is not installed".to_string())?;
+    if commands.len() != multipane.panes.len() {
+        return Err(format!(
+            "received {} terminal commands for {} panes; provide exactly one per pane",
+            commands.len(),
+            multipane.panes.len()
+        ));
+    }
+    if commands.iter().any(|command| command.trim().is_empty()) {
+        return Err("terminal commands cannot be empty".to_string());
+    }
+    for (pane, command) in multipane.panes.iter_mut().zip(commands) {
+        pane.terminal_active = true;
+        pane.terminal_command = Some(command.clone());
+    }
+    Ok(())
+}
+
 /// Materialise the per-pane lane for `selected_base` on the focused pane,
 /// copying runtime metadata so the new lane inherits context-window /
 /// effort settings. Idempotent: if the lane id already exists in

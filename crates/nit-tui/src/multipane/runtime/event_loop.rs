@@ -780,12 +780,19 @@ fn reconcile_pane_terminals(
     terminals: &mut HashMap<usize, crate::pty::PtySession>,
     area: Rect,
 ) {
-    let snapshot: Vec<(usize, bool, PathBuf)> = match state.multipane.as_ref() {
+    let snapshot: Vec<(usize, bool, PathBuf, Option<String>)> = match state.multipane.as_ref() {
         Some(mp) => mp
             .panes
             .iter()
             .enumerate()
-            .map(|(idx, pane)| (idx, pane.terminal_active, pane.cwd.clone()))
+            .map(|(idx, pane)| {
+                (
+                    idx,
+                    pane.terminal_active,
+                    pane.cwd.clone(),
+                    pane.terminal_command.clone(),
+                )
+            })
             .collect(),
         None => return,
     };
@@ -795,7 +802,7 @@ fn reconcile_pane_terminals(
         .map(|mp| (mp.grid_cols, mp.grid_rows))
         .unwrap_or((0, 0));
     terminals.retain(|idx, _| *idx < snapshot.len());
-    for (idx, active, cwd) in snapshot {
+    for (idx, active, cwd, command) in snapshot {
         // Reap a session that exited (operator ran `exit`, or it
         // crashed). If the pane was visible, also revert it to chat
         // so the operator doesn't stare at a dead shell. If it was
@@ -817,7 +824,10 @@ fn reconcile_pane_terminals(
             })
             .unwrap_or(crate::pty::PtySize { rows: 24, cols: 80 });
         match (active, terminals.contains_key(&idx)) {
-            (true, false) => match crate::pty::PtySession::spawn(&cwd, size) {
+            (true, false) => match command.as_deref().map_or_else(
+                || crate::pty::PtySession::spawn(&cwd, size),
+                |command| crate::pty::PtySession::spawn_shell_command(&cwd, size, command),
+            ) {
                 Ok(session) => {
                     terminals.insert(idx, session);
                 }

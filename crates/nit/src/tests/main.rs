@@ -260,6 +260,14 @@ fn multipane_args_parses_with_backend() {
         "4",
         "--cwd",
         "/tmp",
+        "--terminal-command",
+        "tail -F one.log",
+        "--terminal-command",
+        "tail -F two.log",
+        "--terminal-command",
+        "tail -F three.log",
+        "--terminal-command",
+        "tail -F four.log",
     ])
     .expect("parses");
     match cli.command {
@@ -267,6 +275,15 @@ fn multipane_args_parses_with_backend() {
             assert_eq!(args.backend.as_deref(), Some("claude-haiku-4-5"));
             assert_eq!(args.panes, 4);
             assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
+            assert_eq!(
+                args.terminal_commands,
+                [
+                    "tail -F one.log",
+                    "tail -F two.log",
+                    "tail -F three.log",
+                    "tail -F four.log",
+                ]
+            );
         }
         other => panic!("expected Multipane, got {other:?}"),
     }
@@ -279,6 +296,7 @@ fn multipane_defaults_eight_panes_and_no_cwd() {
         Some(Command::Multipane(args)) => {
             assert_eq!(args.panes, 8);
             assert_eq!(args.cwd, None);
+            assert!(args.terminal_commands.is_empty());
         }
         other => panic!("expected Multipane, got {other:?}"),
     }

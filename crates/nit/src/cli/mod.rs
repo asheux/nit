@@ -107,6 +107,11 @@ pub(crate) struct MultipaneArgs {
     /// working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+
+    /// Command to run directly in a pane terminal. Repeat once per pane.
+    /// When omitted, panes start in their normal chat/roster view.
+    #[arg(long = "terminal-command", value_name = "COMMAND")]
+    pub terminal_commands: Vec<String>,
 }
 
 // Fuse `--lab <value>` into `--lab=<value>` so clap's subcommand_precedence_over_arg

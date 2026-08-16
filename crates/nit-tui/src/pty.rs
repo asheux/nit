@@ -42,6 +42,20 @@ impl PtySession {
         Self::spawn_program(&default_shell(), &[], cwd, size)
     }
 
+    /// Spawn one shell command directly in the PTY without simulated input.
+    pub(crate) fn spawn_shell_command(
+        cwd: &Path,
+        size: PtySize,
+        command: &str,
+    ) -> io::Result<Self> {
+        let shell = default_shell();
+        #[cfg(windows)]
+        let args = ["/D", "/S", "/C", command];
+        #[cfg(not(windows))]
+        let args = ["-c", command];
+        Self::spawn_program(&shell, &args, cwd, size)
+    }
+
     /// Spawn an explicit program — used by tests to drive a deterministic
     /// command instead of an interactive shell.
     pub(crate) fn spawn_program(

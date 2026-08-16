@@ -102,6 +102,10 @@ pub struct PaneSession {
     /// (the prior shell is already gone). The event loop owns the PtySession.
     #[serde(skip)]
     pub terminal_active: bool,
+    /// Optional command spawned directly in this pane's PTY. Transient because
+    /// commands must be supplied explicitly on every launch.
+    #[serde(skip)]
+    pub terminal_command: Option<String>,
 }
 
 /// Pane-local text selection. Coordinates are pane-thread row indices
@@ -157,6 +161,7 @@ impl Default for PaneSession {
             selected_effort: BTreeMap::new(),
             selection: None,
             terminal_active: false,
+            terminal_command: None,
         }
     }
 }

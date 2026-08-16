@@ -122,6 +122,32 @@ fn spawn_runs_command_and_reports_exit() {
 
 #[cfg(unix)]
 #[test]
+fn spawn_shell_command_runs_without_typed_input() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    let size = PtySize { rows: 24, cols: 80 };
+    let mut session = match PtySession::spawn_shell_command(&dir, size, "printf nit-direct-command")
+    {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+    for _ in 0..200 {
+        if session.has_exited() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(30));
+    let contents = session.screen().screen().contents();
+    assert!(
+        contents.contains("nit-direct-command"),
+        "screen was {contents:?}"
+    );
+    session.shutdown();
+}
+
+#[cfg(unix)]
+#[test]
 fn scroll_up_enters_scrollback_and_input_snaps_to_bottom() {
     use std::time::Duration;
     let dir = std::env::temp_dir();

@@ -29,8 +29,13 @@ pub(crate) fn run_multipane(
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
 
-    let (state, theme, log_receiver) =
-        bootstrap_state(args.backend.as_deref(), cwd, roster, pane_count)?;
+    let (state, theme, log_receiver) = bootstrap_state(
+        args.backend.as_deref(),
+        cwd,
+        roster,
+        pane_count,
+        &args.terminal_commands,
+    )?;
 
     let (codex_config, claude_config) =
         scale_runner_concurrency(pane_count, codex_config, claude_config);
@@ -65,6 +70,7 @@ fn bootstrap_state(
     cwd: PathBuf,
     roster: AgentsState,
     pane_count: usize,
+    terminal_commands: &[String],
 ) -> anyhow::Result<(AppState, Theme, mpsc::Receiver<String>)> {
     let (workspace_root, editor_buffer) = open_target_gol(Some(&cwd))?;
     let theme = Theme::load(find_theme().as_deref());
@@ -82,6 +88,8 @@ fn bootstrap_state(
     state.focus = PaneId::Editor;
 
     multipane::setup::install_filtered(&mut state, backend, pane_count, cwd)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    multipane::setup::install_terminal_commands(&mut state, terminal_commands)
         .map_err(|err| anyhow::anyhow!(err))?;
 
     Ok((state, theme, log_receiver))
