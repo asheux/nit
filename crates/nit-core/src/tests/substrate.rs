@@ -4,6 +4,7 @@
 //! the assertions that depend on them.
 
 use super::*;
+use crate::mood::Mood;
 use crate::test_helpers::temp_dir;
 use std::fs;
 use std::path::PathBuf;
@@ -287,4 +288,153 @@ fn sorted_by_strength_tiebreak_by_posted_gen() {
     let sorted = state.signals_sorted_by_strength();
     assert_eq!(sorted[0].0.id, "new");
     assert_eq!(sorted[1].0.id, "old");
+}
+
+fn excl_claim(id: &str, owner: &str, path: &str) -> Claim {
+    Claim {
+        id: id.into(),
+        kind: ClaimKind::ExclusiveWrite,
+        target: ClaimTarget::File {
+            path: PathBuf::from(path),
+        },
+        claimed_by: owner.into(),
+        claimed_at_gen: 0,
+        ttl_gens: 50,
+        rationale: "test".into(),
+    }
+}
+
+#[test]
+fn reconcile_unions_disjoint_primitives() {
+    let mut a = SubstrateState::new();
+    a.emit_signal(mk_signal(
+        "a-sig",
+        SignalKind::Warning,
+        0,
+        SignalTarget::Global,
+    ));
+    a.claims
+        .insert("a-claim".into(), excl_claim("a-claim", "agent-a", "a.rs"));
+
+    let mut b = SubstrateState::new();
+    b.emit_signal(mk_signal(
+        "b-sig",
+        SignalKind::Lead,
+        0,
+        SignalTarget::Global,
+    ));
+    b.assert_assumption(Assumption {
+        id: "b-assume".into(),
+        target: AssumptionTarget::Global,
+        fact: serde_json::Value::Bool(true),
+        posted_by: "agent-b".into(),
+        posted_at_gen: 0,
+        ttl_gens: 50,
+        rationale: "test".into(),
+    });
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert!(merged.signals.contains_key("a-sig"));
+    assert!(merged.signals.contains_key("b-sig"));
+    assert!(merged.claims.contains_key("a-claim"));
+    assert!(merged.assumptions.contains_key("b-assume"));
+}
+
+#[test]
+fn reconcile_retains_conflicting_claims_for_the_oracle() {
+    // Two branches each take an ExclusiveWrite lock on the SAME file under
+    // different owners — `claims_conflict` would reject the second in a single
+    // timeline. reconcile keeps BOTH: it is a provenance union, and the real
+    // conflict is the divergent code, resolved later by the merge oracle.
+    let ca = excl_claim("a-lock", "agent-a", "shared.rs");
+    let cb = excl_claim("b-lock", "agent-b", "shared.rs");
+    assert!(
+        claims_conflict(&ca, &cb),
+        "precondition: the claims contend"
+    );
+
+    let mut a = SubstrateState::new();
+    a.claims.insert(ca.id.clone(), ca);
+    let mut b = SubstrateState::new();
+    b.claims.insert(cb.id.clone(), cb);
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert_eq!(merged.claims.len(), 2);
+    assert!(merged.claims.contains_key("a-lock"));
+    assert!(merged.claims.contains_key("b-lock"));
+}
+
+#[test]
+fn reconcile_takes_max_generation_and_counters() {
+    let mut a = SubstrateState::new();
+    a.generation = 3;
+    a.signal_counter = 9;
+    a.claim_counter = 1;
+    a.assumption_counter = 4;
+
+    let mut b = SubstrateState::new();
+    b.generation = 7;
+    b.signal_counter = 2;
+    b.claim_counter = 5;
+    b.assumption_counter = 4;
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert_eq!(merged.generation, 7);
+    // Per-field max keeps a post-merge mint from colliding with either parent.
+    assert_eq!(merged.signal_counter, 9);
+    assert_eq!(merged.claim_counter, 5);
+    assert_eq!(merged.assumption_counter, 4);
+}
+
+#[test]
+fn reconcile_mood_follows_the_higher_generation_branch() {
+    let mut a = SubstrateState::new();
+    a.generation = 2;
+    a.mood = Mood::Exploration;
+    a.mood_quiet_streak = 1;
+
+    let mut b = SubstrateState::new();
+    b.generation = 5;
+    b.mood = Mood::Defensive;
+    b.mood_quiet_streak = 8;
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert_eq!(merged.mood, Mood::Defensive);
+    assert_eq!(merged.mood_quiet_streak, 8);
+
+    // A generation tie keeps a's mood (the branch the merge resolves into).
+    let mut tie_a = a.clone();
+    tie_a.generation = 5;
+    let tie = SubstrateState::reconcile(&tie_a, &b);
+    assert_eq!(tie.mood, Mood::Exploration);
+}
+
+#[test]
+fn reconcile_concatenates_observations_a_then_b() {
+    let mut a = SubstrateState::new();
+    a.observations.push(serde_json::json!({"from": "a"}));
+    let mut b = SubstrateState::new();
+    b.observations.push(serde_json::json!({"from": "b"}));
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert_eq!(merged.observations.len(), 2);
+    assert_eq!(merged.observations[0]["from"], "a");
+    assert_eq!(merged.observations[1]["from"], "b");
+}
+
+#[test]
+fn reconcile_b_wins_on_a_shared_id_key() {
+    // Maps key on id, so `extend(b over a)` resolves a shared key to b. v1
+    // never mints per-branch substrate so this is dormant, but the a-bias is
+    // pinned here against a v2 that does.
+    let mut a = SubstrateState::new();
+    a.claims
+        .insert("dup".into(), excl_claim("dup", "agent-a", "a.rs"));
+    let mut b = SubstrateState::new();
+    b.claims
+        .insert("dup".into(), excl_claim("dup", "agent-b", "b.rs"));
+
+    let merged = SubstrateState::reconcile(&a, &b);
+    assert_eq!(merged.claims.len(), 1);
+    assert_eq!(merged.claims["dup"].claimed_by, "agent-b");
 }

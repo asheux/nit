@@ -1518,6 +1518,41 @@ pub(super) fn apply_agent_ops_click_selection(
         }
         return;
     }
+    // Phase 9 multiway rows. The `*_line_idx` accessors return `Some` only when
+    // `multiway_enabled`, so the flag-off roster never matches here (byte-identical).
+    if state.agents.dock_tab == AgentOpsTab::Roster
+        && Some(line_idx) == agent_ops_view::roster_multiway_mood_line_idx(state)
+    {
+        if let Some(mood) = agent_ops_view::roster_multiway_mood_hit(col) {
+            state.agents.multiway_default_mood = mood;
+            state.agents.roster_tree_selected = None;
+        }
+        return;
+    }
+    if state.agents.dock_tab == AgentOpsTab::Roster
+        && Some(line_idx) == agent_ops_view::roster_multiway_mode_line_idx(state)
+    {
+        if let Some(on) = agent_ops_view::roster_multiway_mode_hit(col) {
+            state.agents.multiway_default_mode_on = on;
+            state.agents.roster_tree_selected = None;
+        }
+        return;
+    }
+    if state.agents.dock_tab == AgentOpsTab::Roster
+        && Some(line_idx) == agent_ops_view::roster_multiway_buttons_line_idx(state)
+    {
+        if let Some(button) = agent_ops_view::roster_multiway_button_hit(col) {
+            match button {
+                agent_ops_view::RosterMultiwayButton::LiveView => {
+                    state.agents.show_multiway_popup = !state.agents.show_multiway_popup;
+                }
+                agent_ops_view::RosterMultiwayButton::Graph => {
+                    state.agents.pending_multiway_graph = true;
+                }
+            }
+        }
+        return;
+    }
     if line_idx < offset {
         return;
     }

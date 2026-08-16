@@ -20,6 +20,7 @@ pub mod intent;
 mod json;
 pub(crate) mod limits;
 mod mission;
+mod multiway;
 mod plan_parser;
 mod prompts;
 mod repair;
@@ -140,6 +141,7 @@ pub fn ensure_swarm_agents_for_followup(
 // `limits` internals directly.
 pub use limits::default_claude_pool_size;
 pub use limits::effective_max_swarm_size;
+pub use multiway::swarm_multiway_policy;
 
 use artifacts::{
     dependency_payload_text, dependency_payload_text_full, merge_task_artifacts,
@@ -236,13 +238,13 @@ use signals::collect_unresolved_deps;
 use signals::{emit_parallel_deps_auto_repair_signals, emit_unresolved_dep_signals};
 pub(crate) use types::is_cargo_workspace;
 pub(crate) use types::{
-    explicit_swarm_mission_kind_from_prompt, parse_swarm_mission_kind, SwarmArtifactFocus,
-    SwarmEventOutcome,
+    explicit_swarm_mission_kind_from_prompt, parse_swarm_mission_kind, GateBundle,
+    SwarmArtifactFocus, SwarmEventOutcome,
 };
 use types::{
-    parse_swarm_template, FilePreState, FollowupContext, FollowupMessage, Gate, GateBundle,
-    GenomeGatePending, GenomeReviewPending, SwarmDagValidationMode, SwarmRun, SwarmStage,
-    SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
+    parse_swarm_template, FilePreState, FollowupContext, FollowupMessage, Gate, GenomeGatePending,
+    GenomeReviewPending, SwarmDagValidationMode, SwarmRun, SwarmStage, SwarmTaskState,
+    DEFAULT_DAG_VALIDATION_MODE,
 };
 pub use types::{
     GateReport, GateReportGate, SwarmArtifactCommand, SwarmArtifactDiff, SwarmArtifactFile,

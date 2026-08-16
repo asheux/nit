@@ -107,6 +107,51 @@ impl SubstrateState {
         nit_utils::fs::write_atomic(&path, |w| w.write_all(&bytes))?;
         Ok(())
     }
+
+    /// Union two branch substrates for an adjudicated merge (multiway Phase 4).
+    ///
+    /// A **provenance union, not lock arbitration**: when both branches hold
+    /// claims that [`claims_conflict`](claims::claims_conflict) would reject —
+    /// e.g. each `ExclusiveWrite`s the same file under a different owner —
+    /// reconcile keeps both. The substrate only records what each branch
+    /// asserted; the code-level conflict those claims stand for is resolved by
+    /// the git merge and the merge oracle, never by dropping a claim here.
+    ///
+    /// `a`-biased and not commutative: `a` is the branch the merge resolves
+    /// into, so it seeds every map and wins the mood tiebreak, and a shared id
+    /// key resolves to `b` (`extend` overwrites). v1 never mints per-branch
+    /// substrate, so that key collision is unreachable and the per-counter
+    /// `max` is enough to keep post-merge id minting collision-free; a v2
+    /// executor that persists divergent substrate must re-key colliding ids
+    /// before the union so `a`'s entry is not silently lost.
+    pub fn reconcile(a: &SubstrateState, b: &SubstrateState) -> SubstrateState {
+        let mut signals = a.signals.clone();
+        signals.extend(b.signals.clone());
+        let mut claims = a.claims.clone();
+        claims.extend(b.claims.clone());
+        let mut assumptions = a.assumptions.clone();
+        assumptions.extend(b.assumptions.clone());
+
+        let mut observations = a.observations.clone();
+        observations.extend_from_slice(&b.observations);
+
+        // The branch that advanced further dictates mood; a tie keeps a's.
+        let leader = if b.generation > a.generation { b } else { a };
+
+        SubstrateState {
+            generation: a.generation.max(b.generation),
+            signals,
+            claims,
+            observations,
+            signal_counter: a.signal_counter.max(b.signal_counter),
+            claim_counter: a.claim_counter.max(b.claim_counter),
+            assumptions,
+            assumption_counter: a.assumption_counter.max(b.assumption_counter),
+            mood: leader.mood,
+            mood_override_until_gen: leader.mood_override_until_gen,
+            mood_quiet_streak: leader.mood_quiet_streak,
+        }
+    }
 }
 
 #[cfg(test)]

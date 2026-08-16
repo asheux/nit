@@ -16,6 +16,7 @@ pub mod claude_runner;
 pub mod codex_runner;
 pub mod intake;
 pub mod multipane;
+pub mod multiway;
 pub mod shadow;
 pub mod swarm;
 

@@ -177,7 +177,7 @@ pub(super) enum SwarmStage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum GateBundle {
+pub(crate) enum GateBundle {
     Rust,
     Node,
     Python,
@@ -186,14 +186,14 @@ pub(super) enum GateBundle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Gate {
-    pub(super) name: String,
+pub(crate) struct Gate {
+    pub(crate) name: String,
     /// Full command run when no cargo-package scope is known. Typically
     /// hits the whole workspace (e.g. `cargo test --workspace`).
-    pub(super) command: String,
+    pub(crate) command: String,
     /// Renders with `{cargo_packages}` → `-p pkg1 -p pkg2 ...` when the
     /// swarm knows which packages it touched. `None` = always full command.
-    pub(super) scoped_command: Option<String>,
+    pub(crate) scoped_command: Option<String>,
 }
 
 impl Gate {
@@ -260,7 +260,7 @@ impl GateBundle {
     /// Walk is bounded at `cwd` or the surrounding git root (whichever is
     /// shallower) so a stray ancestor `Cargo.toml` cannot impose Rust gates
     /// on an unrelated child project.
-    pub(super) fn detect(cwd: &Path) -> GateBundleSelection {
+    pub(crate) fn detect(cwd: &Path) -> GateBundleSelection {
         let config_default = read_workspace_gate_default(cwd);
         if let Ok(Some(default)) = config_default.as_ref() {
             if default.eq_ignore_ascii_case("none") {
@@ -349,7 +349,7 @@ impl GateBundle {
     /// `-p <pkg>` when the swarm's scope maps cleanly onto cargo packages.
     /// Other bundles only expose full-workspace commands — users who want
     /// scoped runs can provide custom gates via `.nit/config.toml`.
-    pub(super) fn gates(&self) -> Vec<Gate> {
+    pub(crate) fn gates(&self) -> Vec<Gate> {
         match self {
             GateBundle::Rust => vec![
                 Gate {
@@ -391,17 +391,17 @@ impl GateBundle {
             GateBundle::Python => vec![
                 Gate {
                     name: "ruff".into(),
-                    command: "python -m ruff check .".into(),
+                    command: "python3 -m ruff check .".into(),
                     scoped_command: None,
                 },
                 Gate {
                     name: "mypy".into(),
-                    command: "python -m mypy .".into(),
+                    command: "python3 -m mypy .".into(),
                     scoped_command: None,
                 },
                 Gate {
                     name: "pytest".into(),
-                    command: "python -m pytest -q".into(),
+                    command: "python3 -m pytest -q".into(),
                     scoped_command: None,
                 },
             ],
@@ -432,9 +432,9 @@ impl GateBundle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GateBundleSelection {
-    pub(super) bundle: Option<GateBundle>,
-    pub(super) source: String,
+pub(crate) struct GateBundleSelection {
+    pub(crate) bundle: Option<GateBundle>,
+    pub(crate) source: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

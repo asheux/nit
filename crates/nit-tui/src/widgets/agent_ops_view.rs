@@ -114,9 +114,29 @@ pub fn roster_swarm_mission_line_idx(state: &AppState) -> usize {
     roster_header_offsets(state).mission_line
 }
 
+pub fn roster_multiway_mood_line_idx(state: &AppState) -> Option<usize> {
+    roster_header_offsets(state).mood_line
+}
+
+pub fn roster_multiway_mode_line_idx(state: &AppState) -> Option<usize> {
+    roster_header_offsets(state).mode_line
+}
+
+pub fn roster_multiway_buttons_line_idx(state: &AppState) -> Option<usize> {
+    roster_header_offsets(state).buttons_line
+}
+
 const ROSTER_BACKEND_NAME_W: usize = 7;
 const ROSTER_SWARM_TEMPLATE_LINE: &str = " Template:  lab   parallel   bulk ";
 const ROSTER_SWARM_MISSION_LINE: &str = " Mission:   auto   general   research   computational ";
+// Phase 9 multiway selector rows + action buttons, rendered only under
+// `multiway_enabled`. Each constant is byte-for-byte the styled line emitted by
+// `roster_multiway_selector_line` / `roster_multiway_buttons_line`, so the
+// column hit-tests below — which scan these constants for ` token ` spans — map
+// to the exact columns the operator sees.
+const ROSTER_MULTIWAY_MOOD_LINE: &str = " Mood:      explore   balanced   exploit ";
+const ROSTER_MULTIWAY_MODE_LINE: &str = " Mode:      linear   multiway ";
+const ROSTER_MULTIWAY_BUTTONS_LINE: &str = " [ Live view ]   [ Graph ] ";
 const ROSTER_ROLE_OPTIONS: [&str; 8] = [
     "all",
     "propose",
@@ -128,11 +148,11 @@ const ROSTER_ROLE_OPTIONS: [&str; 8] = [
     "test",
 ];
 
-fn roster_line_word_hit(
+fn roster_line_word_hit<T: Copy>(
     line: &'static str,
     col: usize,
-    words: &[(&'static str, &'static str)],
-) -> Option<&'static str> {
+    words: &[(&'static str, T)],
+) -> Option<T> {
     for &(label, value) in words {
         let needle = format!(" {label} ");
         let Some(start) = line.find(needle.as_str()) else {
@@ -159,6 +179,43 @@ pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
         ("computational", "computational-research"),
     ];
     roster_line_word_hit(ROSTER_SWARM_MISSION_LINE, col, WORDS)
+}
+
+/// One of the two clickable action buttons on the Phase 9 multiway roster row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RosterMultiwayButton {
+    LiveView,
+    Graph,
+}
+
+pub fn roster_multiway_mood_hit(col: usize) -> Option<nit_core::MultiwaySearchMood> {
+    use nit_core::MultiwaySearchMood::{Balanced, Exploit, Explore};
+    roster_line_word_hit(
+        ROSTER_MULTIWAY_MOOD_LINE,
+        col,
+        &[
+            ("explore", Explore),
+            ("balanced", Balanced),
+            ("exploit", Exploit),
+        ],
+    )
+}
+
+pub fn roster_multiway_mode_hit(col: usize) -> Option<bool> {
+    roster_line_word_hit(
+        ROSTER_MULTIWAY_MODE_LINE,
+        col,
+        &[("linear", false), ("multiway", true)],
+    )
+}
+
+pub fn roster_multiway_button_hit(col: usize) -> Option<RosterMultiwayButton> {
+    use RosterMultiwayButton::{Graph, LiveView};
+    roster_line_word_hit(
+        ROSTER_MULTIWAY_BUTTONS_LINE,
+        col,
+        &[("Live view", LiveView), ("Graph", Graph)],
+    )
 }
 
 pub fn roster_role_cell_hit(col: usize, width: usize) -> bool {
@@ -215,6 +272,11 @@ struct RosterHeaderOffsets {
     blank_after_backends: usize,
     template_line: usize,
     mission_line: usize,
+    /// Phase 9 rows, `Some` only under `multiway_enabled`; `None` keeps the
+    /// off-path layout byte-identical (no rows pushed, nothing below shifts).
+    mood_line: Option<usize>,
+    mode_line: Option<usize>,
+    buttons_line: Option<usize>,
     blank_after_mission: usize,
     table_header: usize,
     table_separator: usize,
@@ -279,7 +341,18 @@ fn roster_header_offsets(state: &AppState) -> RosterHeaderOffsets {
     let blank_after_backends = 1usize.saturating_add(backend_rows);
     let template_line = blank_after_backends.saturating_add(1);
     let mission_line = template_line.saturating_add(1);
-    let blank_after_mission = mission_line.saturating_add(1);
+
+    // Phase 9: under `multiway_enabled` a Mood row, a Mode row, and a
+    // Live view / Graph button row slot in directly after Mission, pushing every
+    // following offset down by three. Off, the rows are absent and nothing
+    // shifts, so the legacy layout stays byte-identical.
+    let multiway = state.agents.multiway_enabled;
+    let mood_line = multiway.then(|| mission_line.saturating_add(1));
+    let mode_line = multiway.then(|| mission_line.saturating_add(2));
+    let buttons_line = multiway.then(|| mission_line.saturating_add(3));
+    let multiway_rows = if multiway { 3 } else { 0 };
+
+    let blank_after_mission = mission_line.saturating_add(1).saturating_add(multiway_rows);
     let table_header = blank_after_mission.saturating_add(1);
     let table_separator = table_header.saturating_add(1);
     let body_offset = table_separator.saturating_add(1);
@@ -288,6 +361,9 @@ fn roster_header_offsets(state: &AppState) -> RosterHeaderOffsets {
         blank_after_backends,
         template_line,
         mission_line,
+        mood_line,
+        mode_line,
+        buttons_line,
         blank_after_mission,
         table_header,
         table_separator,
@@ -1212,6 +1288,11 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
     out.push(String::new());
     out.push(ROSTER_SWARM_TEMPLATE_LINE.into());
     out.push(ROSTER_SWARM_MISSION_LINE.into());
+    if state.agents.multiway_enabled {
+        out.push(ROSTER_MULTIWAY_MOOD_LINE.into());
+        out.push(ROSTER_MULTIWAY_MODE_LINE.into());
+        out.push(ROSTER_MULTIWAY_BUTTONS_LINE.into());
+    }
     out.push(String::new());
     out.push(format!(
         " {} {} {} {} {}",
@@ -6698,6 +6779,69 @@ fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color 
     }
 }
 
+/// Render a Phase 9 selector row (Mood / Mode): a dim label followed by one
+/// pill per option, the active one inverted. The concatenated span content
+/// equals the matching `ROSTER_MULTIWAY_*_LINE` constant the hit-tests scan, so
+/// a click lands on the option drawn under the cursor.
+fn roster_multiway_selector_line(
+    label: &str,
+    options: &[(&str, bool)],
+    theme: &Theme,
+) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let selected_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.border_focused)
+        .add_modifier(Modifier::BOLD);
+    let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
+        theme.cursor_line_bg,
+        theme.background,
+        45,
+    ));
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(options.len() * 2 + 1);
+    spans.push(Span::styled(label.to_string(), label_style));
+    for (idx, (display, selected)) in options.iter().enumerate() {
+        let style = if *selected {
+            selected_style
+        } else {
+            unselected_style
+        };
+        spans.push(Span::styled(format!(" {display} "), style));
+        if idx + 1 < options.len() {
+            spans.push(Span::styled(" ", label_style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Render the Phase 9 action-button row. `[ Live view ]` toggles the live popup;
+/// `[ Graph ]` is greyed while there is no DAG to render — `multiway_view` only
+/// becomes `Some` once a search has streamed a snapshot.
+fn roster_multiway_buttons_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let gap_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let button_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.border_focused)
+        .add_modifier(Modifier::BOLD);
+    let graph_style = if state.agents.multiway_view.is_some() {
+        button_style
+    } else {
+        gap_style
+    };
+    Line::from(vec![
+        Span::styled(" ", gap_style),
+        Span::styled("[ Live view ]", button_style),
+        Span::styled("   ", gap_style),
+        Span::styled("[ Graph ]", graph_style),
+        Span::styled(" ", gap_style),
+    ])
+}
+
 fn agent_status_style(status: AgentStatus, theme: &Theme) -> Style {
     match status {
         AgentStatus::Running => Style::default().fg(theme.title_focused),
@@ -6978,6 +7122,29 @@ fn roster_styled_line(
             }
         }
         return Line::from(spans);
+    }
+    if offsets.mood_line == Some(line_idx) {
+        let mood = state.agents.multiway_default_mood;
+        return roster_multiway_selector_line(
+            " Mood:     ",
+            &[
+                ("explore", mood == nit_core::MultiwaySearchMood::Explore),
+                ("balanced", mood == nit_core::MultiwaySearchMood::Balanced),
+                ("exploit", mood == nit_core::MultiwaySearchMood::Exploit),
+            ],
+            theme,
+        );
+    }
+    if offsets.mode_line == Some(line_idx) {
+        let on = state.agents.multiway_default_mode_on;
+        return roster_multiway_selector_line(
+            " Mode:     ",
+            &[("linear", !on), ("multiway", on)],
+            theme,
+        );
+    }
+    if offsets.buttons_line == Some(line_idx) {
+        return roster_multiway_buttons_line(state, theme);
     }
     if line_idx == offsets.blank_after_mission {
         return Line::from(Span::styled(

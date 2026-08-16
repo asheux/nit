@@ -171,6 +171,17 @@ Inspect the living-system substrate (signals, claims, assumptions) in a popup ov
 - Mouse wheel: Scroll the active table (shared across sub-tabs)
 - Esc or F3: Close
 
+## Multiway graph view (`NIT_MULTIWAY`)
+
+Watch a multiway search think — a live popup of the whole search DAG (Phase 6b). Opt-in: the key and popup are only active when `NIT_MULTIWAY=1`. See `docs/MULTIWAY.md`.
+
+- Ctrl+Shift+M: Toggle the live multiway popup (mirrors the `Ctrl+Shift+T` terminal popup; also auto-opens when a search starts). The `@multiway-popup` chat command toggles it too.
+- j/k or Up/Down: Scroll the search tree (popup open)
+- PageUp/PageDown: Page the tree
+- Home: Scroll to top
+- Esc or q: Close the popup
+- `@multiway-graph` (chat command, not a key): Render the current DAG to a Graphviz image and open it in the OS viewer (saves the `.dot` and surfaces its path when graphviz is absent)
+
 ## Terminal (embedded shell)
 
 Embedded OS shell available in the agent-chat tab, a modal popup, and per multipane pane. See `docs/TERMINAL.md`.

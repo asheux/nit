@@ -40,6 +40,10 @@ mod missions;
 mod mouse;
 #[path = "tests/multipane.rs"]
 mod multipane;
+#[path = "tests/multiway.rs"]
+mod multiway;
+#[path = "tests/multiway_roster_click.rs"]
+mod multiway_roster_click;
 #[path = "tests/popups.rs"]
 mod popups;
 #[path = "tests/roster.rs"]

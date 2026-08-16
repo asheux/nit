@@ -174,6 +174,52 @@ pub struct AgentsState {
     pub pending_provenance_agent_ids: Vec<String>,
     #[serde(skip)]
     pub pending_legacy_notes_alert: Option<String>,
+    /// `NIT_MULTIWAY` resolved once at run start. Gates whether the chat submit
+    /// intercepts `@multiway`; off keeps the legacy dispatch path byte-identical.
+    #[serde(skip)]
+    pub multiway_enabled: bool,
+    /// Multiway dispatch handed from the chat submit to the run loop, which owns
+    /// the `MultiwayRuntime`. Carries the routing source (`@multiway` /
+    /// `@shadow` / `@swarm` / `@all` / bare with `mode=multiway`) plus the
+    /// cleaned command, so the loop maps it to a search policy without this
+    /// signature having to thread a runtime — keeping the shared multipane path
+    /// frozen.
+    #[serde(skip)]
+    pub pending_multiway: Option<PendingMultiway>,
+    /// `/abort` intent for an in-flight multiway search, drained by the run loop.
+    #[serde(skip)]
+    pub pending_multiway_abort: bool,
+    /// `@multiway-graph` intent: render the current DAG to an image on demand
+    /// (Phase 6a). Set by the chat submit, drained by the run loop.
+    #[serde(skip)]
+    pub pending_multiway_graph: bool,
+    /// Whether the live multiway popup (Phase 6b) is shown. Auto-set when a
+    /// search starts, toggled by the operator, closed with Esc/q; read by the
+    /// popup widget.
+    #[serde(skip)]
+    pub show_multiway_popup: bool,
+    /// Live Phase 6b view model, drained from `MultiwayEvent::View` each UI tick.
+    /// `None` until a search streams its first snapshot; the popup widget reads it
+    /// and owns no state, so close/reopen is non-destructive.
+    #[serde(skip)]
+    pub multiway_view: Option<MultiwayView>,
+    /// Vertical scroll offset into the popup's node tree; clamped at render.
+    #[serde(skip)]
+    pub multiway_popup_scroll: u16,
+    /// Roster Mood selector (Phase 9), persisted across sessions. A bare or
+    /// selector-routed dispatch searches with this mood unless a typed `mood=`
+    /// token overrides it.
+    #[serde(default)]
+    pub multiway_default_mood: MultiwaySearchMood,
+    /// Roster Mode selector: `false` keeps the legacy linear dispatch path,
+    /// `true` routes a token-less routable dispatch through the multiway engine.
+    #[serde(default)]
+    pub multiway_default_mode_on: bool,
+    /// Per-dispatch mood override carried from the selector route to the run
+    /// loop, joining the `pending_multiway_*` intent family. `Some` only when the
+    /// Mode selector — not a typed token — routed the dispatch.
+    #[serde(skip)]
+    pub pending_multiway_mood: Option<MultiwaySearchMood>,
     // --- Codex model metadata, all keyed by model slug ---
     // Populated when the roster is seeded from `~/.codex/models_cache.json`.
     #[serde(skip)]
@@ -463,6 +509,16 @@ impl Default for AgentsState {
             pending_provenance_mission_ids: Vec::new(),
             pending_provenance_agent_ids: Vec::new(),
             pending_legacy_notes_alert: None,
+            multiway_enabled: false,
+            pending_multiway: None,
+            pending_multiway_abort: false,
+            pending_multiway_graph: false,
+            show_multiway_popup: false,
+            multiway_view: None,
+            multiway_popup_scroll: 0,
+            multiway_default_mood: MultiwaySearchMood::Balanced,
+            multiway_default_mode_on: false,
+            pending_multiway_mood: None,
             codex_effective_context_window_tokens: HashMap::new(),
             codex_estimated_tokens_used_by_mission: HashMap::new(),
             codex_default_reasoning_effort: HashMap::new(),

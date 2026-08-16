@@ -1,0 +1,20 @@
+[package]
+name = "nit-multiway"
+version = "0.1.0"
+description = "Multiway engine: parallel best-first search over content-addressed git world states"
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+publish = false
+categories = ["development-tools", "algorithms"]
+keywords = ["search", "git", "worktree", "dag", "agents"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# Declared now; first used in Phase 2 (DAG JSON persistence). Harmless unused
+# dep — `just ci` runs no cargo-udeps.
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+nit-utils = { path = "../nit-utils" }
+nit-core = { path = "../nit-core" }

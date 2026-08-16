@@ -438,4 +438,3 @@ cost is the dir walk, which is why we cache and amortise.
   already cancels across panes, but there is no `@all-panes <prompt>`
   dispatch helper yet.
 - Mouse drag to resize pane boundaries.
-

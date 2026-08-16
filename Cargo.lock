@@ -1029,6 +1029,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nit-multiway"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "nit-core",
+ "nit-utils",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "nit-syntax"
 version = "0.1.0"
 dependencies = [
@@ -1085,6 +1097,7 @@ dependencies = [
  "nit-gol",
  "nit-mcp",
  "nit-metal",
+ "nit-multiway",
  "nit-syntax",
  "nit-utils",
  "portable-pty",

@@ -4,10 +4,12 @@ use nit_core::{
     AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus, AppState,
     MissionPhase, CONSOLE_SCROLL_BOTTOM,
 };
+use nit_multiway::policy::Mood;
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig};
 use crate::intake::{self, IntakeStartContext};
+use crate::multiway::dispatch as multiway_dispatch;
 use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRuntime};
 use crate::swarm::{
     create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
@@ -998,6 +1000,70 @@ pub(crate) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
     Some(AbortScope::Agent(arg.to_string()))
 }
 
+/// Parsed `@multiway <task>` command. Leading `mood=` / `k=` tokens tune the
+/// search policy; the remaining text is the task prompt. `k` stays `Option`
+/// so the runtime can fall back to its `SearchPolicy` default when omitted.
+///
+/// Drives the `MultiwayRuntime` wiring split across two files: the chat submit
+/// here detects an `@multiway` command and hands the raw input to the run loop
+/// as `pending_multiway`, and `app/runner.rs` (which owns `MultiwayRuntime`)
+/// re-parses it to start the search and routes `/abort` to the runtime's
+/// worktree/ref teardown. Splitting it this way keeps
+/// `submit_chat_input_and_dispatch` and `handle_abort` at the exact signatures
+/// the multipane dispatch path shares (threading a runtime through them would
+/// ripple across every caller).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MultiwayCommand {
+    pub(crate) task: String,
+    pub(crate) mood: Mood,
+    pub(crate) k: Option<usize>,
+}
+
+/// Parses `@multiway [mood=explore|balanced|exploit] [k=N] <task>`. Returns
+/// `None` when the input isn't an `@multiway` command or carries no task body —
+/// the same empty-body rejection `parse_shadow_command` / `parse_swarm_command`
+/// use so a bare prefix is never handed to an agent as a literal prompt.
+/// Recognised `mood=` / `k=` tokens may lead in any order; the first token that
+/// is neither (or one with an unparseable value) begins the task text.
+pub(crate) fn parse_multiway_command(raw: &str) -> Option<MultiwayCommand> {
+    let rest = raw.trim_start().strip_prefix("@multiway")?;
+    // Require end-of-input or whitespace after the prefix so a longer word like
+    // `@multiwayfoo` isn't hijacked (mirrors `parse_shadow_command`).
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut mood = Mood::Balanced;
+    let mut k = None;
+    let mut remainder = rest.trim_start();
+    while !remainder.is_empty() {
+        let (token, tail) = match remainder.split_once(char::is_whitespace) {
+            Some((token, tail)) => (token, tail.trim_start()),
+            None => (remainder, ""),
+        };
+        if let Some(value) = token.strip_prefix("mood=") {
+            mood = match value.to_ascii_lowercase().as_str() {
+                "explore" => Mood::Explore,
+                "balanced" => Mood::Balanced,
+                "exploit" => Mood::Exploit,
+                _ => break,
+            };
+        } else if let Some(value) = token.strip_prefix("k=") {
+            let Ok(parsed) = value.parse::<usize>() else {
+                break;
+            };
+            k = Some(parsed);
+        } else {
+            break;
+        }
+        remainder = tail;
+    }
+    let task = remainder.trim().to_string();
+    if task.is_empty() {
+        return None;
+    }
+    Some(MultiwayCommand { task, mood, k })
+}
+
 /// True when the operator's input is just a meta-prefix command without
 /// a real prompt body (e.g. `@shadow`, `@swarm`, `@swarm 5 template=lab`).
 /// These slip past `parse_shadow_command` / `parse_swarm_command` (both
@@ -1042,6 +1108,13 @@ pub(crate) fn handle_abort(
     scope: AbortScope,
 ) -> bool {
     let multipane_focus = state.multipane.as_ref().map(|mp| mp.focused);
+    // Route a mission-wide `/abort` (or `/abort all`) to any in-flight multiway
+    // search; the run loop owns the runtime and tears down its worktrees/refs.
+    // Gated on the flag and idempotent when no search is running, so the
+    // off-path and the per-agent `/abort <id>` scope are unchanged.
+    if state.agents.multiway_enabled && matches!(scope, AbortScope::Current | AbortScope::All) {
+        state.agents.pending_multiway_abort = true;
+    }
     // Cancel any in-flight intake before resolving mission scopes — a
     // stranded `pending_intake` would still drive the deferred dispatch
     // even after the operator aborted.
@@ -1362,6 +1435,71 @@ pub(crate) fn submit_chat_input_and_dispatch(
         let aborted = handle_abort(state, codex, claude, swarm, scope);
         reset_chat_input_and_history_nav(state);
         return aborted;
+    }
+    // Multiway routing (Phase 6/7), gated behind `NIT_MULTIWAY` (snapshotted into
+    // `multiway_enabled` at run start). With the flag off this whole block is
+    // skipped and `raw` flows untouched to the existing parsers below — the
+    // byte-identical off-path (the FROZEN non-negotiable). Each branch only
+    // records an intent on `state.agents`; the run loop owns the `MultiwayRuntime`,
+    // so this signature stays frozen for the shared multipane path.
+    if state.agents.multiway_enabled {
+        // Phase 6a: render the current DAG to an image on demand.
+        if multiway_dispatch::parse_multiway_graph_command(&raw) {
+            state.agents.pending_multiway_graph = true;
+            reset_chat_input_and_history_nav(state);
+            return true;
+        }
+        // Phase 6b: toggle the live search popup.
+        if multiway_dispatch::parse_multiway_popup_command(&raw) {
+            state.agents.show_multiway_popup = !state.agents.show_multiway_popup;
+            reset_chat_input_and_history_nav(state);
+            return true;
+        }
+        // Canonical `@multiway <task>` — the explicit form, behaviour unchanged.
+        if parse_multiway_command(&raw).is_some() {
+            state.agents.pending_multiway = Some(nit_core::PendingMultiway {
+                source: nit_core::MultiwaySource::Explicit,
+                command: raw.clone(),
+            });
+            // A typed `@multiway` carries its own `mood=`; the roster selector
+            // never overrides an explicit choice (Phase 9 precedence).
+            state.agents.pending_multiway_mood = None;
+            reset_chat_input_and_history_nav(state);
+            return true;
+        }
+        // `mode=multiway` modifier on @shadow / @swarm / @all / bare chat: strip
+        // the token, classify the front-end, and hand the cleaned command over.
+        let (is_multiway, cleaned) = multiway_dispatch::extract_mode_multiway(&raw);
+        if is_multiway {
+            if let Some(source) = multiway_dispatch::classify(&cleaned) {
+                state.agents.pending_multiway = Some(nit_core::PendingMultiway {
+                    source,
+                    command: cleaned,
+                });
+                // An explicit `mode=multiway` selects the backend by token; the
+                // selector default mood does not apply.
+                state.agents.pending_multiway_mood = None;
+                reset_chat_input_and_history_nav(state);
+                return true;
+            }
+        }
+        // Phase 9: roster Mode selector. The typed forms above already returned and
+        // win, so this fires only when Mode=multiway is selected and the input
+        // carries no explicit token — routing the token-less dispatch through the
+        // engine with the roster's default mood. `classify` returning `None` (empty
+        // or a body-less prefix) falls through to the normal parsers below rather
+        // than hijacking them.
+        if state.agents.multiway_default_mode_on {
+            if let Some(source) = multiway_dispatch::classify(&raw) {
+                state.agents.pending_multiway = Some(nit_core::PendingMultiway {
+                    source,
+                    command: raw.clone(),
+                });
+                state.agents.pending_multiway_mood = Some(state.agents.multiway_default_mood);
+                reset_chat_input_and_history_nav(state);
+                return true;
+            }
+        }
     }
     // `@shadow <prompt>` — explicit opt-in to the single-agent shadow pipeline.
     // Strip the prefix so `push_chat_message` sees just the user's text.

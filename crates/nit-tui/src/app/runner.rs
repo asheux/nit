@@ -244,12 +244,23 @@ pub(super) fn run_loop(
     let mut codex_runner =
         CodexRunner::spawn(codex_runtime, codex_config, mcp_backchannel_socket.clone());
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
+    // Clone the Claude config before it's moved into the app runner: each
+    // `@multiway` search spawns its own dedicated `ClaudeRunner` from this so its
+    // event channel never competes with the app runner's.
+    let multiway_claude_config = claude_config.clone();
     let mut claude_runner = ClaudeRunner::spawn(claude_config);
     // Keep the MCP listener alive for the lifetime of the run loop.
     #[cfg(unix)]
     let _mcp_backchannel_keepalive = mcp_backchannel;
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
+    // Multiway best-first search (NIT_MULTIWAY): the flag is resolved once here
+    // so a mid-session env change can't flip behaviour. The chat submit only
+    // intercepts `@multiway` when this is enabled; `multiway_mission` tracks the
+    // single in-flight v1 search so the tick can poll progress and reap it.
+    let mut multiway = crate::multiway::MultiwayRuntime::from_env();
+    state.agents.multiway_enabled = multiway.enabled();
+    let mut multiway_mission: Option<String> = None;
     // Idle-sleep guard: held while at least one agent turn is in flight so
     // macOS doesn't hibernate mid-swarm and SIGSTOP the runner subprocesses.
     // Released on Drop, so a panic / hard-exit can't leave caffeinate behind.
@@ -497,6 +508,22 @@ pub(super) fn run_loop(
                     if state.agents.global_archive_open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_global_archive_key(&key, state, screen, theme) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    // Multiway live popup (NIT_MULTIWAY, Phase 6b): Ctrl+Shift+M
+                    // toggles the "watch the agents think" overlay from any focus;
+                    // while open it is modal and owns scroll/close. Gated on
+                    // multiway_enabled so the off-path never sees these keys —
+                    // byte-identical to NIT_MULTIWAY=0.
+                    if state.agents.multiway_enabled {
+                        if super::popup_keys::is_multiway_popup_toggle_key(&key) {
+                            state.agents.show_multiway_popup = !state.agents.show_multiway_popup;
+                            needs_redraw = true;
+                            continue;
+                        }
+                        if handle_multiway_popup_key(&key, state) {
                             needs_redraw = true;
                             continue;
                         }
@@ -972,6 +999,19 @@ pub(super) fn run_loop(
                     needs_redraw = true;
                 }
             }
+        }
+
+        // Multiway search lifecycle: start a pending `@multiway` submit, surface
+        // its progress on the status line, honour a pending `/abort`, and reap
+        // finished runs. Every step is inert unless NIT_MULTIWAY is on, because
+        // the intent fields are only ever set on the enabled submit path.
+        if drive_multiway(
+            state,
+            &mut multiway,
+            &mut multiway_mission,
+            &multiway_claude_config,
+        ) {
+            needs_redraw = true;
         }
 
         // Async backend-probe events (cache-miss path of init_agents).
@@ -1540,5 +1580,211 @@ fn spawn_app_runtimes(
             Some(GamesPetriDishRuntime::new(state)),
             Some(GamesConfigPreviewRuntime::spawn()),
         ),
+    }
+}
+
+/// Per-tick multiway lifecycle: start a pending `@multiway` search, surface its
+/// progress on the status line, honour a pending `/abort`, and reap finished
+/// runs. Returns whether the status line changed so the caller can redraw.
+/// Every step is inert unless `NIT_MULTIWAY` is on, because the intent fields
+/// are only ever set on the enabled submit path.
+fn drive_multiway(
+    state: &mut AppState,
+    multiway: &mut crate::multiway::MultiwayRuntime,
+    active_mission: &mut Option<String>,
+    claude_config: &ClaudeRunnerConfig,
+) -> bool {
+    let mut changed = false;
+    if let Some(pending) = state.agents.pending_multiway.take() {
+        start_multiway(state, multiway, active_mission, claude_config, &pending);
+        changed = true;
+    }
+    if std::mem::take(&mut state.agents.pending_multiway_abort) {
+        multiway.abort_all();
+    }
+    if std::mem::take(&mut state.agents.pending_multiway_graph) {
+        render_multiway_graph(state);
+        changed = true;
+    }
+    if let Some(mission) = active_mission.clone() {
+        for event in multiway.poll(&mission) {
+            match event {
+                crate::multiway::MultiwayEvent::View(view) => {
+                    // Live "watch the agents think" feed: swap in the latest
+                    // snapshot. The popup auto-opens once at search start; we do
+                    // NOT re-open per view, so a manual close (Ctrl+Shift+M / q /
+                    // Esc) stays closed while the search keeps streaming —
+                    // reopening shows the live state. (6b close/reopen contract.)
+                    state.agents.multiway_view = Some(view);
+                }
+                other => state.status = Some(multiway_status_line(&other)),
+            }
+            changed = true;
+        }
+        if !multiway.is_active(&mission) {
+            *active_mission = None;
+        }
+    }
+    multiway.cleanup_finished();
+    changed
+}
+
+/// Phase 6a: render the most recent persisted multiway DAG to an image and open
+/// it in the OS viewer. v1 reads `<state_dir>/multiway/<mission>.json` (written
+/// when a search ends), so it shows the last completed run. The load + `dot`
+/// spawn run on a detached worker so a large graph never blocks the event loop;
+/// `render_and_open` writes a placeholder, opens the viewer, then overwrites it.
+/// Best-effort: a missing DAG surfaces a hint, and a render failure (e.g. no
+/// graphviz, which saves the `.dot` instead) is swallowed by the worker.
+fn render_multiway_graph(state: &mut AppState) {
+    let Some(base) = nit_utils::paths::state_dir().or_else(nit_utils::paths::data_dir) else {
+        state.status = Some("multiway: no state directory for graph render".to_owned());
+        return;
+    };
+    let Some(dag) = latest_multiway_dag(&base.join("multiway")) else {
+        state.status = Some("multiway: no search DAG yet — run a multiway search first".to_owned());
+        return;
+    };
+    state.status = Some("multiway: rendering graph…".to_owned());
+    let _ = std::thread::Builder::new()
+        .name("nit-multiway-graph".to_owned())
+        .spawn(move || {
+            if let Ok(graph) = nit_multiway::graph::Graph::load(&dag) {
+                let _ = crate::multiway::render::render_and_open(&graph, &base);
+            }
+        });
+}
+
+/// The newest `*.json` DAG under the multiway state dir, by mtime.
+fn latest_multiway_dag(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .max_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+}
+
+/// Spawn a dedicated `ClaudeRunner` and start a search from a pending multiway
+/// dispatch, mapping its source to a `(SearchPolicy, Task)` first. v1 runs one
+/// search at a time; the mission id keys both the persisted DAG file and the
+/// throwaway `refs/nit-multiway/<mission>/*` namespace.
+fn start_multiway(
+    state: &mut AppState,
+    multiway: &mut crate::multiway::MultiwayRuntime,
+    active_mission: &mut Option<String>,
+    claude_config: &ClaudeRunnerConfig,
+    pending: &nit_core::PendingMultiway,
+) {
+    let Some((policy, task)) = resolve_multiway_dispatch(state, pending) else {
+        return;
+    };
+    let mission = format!("mw-{}", state.agents.event_epoch);
+    let model = multiway_model(state);
+    let runner = ClaudeRunner::spawn(claude_config.clone());
+    match multiway.start(
+        &mission,
+        state.workspace_root.clone(),
+        runner,
+        model,
+        task,
+        policy,
+    ) {
+        Ok(()) => {
+            // Auto-open the live popup so the operator watches from turn one; a
+            // fresh search clears any prior snapshot and resets the scroll.
+            state.agents.multiway_view = None;
+            state.agents.show_multiway_popup = true;
+            state.agents.multiway_popup_scroll = 0;
+            state.status = Some(format!("multiway: search `{mission}` started"));
+            *active_mission = Some(mission);
+        }
+        Err(err) => state.status = Some(format!("multiway: {err}")),
+    }
+}
+
+/// Resolve a pending multiway dispatch to its `(SearchPolicy, Task)`. The
+/// canonical `@multiway` form keeps its own `mood=`/`k=` grammar, parsed here in
+/// the app layer where `parse_multiway_command` lives; every other front-end
+/// defers to `multiway::dispatch::resolve_multiway_policy`, which re-parses the
+/// cleaned command through that front-end's parser and applies its policy mapper.
+/// `@all`'s fork width is the broadcast fan-out, computed the same way the chat
+/// broadcast resolves its targets.
+pub(super) fn resolve_multiway_dispatch(
+    state: &AppState,
+    pending: &nit_core::PendingMultiway,
+) -> Option<(crate::multiway::SearchPolicy, crate::multiway::Task)> {
+    if pending.source == nit_core::MultiwaySource::Explicit {
+        let command = super::chat_input::parse_multiway_command(&pending.command)?;
+        let defaults = crate::multiway::SearchPolicy::default();
+        return Some((
+            crate::multiway::SearchPolicy {
+                mood: command.mood,
+                k: command.k.unwrap_or(defaults.k),
+                budget: defaults.budget,
+            },
+            crate::multiway::Task {
+                prompt: command.task,
+                role: "integrate".to_owned(),
+            },
+        ));
+    }
+    let fan_out =
+        super::chat_input::broadcast_target_agents(state, state.agents.selected_context_mission())
+            .len();
+    let (mut policy, task) = crate::multiway::dispatch::resolve_multiway_policy(
+        pending.source,
+        &pending.command,
+        fan_out,
+    )?;
+    // Phase 9 selector carry: a roster Mode/Mood dispatch records the chosen mood
+    // here; typed `@multiway` / `mode=` dispatches leave it None and keep their own.
+    if let Some(mood) = state.agents.pending_multiway_mood {
+        policy.mood = crate::multiway::dispatch::engine_mood(mood);
+    }
+    Some((policy, task))
+}
+
+/// The `--model` slug for the dedicated multiway runner: the first Claude lane's
+/// base id (clone/swarm suffixes stripped), falling back to a plain `claude`
+/// when the roster carries no Claude lane.
+fn multiway_model(state: &AppState) -> String {
+    state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.is_claude())
+        .map(|lane| crate::swarm::resolve_base_agent_id(&lane.id).to_owned())
+        .unwrap_or_else(|| "claude".to_owned())
+}
+
+fn multiway_status_line(event: &crate::multiway::MultiwayEvent) -> String {
+    match event {
+        crate::multiway::MultiwayEvent::Progress {
+            nodes,
+            turns,
+            frontier,
+            best_score,
+            best_tier,
+        } => format!(
+            "multiway: {nodes} nodes · {turns} turns · frontier {frontier} · best {best_score:.3} ({best_tier:?})"
+        ),
+        // No node survived its gates (`best` is None): surface the NIT_MULTIWAY_GATES
+        // steer instead of the empty-handed node/turn summary.
+        crate::multiway::MultiwayEvent::Done(outcome) => {
+            match crate::multiway::runtime::all_gated_hint(outcome) {
+                Some(hint) => format!("multiway: {hint}"),
+                None => format!(
+                    "multiway: {:?} · {} nodes · {} turns",
+                    outcome.stop_reason, outcome.nodes_expanded, outcome.turns_spent
+                ),
+            }
+        }
+        crate::multiway::MultiwayEvent::Failed(err) => format!("multiway: failed — {err}"),
+        crate::multiway::MultiwayEvent::View(_) => String::new(),
     }
 }

@@ -17,11 +17,15 @@
 //! user has some feedback while the pipeline runs.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use nit_core::{AgentBusEvent, AgentStatus, AppState};
 
+use crate::multiway::runtime::clamp_fork_width;
+use crate::multiway::{Mood, SearchPolicy, Task};
 use crate::swarm::{
-    copy_claude_runtime_metadata, copy_codex_runtime_metadata, insert_swarm_clone_lane,
+    copy_claude_runtime_metadata, copy_codex_runtime_metadata, effective_max_swarm_size,
+    insert_swarm_clone_lane,
 };
 
 pub const SHADOW_ROLES: &[&str] = &["propose-a", "propose-b", "judge", "review"];
@@ -38,14 +42,29 @@ pub enum ShadowsMode {
     Auto,
 }
 
-/// Parsed `@shadow <prompt>` command.
+/// Execution backend a `@shadow` command selects. `Default` runs the hidden
+/// propose/judge/review pipeline; `Multiway` (an optional leading `mode=multiway`
+/// token) routes the task into the best-first search engine instead. The router
+/// only acts on `Multiway` when `NIT_MULTIWAY` is enabled, so with the flag off
+/// the default path is byte-identical.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ShadowMode {
+    Default,
+    Multiway,
+}
+
+/// Parsed `@shadow [mode=multiway] <prompt>` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowCommand {
     pub prompt: String,
+    pub mode: ShadowMode,
 }
 
 /// Requires the prefix be followed by whitespace so `@shadows` or
-/// `@shadowing` is not matched by accident.
+/// `@shadowing` is not matched by accident. An optional leading `mode=multiway`
+/// token is parsed onto the command's `mode` field and stripped from the prompt.
+/// It is recognised only as the first token, so the same string mid-prompt stays
+/// ordinary task text and never silently selects the search backend.
 pub fn parse_shadow_command(raw: &str) -> Option<ShadowCommand> {
     let trimmed = raw.trim_start();
     let rest = trimmed.strip_prefix("@shadow")?;
@@ -53,11 +72,42 @@ pub fn parse_shadow_command(raw: &str) -> Option<ShadowCommand> {
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    let prompt = rest.trim().to_string();
-    if prompt.is_empty() {
+    let body = rest.trim();
+    // Reject on the raw body (before any token strip) so the `is_some()` the
+    // router reads is identical to the pre-Phase-7 parser for every input — the
+    // byte-identical off-path guarantee.
+    if body.is_empty() {
         return None;
     }
-    Some(ShadowCommand { prompt })
+    let (first, tail) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+    let (mode, prompt) = match first.strip_prefix("mode=") {
+        Some(value) if value.eq_ignore_ascii_case("multiway") => {
+            (ShadowMode::Multiway, tail.trim_start().to_string())
+        }
+        _ => (ShadowMode::Default, body.to_string()),
+    };
+    Some(ShadowCommand { prompt, mode })
+}
+
+/// Map a parsed `@shadow mode=multiway` command to a multiway `SearchPolicy` and
+/// `Task`. The shadow generalisation forks `k = 2` — propose-a/-b are the first
+/// fork — under `Mood::Balanced`, the mood that admits a merge; that merge is
+/// serviced by the production `JudgeMergeOracle`, which reuses the shadow judge
+/// (`build_merge_judge_prompt`). `Mood::Exploit` would never merge and so would
+/// strand that oracle. `k` is clamped to the fd-bounded swarm ceiling here — and
+/// again, idempotently, in `MultiwayRuntime::start` — so a tight `ulimit -n`
+/// can't drive the fork into `EMFILE`.
+pub fn shadow_multiway_policy(cmd: &ShadowCommand) -> (SearchPolicy, Task) {
+    let policy = SearchPolicy {
+        mood: Mood::Balanced,
+        k: clamp_fork_width(2, effective_max_swarm_size()),
+        budget: SearchPolicy::default().budget,
+    };
+    let task = Task {
+        prompt: cmd.prompt.clone(),
+        role: "integrate".to_owned(),
+    };
+    (policy, task)
 }
 
 /// Heuristic: is this prompt "heavy" enough to warrant shadow deliberation?
@@ -683,6 +733,57 @@ fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> 
          ### Proposal A (minimal-diff lens)\n{proposal_a}\n\n\
          ### Proposal B (architectural-coherence lens)\n{proposal_b}\n",
         preamble = shadow_preamble(),
+        role_contract = render_role_contract("judge"),
+    )
+}
+
+/// Prompt for the multiway merge oracle's judge turn. It reuses the same
+/// genome-awareness framing and `judge` role contract as [`build_judge_prompt`],
+/// but deliberately drops [`shadow_readonly_clause`]: the shadow judge only ranks
+/// two text proposals, whereas this judge resolves a real git conflict by
+/// *writing* the merged files. `base`/`ours`/`theirs` are the three restored
+/// merge-base trees; `conflicts` are the paths git could not auto-merge. The turn
+/// runs with `ours` as its cwd, so "edit in place" lands the resolution there.
+pub(crate) fn build_merge_judge_prompt(
+    base: &Path,
+    ours: &Path,
+    theirs: &Path,
+    conflicts: &[PathBuf],
+) -> String {
+    let files = if conflicts.is_empty() {
+        "(none individually reported — reconcile any divergence you find)".to_owned()
+    } else {
+        conflicts
+            .iter()
+            .map(|path| format!("- {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "{awareness}\n\n## YOUR ROLE\n\
+         You are Multiway-Merge-Judge. Two sibling search branches forked from a \
+         shared base and diverged; git could not auto-merge them. Reconcile the \
+         two branches into one coherent result and WRITE the merged files in \
+         place in your current working directory (the OURS tree).\n\n\
+         ## THREE-WAY MERGE CONTEXT\n\
+         - BASE (common ancestor): {base}\n\
+         - OURS (your working directory — edit these files): {ours}\n\
+         - THEIRS (the sibling branch): {theirs}\n\n\
+         ## CONFLICTED FILES\n{files}\n\n\
+         ## HOW TO RESOLVE\n\
+         - Compare each conflicted path across BASE, OURS, and THEIRS to see what \
+         each branch changed relative to the ancestor.\n\
+         - Combine both branches' intent; keep non-conflicting changes from both \
+         sides rather than discarding one branch wholesale.\n\
+         - Edit the files under OURS so they hold the reconciled result, and leave \
+         NO conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`).\n\
+         - The merged tree is re-scored by the genome+gates valuer, so the result \
+         must compile and read as if a single author wrote it.\n\n\
+         {role_contract}\n",
+        awareness = nit_system_awareness(),
+        base = base.display(),
+        ours = ours.display(),
+        theirs = theirs.display(),
         role_contract = render_role_contract("judge"),
     )
 }

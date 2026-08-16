@@ -23,6 +23,7 @@ pub mod gate_monitor_view;
 pub mod graph_render;
 pub mod help_overlay;
 pub mod job_output_view;
+pub mod multiway_popup;
 pub mod notes_view;
 mod picker_utils;
 pub mod protocol_picker;

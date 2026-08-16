@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-pub(super) const APP_TEST_SUBMODULE_COUNT: usize = 16;
+pub(super) const APP_TEST_SUBMODULE_COUNT: usize = 17;
 pub(super) const TEMP_STATE_LABEL_PREFIX: &str = "nit-app";
 
 pub(super) struct AppTestSubModule {
@@ -66,6 +66,10 @@ pub(super) const APP_TEST_SUBMODULES: &[AppTestSubModule] = &[
     AppTestSubModule {
         file: "multipane.rs",
         focus: "multipane runtime drain",
+    },
+    AppTestSubModule {
+        file: "multiway.rs",
+        focus: "Phase 7 mode=multiway routing / classify / resolve / off-path",
     },
     AppTestSubModule {
         file: "popups.rs",

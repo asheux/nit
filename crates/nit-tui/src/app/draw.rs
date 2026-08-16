@@ -30,7 +30,8 @@ use crate::{
         definition_popup, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
         games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
         games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, rule_picker, substrate_overlay, terminal_view, top_bar, visualizer_view,
+        help_overlay, multiway_popup, rule_picker, substrate_overlay, terminal_view, top_bar,
+        visualizer_view,
     },
 };
 
@@ -372,6 +373,14 @@ pub(super) fn draw(
         if state.show_substrate_overlay {
             let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
             substrate_overlay::render(f, area, state, theme);
+        }
+        // Phase 6b live multiway popup ("watch the agents think"). Gated on the
+        // toggle, which only flips under the `multiway_enabled` guard, so the
+        // NIT_MULTIWAY=0 path can never reach this. `preferred_size` already
+        // returns a centred Rect (do not wrap in `dynamic_popup_rect`).
+        if state.agents.show_multiway_popup {
+            let area = multiway_popup::preferred_size(screen);
+            multiway_popup::render(f, area, &state.agents, theme);
         }
         if state.fuzzy_search.open {
             let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));

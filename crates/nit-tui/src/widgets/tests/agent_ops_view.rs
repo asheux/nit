@@ -8,12 +8,15 @@ use super::{
     artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,
     dag_lines_for_dashboard, diagnostics_lines, format_saved_run_relative_label_from_micros,
     mission_visible_agent_lines, ops_styled_line, parse_roster_truncation_disabled,
-    roster_backend_total_counts, roster_column_widths, roster_grouped_agent_indices,
-    roster_inventory_backend_accent, roster_lane_backend_accent, roster_running_priority,
-    roster_styled_line, roster_swarm_mission_hit, roster_swarm_mission_line_idx,
-    roster_swarm_template_hit, roster_swarm_template_line_idx, saved_run_detail_label,
-    swarm_clone_display_label, table_role_label, tree_closed_glyph, tree_open_glyph,
-    BackendInventoryBackend, MISSION_VISIBLE_AGENTS_MAX, ROSTER_VISIBLE_AGENTS_PER_BACKEND,
+    roster_backend_total_counts, roster_body_offset, roster_column_widths,
+    roster_grouped_agent_indices, roster_inventory_backend_accent, roster_lane_backend_accent,
+    roster_multiway_button_hit, roster_multiway_buttons_line_idx, roster_multiway_mode_hit,
+    roster_multiway_mode_line_idx, roster_multiway_mood_hit, roster_multiway_mood_line_idx,
+    roster_running_priority, roster_styled_line, roster_swarm_mission_hit,
+    roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
+    saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
+    tree_open_glyph, BackendInventoryBackend, RosterMultiwayButton, MISSION_VISIBLE_AGENTS_MAX,
+    ROSTER_VISIBLE_AGENTS_PER_BACKEND,
 };
 use crate::swarm::{
     GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow, SwarmPersistenceView,
@@ -22,8 +25,8 @@ use crate::swarm::{
 use crate::theme::Theme;
 use nit_core::{
     AgentAlertSeverity, AgentChannel, AgentLane, AgentLaneKind, AgentMessage, AgentOpsTab,
-    AgentStatus, AppKind, AppState, Buffer, MissionPhase, MissionRecord, PatchProposal,
-    PatchStatus, SavedRunHistoryFilter,
+    AgentStatus, AppKind, AppState, Buffer, MissionPhase, MissionRecord, MultiwaySearchMood,
+    PatchProposal, PatchStatus, SavedRunHistoryFilter,
 };
 use ratatui::style::Modifier;
 use std::{
@@ -881,6 +884,248 @@ fn mission_hit_targets_all_buttons() {
             Some(value)
         );
     }
+}
+
+// --- Phase 9 multiway roster rows + buttons ---------------------------------
+//
+// Everything below is gated behind `state.agents.multiway_enabled`. With the
+// flag off the roster renders byte-identical to its pre-Phase-9 layout; with it
+// on, a Mood row, a Mode row, and a Live view / Graph button row slot in after
+// Mission, and the column hit-tests map to the option drawn under the cursor.
+
+fn roster_state(multiway_enabled: bool) -> AppState {
+    let mut state = AppState::new(
+        std::env::temp_dir(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
+    );
+    state.agents.dock_tab = AgentOpsTab::Roster;
+    state.agents.multiway_enabled = multiway_enabled;
+    state
+}
+
+fn fake_multiway_view() -> nit_core::MultiwayView {
+    nit_core::MultiwayView {
+        header: nit_core::MultiwayHeader {
+            mood: "balanced".into(),
+            k: 3,
+            turns: 1,
+            max_turns: 10,
+            nodes: 1,
+            max_nodes: 10,
+            frontier: 0,
+            best_score: 0.0,
+            best_tier: nit_core::GenomeTier::StillLife,
+            stop_reason: None,
+        },
+        nodes: Vec::new(),
+        kept_path: Vec::new(),
+        in_flight: None,
+    }
+}
+
+#[test]
+fn roster_multiway_rows_absent_when_flag_off() {
+    let state = roster_state(false);
+    assert!(roster_multiway_mood_line_idx(&state).is_none());
+    assert!(roster_multiway_mode_line_idx(&state).is_none());
+    assert!(roster_multiway_buttons_line_idx(&state).is_none());
+
+    let lines = current_lines_for_width(&state, 96);
+    assert!(!lines.iter().any(|l| l.contains("Mood:")));
+    assert!(!lines.iter().any(|l| l.contains("Mode:")));
+    assert!(!lines.iter().any(|l| l.contains("Live view")));
+    // The row directly after Mission is still the pre-table blank: nothing shifted.
+    assert!(lines[roster_swarm_mission_line_idx(&state) + 1].is_empty());
+}
+
+#[test]
+fn roster_multiway_rows_present_and_ordered_when_flag_on() {
+    let state = roster_state(true);
+    let mission = roster_swarm_mission_line_idx(&state);
+    let mood = roster_multiway_mood_line_idx(&state).expect("mood line");
+    let mode = roster_multiway_mode_line_idx(&state).expect("mode line");
+    let buttons = roster_multiway_buttons_line_idx(&state).expect("buttons line");
+    assert_eq!(mood, mission + 1);
+    assert_eq!(mode, mission + 2);
+    assert_eq!(buttons, mission + 3);
+
+    let lines = current_lines_for_width(&state, 96);
+    assert!(lines[mood].contains("Mood:") && lines[mood].contains("explore"));
+    assert!(lines[mode].contains("Mode:") && lines[mode].contains("multiway"));
+    assert!(lines[buttons].contains("Live view") && lines[buttons].contains("Graph"));
+}
+
+#[test]
+fn roster_multiway_enabled_shifts_body_down_by_three() {
+    let off = roster_state(false);
+    let on = roster_state(true);
+    assert_eq!(roster_body_offset(&on), roster_body_offset(&off) + 3);
+    // Template / Mission keep their indices: the new rows go strictly below them.
+    assert_eq!(
+        roster_swarm_template_line_idx(&on),
+        roster_swarm_template_line_idx(&off)
+    );
+    assert_eq!(
+        roster_swarm_mission_line_idx(&on),
+        roster_swarm_mission_line_idx(&off)
+    );
+}
+
+#[test]
+fn roster_multiway_styled_rows_match_their_hit_test_constants() {
+    // The hit-tests scan the `ROSTER_MULTIWAY_*_LINE` constants; the renderer
+    // builds spans independently. They must agree char-for-char or a click lands
+    // on the wrong option.
+    let state = roster_state(true);
+    let theme = Theme::default();
+    let lines = current_lines_for_width(&state, 96);
+
+    for (idx, expected) in [
+        (
+            roster_multiway_mood_line_idx(&state).unwrap(),
+            super::ROSTER_MULTIWAY_MOOD_LINE,
+        ),
+        (
+            roster_multiway_mode_line_idx(&state).unwrap(),
+            super::ROSTER_MULTIWAY_MODE_LINE,
+        ),
+        (
+            roster_multiway_buttons_line_idx(&state).unwrap(),
+            super::ROSTER_MULTIWAY_BUTTONS_LINE,
+        ),
+    ] {
+        let styled = roster_styled_line(&state, idx, &lines[idx], 96, &theme);
+        let rendered: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            rendered, expected,
+            "styled row {idx} must equal its hit-test constant"
+        );
+    }
+}
+
+#[test]
+fn roster_multiway_mood_hit_maps_each_option() {
+    for (label, value) in [
+        ("explore", MultiwaySearchMood::Explore),
+        ("balanced", MultiwaySearchMood::Balanced),
+        ("exploit", MultiwaySearchMood::Exploit),
+    ] {
+        let needle = format!(" {label} ");
+        let start = super::ROSTER_MULTIWAY_MOOD_LINE
+            .find(needle.as_str())
+            .expect("mood option");
+        assert_eq!(roster_multiway_mood_hit(start), Some(value));
+        assert_eq!(
+            roster_multiway_mood_hit(start + needle.len().saturating_sub(1)),
+            Some(value)
+        );
+    }
+    assert_eq!(roster_multiway_mood_hit(0), None);
+}
+
+#[test]
+fn roster_multiway_mode_hit_maps_linear_and_multiway() {
+    for (label, value) in [("linear", false), ("multiway", true)] {
+        let needle = format!(" {label} ");
+        let start = super::ROSTER_MULTIWAY_MODE_LINE
+            .find(needle.as_str())
+            .expect("mode option");
+        assert_eq!(roster_multiway_mode_hit(start), Some(value));
+    }
+    assert_eq!(roster_multiway_mode_hit(0), None);
+}
+
+#[test]
+fn roster_multiway_button_hit_maps_live_view_and_graph() {
+    let live = super::ROSTER_MULTIWAY_BUTTONS_LINE
+        .find(" Live view ")
+        .expect("live view button");
+    let graph = super::ROSTER_MULTIWAY_BUTTONS_LINE
+        .find(" Graph ")
+        .expect("graph button");
+    assert_eq!(
+        roster_multiway_button_hit(live),
+        Some(RosterMultiwayButton::LiveView)
+    );
+    assert_eq!(
+        roster_multiway_button_hit(graph),
+        Some(RosterMultiwayButton::Graph)
+    );
+    assert_eq!(roster_multiway_button_hit(0), None);
+}
+
+#[test]
+fn roster_multiway_mood_row_highlights_active_selection() {
+    let mut state = roster_state(true);
+    state.agents.multiway_default_mood = MultiwaySearchMood::Exploit;
+    let theme = Theme::default();
+    let lines = current_lines_for_width(&state, 96);
+    let idx = roster_multiway_mood_line_idx(&state).unwrap();
+    let styled = roster_styled_line(&state, idx, &lines[idx], 96, &theme);
+
+    let bold = |needle: &str| {
+        styled
+            .spans
+            .iter()
+            .find(|s| s.content.contains(needle))
+            .unwrap_or_else(|| panic!("span for {needle}"))
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    };
+    assert!(bold("exploit"));
+    assert!(!bold("explore"));
+    assert!(!bold("balanced"));
+}
+
+#[test]
+fn roster_multiway_mode_row_highlights_active_selection() {
+    let mut state = roster_state(true);
+    state.agents.multiway_default_mode_on = true;
+    let theme = Theme::default();
+    let lines = current_lines_for_width(&state, 96);
+    let idx = roster_multiway_mode_line_idx(&state).unwrap();
+    let styled = roster_styled_line(&state, idx, &lines[idx], 96, &theme);
+
+    let bold = |needle: &str| {
+        styled
+            .spans
+            .iter()
+            .find(|s| s.content.contains(needle))
+            .unwrap_or_else(|| panic!("span for {needle}"))
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    };
+    assert!(bold("multiway"));
+    assert!(!bold("linear"));
+}
+
+#[test]
+fn roster_multiway_graph_button_greyed_until_a_dag_exists() {
+    let mut state = roster_state(true);
+    let theme = Theme::default();
+    let idx = roster_multiway_buttons_line_idx(&state).unwrap();
+
+    let graph_dim = |state: &AppState| {
+        let lines = current_lines_for_width(state, 96);
+        let styled = roster_styled_line(state, idx, &lines[idx], 96, &theme);
+        styled
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Graph"))
+            .expect("graph span")
+            .style
+            .add_modifier
+            .contains(Modifier::DIM)
+    };
+
+    // No search has streamed a view yet -> Graph is greyed.
+    assert!(graph_dim(&state));
+    // A live view present -> Graph is an active button again.
+    state.agents.multiway_view = Some(fake_multiway_view());
+    assert!(!graph_dim(&state));
 }
 
 #[test]

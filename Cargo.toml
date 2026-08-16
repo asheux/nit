@@ -12,6 +12,7 @@ members = [
     "crates/nit-metal",
     "crates/nit-gol",
     "crates/nit-mcp",
+    "crates/nit-multiway",
     "crates/nit-syntax",
     "crates/nit-tui",
     "crates/nit-utils",

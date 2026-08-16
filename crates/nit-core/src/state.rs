@@ -28,6 +28,7 @@ pub mod file_tree;
 mod games;
 pub mod jumplist;
 pub mod multipane;
+mod multiway_view;
 mod pickers;
 mod text_input;
 mod visualizer;
@@ -55,6 +56,10 @@ pub use games::{
     GamesStatus, GamesStrategyInspectState, GamesTmSimState,
 };
 pub use multipane::{DirSearchState, MultipaneState, PaneSelection, PaneSession};
+pub use multiway_view::{
+    MultiwayHeader, MultiwayNodeStatus, MultiwayNodeView, MultiwaySearchMood, MultiwaySource,
+    MultiwayView, PendingMultiway,
+};
 pub use pickers::{ProtocolPickerState, RulePickerState};
 pub use text_input::{smart_case_insensitive, CommandLine, EditorSearch, SearchPrompt};
 pub use visualizer::{GolRenderMode, VisualizerMode, VisualizerRuleEntry, VisualizerState};

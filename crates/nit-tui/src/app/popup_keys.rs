@@ -1167,6 +1167,57 @@ pub(crate) fn is_terminal_popup_toggle_key(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
 }
 
+/// `Ctrl+Shift+M` — the global toggle for the Phase 6b multiway popup ("watch the
+/// agents think"), mirroring the `Ctrl+Shift+T` terminal-popup chord. Shift may
+/// arrive explicitly or implicitly as an uppercase `M` on terminals that fold the
+/// modifier into the character.
+pub(crate) fn is_multiway_popup_toggle_key(key: &KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    let shift =
+        key.modifiers.contains(KeyModifiers::SHIFT) || matches!(key.code, KeyCode::Char('M'));
+    shift && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+}
+
+/// Modal key handling for the live multiway popup. While it is open it owns scroll
+/// and close; the global quit chord still falls through so the operator can always
+/// exit. Returns `true` when the key was consumed. Scroll floors at 0 here and is
+/// clamped to the content height at render — this handler holds no view geometry,
+/// so the popup widget stays the single owner of layout.
+pub(super) fn handle_multiway_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    if !state.agents.show_multiway_popup {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    const PAGE: u16 = 10;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => state.agents.show_multiway_popup = false,
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.agents.multiway_popup_scroll =
+                state.agents.multiway_popup_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.agents.multiway_popup_scroll =
+                state.agents.multiway_popup_scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            state.agents.multiway_popup_scroll =
+                state.agents.multiway_popup_scroll.saturating_sub(PAGE);
+        }
+        KeyCode::PageDown => {
+            state.agents.multiway_popup_scroll =
+                state.agents.multiway_popup_scroll.saturating_add(PAGE);
+        }
+        KeyCode::Home => state.agents.multiway_popup_scroll = 0,
+        // Modal: swallow every other key so it never leaks to the pane beneath.
+        _ => {}
+    }
+    true
+}
+
 /// Route a key while the terminal popup is focused. Three close
 /// affordances exist; everything else encodes to PTY bytes:
 ///

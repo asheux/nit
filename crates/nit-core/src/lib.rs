@@ -97,11 +97,12 @@ pub use state::{
     GamesStatus, GamesStrategyInspectState, GateMonitorSubView, GenomeEvalBatch, GenomeShadowEval,
     GlobalArchiveEntry, GlobalArchiveSourceKind, GolRenderMode, Intervention, JobState, LogBuffer,
     McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, MultipaneState,
-    PaneSelection, PaneSession, PatchProposal, PatchStatus, PendingIntake, QueuedClaudeTurn,
-    QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,
-    SavedRunHistoryPendingAction, SubstrateOverlayTab, SyntaxDebugInfo, TerminalPopupState,
-    TerminalSelectRegion, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
-    VisualizerState, YankKind, CONSOLE_SCROLL_BOTTOM,
+    MultiwayHeader, MultiwayNodeStatus, MultiwayNodeView, MultiwaySearchMood, MultiwaySource,
+    MultiwayView, PaneSelection, PaneSession, PatchProposal, PatchStatus, PendingIntake,
+    PendingMultiway, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection,
+    SavedRunHistoryFilter, SavedRunHistoryPendingAction, SubstrateOverlayTab, SyntaxDebugInfo,
+    TerminalPopupState, TerminalSelectRegion, UiSelection, UiSelectionPane, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 pub use substrate::{
     claims_conflict, targets_overlap, Assumption, AssumptionId, AssumptionTarget, Claim,
