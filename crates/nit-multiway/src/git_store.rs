@@ -190,7 +190,10 @@ impl GitWorldStore {
 
     /// A git invocation pinned to the fixed engine identity, with hooks, signing,
     /// and credential prompts disabled so a turn can never block or run operator
-    /// hooks. `dir` is the working directory (the repo, or a worktree).
+    /// hooks. Line-ending conversion is off too: a worktree must hold exactly the
+    /// bytes the tree commits, whatever the host's `core.autocrlf` (Git for
+    /// Windows defaults it to `true`, which would check out CRLF and change every
+    /// file's hash). `dir` is the working directory (the repo, or a worktree).
     fn git(&self, dir: &Path) -> Command {
         let mut cmd = Command::new("git");
         cmd.current_dir(dir)
@@ -198,6 +201,8 @@ impl GitWorldStore {
             .args(["-c", "user.email=noreply@nit.tools"])
             .args(["-c", "commit.gpgsign=false"])
             .args(["-c", "core.hooksPath=/dev/null"])
+            .args(["-c", "core.autocrlf=false"])
+            .args(["-c", "core.eol=lf"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null());
         cmd
