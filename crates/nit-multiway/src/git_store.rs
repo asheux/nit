@@ -85,7 +85,7 @@ impl Drop for GitWorktree {
         let _ = Command::new("git")
             .current_dir(&self.repo)
             .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
+            .arg(git_path_arg(&self.path))
             .stdin(Stdio::null())
             .env("GIT_TERMINAL_PROMPT", "0")
             .output();
@@ -226,7 +226,7 @@ impl GitWorldStore {
         self.run(
             self.git(&self.repo)
                 .args(["worktree", "add", "--detach"])
-                .arg(&path)
+                .arg(git_path_arg(&path))
                 .arg(at.as_str()),
             "worktree add",
         )?;
@@ -422,6 +422,38 @@ fn sanitize(raw: &str) -> String {
     }
 }
 
+/// Strip the Windows verbatim prefix (`\\?\`) that `Path::canonicalize`
+/// adds, for paths handed to git as *arguments*. Git for Windows cannot parse
+/// that prefix (it becomes `//?/C:/...` and `worktree add` fails with "Invalid
+/// argument"). Paths used as `current_dir` need no change. On Unix a path
+/// never carries a prefix, so this is a plain copy.
+fn git_path_arg(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut plain = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => PathBuf::from(format!("{}:\\", letter as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut unc = std::ffi::OsString::from(r"\\");
+            unc.push(server);
+            unc.push(r"\");
+            unc.push(share);
+            unc.push(r"\");
+            PathBuf::from(unc)
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        if let Component::Normal(part) = component {
+            plain.push(part);
+        }
+    }
+    plain
+}
+
 fn canonical(path: &Path) -> Result<PathBuf, GitStoreError> {
     path.canonicalize().map_err(|source| GitStoreError::Io {
         path: path.to_path_buf(),
@@ -460,4 +492,34 @@ fn git_version(dir: &Path) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_path_arg;
+    use std::path::Path;
+
+    #[test]
+    fn git_path_arg_leaves_plain_paths_alone() {
+        let plain = if cfg!(windows) {
+            Path::new(r"C:\Users\me\wt")
+        } else {
+            Path::new("/tmp/nit/wt")
+        };
+        assert_eq!(git_path_arg(plain), plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_path_arg_strips_verbatim_disk_prefix() {
+        let verbatim = Path::new(r"\\?\C:\Users\me\wt");
+        assert_eq!(git_path_arg(verbatim), Path::new(r"C:\Users\me\wt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_path_arg_strips_verbatim_unc_prefix() {
+        let verbatim = Path::new(r"\\?\UNC\server\share\dir\wt");
+        assert_eq!(git_path_arg(verbatim), Path::new(r"\\server\share\dir\wt"));
+    }
 }
