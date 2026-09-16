@@ -1,74 +1,93 @@
 # Environment Variables
 
-This is the canonical reference for nit's runtime environment variables and the
-tuning knobs they expose. Every variable is read from the process environment at
-startup (or, where noted, on each dispatch), so you set them the usual way:
+The full list of environment variables nit reads, with their defaults. Most
+are optional escape hatches or performance knobs; nit runs fine with none set.
+nit reads each variable once at startup unless the table says it reads it on
+each dispatch. Set them the usual way:
 
 ```bash
 NIT_CLAUDE_POOL=1 NIT_TUI_FPS=30 nit --agents claude
 ```
 
-Most variables are optional escape hatches or performance knobs; nit runs with
-sensible defaults when none are set. Variables are grouped by the subsystem they
-affect. Subsystem docs (`docs/SWARM.md`, `docs/MULTIPANE.md`, `docs/INTAKE.md`,
-`docs/TERMINAL.md`, `docs/PERF.md`) keep their own contextual mentions; this page
-is the full list.
+Subsystem docs (`docs/SWARM.md`, `docs/MULTIPANE.md`, `docs/INTAKE.md`,
+`docs/TERMINAL.md`, `docs/PERF.md`) mention their own variables in context.
+This page is the complete list.
 
-> Contributor note: `CLAUDE.md` carries a condensed copy of the same table as an
-> always-loaded quick reference. This page is the public, synced-to-website
-> canonical version — keep the two in sync when adding a variable.
+Contributor note: `CLAUDE.md` carries a condensed copy of this table as an
+always-loaded quick reference. Update both when you add or change a variable.
 
 ## TUI rendering
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_TUI_FPS` | `60` (16 ms) | Redraw cap for both the single-pane and multipane event loops. Clamped to `15..=120`; out-of-range values fall back to the default. The cap gates `terminal.draw` so a high-volume agent-bus burst can't repaint faster than the terminal compositor (input handling and bus-event apply remain unthrottled). Resolved once at run start, not in the hot loop. See `docs/PERF.md`. |
-| `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the agent ops UI. |
+| `NIT_TUI_FPS` | `60` (16 ms) | Redraw cap for the single-pane and multipane event loops. Clamped to `15..=120`; out-of-range values use the default. See `docs/PERF.md`. |
+| `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the Agent Ops UI. |
+
+The cap only limits drawing, so an agent-bus burst cannot repaint faster than
+the terminal. Input handling and bus-event apply are not throttled.
 
 ## Roster / swarm display
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_ROSTER_NO_TRUNCATE` | unset | Disable per-backend / per-mission / chat-pane breather row truncation. Set to `1`/`true` to inspect every clone in large swarms. See `docs/SWARM.md` "UI truncation for large swarms". |
+| `NIT_ROSTER_NO_TRUNCATE` | unset | Set to `1` or `true` to show every clone row in large swarms instead of truncating per backend, per mission, and in the chat-pane breather. See `docs/SWARM.md` "UI truncation for large swarms". |
 
 ## Claude runner + warm pool
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_CLAUDE_POOL` | `0` (cold-spawn) | Opt into the warm pool of long-lived `claude -p --input-format stream-json` workers (`crates/nit-tui/src/claude_pool.rs`). Set to `1` / `true` / `yes` / `on` to enable. When enabled, "vanilla" turns (no resume, default `--max-turns`, no custom `--effort`, `persist_session=true`) check a worker out of the pool, write a stream-json envelope to its long-lived stdin, and check the slot back in after the `result` event. Specialised turns (integrators with `INTEGRATOR_MAX_TURNS=500`, resumed sessions, custom `--effort`) bypass the pool and take the cold-spawn path. Unhealthy outcomes (BrokenPipe, stream-json `error`, non-zero exit, operator cancel, idle timeout, hourly GC age) replace the slot rather than returning it. The `=0` branch is byte-identical to the pre-pool runner and stays in code as the rollback path. |
-| `NIT_CLAUDE_POOL_SIZE` | `default_claude_pool_size()` | Override the warm pool's worker cap (only meaningful when `NIT_CLAUDE_POOL=1`). Default is `clamp(effective_max_swarm_size / 4, 2..=8)` — macOS default `ulimit -n 256` lands on 8; tight `ulimit -n 64` drops to 2. Each parked slot permanently holds the same 4-fd footprint as an in-flight cold-spawn turn, so the effective swarm ceiling is reduced by the pool size. Multipane operators running N panes should set this to at least N. |
-| `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | `900` (15 min) | Idle-output reaper for Claude turns. Kills the subprocess when no stream-json line has been read for N seconds and tries to recover the final message from buffered stream-json so the swarm can still proceed. **Only fires on read-only / verifier-style turns** — any turn that invokes a write-capable tool (Write/Edit/MultiEdit/NotebookEdit) is exempted, on the assumption that writers are productive. Set to `0` to disable. The runner also exits early as soon as a stream-json `result` event is observed (regardless of writer status), even before this timeout fires. Applies to both the cold-spawn and warm-pool paths; on the pool path an idle-fired reap triggers `pool.recycle(IdleTimeout)` so the slot is replaced rather than parked with potentially-poisoned state. |
+| `NIT_CLAUDE_POOL` | `0` (off) | Set to `1`, `true`, `yes`, or `on` to keep a warm pool of long-lived `claude -p --input-format stream-json` workers. Only plain turns use the pool; see the note below. |
+| `NIT_CLAUDE_POOL_SIZE` | `clamp(effective_max_swarm_size / 4, 2..=8)` | Worker cap for the warm pool. Only used when `NIT_CLAUDE_POOL=1`. With N multipane panes, set it to at least N. |
+| `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | `900` (15 min) | Kill a Claude turn when no stream-json line arrives for this many seconds, then recover the final message from the buffered output. Only fires on read-only turns. `0` disables it. |
+
+- Pool: a plain turn has no resume, the default `--max-turns`, no custom `--effort`, and `persist_session=true`. Integrator turns (`INTEGRATOR_MAX_TURNS=500`), resumed sessions, and custom `--effort` turns skip the pool and cold-spawn. A worker that fails (broken pipe, stream-json `error`, non-zero exit, cancel, idle timeout, or hourly GC age) is replaced, not returned. With the pool off, nit cold-spawns every turn.
+- Pool size: the default is 8 with the macOS default `ulimit -n 256` and 2 with `ulimit -n 64`. Each parked worker holds the same 4 file descriptors as an in-flight turn, so the pool size lowers the effective swarm ceiling.
+- Idle timeout: a turn that calls a write-capable tool (Write, Edit, MultiEdit, NotebookEdit) is exempt. The runner also stops as soon as it sees a stream-json `result` event, whatever the turn did. Applies to cold-spawn and pool turns; a pool worker that idles out is replaced.
 
 ## Swarm planner / gates / prompt budgets
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_PLANNER_LEGACY` | unset | Disable the deterministic plan validator + repair loop (`crates/nit-tui/src/swarm/validator.rs` and `repair.rs`). Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) revert the planner stage to its pre-validator behaviour: the planner LLM call runs once, the parsed plan goes straight to `finalize_plan`, no repair re-dispatch. Resolved once at `SwarmRuntime` construction and cached on `runtime.legacy_planner`, so a mid-mission env change can't flip behaviour halfway through a planning round. One-release rollback escape hatch. See `docs/SWARM.md` "How Swarm Works". |
-| `NIT_PROMPT_TIERS` | enabled | Role-specific prompt budget tiers (`crates/nit-tui/src/swarm/budgets.rs`). When enabled, every dispatch runs through a three-stage truncation pass after `wrap_task_prompt` assembles the prompt and before it ships. Setting `0` / `false` / `no` / `off` (case-insensitive) short-circuits the pass to a no-op — byte-identical to the pre-tiers dispatch path. Resolved once at `SwarmRuntime` construction and snapshotted onto every `SwarmRun` at `start()`; mid-mission env flips cannot change behaviour between turns. Per-mission override: `@swarm budget=ROLE:N`. See `docs/SWARM.md` "Prompt budget tiers" for the role ceilings and truncation order. |
-| `NIT_PROMPT_BUDGET_<ROLE>` | per-role default | Per-role byte ceiling override for the prompt budget tier — `<ROLE>` is one of `INTEGRATE`, `JUDGE`, `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, `DEFAULT`. Decimal byte count only (no `k`/`K` suffix in env values; that suffix is only honoured by the per-mission `budget=ROLE:N` command token). Only meaningful when `NIT_PROMPT_TIERS` is enabled. Example: `NIT_PROMPT_BUDGET_INTEGRATE=600000` lifts the integrate ceiling to 600K bytes for the rest of the runtime's lifetime. |
-| `NIT_SCOPE_WALK_TIMEOUT_MS` | `200` | Foreground deadline (ms) waited on the background scope walk before chat dispatch proceeds with empty `scope_files`. The walk extracts directory tokens from the operator prompt and lists source files for the planner; running it inline used to freeze the UI on big trees. The walker thread keeps running after timeout and is bounded by its own caps (depth 12, 100 files, no symlink follow, skips `target` / `node_modules` / `.*`). Set to `0` to skip the walk entirely (always returns empty). |
-| `NIT_STRICT_CHECKLIST` | unset | Enforce strict file-checklist matching on swarm integrate turns. By default the structural-compliance check is **advisory** — when an integrator skips a checklist file nit logs an Info diag but does not re-dispatch. Setting it (`1`) restores the Warning substrate signal and the missing-files re-dispatch path (`crates/nit-tui/src/swarm/runtime_events.rs`). Stub files and incomplete directory splits re-dispatch regardless of this flag. |
-| `NIT_NO_COMPILE_GATE` | unset | Disable the post-edit compile gate — the `cargo check` nit spawns for each Rust crate an integrator touched on `TurnCompleted` (`crates/nit-tui/src/app/compile_gate.rs`). Already a no-op when the workspace isn't a Cargo workspace or no `crates/*/` files were touched; set this to skip it unconditionally. |
+| `NIT_PLANNER_LEGACY` | unset | Truthy values (`1`, `true`, `yes`, `on`, any case) disable the plan validator and repair loop: the planner runs once and its plan is used as is. Read once at startup. See `docs/SWARM.md` "How Swarm Works". |
+| `NIT_PROMPT_TIERS` | enabled | Role-specific prompt budget tiers. `0`, `false`, `no`, or `off` (any case) skips the truncation pass. Read once at startup. Per-mission override: `@swarm budget=ROLE:N`. See `docs/SWARM.md` "Prompt budget tiers". |
+| `NIT_PROMPT_BUDGET_<ROLE>` | per-role default | Byte ceiling for one role's prompt budget. `<ROLE>` is `INTEGRATE`, `JUDGE`, `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, or `DEFAULT`. Decimal bytes only. Needs `NIT_PROMPT_TIERS` enabled. |
+| `NIT_SCOPE_WALK_TIMEOUT_MS` | `200` | How long chat dispatch waits for the background scope walk before it continues with empty `scope_files`. `0` skips the walk. |
+| `NIT_STRICT_CHECKLIST` | unset | Set to `1` to enforce the file checklist on swarm integrate turns: a skipped file raises a Warning signal and re-dispatches. By default nit only logs an Info diag. |
+| `NIT_NO_COMPILE_GATE` | unset | Skip the post-edit compile gate, the `cargo check` nit runs for each Rust crate an integrator touched. |
+
+- Budgets: `NIT_PROMPT_BUDGET_INTEGRATE=600000` lifts the integrate ceiling to 600K bytes for the rest of the session. The `k` / `K` suffix only works in the `budget=ROLE:N` command token, not in env values.
+- Scope walk: it pulls directory tokens from your prompt and lists source files for the planner. It keeps running after the timeout, stops at depth 12 or 100 files, does not follow symlinks, and skips `target`, `node_modules`, and dot-directories.
+- Checklist: stub files and incomplete directory splits re-dispatch whether or not `NIT_STRICT_CHECKLIST` is set.
+- Compile gate: already a no-op outside a Cargo workspace or when no `crates/*/` files were touched.
 
 ## Multiway search engine
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_MULTIWAY` | `0` (off) | Opt into the multiway best-first search engine (`crates/nit-multiway` + `crates/nit-tui/src/multiway/`). Set to `1` / `true` / `yes` / `on` to enable. When on, the `@multiway <task>` chat command — with optional `mood=` (`explore` / `balanced` / `exploit`) and `k=N` fork-width flags — dispatches a mission as a best-first DAG search over isolated git worktrees (genome+gates value heuristic, emergent backtrack, per-mission DAG persisted to `<state_dir>/multiway/<mission>.json`); `/abort` tears down the worktrees and prunes `refs/nit-multiway/<mission>/*`. Resolved once at `MultiwayRuntime::from_env` construction (like `NIT_PLANNER_LEGACY`) so a mid-mission env change can't flip behaviour. The `=0` branch is byte-identical to today — `@multiway …` flows to normal chat dispatch as a literal prompt and no `MultiwayRuntime` runs — and stays in code as the rollback path mirroring `NIT_CLAUDE_POOL=0` / `NIT_PLANNER_LEGACY=1`. v1 is Claude-only and single-pane; the fork width `k` (default 3) is clamped by the effective swarm ceiling. Phase 6 (the `@multiway-graph` / `Ctrl+Shift+M` graph view) and Phase 7 (the `mode=multiway` modifier on `@shadow` / `@swarm` / `@all`) add **no new env var** — both stay under this flag. See `docs/MULTIWAY.md`. |
-| `NIT_MULTIWAY_GATES` | unset (auto-detect) | Override the multiway value-gate commands (only meaningful when `NIT_MULTIWAY=1`). **Unset** → auto-detect the gate bundle from each worktree (`rust-ci`/`node-ci`/`python-ci`/`go-ci`), byte-identical to today (`GenomeValuer::for_tree`). **Set** to a `;`-separated list of commands → those *replace* the auto-detected bundle for the valuer; each command is whitespace argv-split and spawned directly in the per-node worktree with **no shell**, and **all must pass** for a node to be viable (`GenomeValuer::new`). **Empty** (`NIT_MULTIWAY_GATES=`) → no gates, genome-only valuation — the operator's explicit opt-in to fail-open. Point the gate at a runner that resolves deps in a clean tree, e.g. `NIT_MULTIWAY_GATES="uv run pytest -q"`. Resolved once at `MultiwayRuntime::from_env` construction (like `NIT_MULTIWAY`) so a mid-mission env change can't flip behaviour. See `docs/MULTIWAY.md` (Phase 8). |
+| `NIT_MULTIWAY` | `0` (off) | Set to `1`, `true`, `yes`, or `on` to enable the multiway best-first search engine and the `@multiway <task>` chat command. Read once at startup. See `docs/MULTIWAY.md`. |
+| `NIT_MULTIWAY_GATES` | unset (auto-detect) | Override the multiway value-gate commands as a `;`-separated list. Unset auto-detects the gate bundle per worktree; empty means no gates, genome-only valuation. Needs `NIT_MULTIWAY=1`. Read once at startup. |
+
+- `@multiway` accepts `mood=` (`explore`, `balanced`, `exploit`) and `k=N` fork-width flags. The default `k` is 3, clamped by the effective swarm ceiling. A mission runs as a best-first DAG search over isolated git worktrees, persisted to `<state_dir>/multiway/<mission>.json`. `/abort` removes the worktrees and prunes `refs/nit-multiway/<mission>/*`. With the flag off, `@multiway ...` goes to normal chat as a literal prompt.
+- The graph view (`@multiway-graph`, `Ctrl+Shift+M`) and the `mode=multiway` modifier on `@shadow`, `@swarm`, and `@all` use this same flag. There is no separate variable. v1 is Claude-only and single-pane.
+- Gate commands are split on whitespace and run directly in the node's worktree with no shell. All must pass for a node to be viable. Auto-detect picks `rust-ci`, `node-ci`, `python-ci`, or `go-ci`. Point the gate at a runner that resolves deps in a clean tree, for example `NIT_MULTIWAY_GATES="uv run pytest -q"`. A missing gate program fails the node instead of aborting the search.
 
 ## Codex MCP turn timeouts
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard total timeout for an MCP turn (0 or unset = no limit). If any in-flight turn exceeds it, nit restarts the MCP server and fails all in-flight turns. |
-| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn (set to enable, e.g. `600`; 0 or unset = disabled). If an in-flight turn stops producing `codex/event` notifications for longer than this, nit restarts the MCP server and fails the in-flight turns. Disabled by default because cancelling hung turns can force a new session and affect continuity. See `docs/SWARM.md` "Optional safety valve: idle timeouts". |
+| `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard total timeout for an MCP turn. `0` or unset means no limit. When any in-flight turn exceeds it, nit restarts the MCP server and fails all in-flight turns. |
+| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn, for example `600`. `0` or unset disables it. When a turn stops producing `codex/event` notifications for this long, nit restarts the MCP server and fails the in-flight turns. See `docs/SWARM.md` "Optional safety valve: idle timeouts". |
+
+The idle timeout is off by default because cancelling a hung turn can force a
+new session and break continuity.
 
 ## Intake preprocessor
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_INTAKE_DISABLED` | unset | Runtime kill switch for the hidden Claude-class intake agent. `1` disables intake for the rest of the session (read on every dispatch, so it flips without a restart). Equivalent to `intake_enabled = false` in `config.toml`. On disable, prompts dispatch as-is with no file-checklist augmentation. See `docs/INTAKE.md`. |
+| `NIT_INTAKE_DISABLED` | unset | `1` turns off the hidden Claude-class intake agent for the rest of the session. Read on every dispatch, so it works without a restart. Same as `intake_enabled = false` in `config.toml`. See `docs/INTAKE.md`. |
+
+With intake off, prompts dispatch as-is with no file-checklist augmentation.
 
 ## Snapshots (Game of Life)
 
@@ -83,28 +102,39 @@ is the full list.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `NIT_GOL_STACK_MB` | `256` | Stack size (MB) for Game of Life worker threads. |
-| `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads (falls back to `NIT_GOL_STACK_MB`). |
+| `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads. Falls back to `NIT_GOL_STACK_MB`. |
 
 ## Games engine
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_GAMES_DISABLE_METAL` | unset | Force the games tournament kernel onto the CPU fallback path, skipping all Metal GPU work (`crates/nit-games/src/tournament/kernel.rs`). Escape hatch for hosts where Metal devices initialise but reject compute submissions (e.g. GitHub Actions macOS VMs). |
+| `NIT_GAMES_DISABLE_METAL` | unset | Force the games tournament kernel onto the CPU path and skip all Metal GPU work. For hosts where Metal devices initialise but reject compute submissions, such as GitHub Actions macOS VMs. See `docs/GAMES.md`. |
 
 ## Logging / version check
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Override the log file path. |
-| `NIT_NO_VERSION_CHECK` | unset | Silence the launch-time "newer release available" prompt (`1` to mute). |
+| `NIT_NO_VERSION_CHECK` | unset | `1` silences the launch-time "newer release available" prompt. |
+
+## Set by nit, not by you
+
+nit sets these on the `nit-mcp-server` process it spawns. They are not user
+knobs.
+
+| Variable | Purpose |
+|----------|---------|
+| `NIT_MCP_BACKCHANNEL_SOCKET` | Path of the Unix socket the server uses to talk back to nit. |
+| `NIT_MCP_AGENT_ID` | The id of the agent the server belongs to. |
+| `NIT_MCP_BACKCHANNEL_PORT` | TCP port used instead of the socket on hosts without Unix sockets. |
 
 ## Related constants
 
-These are compile-time constants, not environment variables, but they bound the
-behaviour the variables above tune:
+These are compile-time constants, not environment variables, but they bound
+what the variables above tune:
 
 | Constant | Value | Location | Role |
 |----------|-------|----------|------|
 | `MAX_SWARM_SIZE` | `256` | `crates/nit-tui/src/swarm/constants.rs` | Hard upper bound on swarm agent count, before the FD clamp. See `docs/SWARM.md` "Static and effective ceilings". |
-| `BULK_PRACTICAL_MAX` | `12` | `crates/nit-tui/src/swarm/` | Bulk-template proposer cap (per-dep budget collapses past it). |
-| `INTEGRATOR_MAX_TURNS` | `500` | `crates/nit-tui/src/claude_runner.rs` | `--max-turns` lifted for single-writer integrator turns (default turns use `50`). |
+| `BULK_PRACTICAL_MAX` | `12` | `crates/nit-tui/src/swarm/` | Bulk-template proposer cap. The per-dep budget collapses past it. |
+| `INTEGRATOR_MAX_TURNS` | `500` | `crates/nit-tui/src/claude_runner.rs` | `--max-turns` for single-writer integrator turns. Normal turns use `50`. |

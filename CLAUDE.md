@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-## Build & test
+## Build and test
 
 ```bash
 just ci             # fmt-check + clippy + test + cargo deny
@@ -9,141 +9,139 @@ just clippy         # cargo clippy --all-targets --all-features -- -D warnings
 just run -- <args>  # cargo run -- <args>
 ```
 
-CI uses `--locked` — do not update `Cargo.lock` unless intentional.
-MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
+- CI uses `--locked`. Do not update `Cargo.lock` unless the change is intentional.
+- MSRV: Rust 1.88.0, pinned in `rust-toolchain.toml`.
+- Clippy must pass with zero warnings.
+- Run `cargo test --all` for the live test count.
 
 ## Workspace layout
 
 | Crate | Purpose |
 |-------|---------|
 | `nit` | CLI binary entry point |
-| `nit-core` | State (`AppState`), agent bus, config, buffer |
-| `nit-tui` | TUI app loop, widgets, swarm orchestration, Claude/Codex runners, games UI |
+| `nit-core` | State (`AppState`), agent bus, config, buffers, substrate, genome reports, seed encoders |
+| `nit-tui` | TUI loop, widgets, swarm, shadows, intake, multipane, terminal, Codex and Claude runners, games UI |
+| `nit-multiway` | Best-first search engine over git worktrees (opt-in, `NIT_MULTIWAY=1`) |
+| `nit-mcp` | MCP stdio JSON-RPC server (`nit-mcp-server`) that exposes substrate tools to spawned `codex` |
 | `nit-games` | Game theory tournament engine |
-| `nit-gol` | Game of Life simulation |
+| `nit-gol` | Game of Life engine |
 | `nit-metal` | Metal GPU acceleration (macOS) |
-| `nit-mcp` | MCP stdio JSON-RPC server (`nit-mcp-server` binary) — bridges spawned `codex` back into substrate tools (signals/claims/assumptions); spawned by `codex_runner` |
-| `nit-syntax` | Syntax highlighting (tree-sitter 0.25, 29 active grammars; language metadata lives in `nit-core::languages::LANGUAGES`) |
-| `nit-utils` | Shared filesystem/hashing/path utilities |
+| `nit-syntax` | Tree-sitter highlighting (29 grammars; the language table is `nit-core::languages::LANGUAGES`) |
+| `nit-utils` | Shared filesystem, hashing, and path helpers |
 
 ## Key source files
 
-- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch, genome retry logic (`GENOME_RETRY_LIMIT = 3`; no file-size gate — the encoder's <20-sig-line auto-pass + the parsimony detector handle "trivial code" protection)
-- `crates/nit-tui/src/app/dispatch.rs` — agent prompt dispatch (Codex and Claude routing, queue management)
-- `crates/nit-tui/src/app/chat_input.rs` — chat input command parsing (`@all`, `@swarm`, `@shadow`, `@new`, `@queue`)
-- `crates/nit-core/src/agent_bus.rs` — `AgentBusEvent` enum and state application
-- `crates/nit-core/src/state.rs` — `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types, `AgentOpsTab` (8 UI tabs + 1 internal `Patch`)
-- `crates/nit-core/src/genome_report.rs` — code-as-genome tier scoring, parsimony detector, soft-bottleneck lift
-- `crates/nit-core/src/languages.rs` — master `LANGUAGES` table (extensions, filenames, shebangs, injection aliases, `is_code`) consumed by `nit-syntax` detection, the file-watcher, the swarm scope walk, and the seed encoders. To add a language: append a `LanguageInfo` entry here, then add the grammar crate dep + arm in `nit-syntax/src/language/grammars.rs` (and the matching `SeedLanguage::ts_language` arm in `nit-core/src/seed/encoders/lang.rs` if the genome encoders should score it).
-- `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution, gate bundles `rust-ci`/`node-ci`/`python-ci`/`go-ci`, custom gates)
-- `crates/nit-tui/src/shadow.rs` — shadow agent pipeline (`propose-a` / `propose-b` → `judge` → `review` → main)
-- `crates/nit-tui/src/codex_runner.rs` — Codex CLI integration (MCP server + exec runtime)
-- `crates/nit-tui/src/claude_runner.rs` — Claude CLI subprocess integration (`claude -p`)
-- `crates/nit-tui/src/widgets/` — all TUI widgets (agent_console_view, agent_ops_view, artifacts_popup, gate_monitor_view, etc.)
+- `crates/nit-tui/src/app/mod.rs`: main event loop, input handling, key dispatch.
+- `crates/nit-tui/src/app/genome_retry.rs`: genome retry prompt and `GENOME_RETRY_LIMIT = 3`. There is no file-size gate on retries; the encoder's under-20-significant-lines auto-pass and the parsimony detector cover trivial files.
+- `crates/nit-tui/src/app/dispatch.rs`: agent prompt dispatch (Codex and Claude routing, queues).
+- `crates/nit-tui/src/app/chat_input.rs`: chat command parsing (`@all`, `@swarm`, `@shadow`, `@multiway`, `@new`, `@queue`, `/abort`).
+- `crates/nit-core/src/agent_bus/`: `AgentBusEvent` and how events apply to state.
+- `crates/nit-core/src/state/`: `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types, `AgentOpsTab` (8 UI tabs plus one internal `Patch` tab).
+- `crates/nit-core/src/genome_report/`: genome tier scoring, parsimony detector, soft-bottleneck lift.
+- `crates/nit-core/src/languages.rs`: the `LANGUAGES` table (extensions, filenames, shebangs, injection aliases, `is_code`). Used by `nit-syntax` detection, the file watcher, the swarm scope walk, and the seed encoders. To add a language: append a `LanguageInfo` here, add the grammar dep and arm in `nit-syntax/src/language/grammars.rs`, and add a `SeedLanguage::ts_language` arm in `nit-core/src/seed/encoders/lang.rs` if the encoders should score it.
+- `crates/nit-tui/src/swarm/`: swarm orchestrator (DAG planning and execution, gate bundles `rust-ci` / `node-ci` / `python-ci` / `go-ci`, custom gates, validator, repair, budgets).
+- `crates/nit-tui/src/shadow.rs`: shadow pipeline (`propose-a` / `propose-b`, then `judge`, then `review`, then the main agent).
+- `crates/nit-tui/src/intake.rs`: hidden intake classifier (Claude lanes only).
+- `crates/nit-tui/src/multiway/` and `crates/nit-multiway/`: multiway runtime and engine.
+- `crates/nit-tui/src/codex_runner/`: Codex integration (MCP server and exec runtime).
+- `crates/nit-tui/src/claude_runner.rs` and `claude_pool.rs`: Claude subprocess runner and warm pool.
+- `crates/nit-tui/src/widgets/`: all TUI widgets.
 
 ## Conventions
 
-- No network calls from `nit` itself; external CLIs (`codex`, `claude`, `git`) are spawned directly (no shell).
-- `time` crate is vendored at `vendor/time`.
-- Clippy must pass with zero warnings (`-D warnings`).
-- Tests: `cargo test --all` — ~700+ tests across the workspace (run it for the live count; the substrate layer added ~280 nit-core tests after the 526-test `docs/REPO_HEALTH.md` snapshot).
-- Agent dispatch: Codex uses MCP or exec runtime; Claude spawns `claude -p` subprocesses.
-- Queue management: `queue_len` on `AgentLane` tracks UI-visible queue depth; increment on enqueue, decrement on `TurnCompleted`/`TurnFailed`.
+- nit makes no network calls. It spawns `codex`, `claude`, and `git` directly, never through a shell.
+- The `time` crate is vendored at `vendor/time`.
+- Codex turns use the MCP or exec runtime; Claude turns spawn `claude -p`.
+- `queue_len` on `AgentLane` is the UI-visible queue depth. Increment on enqueue, decrement on `TurnCompleted` or `TurnFailed`.
+- Document every new environment variable in both this file and `docs/ENVIRONMENT.md`.
 
 ## Environment variables
 
-> Canonical, public copy: `docs/ENVIRONMENT.md` (synced to the website). This table is the always-loaded contributor quick-reference — keep the two in sync when adding or changing a variable.
+`docs/ENVIRONMENT.md` is the full public reference (synced to the website). This table is
+the quick version; keep the two in sync.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Override the log file path |
-| `NIT_TUI_FPS` | `60` (16 ms) | Redraw cap for both the single-pane and multipane event loops. Clamped to `15..=120`; out-of-range values fall back to the default. The cap gates `terminal.draw` so a high-volume agent-bus burst can't repaint faster than the terminal compositor (input handling and bus event apply remain unthrottled). Resolved once at run start, not in the hot loop. |
-| `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the agent ops UI |
-| `NIT_ROSTER_NO_TRUNCATE` | unset | Disable per-backend / per-mission / chat-pane breather row truncation. Set to `1`/`true` to inspect every clone in large swarms. |
-| `NIT_SNAPSHOT_QUEUE` | `64` | Snapshot writer channel capacity |
-| `NIT_SNAPSHOT_DEBUG` | unset | Enable verbose snapshot debug logging to stderr |
-| `NIT_SNAPSHOT_CYCLE` | unset | Force a snapshot when an attractor cycle is detected |
-| `NIT_GOL_STACK_MB` | `256` | Stack size (MB) for Game of Life worker threads |
-| `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads (falls back to `NIT_GOL_STACK_MB`) |
-| `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for an MCP turn (0 or unset = no limit) |
-| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn (set to enable, e.g. `600`; 0 or unset = disabled) |
-| `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | `900` (15 min) | Idle-output reaper for Claude turns. Kills the subprocess when no stream-json line has been read for N seconds and tries to recover the final message from buffered stream-json so the swarm can still proceed. **Only fires on read-only / verifier-style turns** — any turn that invokes a write-capable tool (Write/Edit/MultiEdit/NotebookEdit) is exempted on the assumption that writers are productive. Set to `0` to disable. The runner also exits early as soon as a stream-json `result` event is observed (regardless of writer status), even before this timeout fires. Applies to BOTH the cold-spawn path and the warm-pool path (`NIT_CLAUDE_POOL=1`); on the pool path, an idle-fired reap triggers `pool.recycle(IdleTimeout)` so the slot is replaced rather than parked with potentially-poisoned state. |
-| `NIT_CLAUDE_POOL` | `0` (cold-spawn) | Opt into the warm pool of long-lived `claude -p --input-format stream-json` workers (`crates/nit-tui/src/claude_pool.rs`). Set to `1` / `true` / `yes` / `on` to enable. When enabled, "vanilla" turns (no resume, default `--max-turns`, no custom `--effort`, `persist_session=true`) check a worker out of the pool, write a stream-json envelope to its long-lived stdin, and check the slot back in after the `result` event. Specialised turns (integrators with `INTEGRATOR_MAX_TURNS=500`, resumed sessions, custom `--effort`) bypass the pool and take the cold-spawn path. Unhealthy outcomes (BrokenPipe, stream-json `error`, non-zero exit, operator cancel, idle timeout, hourly GC age) replace the slot rather than returning it. The `=0` branch is byte-identical to the pre-pool runner and stays in code as the rollback path for at least one release after the default flips. |
-| `NIT_CLAUDE_POOL_SIZE` | `default_claude_pool_size()` | Override the warm pool's worker cap (only meaningful when `NIT_CLAUDE_POOL=1`). Default is `clamp(effective_max_swarm_size / 4, 2..=8)` — macOS default `ulimit -n 256` lands on 8; tight `ulimit -n 64` drops to 2. Each parked slot permanently holds the same 4-fd footprint as an in-flight cold-spawn turn, so the effective swarm ceiling is reduced by the pool size. Multipane operators running N panes should set this to at least N. |
-| `NIT_SCOPE_WALK_TIMEOUT_MS` | `200` | Foreground deadline (ms) waited on the background scope walk before chat dispatch proceeds with empty `scope_files`. The walk extracts directory tokens from the operator prompt and lists source files for the planner; running it inline used to freeze the UI on big trees. The walker thread keeps running after timeout and is bounded by its own caps (depth 12, 100 files, no symlink follow, skips `target` / `node_modules` / `.*`). Set to `0` to skip the walk entirely (always returns empty). |
-| `NIT_PLANNER_LEGACY` | unset | Disable the deterministic plan validator + repair loop introduced in `crates/nit-tui/src/swarm/validator.rs` and `repair.rs`. Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) revert the planner stage to its pre-validator behaviour: the planner LLM call runs once, the parsed plan goes straight to `finalize_plan`, no repair re-dispatch. Resolved once at `SwarmRuntime` construction and cached on `runtime.legacy_planner`, so a mid-mission env change can't flip behaviour halfway through a planning round. Intended as a one-release rollback escape hatch; remove once the validator + repair loop has baked in. |
-| `NIT_PROMPT_TIERS` | enabled | Role-specific prompt budget tiers (`crates/nit-tui/src/swarm/budgets.rs`). When enabled, every `SwarmDispatch` runs through a three-stage truncation pass (halve per-dep payloads → drop proposer then judge dep payloads with breadcrumbs → shrink `## GENOME LANDSCAPE` block) after `wrap_task_prompt` assembles the prompt and before it ships. Per-role byte ceilings: integrate 480K, judge 320K, research/computational-research 240K, propose 160K, review 120K, test 96K, default 96K — sized against Claude's 200K-token window with ~120K reserved for system framing and tool-use accumulation. Invariants never dropped at any stage: `## FILE CHECKLIST`, role contract, operator request, `<SWARM_TASK_COMPLETE>` SIGN-OFF. Setting `0` / `false` / `no` / `off` (case-insensitive) returns `usize::MAX` from `PromptBudgets::for_role` so `apply_prompt_budget` short-circuits to a no-op — byte-identical to the pre-tiers dispatch path. Resolved once at `SwarmRuntime` construction and snapshotted onto every `SwarmRun` at `start()`; mid-mission env flips cannot change behaviour between turns. Per-mission overrides: `@swarm budget=ROLE:N` (accepts `k`/`K` suffix → ×1024) on the command line writes onto `SwarmRun.prompt_budgets` and takes precedence over the runtime defaults. The off-path stays in code as the rollback pattern mirroring `NIT_CLAUDE_POOL=0` / `NIT_PLANNER_LEGACY=1`. |
-| `NIT_PROMPT_BUDGET_<ROLE>` | per-role default | Per-role byte ceiling override for the prompt budget tier — `<ROLE>` is one of `INTEGRATE`, `JUDGE`, `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, `DEFAULT`. Decimal byte count only (no `k`/`K` suffix in env values; that suffix is only honoured by the per-mission `budget=ROLE:N` command token). Only meaningful when `NIT_PROMPT_TIERS` is enabled; otherwise the budget short-circuits to `usize::MAX` regardless. Example: `NIT_PROMPT_BUDGET_INTEGRATE=600000` lifts the integrate ceiling to 600K bytes for the rest of the runtime's lifetime. |
-| `NIT_MULTIWAY` | `0` (off) | Opt into the multiway best-first search engine (`crates/nit-multiway` + `crates/nit-tui/src/multiway/`). Set to `1` / `true` / `yes` / `on` to enable. When on, the `@multiway <task>` chat command — with optional `mood=` (`explore` / `balanced` / `exploit`) and `k=N` fork-width flags — dispatches a mission as a best-first DAG search over isolated git worktrees (genome+gates value heuristic, emergent backtrack, per-mission DAG persisted to `<state_dir>/multiway/<mission>.json`); `/abort` tears down the worktrees and prunes `refs/nit-multiway/<mission>/*`. Resolved once at `MultiwayRuntime::from_env` construction (like `NIT_PLANNER_LEGACY`) so a mid-mission env change can't flip behaviour. The `=0` branch is byte-identical to today — `@multiway …` flows to normal chat dispatch as a literal prompt and no `MultiwayRuntime` runs — and stays in code as the rollback path mirroring `NIT_CLAUDE_POOL=0` / `NIT_PLANNER_LEGACY=1`. v1 is Claude-only and single-pane; the fork width `k` (default 3) is clamped by the effective swarm ceiling. Phase 6 (the `@multiway-graph` / `Ctrl+Shift+M` graph view) and Phase 7 (the `mode=multiway` modifier on `@shadow` / `@swarm` / `@all`) add **no new env var** — both stay under this flag. See `docs/MULTIWAY.md`. |
-| `NIT_MULTIWAY_GATES` | unset (auto-detect) | Override the multiway value-gate commands (only meaningful when `NIT_MULTIWAY=1`). **Unset** → auto-detect the gate bundle from each worktree (`rust-ci`/`node-ci`/`python-ci`/`go-ci`), byte-identical to today (`GenomeValuer::for_tree`). **Set** to a `;`-separated list of commands → those *replace* the auto-detected bundle for the valuer; each command is whitespace argv-split and spawned directly in the per-node worktree with **no shell**, and **all must pass** for a node to be viable (`GenomeValuer::new`). **Empty** (`NIT_MULTIWAY_GATES=`) → no gates, genome-only valuation — the operator's explicit opt-in to fail-open. Point the gate at a runner that resolves deps in a clean tree, e.g. `NIT_MULTIWAY_GATES="uv run pytest -q"`. Resolved once at `MultiwayRuntime::from_env` construction (like `NIT_MULTIWAY`) so a mid-mission env change can't flip behaviour. See `docs/MULTIWAY.md` (Phase 8). |
+| `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Log file path. |
+| `NIT_NO_VERSION_CHECK` | unset | `1` mutes the launch-time update prompt. |
+| `NIT_TUI_FPS` | `60` | Redraw cap for both event loops, clamped to `15..=120`. Read once at start. |
+| `NIT_ASCII_FALLBACK` | unset | ASCII glyphs instead of Unicode in the agent ops UI. |
+| `NIT_ROSTER_NO_TRUNCATE` | unset | `1` shows every clone in the roster, missions, and chat breather. |
+| `NIT_CLAUDE_POOL` | `0` | `1` enables the warm pool of long-lived `claude -p --input-format stream-json` workers. Only plain turns use it; integrators, resumed sessions, and custom `--effort` turns cold-spawn. The `0` path stays as the rollback. |
+| `NIT_CLAUDE_POOL_SIZE` | `clamp(effective_max_swarm_size / 4, 2..=8)` | Pool worker cap. Each parked worker holds 4 fds, so the swarm ceiling drops by this much. Multipane users with N panes should set at least N. |
+| `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | `900` | Kills a Claude turn that has produced no stream-json for N seconds and recovers the last message. Only fires on turns that have not used a write tool. `0` disables. |
+| `NIT_SCOPE_WALK_TIMEOUT_MS` | `200` | How long chat dispatch waits for the background scope walk before sending empty `scope_files`. `0` skips the walk. |
+| `NIT_PLANNER_LEGACY` | unset | Truthy disables the plan validator and repair loop (`swarm/validator.rs`, `repair.rs`). Read once when `SwarmRuntime` is built. |
+| `NIT_PROMPT_TIERS` | enabled | Role-based prompt byte ceilings with three-stage truncation (`swarm/budgets.rs`). `0` / `false` / `no` / `off` disables. Ceilings: integrate 480K, judge 320K, research 240K, propose 160K, review 120K, test 96K, default 96K. Per mission: `@swarm budget=ROLE:N` (`k` suffix allowed). |
+| `NIT_PROMPT_BUDGET_<ROLE>` | per role | Byte ceiling override for `INTEGRATE`, `JUDGE`, `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, or `DEFAULT`. Decimal bytes only. |
+| `NIT_STRICT_CHECKLIST` | unset | `1` makes a missed checklist file on an integrate turn emit a Warning signal and re-dispatch, instead of an Info diag. |
+| `NIT_NO_COMPILE_GATE` | unset | Skips the `cargo check` nit runs on each crate an integrator touched (`app/compile_gate.rs`). |
+| `NIT_MULTIWAY` | `0` | `1` enables the multiway engine, `@multiway`, `mode=multiway`, the graph view, and the roster controls. Read once in `MultiwayRuntime::from_env`. Claude-only, single-pane. See `docs/MULTIWAY.md`. |
+| `NIT_MULTIWAY_GATES` | unset | Unset: auto-detect the gate bundle per worktree. Set: `;`-separated commands that replace it (argv-split, no shell, all must pass). Empty: no gates, genome-only. |
+| `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for a Codex MCP turn. `0` or unset means no limit. |
+| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for a Codex MCP turn, for example `600`. |
+| `NIT_INTAKE_DISABLED` | unset | `1` turns the intake agent off. Read on every dispatch. |
+| `NIT_SNAPSHOT_QUEUE` | `64` | Snapshot writer channel capacity. |
+| `NIT_SNAPSHOT_DEBUG` | unset | Verbose snapshot logging to stderr. |
+| `NIT_SNAPSHOT_CYCLE` | unset | Force a snapshot when an attractor cycle is found. |
+| `NIT_GOL_STACK_MB` | `256` | Stack size for Game of Life worker threads. |
+| `NIT_GOL_IO_STACK_MB` | `256` | Stack size for snapshot-stress I/O threads. Falls back to `NIT_GOL_STACK_MB`. |
+| `NIT_GAMES_DISABLE_METAL` | unset | Forces the games kernel onto the CPU path. |
 
 ## Swarm size limits
 
-Operator-facing ceiling table + soft advisories live in `docs/SWARM.md` "Static and effective ceilings". Contributor references:
+The user-facing ceiling table is in `docs/SWARM.md` under "Static and effective ceilings".
 
 - Static cap: `MAX_SWARM_SIZE = 256` (`crates/nit-tui/src/swarm/constants.rs`).
-- Effective cap: `min(MAX_SWARM_SIZE, max(1, (fd_limit - 32) / 4))` —
-  `compute_effective_max_swarm_size` in `crates/nit-tui/src/swarm/limits.rs`
-  (each in-flight Codex/Claude turn opens 4 fds). macOS default `ulimit -n 256`
-  → **56 agents**; bump with `ulimit -n 4096` and restart.
-- `NIT_CLAUDE_POOL=1` parks `default_claude_pool_size()` workers, each holding 4
-  fds, so the effective ceiling drops by the pool size (56 → 48 on macOS default).
-- Bulk proposers cap at `BULK_PRACTICAL_MAX = 12` (per-dep budget collapses past that).
+- Effective cap: `min(MAX_SWARM_SIZE, max(1, (fd_limit - 32) / 4))`, from
+  `compute_effective_max_swarm_size` in `crates/nit-tui/src/swarm/limits.rs`. Each
+  in-flight turn opens 4 fds. The macOS default `ulimit -n 256` gives 56 agents; run
+  `ulimit -n 4096` and restart to lift it.
+- `NIT_CLAUDE_POOL=1` parks `default_claude_pool_size()` workers at 4 fds each, so the
+  ceiling drops by the pool size (56 to 48 on the macOS default).
+- Bulk proposers cap at `BULK_PRACTICAL_MAX = 12`.
 
-## Agent commands (in Agent Chat)
+## Agent chat commands
 
-- `@all <prompt>` — fan-out to multiple agents (Codex and Claude)
-- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow
-- `@shadow <prompt>` — single-agent dispatch with hidden propose/judge/review support agents; auto-enables for heavy prompts when no prefix is present (see `docs/SHADOWS.md`)
-- `@multiway [mood=explore/balanced/exploit] [k=N] <prompt>` — best-first DAG search over isolated git worktrees (genome+gates value heuristic, emergent backtrack). **Gated behind `NIT_MULTIWAY=1`** (off by default); when off the prompt dispatches as ordinary chat. See `docs/MULTIWAY.md`.
-- `mode=multiway` — modifier on `@shadow` / `@swarm` / `@all` (and bare chat) that routes that command into the multiway engine instead of its default backend: `@shadow mode=multiway` → `k=2` balanced search (shadow judge = merge oracle); `@swarm [N] [template=lab|parallel|bulk] mode=multiway` → `N`/`template` map to `k`/`mood` (`parallel`/`bulk` → explore, `lab` → balanced); `@all mode=multiway` → one wide expansion with `k` = the fan-out count, value-ranked. **Strictly additive**: without the token (or with `NIT_MULTIWAY` off) the command is byte-identical to its default behaviour. Also gated behind `NIT_MULTIWAY=1`. See `docs/MULTIWAY.md`.
-- `@multiway-graph` — render the current multiway search DAG to a Graphviz image and open it in the OS viewer (saves the `.dot` and surfaces its path when graphviz is absent). The `Ctrl+Shift+M` key (or the `@multiway-popup` command) toggles a live in-TUI popup of the search tree (auto-opens when a search starts; see `docs/KEYBINDINGS.md`). Both gated behind `NIT_MULTIWAY=1`.
-- `@new <prompt>` — spawn fresh-context clone when agent is busy
-- `@queue` / `@q` — legacy alias for queued prompt (now same as default queueing)
-- `/abort` (or `@abort`) — abort the active swarm mission. `/abort all` cancels every running swarm + clears both runner queues. `/abort <agent-id>` is a surgical strike that kills one agent's in-flight + queued turns. See `docs/SWARM.md` "Aborting a swarm".
+- `@all <prompt>`: same prompt to several agents.
+- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>`: orchestrated mission. See `docs/SWARM.md`.
+- `@shadow <prompt>`: one agent with hidden propose, judge, and review support. Auto-enables for heavy prompts. See `docs/SHADOWS.md`.
+- `@multiway [mood=explore|balanced|exploit] [k=N] <prompt>`: best-first search over git worktrees. Needs `NIT_MULTIWAY=1`; otherwise it dispatches as plain chat. See `docs/MULTIWAY.md`.
+- `mode=multiway`: modifier on `@shadow`, `@swarm`, `@all`, and bare chat that routes the command into the multiway engine (`@shadow` gives `k=2` balanced; `@swarm` maps `N` and `template` to `k` and `mood`; `@all` gives one wide expansion). Without the token, or with the flag off, the command is unchanged. Also needs `NIT_MULTIWAY=1`.
+- `@multiway-graph`: render the current search DAG with Graphviz and open it. `Ctrl+Shift+M` or `@multiway-popup` toggles the live popup. Both need `NIT_MULTIWAY=1`.
+- `@new <prompt>`: fresh-context clone when the agent is busy.
+- `@queue` / `@q`: explicit queue (same as the default queueing).
+- `/abort` (or `@abort`): abort the active swarm mission. `/abort all` cancels every mission and clears both runner queues. `/abort <agent-id>` kills one agent's in-flight and queued turns. See `docs/SWARM.md` "Aborting a swarm".
 
 ## Multipane mode
 
-`nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid
-of N independent chat panes (default 8, range 1..=32; grid is
-`ceil(sqrt(N))` columns × `ceil(N / cols)` rows), each a self-contained
-chat session anchored at its own working directory. `--backend` is
-optional: omit it for a per-pane roster picker, name a family
-(`claude` / `codex`) to filter the per-pane roster, or name a specific
-lane id to pre-pick every pane. Per-pane agent ids use the form
-`<base>#mp-pane-NN` so they coexist with `#swarm-` and `#chat-clone-`
-conventions. Editor / agent ops / visualizer panes are unavailable;
-only chat dispatch is wired.
+`nit multipane [--backend <model>] [--panes N] [--cwd PATH] [--terminal-command CMD ...]`
+opens N independent chat panes (default 8, range `1..=32`, grid `ceil(sqrt(N))` columns).
+`--backend` is optional: omit it for a per-pane picker, name a family (`claude` / `codex`)
+to filter the picker, or name a lane id to pre-pick every pane. `--terminal-command`
+takes exactly one command per pane and starts that pane in its terminal. Per-pane agent
+ids are `<base>#mp-pane-NN`. Only chat dispatch is wired; editor, agent ops, and
+visualizer panes are unavailable.
 
-Chat-pane parity: every pane runs the canonical
-`app::chat_input::submit_chat_input_and_dispatch` via a Lens-B
-alias-and-restore wrapper in `multipane::dispatch::with_pane_aliased`,
-so `@swarm` / `@shadow` / `@all` / `@new` / `@queue` / `@q` /
-`/abort` / queueing / broadcast / swarm-followup re-activation all
-work per pane. Operator prompts land in `state.agents.messages`
-tagged with the pane's `mission_id`, and `agent_console_view::render_pane`
-renders inline-breather + agent-table rows scoped to the pane.
-
-Keymap (focus cycling, abort, roster revert): see `docs/KEYBINDINGS.md`
-"Multipane mode". Per-pane sessions persist to
-`<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and on
-focus change (debounced ≤ 1 write/sec); `chat_input` is capped at 4 KB; a
-"fresh" Ctrl+Q with no prior file drops the session instead of writing an
-empty layout. See `docs/MULTIPANE.md` for the full spec.
+Every pane runs the standard `app::chat_input::submit_chat_input_and_dispatch` through
+the alias-and-restore wrapper `multipane::dispatch::with_pane_aliased`, so every chat
+command works per pane. Prompts land in `state.agents.messages` tagged with the pane's
+`mission_id`, and `agent_console_view::render_pane` draws the pane. Sessions persist to
+`<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and on focus change
+(at most one write per second); `chat_input` is capped at 4 KB. Keys are in
+`docs/KEYBINDINGS.md` under "Multipane mode"; the spec is `docs/MULTIPANE.md`.
 
 ## Aborting in-flight work
 
-Operator-facing triggers + semantics (the 5-trigger table, what abort does, current-mission resolution) live in `docs/SWARM.md` "Aborting a swarm". Wiring, for contributors:
+User-facing triggers and behaviour are in `docs/SWARM.md` under "Aborting a swarm". Wiring:
 
-- All triggers route through `chat_input::handle_abort`: `/abort` parsing in
-  `app/chat_input.rs::parse_abort_command`; Ctrl+C and `x` (Missions tab) in
-  `app/agent_station.rs`; Esc-Esc via `chat_input::record_chat_esc_press`
-  (thread-local).
-- The swarm runtime moves the run to `completed_runs` (`report_status = "ABORTED"`),
-  drains queued turns, and pushes a `SYSTEM_ALERT_KIND` message. The runner-side
-  `CancelTurn { agent_id }` sets the per-turn cancel `AtomicBool`; the worker thread
-  sees it within ~50ms and calls `child.kill()`.
+- All triggers go through `chat_input::handle_abort`. `/abort` parsing is
+  `app/chat_input.rs::parse_abort_command`; Ctrl+C and `x` (Missions tab) live in
+  `app/agent_station.rs`; Esc-Esc uses `chat_input::record_chat_esc_press` (thread-local).
+- The swarm runtime moves the run to `completed_runs` with `report_status = "ABORTED"`,
+  drains queued turns, and pushes a `SYSTEM_ALERT_KIND` message. `CancelTurn { agent_id }`
+  sets the per-turn cancel flag; the worker thread sees it within about 50 ms and kills
+  the child.
 - Operator cancels ride the same `TurnFailed` event but carry the
-  `OPERATOR_CANCEL_TURN_MESSAGE` sentinel (`nit-core::agent_bus`), routing to the soft
-  path: `AgentStatus::Idle` (not Error), no alert/signal, Info-level diag, no LAB→WARN
-  promotion.
+  `OPERATOR_CANCEL_TURN_MESSAGE` sentinel (`nit-core::agent_bus`), which takes the soft
+  path: `AgentStatus::Idle`, no alert or signal, an Info diag, no LAB to WARN promotion.

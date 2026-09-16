@@ -1,284 +1,222 @@
 # Smoke Test / Feature Tour
 
-This doc is a practical checklist: run these steps and compare the expected behavior.
-It's meant for quick confidence after changes to UI, commands, or engine wiring.
+A checklist for quick confidence after changes to the UI, commands, or engine
+wiring. Run each step and compare what you see with the "Expect" line. The
+full key list is in `docs/KEYBINDINGS.md`.
 
 ## Build + CI Checks
 
 - Format: `just fmt`
-  - Expect: clean run; no formatting diffs.
+  - Expect: clean run, no formatting diffs.
 - Lint: `just clippy`
   - Expect: success with `-D warnings` (no warnings).
 - Tests: `just test`
   - Expect: all tests pass.
 - Build: `cargo build`
   - Expect: clean compile.
-- Preflight (one-shot): `scripts/healthcheck.sh` (add `--deep` for clippy + tests)
+- Preflight (one shot): `scripts/healthcheck.sh` (add `--deep` for clippy and tests)
   - Expect: every check labelled `[green] pass`; exit code 0.
 
 ## Core TUI (Applies To All Labs)
 
-- Launch:
-  - `cargo run --`
-  - `cargo run -- path/to/file`
-  - `cargo run -- .`
-  - Expect: a multi-pane editor TUI (Editor/Notes/Logs + right-side panes).
-  - Expect: with no args or a directory target, NITTree opens in the Editor pane (rooted at the cwd/target dir).
+- Launch: `cargo run --`, `cargo run -- path/to/file`, or `cargo run -- .`
+  - Expect: a multi-pane editor TUI (Editor / Notes / Logs plus right-side panes).
+  - Expect: with no args or a directory target, NITTree opens in the Editor pane, rooted at the cwd or target dir.
 - NITTree:
-  - Toggle:
-    - `Ctrl+T` or `:tree`
-    - Expect: tree opens/closes as an Editor-pane overlay (editor buffer stays intact under it).
-  - Navigation:
-    - `j/k` or `Up/Down`, `PageUp/PageDown`, `Home/End`
-    - Expect: selection stays visible; directories auto-expand along the selected path and auto-collapse when you leave.
-  - Open:
-    - `Enter` on a file
-    - Expect: file loads into the editor buffer and the tree closes.
-  - Filters:
-    - `.` toggles dotfiles; `r` refreshes; `.git` never appears.
-    - Add an entry to `.gitignore`, refresh, and expect ignored files/dirs to disappear.
+  - Toggle: `Ctrl+T` or `:tree`
+    - Expect: the tree opens and closes as an Editor-pane overlay. The editor buffer stays intact under it.
+  - Navigate: `j/k` or `Up/Down`, `PageUp/PageDown`, `Home/End`
+    - Expect: the selection stays visible. Directories auto-expand along the selected path and auto-collapse when you leave.
+  - Open: `Enter` on a file
+    - Expect: the file loads into the editor buffer and the tree closes.
+  - Filters: `.` toggles dotfiles; `r` refreshes; `.git` never appears.
+    - Add an entry to `.gitignore` and refresh. Expect: the ignored files and dirs disappear.
 - Fuzzy search:
-  - File search:
-    - `Ctrl+P` (or `:find`)
-    - Expect: centered popup with FILES mode, query prompt, and a scrolling file list.
-    - Type a few characters; expect: results filter quickly and selection stays visible.
-    - `Enter` on a result; expect: file opens in editor and popup closes.
-  - Content search:
-    - `Ctrl+F` (or `:grep`)
-    - Type a query (e.g. `fn main`); expect: matches stream in as they are found.
-    - Move selection; expect: preview updates and highlights the match line.
-    - `Enter` on a match; expect: file opens and cursor jumps to the matched line/col.
-  - Gitignore:
-    - Add an entry to `.gitignore`, re-open search and press `Ctrl+R` (or `F5`); expect: ignored paths disappear (unless `F3`/`Ctrl+G` shows ignored).
-- Pane focus:
-  - `Tab` / `Shift+Tab`
-  - `Ctrl+H/J/K/L`
-  - Expect: focus moves between panes (border/selection changes).
-- Help overlay:
-  - `F1` (any time) or `?` (Normal mode)
-  - Expect: help popup with keybinds and `:` commands.
-- Command prompt:
-  - `:` (Normal mode)
-  - Expect: a prompt line; Enter executes; status/logs show results.
-  - Try `:help` or `:commands`; expect: help popup opens.
-  - Try `:q`; expect: quit confirmation if dirty, otherwise app exits.
-- Quit confirmation:
-  - Make an edit, then `Ctrl+Q`
-  - Expect: confirmation prompt; `Y` quits, `N` cancels.
-- Save:
-  - `Ctrl+S`
-  - Expect: dirty indicator clears; file writes to disk.
-- Debug mode:
-  - `Ctrl+B`
-  - Expect: debug information appears (and toggles back off).
+  - File search: `Ctrl+P` (or `:find`)
+    - Expect: a centered popup in FILES mode with a query prompt and a scrolling file list.
+    - Type a few characters. Expect: results filter quickly and the selection stays visible.
+    - `Enter` on a result. Expect: the file opens in the editor and the popup closes.
+  - Content search: `Ctrl+F` (or `:grep`)
+    - Type a query such as `fn main`. Expect: matches stream in as they are found.
+    - Move the selection. Expect: the preview updates and highlights the match line.
+    - `Enter` on a match. Expect: the file opens and the cursor jumps to the matched line and column.
+  - Gitignore: add an entry to `.gitignore`, reopen search, and press `Ctrl+R` (or `F5`).
+    - Expect: ignored paths disappear, unless `F3` / `Ctrl+G` shows ignored files.
+- Pane focus: `Tab` / `Shift+Tab`, `Ctrl+H/J/K/L`
+  - Expect: focus moves between panes. The border or selection changes.
+- Help overlay: `F1` (any time) or `?` (Normal mode)
+  - Expect: a help popup with keybinds and `:` commands.
+- Command prompt: `:` (Normal mode)
+  - Expect: a prompt line. Enter runs the command; status and logs show the result.
+  - Try `:help` or `:commands`. Expect: the help popup opens.
+  - Try `:q`. Expect: a quit confirmation if dirty, otherwise the app exits.
+- Quit confirmation: make an edit, then `Ctrl+Q`
+  - Expect: a confirmation prompt. `Y` quits, `N` cancels.
+- Save: `Ctrl+S`
+  - Expect: the dirty indicator clears and the file is written to disk.
+- Debug mode: `Ctrl+B`
+  - Expect: debug information appears, and toggles off again.
 
 ## Agent Station (Codex/Claude/MCP)
 
 - Preconditions:
-  - `codex` installed and accessible on `$PATH` (for `--agents codex`)
-  - `~/.codex/models_cache.json` present (for Codex roster seeding)
-  - `claude` installed and accessible on `$PATH` (for `--agents claude`)
-- Launch with Codex lanes:
-  - `cargo run -- --agents codex`
-  - Expect: Agent Ops roster populated with Codex models.
-- Verify MCP transport (default runtime):
-  - In Agent Ops: switch to the MCP tab.
-  - Expect: status transitions to CONNECTED and endpoint shows `stdio://...` (backed by `codex mcp-server`).
-  - Press `x` (stop), `s` (start), `r` (reconnect); expect status updates accordingly.
-  - Note: `r` preserves saved Codex thread ids for continuations; `x` clears them, so the next prompt starts a new thread.
-- Verify a turn over MCP:
-  - Focus Agent Chat (from Agent Ops: `Enter`).
-  - Send a short prompt; expect: stage updates while running and the thread shows `done (see ARTIFACTS)` when finished.
-  - Expect: the full formatted reply is available in Agent Ops → ARTIFACTS (open the REPLY card).
-- Verify parallel turns (multi-agent):
+  - `codex` installed and on `$PATH` (for `--agents codex`)
+  - `~/.codex/models_cache.json` present (seeds the Codex roster)
+  - `claude` installed and on `$PATH` (for `--agents claude`)
+- Launch with Codex lanes: `cargo run -- --agents codex`
+  - Expect: the Agent Ops roster lists Codex models.
+- MCP transport (default runtime):
+  - In Agent Ops, switch to the MCP tab.
+  - Expect: status becomes CONNECTED and the endpoint shows `stdio://...`, backed by `codex mcp-server`.
+  - Press `x` (stop), `s` (start), `r` (reconnect). Expect: the status follows each press.
+  - `r` keeps saved Codex thread ids for continuations. `x` clears them, so the next prompt starts a new thread.
+- A turn over MCP:
+  - Focus Agent Chat (`Enter` from Agent Ops).
+  - Send a short prompt. Expect: stage updates while it runs, then `done (see ARTIFACTS)` in the thread.
+  - Expect: the full formatted reply in Agent Ops, ARTIFACTS tab (open the REPLY card).
+- Parallel turns (multi-agent):
   - Launch with `cargo run -- --agents codex --codex-max-parallel-turns 2`.
   - In Agent Ops (Roster): select a model, `Enter` to Agent Chat, send a prompt.
-  - While the first turn is running: return to Agent Ops, select a different model, `Enter`, send another prompt.
-  - Expect: both models show `RUNNING` in the roster and Agent Chat shows a multi-agent “Working” table.
-  - Expect: each agent finishes independently (thread shows `done (see ARTIFACTS)` per agent); full outputs are in Agent Ops → ARTIFACTS.
-  - Optional: create a mission (`n` in Agent Ops), then in Agent Chat send `@all <prompt>` to broadcast to the mission’s assigned Codex agents.
-- Verify `@swarm` orchestration (task splitting + synthesis):
-  - In Agent Chat (any Codex or Claude model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
-  - Expect: a new mission is created (Missions tab shows `SWM yes`) and the planner runs first (phase `PLAN`).
-  - Expect: during planning, Agent Ops → DAG shows `Planning: waiting for planner output`.
-  - Expect: after the planner returns a JSON plan, Agent Ops → DAG shows task cards (multi-line, wraps instead of `...`) with accurate `Pending` vs `Queued` vs `Skipped` states.
-  - Expect: Agent Chat continues to show the compact “Working/Queued” table; swarm metadata is appended below it (template/integrator/verifier/gates).
-  - Expect: tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`), with some tasks queued until their deps finish.
-  - Expect: when all task agents finish, nit runs a verifier turn (phase `VERIFY`, status `VERIFY`) to execute a built-in gate bundle when detected.
-  - Expect: per-gate outcomes are visible in Agent Ops → DAG, and include PASS/FAIL (and SKIP when reported).
-  - Expect: after verification completes, the planner runs a synthesis turn (status `SYNTH`) and the mission status becomes:
-    - `DONE` when gates pass (or no gates were detected)
+  - While it runs: return to Agent Ops, select a different model, `Enter`, send another prompt.
+  - Expect: both models show `RUNNING` in the roster and Agent Chat shows a multi-agent "Working" table.
+  - Expect: each agent finishes on its own, with `done (see ARTIFACTS)` per agent. Full outputs are in Agent Ops, ARTIFACTS tab.
+  - Optional: create a mission (`n` in Agent Ops), then send `@all <prompt>` in Agent Chat to broadcast to the mission's assigned Codex agents.
+- `@swarm` orchestration (task splitting and synthesis):
+  - In Agent Chat, with any Codex or Claude model selected, send `@swarm 4 template=lab <prompt>`. `lab` is the default, so `template=...` is optional.
+  - Expect: a new mission (the Missions tab shows `SWM yes`), and the planner runs first (phase `PLAN`).
+  - Expect: during planning, Agent Ops DAG tab shows `Planning: waiting for planner output`.
+  - Expect: after the planner returns a JSON plan, the DAG tab shows multi-line task cards (they wrap instead of `...`) with correct `Pending`, `Queued`, and `Skipped` states.
+  - Expect: Agent Chat keeps the compact "Working/Queued" table, with swarm metadata below it (template, integrator, verifier, gates).
+  - Expect: tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`). Some tasks wait until their deps finish.
+  - Expect: when all task agents finish, nit runs a verifier turn (phase `VERIFY`, status `VERIFY`) that runs a built-in gate bundle when it detects one.
+  - Expect: per-gate outcomes in the DAG tab, as PASS / FAIL (and SKIP when reported).
+  - Expect: after verification, the planner runs a synthesis turn (status `SYNTH`) and the mission ends as:
+    - `DONE` when gates pass, or no gates were detected
     - `FAILED` when gates ran and failed
-    - `ERROR` when verification errored (e.g., missing/invalid gate report JSON)
-  - Template `bulk` sanity:
+    - `ERROR` when verification errored, for example a missing or invalid gate report JSON
+  - Template `bulk`:
     - Send `@swarm 5 template=bulk <prompt>`.
-    - Expect: multiple “propose” tasks run first (parallel), then a “judge” task runs, then an integrator task (`writes=true`) runs before VERIFY/SYNTH.
-    - Expect: Agent Ops auto-switches to the DAG tab at swarm start for bulk.
-  - Bulk roster roles sanity:
-    - In Agent Ops → Roster, select swarm template `bulk` (press `3`).
-    - Expand a model row; expect a `Size` branch and a `Role` branch.
-    - Pick `Role → integrate` for a non-planner model.
-    - Launch a bulk swarm (`@swarm 5 template=bulk <prompt>` or implicit bulk).
-    - Expect: swarm metadata shows the chosen model as the integrator and the `integrate` task is assigned to it.
-  - Priority roster hint sanity:
-    - In Agent Ops → Roster, mark one Codex model as priority (`[x]`) via Space (on the model row) or mouse click.
+    - Expect: several "propose" tasks run first in parallel, then a "judge" task, then an integrator task (`writes=true`) before VERIFY / SYNTH.
+    - Expect: Agent Ops switches to the DAG tab by itself when a bulk swarm starts.
+  - Bulk roster roles:
+    - In Agent Ops Roster, select the `bulk` template (press `3`).
+    - Expand a model row. Expect: a `Size` branch and a `Role` branch.
+    - Under `Role`, pick `integrate` for a non-planner model.
+    - Launch a bulk swarm (`@swarm 5 template=bulk <prompt>`, or implicit bulk).
+    - Expect: swarm metadata names that model as the integrator, and the `integrate` task goes to it.
+  - Priority roster hint:
+    - In Agent Ops Roster, mark one Codex model as priority (`[x]`) with Space on the model row or a mouse click.
     - Launch a `parallel` or `bulk` swarm with a limited size (`@swarm 4 template=parallel <prompt>`).
-    - Expect: the created swarm mission includes the priority model among the selected agents (especially if more models exist than the swarm size).
-    - Expect: the planner prompt includes a “Priority agents” section listing the selected model.
-  - Implicit bulk launch sanity (no `@swarm`):
-    - In Agent Ops → Roster, select swarm template `bulk` (press `3`).
-    - In Agent Chat, send a plain prompt (e.g. `do a quick repo health check and suggest next steps`).
-    - Expect: swarm starts as if `@swarm template=bulk ...` was used.
-  - Deadlock sanity (cyclic plan):
-    - If the planner returns a cyclic plan or unknown deps under the default strict DAG mode, expect a `PLAN error` explaining the invalid DAG and the mission to stop before `VERIFY`/`SYNTH` with status `FAILED`.
-  - Structured artifacts persistence sanity:
-    - Have a task emit a `swarm_artifacts` JSON block (files/diffs/commands/risks/notes).
-    - Expect the selected mission to show task artifacts in `Agent Ops → Artifacts`.
-    - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`, `gates/output.txt`, `gates/verify.md`).
-  - Mission focus sanity:
+    - Expect: the swarm mission includes the priority model, even when more models exist than the swarm size.
+    - Expect: the planner prompt has a "Priority agents" section listing that model.
+  - Implicit bulk launch (no `@swarm`):
+    - In Agent Ops Roster, select the `bulk` template (press `3`).
+    - In Agent Chat, send a plain prompt such as `do a quick repo health check and suggest next steps`.
+    - Expect: the swarm starts as if you had typed `@swarm template=bulk ...`.
+  - Deadlock (cyclic plan):
+    - If the planner returns a cyclic plan or unknown deps under the default strict DAG mode, expect a `PLAN error` that explains the invalid DAG. The mission stops before `VERIFY` / `SYNTH` with status `FAILED`.
+  - Structured artifact persistence:
+    - Have a task emit a `swarm_artifacts` JSON block (files, diffs, commands, risks, notes).
+    - Expect: the selected mission shows task artifacts in Agent Ops, ARTIFACTS tab.
+    - Expect: files under `.nit/swarm/<mission>/`: `run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, and optionally `gates/report.json`, `gates/output.txt`, `gates/verify.md`.
+  - Mission focus:
     - Send `@swarm template=lab mission=research <prompt>`.
-    - Expect: mission classified as `research`; research roles allowed in the plan.
+    - Expect: the mission is classified `research`, and research roles are allowed in the plan.
     - Send `@swarm template=lab mission=computational-research <prompt>`.
-    - Expect: mission classified as `computational-research`; both research and computational-research roles allowed.
-  - Gate bundle override sanity:
-    - Add `.nit/config.toml` with:
-      - `[swarm.gates]`
-      - `default = "none"` (or `rust-ci`/`node-ci`/`python-ci`/`go-ci`).
-    - Expect swarm metadata and VERIFY behavior to follow the override.
-- Verify Claude agent:
+    - Expect: the mission is classified `computational-research`, and both research and computational-research roles are allowed.
+  - Gate bundle override:
+    - Add `.nit/config.toml` with `[swarm.gates]` and `default = "none"` (or `rust-ci` / `node-ci` / `python-ci` / `go-ci`).
+    - Expect: swarm metadata and VERIFY follow the override.
+- Claude agent:
   - Launch with `cargo run -- --agents claude`.
-  - Expect: Agent Ops roster populated with Claude models (probed via `claude models --json`).
-  - Focus Agent Chat, send a short prompt.
-  - Expect: stage updates while running; the thread shows `done (see ARTIFACTS)` when finished.
-  - Expect: session resumption works across multiple prompts (Claude uses `--resume <session_id>`).
-- Verify `@shadow` pipeline (single-agent propose/judge/review augmentation):
-  - Select a single Codex or Claude agent in Agent Ops → Roster.
-  - In Agent Chat send `@shadow <short prompt>`.
-  - Expect: the "breather" above the chat cycles through `Proposing ...` → `Judging ...` → `Reviewing ...` → `Finalizing ...` before the main agent answers.
-  - Expect: no shadow lanes are visible in the roster or chat — only the main agent's reply shows up at the end.
-  - Auto-shadow sanity: without any `@` prefix, send a prompt longer than 500 chars OR containing a keyword like `refactor` / `rewrite` / `implement`. Expect the same four-stage breather before the final reply.
-  - Suppression sanity: `@swarm` / `@all` / `@new` / `@queue` / `@q` prompts must NOT trigger shadows. Shadows also never run inside an active swarm mission.
-  - Failure fallback: if any shadow turn fails, the main agent is re-dispatched with the unaugmented prompt as a graceful fallback.
-- Verify mixed agents:
-  - Launch with `cargo run -- --agents all` (default).
-  - Expect: roster shows Codex, Claude, and (if detected) Gemini models.
-  - Expect: Gemini models appear in roster but are not actionable (no runtime runner).
-  - Send prompts to both Codex and Claude agents; expect both to work independently.
-- Failure mode sanity:
-  - If Codex is offline/misconfigured, expect MCP state ERROR and details in Agent diagnostics/logs.
-  - If Claude CLI is not on PATH, expect Claude lanes to be absent from roster (no crash).
+  - Expect: the Agent Ops roster lists Claude models, probed with `claude models --json`.
+  - Focus Agent Chat and send a short prompt.
+  - Expect: stage updates while it runs, then `done (see ARTIFACTS)` in the thread.
+  - Expect: the session resumes across prompts (Claude uses `--resume <session_id>`).
+- `@shadow` pipeline (single-agent propose / judge / review):
+  - Select one Codex or Claude agent in Agent Ops Roster.
+  - In Agent Chat, send `@shadow <short prompt>`.
+  - Expect: the "breather" above the chat cycles through `Proposing ...`, `Judging ...`, `Reviewing ...`, and `Finalizing ...` before the main agent answers.
+  - Expect: no shadow lanes in the roster or chat. Only the main agent's reply appears at the end.
+  - Auto-shadow: with no `@` prefix, send a prompt longer than 500 characters, or one that contains a keyword such as `refactor`, `rewrite`, or `implement`. Expect: the same four-stage breather before the final reply.
+  - Suppression: `@swarm`, `@all`, `@new`, `@queue`, and `@q` prompts must not trigger shadows. Shadows never run inside an active swarm mission.
+  - Failure fallback: if any shadow turn fails, nit re-dispatches the main agent with the plain prompt.
+- Mixed agents:
+  - Launch with `cargo run -- --agents all` (the default).
+  - Expect: the roster shows Codex, Claude, and, if detected, Gemini models.
+  - Expect: Gemini models appear but cannot run (no runtime runner).
+  - Send prompts to both Codex and Claude agents. Expect: both work independently.
+- Failure modes:
+  - If Codex is offline or misconfigured, expect MCP state ERROR with details in Agent diagnostics and logs.
+  - If the Claude CLI is not on PATH, expect no Claude lanes in the roster and no crash.
 
 ## Editor + Notes
 
-- Mode switching:
-  - `Esc` -> Normal
-  - `i`/`a`/`o`/`Shift+O` -> Insert
-  - `v` -> Visual
-  - Expect: vim-like modal behavior for movement vs editing.
-- Editing:
-  - Type in Insert mode; use `Backspace`/`Delete`; press `Enter` for newlines.
+- Mode switching: `Esc` to Normal; `i` / `a` / `o` / `Shift+O` to Insert; `v` to Visual
+  - Expect: vim-like modal behaviour for movement versus editing.
+- Editing: type in Insert mode; use `Backspace` / `Delete`; press `Enter` for newlines
   - Expect: stable cursor movement and correct text edits.
-- Selection ops:
-  - Visual mode + `y` (yank), `d` (delete), then `p`/`Shift+P` (paste).
-  - Expect: selection transforms correctly; paste respects line/inline modes.
-- Undo/redo:
-  - `u` (undo), `Shift+R` (redo)
-  - Expect: edits revert/reapply.
-- Syntax highlight:
-  - With Editor focused (not Insert): `Shift+S`
-  - Expect: syntax highlighting toggles on/off (Gate Monitor reflects status).
+- Selection ops: Visual mode plus `y` (yank) or `d` (delete), then `p` / `Shift+P` (paste)
+  - Expect: the selection transforms correctly. Paste respects line and inline modes.
+- Undo / redo: `u` (undo), `Shift+R` (redo)
+  - Expect: edits revert and reapply.
+- Syntax highlight: with the Editor focused and not in Insert mode, `Shift+S`
+  - Expect: highlighting toggles on and off. The Gate Monitor shows the status.
 
 ## GoL Lab (Visualizer + Petri Dish)
 
-- Launch GoL lab:
-  - `cargo run -- gol`
-  - or `cargo run -- --lab gol`
-  - Expect: GoL Visualizer pane active.
-- Open Petri Dish popup:
-  - `Ctrl+Enter`
-  - Expect: GoL simulation popup opens and starts stepping.
-- Pause/step/speed:
-  - `Space` pause/resume
-  - `Enter` steps (when paused)
-  - `+` / `-` adjusts speed
-  - Expect: generation counter behaves as described.
-- Hide/show popup:
-  - `H` hides (sim continues)
-  - `Ctrl+^` shows hidden popup
-  - Expect: popup visibility toggles without stopping the sim.
-- Reseed from code:
-  - In popup: `Ctrl+R`
-  - Expect: seed derived from current editor/scratchpad content; sim restarts on new seed.
-- Rule picker:
-  - In popup: `F2` or `Ctrl+P`
-  - Expect: rule list + custom input; selecting updates active rule.
-- Protocol picker:
-  - In popup: `P`
-  - Expect: protocol picker opens; selecting applies a protocol.
-- Rule search:
-  - In popup: `G` toggles rule search; `A` applies best rule
-  - Expect: leaderboard updates; applying swaps the live rule.
-- Snapshots:
-  - Visualizer: `Ctrl+N` (seed snapshot)
-  - Popup: `S` (sim snapshot)
-  - Expect: snapshot files appear under `gol-snapshots/` in the workspace.
+- Launch: `cargo run -- gol` or `cargo run -- --lab gol`
+  - Expect: the GoL Visualizer pane is active.
+- Open the Petri Dish popup: `Ctrl+Enter`
+  - Expect: the GoL simulation popup opens and starts stepping.
+- Pause / step / speed: `Space` pauses and resumes; `Enter` steps when paused; `+` / `-` changes speed
+  - Expect: the generation counter follows.
+- Hide / show: `H` hides (the sim continues); `Ctrl+^` shows the hidden popup
+  - Expect: visibility toggles without stopping the sim.
+- Reseed from code: in the popup, `Ctrl+R`
+  - Expect: a seed derived from the current editor or scratchpad content. The sim restarts on it.
+- Rule picker: in the popup, `F2` or `Ctrl+P`
+  - Expect: a rule list plus custom input. Selecting updates the active rule.
+- Protocol picker: in the popup, `P`
+  - Expect: the protocol picker opens. Selecting applies a protocol.
+- Rule search: in the popup, `G` toggles rule search and `A` applies the best rule
+  - Expect: the leaderboard updates. Applying swaps the live rule.
+- Snapshots: Visualizer `Ctrl+N` (seed snapshot); popup `S` (sim snapshot)
+  - Expect: snapshot files under `gol-snapshots/` in the workspace.
 
 ## Games Lab (TUI Tournament + Inspector)
 
-- Launch Games lab:
-  - `cargo run -- games`
-  - or `cargo run -- --lab games`
-  - Expect: Games UI is active (reads `games.toml` by default).
-- Run tournament:
-  - `Ctrl+Enter` or `:games run`
-  - Expect: Games tournament popup appears; run output written under `runs/games/...`.
-- Pause/step/speed:
-  - `Space` pause/resume
-  - `Enter` steps one round (when paused)
-  - `+` / `-` adjusts speed
-  - Expect: round counter responds correctly.
-- Hide/show popup:
-  - `H` hides (tournament continues)
-  - `Ctrl+^` shows hidden popup
-- Run browser:
-  - `:games runs`
-  - Expect: list of saved runs; selecting loads a run.
-- Replay:
-  - Load a run, then `:games replay`
-  - Expect: replay selector opens and shows per-match data.
-- Strategy inspector:
-  - `:games strategy` (from loaded run)
-  - `:games strategies all` or `:games strategies config`
-  - Expect: list of strategies is browseable.
-- Strategy inspect (single):
-  - `:games inspect <strategy_id>`
-  - Expect: introspection text + details.
-  - Rule tuple override (one-sided TM):
-    - `:games inspect <id> {rule,states,symbols}`
-    - `:games inspect {rule,states,symbols}`
-    - Expect: inspector shows the generated TM's decoded transitions/metadata.
-- TM simulation:
-  - `:games tm {rule,states,symbols} <input> [steps]`
-  - Expect: TM simulation view opens and displays the trace/summary.
-- History analysis:
-  - Enable history in `games.toml` (e.g. `[history] enabled = true`), run a tournament, then:
-    - `:games analyze`
-  - Expect: analysis outputs written next to the history log (JSON + CSV + NDJSON).
+- Launch: `cargo run -- games` or `cargo run -- --lab games`
+  - Expect: the Games UI is active. It reads `games.toml` by default.
+- Run a tournament: `Ctrl+Enter` or `:games run`
+  - Expect: the tournament popup appears, and run output lands under `runs/games/...`.
+- Pause / step / speed: `Space` pauses and resumes; `Enter` steps one round when paused; `+` / `-` changes speed
+  - Expect: the round counter follows.
+- Hide / show: `H` hides (the tournament continues); `Ctrl+^` shows the hidden popup
+- Run browser: `:games runs`
+  - Expect: a list of saved runs. Selecting one loads it.
+- Replay: load a run, then `:games replay`
+  - Expect: the replay selector opens with per-match data.
+- Strategy inspector: `:games strategy` (from a loaded run), `:games strategies all`, or `:games strategies config`
+  - Expect: a browseable list of strategies.
+- Single strategy: `:games inspect <strategy_id>`
+  - Expect: introspection text and details.
+  - Rule tuple override (one-sided TM): `:games inspect <id> {rule,states,symbols}` or `:games inspect {rule,states,symbols}`
+    - Expect: the inspector shows the generated TM's decoded transitions and metadata.
+- TM simulation: `:games tm {rule,states,symbols} <input> [steps]`
+  - Expect: the TM simulation view opens with a trace and summary.
+- History analysis: enable history in `games.toml` (`[history] enabled = true`), run a tournament, then `:games analyze`
+  - Expect: analysis outputs next to the history log (JSON, CSV, and NDJSON).
 
 ## Games Lab (Headless CLI)
 
-- Headless run:
-  - `cargo run -- games run --config games.toml --out . --format pretty`
-  - Expect: run directory with `run_summary.json` and related outputs.
-- Sweep:
-  - `cargo run -- games sweep --config games.toml --rounds 200,500 --noise 0.0,0.05 --repetitions 1,3`
-  - Expect: multiple runs produced (parameter grid).
-- Enumerate FSMs:
-  - `cargo run -- games enumerate fsm --states 2..4 --out ./generated --canonical --limit 1000`
-  - Expect: NDJSON strategy file(s) produced under `./generated`.
-- Inspect strategy:
-  - `cargo run -- games inspect --config games.toml --id <strategy_id> --format pretty`
-  - Expect: introspection printed to stdout (or `--out <path>`).
-- Export strategy graph:
-  - `cargo run -- games graph --config games.toml --id <strategy_id> --out ./graph.dot`
+- Headless run: `cargo run -- games run --config games.toml --out . --format pretty`
+  - Expect: a run directory with `run_summary.json` and related outputs.
+- Sweep: `cargo run -- games sweep --config games.toml --rounds 200,500 --noise 0.0,0.05 --repetitions 1,3`
+  - Expect: one run per point in the parameter grid.
+- Enumerate FSMs: `cargo run -- games enumerate fsm --states 2..4 --out ./generated --canonical --limit 1000`
+  - Expect: NDJSON strategy files under `./generated`.
+- Inspect a strategy: `cargo run -- games inspect --config games.toml --id <strategy_id> --format pretty`
+  - Expect: introspection on stdout, or in `--out <path>`.
+- Export a strategy graph: `cargo run -- games graph --config games.toml --id <strategy_id> --out ./graph.dot`
   - Expect: DOT (or JSON) written to the output path.

@@ -1,91 +1,72 @@
 # Multipane Mode
 
-> **Status**: shipped. Phase 1–6 are live. Outstanding follow-ups
-> (cross-pane @all-panes broadcast, Ctrl+Q confirm dialog) are tracked
-> as out-of-scope items at the bottom of this document.
+Multipane is a second launch mode. It opens a grid of independent chat panes,
+each with its own working directory and its own agent session, in one
+terminal. Think `tmux` for AI agents. This doc covers the CLI, the pane
+layout, dir search, keys, persistence, and limits, with a short contributor
+section at the end.
 
-## Vision
+![nit multipane mode: sixteen independent agent chat panes in a 4×4 grid](https://nit.tools/multipane.png)
 
-A second launch mode for nit that opens a grid of independent **chat
-panes**, each operating in its own working directory, all backed by a
-single user-chosen agent backend. Editor, agent ops, visualizer, and
-the rest of the standard nit UI are unavailable in this mode — only
-chat dispatch.
+Only chat dispatch works in this mode. There is no editor, file tree, Notes
+pane, Agent Ops dock, or visualizer, and the global keys for those do nothing.
+Exit multipane and run plain `nit` for them. Each pane can also show an
+embedded terminal; see `docs/TERMINAL.md`.
 
-![nit multipane mode — sixteen independent agent chat panes in a 4×4 grid](https://nit.tools/multipane.png)
-
-Use case: drive N concurrent agent sessions across different projects
-from one terminal. Like `tmux` for AI agents.
-
-## Hard requirements (from operator brief)
-
-- **`--backend` is optional**. When supplied (specific lane id or family
-  alias), the chosen backend applies to **every pane** — no per-pane
-  backend override is allowed. When omitted, every pane opens in
-  **roster mode** showing every available backend, and the operator
-  picks per pane independently.
-- Each pane is **its own session** (chat history, mission state, queued
-  turns, in-flight work) anchored at its own **cwd**.
-- Agent dispatches from a pane operate inside that pane's cwd —
-  subprocess `Command::current_dir(pane.cwd)`.
-- A **dir search** at the top of each pane:
-  - Plain text → fuzzy-match subdirectories of `pane.cwd` recursively.
-  - `../<query>` → search children of `pane.cwd`'s parent (one level up).
-  - `../../<query>` → search children of grandparent (two levels up).
-  - … and so on for `../../../`.
-  - Enter / select → switch the pane's cwd to the matched directory.
-- **Search must be fast** — feels instant on directory trees of 10k+
-  entries.
-- Default panes per launch: **8** (4 wide × 2 tall) — fit into a normal
-  terminal. Operator override: `--panes N`.
-- Navigation: **Tab** / **Shift+Tab** to cycle, **mouse click** to
-  focus directly.
-- In multipane mode, **only the chat pane works**. No editor, no agent
-  ops dock, no visualizer. To use those, exit multipane and launch
-  nit normally.
-
-## CLI surface
-
-New subcommand on the existing `clap` enum:
+## CLI
 
 ```bash
 nit multipane                                          # 8 panes, full roster per pane
 nit multipane --panes 4                                # 4 panes, full roster per pane
-nit multipane --backend claude                         # 8 panes, all locked to Claude family
+nit multipane --backend claude                         # 8 panes, all locked to the Claude family
 nit multipane --backend gpt-5 --panes 6                # 3×2 grid, all pre-picked to gpt-5
 nit multipane --backend claude-haiku-4-5 --panes 4     # 4 panes, all pre-picked
 nit multipane --backend claude --panes 8 --cwd /work   # full composition
+nit multipane --panes 2 --terminal-command "htop" --terminal-command "tail -f app.log"
 ```
 
-Note: the operator's shorthand `nit multipane --backend claude 5 --panes 8`
-includes a stray positional `5` that clap rejects. The CLI surface is
-strictly `--backend <id-or-family>` + `--panes <N>` + `--cwd <path>`.
+| Flag | Meaning |
+|---|---|
+| `--panes N` | Number of panes, clamped to 1 to 32. Default 8. |
+| `--backend <id-or-family>` | Backend for every pane. Optional. |
+| `--cwd <path>` | Starting directory for every pane. Default: the current directory. |
+| `--terminal-command <COMMAND>` | Start a pane with its terminal open running this command. Repeatable. |
 
-`--panes` clamps to `[1, 32]`. The grid layout chooses dimensions to
-keep panes roughly square (computed as `ceil(sqrt(N))` columns).
+There are no positional arguments, so `nit multipane --backend claude 5` is
+rejected.
 
-`--backend` accepts either a specific lane id (`claude-haiku-4-5`,
-`gpt-5`, …) or one of four reserved family aliases — `codex`, `claude`,
-`gemini`, `local` — case-insensitive. A specific lane id pre-picks every
-pane (the lane is cloned into `state.agents.agents` as
-`<id>#mp-pane-NN` and the pane lands directly in chat). A family alias
-filters the per-pane roster but leaves panes unselected; the operator
-picks within that family. Omitting `--backend` shows the full roster
-with per-pane independence. Unknown specific ids exit with the available
-ones listed.
+The grid stays roughly square: `ceil(sqrt(N))` columns and `ceil(N / cols)`
+rows. The default 8 panes give a grid 4 wide and 2 tall.
 
-## UX spec
+`--backend` takes a specific lane id such as `claude-haiku-4-5` or `gpt-5`, or
+one of four family aliases: `codex`, `claude`, `gemini`, `local`. Aliases are
+case-insensitive.
 
-### Per-pane layout
+| Form | Effect |
+|---|---|
+| Specific lane id | Every pane is pre-picked. The lane is cloned as `<id>#mp-pane-NN` and the pane opens in chat mode. |
+| Family alias | Each pane's roster shows only that family. You pick per pane. |
+| Omitted | Each pane shows the full roster and picks on its own. |
 
-```
+An unknown specific id exits with the available backends listed. If a family
+alias matches no installed lane, the pane shows "No <family> agents detected —
+install the CLI" instead of exiting.
+
+`--terminal-command` must be given exactly once per pane, in pane order, and
+no command may be empty. Otherwise nit exits with an error. Each pane then
+starts with its terminal open running that command instead of the chat or
+roster view.
+
+## Per-pane layout
+
+```text
 ┌─[pane 0]─ cwd: /Users/me/code/nit ──────────────┐
 │ search:  __                                     │  ← 1-row dir search
 │ ─────────────────────────────────────────────── │
 │ ↳ [haiku] done (see ARTIFACTS)                  │
 │   You: refactor crates/nit-utils/src/lib.rs     │  ← chat thread
-│ ↳ [haiku] Working ...                           │     (existing
-│                                                 │      agent_console_view)
+│ ↳ [haiku] Working ...                           │
+│                                                 │
 │                                                 │
 │ ─────────────────────────────────────────────── │
 │ ↳ /abort · Ctrl+C · Esc Esc                     │  ← hint strip
@@ -95,72 +76,78 @@ ones listed.
 └─────────────────────────────────────────────────┘
 ```
 
-The middle and bottom (chat thread + hint + input box) are the
-**existing** `agent_console_view::render` output, parameterised on a
-per-pane state. Top row is new.
+The chat thread, hint strip, and input box are the standard agent chat view,
+drawn once per pane. The dir search row is specific to multipane.
 
-### Dir search modes
+Each pane is its own session: chat history, mission state, queued turns, and
+in-flight work, all anchored at the pane's cwd. Agents dispatched from a pane
+run inside that cwd. Pane agents get the id `<base>#mp-pane-NN` (zero-padded),
+which keeps them apart from `#chat-clone-` and `#swarm-` ids.
 
-The dir search bar at the top accepts free text. The parser looks at
-the prefix:
+## Dir search
+
+Press `Ctrl+/` to open the dir search in the focused pane. Some terminals,
+including the default macOS Terminal.app, drop `Ctrl+/`; use `F2` there. The
+prefix of the query picks where to search:
 
 | Input | Meaning |
 |---|---|
-| `(empty)` | Show children of cwd (the immediate subdirectories) |
-| `foo` | Recursive fuzzy match of subdirectories under cwd, displayed as `parent/foo/match/` breadcrumbs |
+| (empty) | Show the immediate subdirectories of cwd |
+| `foo` | Recursive fuzzy match under cwd, shown as `parent/foo/match/` breadcrumbs |
 | `../` | Show children of cwd's parent |
-| `../foo` | Recursive fuzzy match under cwd's parent containing "foo" |
+| `../foo` | Recursive fuzzy match under cwd's parent |
 | `../../` | Show children of cwd's grandparent |
-| `../../foo` | Recursive fuzzy match under cwd's grandparent containing "foo" |
-| `/abs/path` | Treat as absolute, match descendants |
+| `../../foo` | Recursive fuzzy match under cwd's grandparent |
+| `/abs/path` | Treat as absolute and match descendants |
 | `~/foo` | Expand `~` and search |
 
-Gitignored bare-name directories (read from the workspace `.gitignore`
-at startup) and the heavyweight build dirs (`node_modules`, `target`,
-`.venv`, `dist`, `build`) are filtered at the walker source so they
-never reach the dropdown.
+Directories named in the workspace `.gitignore` (read once at startup) and the
+build dirs `node_modules`, `target`, `.venv`, `dist`, and `build` never reach
+the list. Dotfiles stay hidden until you press `Alt+f`.
 
-Results render below the search bar as a dynamically sized dropdown
-(3 to 16 rows, sized to fit the pane). Up/Down or Ctrl+J/Ctrl+K move
-the highlight; passing the bottom row scrolls the viewport, and the
-inverse at the top. Right or Ctrl+L expands the highlighted directory
-in place (its children indent one level beneath it); Left or Ctrl+H
-collapses. Enter commits the highlighted entry as the new pane cwd;
-Esc cancels and resumes the chat thread underneath. Home / End jump
-the input cursor to the start / end of the query. Typing more
-characters narrows the list live; the recursive walk runs on a
-background thread, and a fresh keystroke supersedes any in-flight walk
-so the UI never blocks. Length penalty in the fuzzy ranker means a
-short relative path (`nit-tui/`) outranks a deeper match
-(`crates/nit-tui/`); refine with a deeper prefix when needed.
+Results appear in a dropdown of 3 to 16 rows, sized to the pane.
 
-When the user commits a directory, the pane:
-1. Updates `pane.cwd`.
-2. Pushes a system message to the pane: `cwd → /new/path`.
-3. The next `@swarm`/free-text dispatch uses the new cwd.
+| Key | Action |
+|---|---|
+| `Up` / `Down`, `Ctrl+K` / `Ctrl+J` | Move the highlight. The list scrolls past either end. |
+| `Right` / `Ctrl+L` | Expand the highlighted directory in place, indented one level. |
+| `Left` / `Ctrl+H` | Collapse it. |
+| `Home` / `End` | Jump the input cursor to the start or end of the query. |
+| `Alt+f` | Toggle hidden directories such as `.git` and `.cache`. |
+| `Enter` | Set the pane's cwd to the highlighted entry. |
+| `Esc` | Close the search and keep the chat input. A second `Esc` within about 500 ms aborts the pane. |
+| `Tab` / `Shift+Tab` | Switch pane focus and close the search. |
 
-### Focus & input routing
+Typing narrows the list live. The recursive walk runs on a background thread,
+and each new keystroke replaces the walk in flight, so the UI never blocks.
+The ranker penalises length, so `nit-tui/` outranks `crates/nit-tui/`; type a
+deeper prefix when you need the deeper match.
 
-- One pane has focus at any time, drawn with a brighter border.
-- Tab cycles forward, Shift+Tab cycles backward. Tab/Shift+Tab never
-  move the per-pane roster cursor — they only switch which pane has
-  focus.
-- Mouse click anywhere inside a pane focuses it.
-- Only the focused pane receives keyboard input. Background panes
-  still update (turn output streams in, "Working..." breather animates,
-  etc.).
-- `/abort`, `/abort all`, `/abort <agent-id>`, Ctrl+C with empty input,
-  and Esc-Esc within ~500 ms target the focused pane (or every pane,
-  for `all`). Issuing them in a roster-mode pane (no committed
-  selection) emits a one-line "no agent selected — nothing to abort"
-  notice in the pane's chat history rather than a silent drop.
+When you commit a directory, the pane updates its cwd, posts the system
+message `cwd → /new/path`, and the next dispatch uses the new directory.
 
-### Roster mode keymap
+## Focus and input routing
 
-When a pane has no committed selection, the body of the pane renders the
-same tree the Agent OPS Roster tab does:
+- One pane has focus at a time, drawn with a brighter border.
+- `Tab` cycles forward and `Shift+Tab` backward. Neither moves a roster
+  cursor.
+- A mouse click anywhere inside a pane focuses it.
+- Only the focused pane takes keyboard input. Background panes keep updating:
+  turn output streams in and the "Working..." animation runs.
+- `/abort`, `/abort <agent-id>`, `Ctrl+C` with empty input, and `Esc Esc`
+  within about 500 ms target the focused pane. `/abort all` targets every
+  pane. In a pane with no committed agent, these post "no agent selected —
+  nothing to abort" to the pane's chat instead of dropping silently.
+- `Ctrl+Q` quits multipane. There is no confirm dialog; typed prompts are
+  saved to disk (see Persistence).
+- `F1`, or `?` with empty chat input, toggles the help overlay.
 
-```
+## Roster mode
+
+A pane with no committed agent shows the same tree as the Agent Ops Roster
+tab:
+
+```text
  Template:  lab   parallel   bulk
  Mission:   auto   general   research   computational
 
@@ -173,222 +160,62 @@ same tree the Agent OPS Roster tab does:
  ▸ Local
 ```
 
-- The `Template:` and `Mission:` rows control swarm defaults
-  (`state.agents.swarm_default_template` /
-  `state.agents.swarm_default_mission`). Click a word to set it. These
-  writes are global — clicking from one pane affects all panes and the
-  Agent OPS dock.
-- Backend headers expand / collapse per pane. Expansion is purely
-  cursor-driven: at most one backend group is visible at a time
-  (whichever the cursor is on, via `PaneSession.auto_expanded_backend`),
-  and the group collapses the moment the cursor walks off it. Two
-  panes can be on different backends because the cursor is per-pane.
-- Each agent under an expanded backend shows a `↳ Size` branch with one
-  `[x]` checkbox per supported reasoning effort. Toggling sets the
-  effort in the global `codex_selected_reasoning_effort` /
-  `claude_selected_effort` map (matching Agent OPS behaviour).
+- The `Template:` and `Mission:` rows set the pane's swarm defaults. Click a
+  word to set it. Each pane keeps its own choice, seeded from the global
+  defaults at launch.
+- Expansion follows the cursor. Only the backend group under the cursor is
+  open, and it closes when the cursor leaves it. Cursors are per pane, so two
+  panes can show different backends.
+- Each agent under an open backend shows a `↳ Size` branch with one `[x]`
+  checkbox per supported reasoning effort. The choice is per pane and is
+  applied when the pane dispatches.
 
 | Key | Action |
 |---|---|
-| `↑` / `k`, `↓` / `j` | Move the per-pane cursor through selectable rows (Backend, Agent, SizeBranch, SizeLeaf). Template / Mission rows are skipped — they are click-only. |
-| `→` / `l` | Expand the focused row: opens a Backend group, un-collapses an Agent's tree, etc. |
-| `←` / `h` | Collapse: closes a Backend group, hides an Agent's Size leaves. |
-| `PgUp` / `PgDn` | Jump the cursor by a page (8 rows). |
-| `g` / `G` | Jump cursor to the first / last selectable row. |
-| `Space` | Toggle the checkbox under the cursor when it sits on a SizeLeaf. |
-| `Enter` | Commit: Backend → toggle expand; Agent → materialise `<base>#mp-pane-NN` and switch the pane to chat mode; SizeBranch → toggle agent tree collapse; SizeLeaf → toggle the checkbox. |
-| `Tab` / `Shift+Tab` | Cycle focus between panes (never moves the roster cursor). |
-| `Mouse left-click` | Focuses the clicked pane and routes to the row under the cursor: Template/Mission word → set the global default; Backend → toggle expand; Agent → materialise + switch to chat; SizeBranch → toggle tree; SizeLeaf → toggle checkbox. |
-| `Mouse wheel` | Scrolls the pane's roster viewport (`PaneSession.roster_scroll`). |
-| `Ctrl+C`, `Esc Esc` | Emits the no-op "no agent selected — nothing to abort" notice. |
+| `↑` / `k`, `↓` / `j` | Move the cursor through Backend, Agent, SizeBranch, and SizeLeaf rows. Template and Mission rows are click-only. |
+| `→` / `l` | Expand: open a Backend group or an Agent's tree. |
+| `←` / `h` | Collapse: close a Backend group or hide an Agent's Size leaves. |
+| `PgUp` / `PgDn` | Move the cursor by a page (8 rows). |
+| `g` / `G` | Jump to the first or last selectable row. |
+| `Space` | Toggle the checkbox under the cursor on a SizeLeaf. |
+| `Enter` | Backend: toggle expand. Agent: create `<base>#mp-pane-NN` and switch to chat mode. SizeBranch: toggle the tree. SizeLeaf: toggle the checkbox. |
+| `Tab` / `Shift+Tab` | Cycle pane focus. Never moves the cursor. |
+| Mouse left-click | Focus the pane and act on the row under the pointer, as `Enter` does. A Template or Mission word sets the pane default. |
+| Mouse wheel | Scroll the roster. |
+| `Ctrl+C`, `Esc Esc` | Post "no agent selected — nothing to abort". |
 
-When a pane is already in chat mode:
+## Chat mode
+
+Once a pane has an agent, its input works like the standard chat input. It has
+the same editing keys and prompt history on `Up` / `Down`. The same commands
+work too: `@swarm`, `@shadow`, `@new`, `@queue`, `@all`, and `/abort`. See the
+"Multipane mode" section of `docs/KEYBINDINGS.md` for the full list.
 
 | Key | Action |
 |---|---|
-| `Ctrl+R` | Revert the focused pane back to roster mode. Clears `selected_agent_id`, the chat input buffer, and the active mission. The original roster cursor / expansion state are preserved per pane. |
-| `PgUp` / `PgDn` | Scroll the chat thread (`PaneSession.chat_thread_scroll`). The auto-stick-to-bottom default returns when the operator scrolls back to 0. |
-| `Mouse wheel` | Scrolls the focused pane's chat thread. Wheel events on a different pane don't steal focus — the wheel always targets the pane under the cursor. |
+| `Ctrl+R` | Return the pane to roster mode. Clears the selected agent, the chat input, and the active mission. The roster cursor and expansion state are kept. |
+| `PgUp` / `PgDn` | Scroll the chat thread. Scrolling back to the bottom restores auto-stick. |
+| Mouse wheel | Scroll the chat thread of the pane under the pointer. It does not move focus. |
+| `Ctrl+\`, or the `NIT` / `TERM` title pill | Toggle the pane's embedded terminal. See `docs/TERMINAL.md`. |
 
-The four reserved family aliases (`codex`, `claude`, `gemini`, `local`)
-filter the roster to a single backend family. If the filter matches no
-installed lanes (e.g. `--backend gemini` on a host without the Gemini
-CLI), the pane shows a single "No <family> agents detected — install
-the CLI" line instead of crashing or exiting.
+## Persistence
 
-### Disabled features
+nit writes `<state_dir>/multipane/session-<workspace-hash>.json` on `Ctrl+Q`
+and on focus change, at most once per second. The next launch with the same
+pane count reads it back. It restores the focused pane and, per pane, the cwd,
+the chat input (capped at 4 KB), the prompt history, the Template and Mission
+choice, and the selected agent. A selected agent that no longer exists drops
+the pane back to roster mode. UI-only state (help overlay, dir search, roster
+expansion) starts fresh.
 
-In multipane mode:
-- No editor pane, no Notes pane, no file tree, no Agent Ops dock, no
-  visualizer pane.
-- Global keybindings that would have switched focus to those panes
-  are no-ops (or absent).
-- `@swarm` still works inside a pane — it routes to the per-pane agent
-  the same way.
-- `/abort`, Ctrl+C (empty), Esc-Esc still work in the focused pane.
+A fresh `Ctrl+Q`, where no pane has run a mission and no prior file existed,
+removes the file instead of saving an empty layout.
 
-## State model
+## Too-small terminals
 
-### New core types (in `nit-core/src/state/multipane.rs`)
-
-```rust
-pub struct PaneSession {
-    pub pane_id: usize,                       // 0..N-1; stable for the run
-    pub agent_id: String,                     // empty until selection commits
-    pub cwd: PathBuf,                         // working directory for this session
-    pub chat_input: String,
-    pub chat_input_cursor: usize,
-    pub chat_input_selection_anchor: Option<usize>,
-    pub chat_input_scroll: usize,
-    pub chat_prompt_history: Vec<String>,
-    pub chat_prompt_history_pos: Option<usize>,
-    pub dir_search: Option<DirSearchState>,   // Some when search is active
-    pub mission_id: Option<String>,           // current mission anchored to this pane
-    pub roster_cursor: usize,                 // position inside the per-pane roster
-    pub roster_scroll: usize,                 // viewport top row inside the roster body
-    pub auto_expanded_backend: Option<AgentLaneKind>,     // cursor-driven, single-backend latch
-    pub auto_expanded_agent: Option<String>,              // cursor-driven, mirrors the agent row
-    pub roster_collapsed_agent_ids: HashSet<String>,      // pane-local Size/Role collapse
-    pub roster_tree_selected: Option<RosterTreeSelection>, // leaf cursor inside Size branch
-    pub chat_thread_scroll: usize,            // separate from chat_input_scroll
-    pub selected_agent_id: Option<String>,    // None ⇒ render roster picker
-}
-
-pub struct DirSearchState {
-    pub query: String,
-    pub query_cursor: usize,
-    pub results: Vec<PathBuf>,                // populated by dir_search_runner
-    pub selected: usize,
-    pub generation: u64,                      // request-id latch, runner drops stale results
-    pub show_hidden: bool,                    // Alt+f toggle
-    /// Index into the directory tree we're searching in. Computed from
-    /// query prefix (`../` count) at parse time.
-    pub base: PathBuf,
-}
-
-pub struct MultipaneState {
-    pub backend_agent_id: String,             // operator's --backend verbatim (or "")
-    pub panes: Vec<PaneSession>,
-    pub focused: usize,                       // 0..panes.len()-1
-    pub grid_cols: usize,                     // computed at launch
-    pub grid_rows: usize,
-    pub backend_filter: Option<String>,       // family alias / specific id / None
-}
-```
-
-`AppState` gets one new optional field:
-
-```rust
-pub multipane: Option<MultipaneState>,
-```
-
-When `Some`, render the multipane UI; ignore standard panes/widgets.
-When `None` (the default), nit behaves exactly as it does today —
-zero impact on existing flows.
-
-### Why this shape
-
-- **Messages stay in `state.agents.messages`** keyed by `agent_id`, as
-  today. Each pane has a unique agent_id (`<base>#pane-K`), so the
-  message renderer naturally filters per-pane without a duplicate
-  Vec.
-- **Active turns + queues** stay in `state.agents.active_turns` /
-  `queued_*_turns` keyed by agent_id. The runner already supports
-  arbitrary agent_id values; the per-pane suffix is enough.
-- **Mission + swarm state** stays in `SwarmRuntime`. A pane's swarm
-  mission is just a regular swarm mission with the pane's agent_id as
-  planner.
-- **Per-pane state is small** (input buffer, history, search) — fits
-  cleanly in `PaneSession` without restructuring the rest of state.
-
-### Reusing the existing chat renderer
-
-`crates/nit-tui/src/widgets/agent_console_view::render` (in `agent_console_view/mod.rs`) already
-consumes `&AppState` and assumes it's drawing the *one* chat pane.
-We extract a thinner core that takes a `&PaneSession` plus the
-shared `state` for messages — call it `render_pane(...)`. The
-existing `render` becomes a thin wrapper for backward compat
-(non-multipane mode).
-
-## CLI parsing
-
-```rust
-// crates/nit/src/cli/mod.rs
-#[derive(Subcommand, Debug)]
-pub enum Command {
-    Gol { ... },
-    Games { ... },
-    Multipane(MultipaneArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct MultipaneArgs {
-    /// Backend model id (specific lane like `claude-haiku-4-5`) or
-    /// family alias (`codex` / `claude` / `gemini` / `local`). Optional —
-    /// when omitted, every pane opens in roster mode.
-    #[arg(long)]
-    pub backend: Option<String>,
-
-    /// Number of panes to open. Clamped to [1, 32]. Grid is roughly
-    /// square: ceil(sqrt(N)) columns × ceil(N / cols) rows.
-    #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(1..=32))]
-    pub panes: u8,
-
-    /// Starting directory for every pane. Defaults to the current
-    /// working directory.
-    #[arg(long)]
-    pub cwd: Option<PathBuf>,
-}
-```
-
-## Implementation notes
-
-> The original spec carried a six-phase delivery plan plus copy-paste
-> coding-agent prompts. All phases shipped; the historical material has
-> been removed. Key landed surfaces, with current source paths:
->
-> - **CLI + state types** — `crates/nit/src/cli/mod.rs::Command::Multipane`,
->   `MultipaneArgs`; `crates/nit-core/src/state/multipane.rs` for
->   `PaneSession`, `DirSearchState`, `MultipaneState`; re-exports in
->   `crates/nit-core/src/lib.rs`.
-> - **Launch wiring** — `crates/nit/src/multipane_setup.rs` materialises
->   the pane roster, validates `--backend`, and forwards into the TUI.
-> - **Render + event loop** — `crates/nit-tui/src/multipane/mod.rs`,
->   `runtime/`, `grid.rs`, `focus.rs`, `roster_view.rs`. Standard mode is
->   untouched (no impact when `state.multipane.is_none()`).
-> - **Per-pane chat dispatch** — `crates/nit-tui/src/multipane/dispatch.rs`
->   wraps `app::chat_input::submit_chat_input_and_dispatch` with a
->   `with_pane_aliased` shim that injects the pane's `cwd` + agent id.
-> - **Dir search** — `crates/nit-tui/src/multipane/dir_search.rs` (pure
->   parser + ranker) and `dir_search_runner.rs` (async walker, mirrors
->   `fuzzy_search_runner` and reuses `fuzzy_score_bytes`).
-> - **Locked-down key map** — `multipane::runtime::handle_key` allow-lists
->   Tab / Shift+Tab / Enter / Ctrl+/ / F2 / Ctrl+R / Ctrl+C / Esc / Ctrl+Q
->   / F1 / `?` / character / mouse and silently swallows everything else.
-> - **Persistence** — `crates/nit-tui/src/multipane/persistence.rs` writes
->   `<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and on
->   focus change (debounced ≤ 1 write/sec). `chat_input` is capped at 4 KB.
->   A "fresh" Ctrl+Q (no prior file, no mission run) drops the file rather
->   than persisting an empty layout.
-> - **Tests** — `crates/nit-tui/src/tests/multipane_integration.rs` (5
->   tests: per-pane cwd dispatch, focused-pane abort isolation,
->   no-agent-selected notice, dir-search cwd commit, persistence
->   roundtrip).
-
-### Notable deviations from the original phase plan
-
-- The Phase-5 standalone `key_dispatch.rs` was collapsed into
-  `multipane/runtime/` once the allow-list shrank below the threshold
-  where a separate module was paying for itself.
-- Ctrl+Q ships without a confirm dialog. Multipane has no popup
-  state machine, and persistence already snapshots typed prompts on
-  disk, so an accidental Ctrl+Q is recoverable.
-- Persistence dropped the original "across nit restarts" caveat and
-  instead lands `<state_dir>/multipane/session-<workspace-hash>.json`
-  on Ctrl+Q and on focus change (debounced ≤ 1 write/sec). `chat_input`
-  is capped at 4 KB on save; a "fresh" Ctrl+Q (no pane has run a
-  mission and no prior file existed) drops the file rather than
-  persisting an empty layout.
+When a pane would be narrower than 20 cells or shorter than 10 rows, nit does
+not draw the grid. It shows one line instead:
+"Terminal too small for N panes — resize or relaunch with --panes <smaller>".
 
 ## Performance budget
 
@@ -400,41 +227,52 @@ pub struct MultipaneArgs {
 | Focus switch (Tab) | < 1 ms | Pure state mutation, no IO |
 | Pane redraw on background turn output | < 16 ms | Reuses existing render path |
 
-The chat-thread render path is already ratatui — fast. The dominant
-cost is the dir walk, which is why we cache and amortise.
+The chat thread render is plain ratatui and fast. The dir walk dominates, so
+nit caches it.
 
-## Resolved decisions
+## State model
 
-1. **Agent-id namespace**: pane lanes use `<base>#mp-pane-NN`
-   (zero-padded, two digits). Distinct from `#chat-clone-` and
-   `#swarm-` separators so the runner's id-keyed maps never collide.
-2. **Persistence**: shipped. `<state_dir>/multipane/session-<hash>.json`
-   stores per-pane `cwd`, `chat_input`, history, swarm_template /
-   swarm_mission, `selected_agent_id`, and the focused index. UI-only
-   fields (`help_open`, dir-search overlay, roster auto-expansion
-   latches) are `#[serde(skip)]` and start fresh on each launch.
-3. **Backend specificity**: `--backend <specific-id>` pre-picks every
-   pane; `--backend <family>` filters the per-pane roster to that
-   family; omitting the flag shows the full roster. All three modes
-   ship.
-4. **Mission scope**: per-pane mission, no cross-pane swarms. Each
-   pane carries its own `mission_id` field on `PaneSession`.
-5. **Resize handling**: when per-pane width drops below 20 cells or
-   height below 10 rows, the runtime renders a single centered
-   "Terminal too small for N panes — resize or relaunch with
-   --panes <smaller>" paragraph instead of the grid.
-6. **Ctrl+Q without confirm dialog (deviation)**: the original spec
-   asked for a confirmation prompt before exiting. v1 ships without
-   one — multipane has no popup state machine yet, and persistence
-   already preserves typed prompts on disk so an accidental Ctrl+Q is
-   recoverable. A confirm dialog can land as a follow-up.
+Multipane adds one optional field to `AppState`:
+`multipane: Option<MultipaneState>`. When it is `Some`, nit renders the grid.
+When it is `None`, nit runs as usual with no other change.
 
-## Out of scope (v1)
+`crates/nit-core/src/state/multipane.rs` defines the types:
 
-- Splitting / closing panes at runtime. Layout is fixed at launch.
-- Different backends per pane (each pane picks once from its per-pane
-  roster; flip back via `Ctrl+R` to re-select).
-- Cross-pane operations (broadcast one prompt to every pane). `/abort all`
-  already cancels across panes, but there is no `@all-panes <prompt>`
-  dispatch helper yet.
-- Mouse drag to resize pane boundaries.
+- `MultipaneState`: the `--backend` value, the backend filter, the pane list,
+  the focused index, and the grid columns and rows.
+- `PaneSession`: one pane. Its id, cwd, agent id, chat input and prompt
+  history, mission ids, roster cursor and scroll, chat thread scroll,
+  `selected_agent_id` (`None` means show the roster), `swarm_template`,
+  `swarm_mission`, per-agent `selected_effort`, and the terminal flag and
+  command.
+- `DirSearchState`: the query, results, highlight, the base directory computed
+  from the `../` prefix, a generation counter that drops stale walks,
+  `show_hidden`, and the set of expanded directories.
+
+Messages stay in `state.agents.messages` keyed by agent id. Active turns and
+queues are keyed by agent id too. So the per-pane id suffix is all the
+renderer and runner need. A pane's swarm mission is a normal swarm mission
+with the pane's agent as planner. At dispatch time the pane's Template,
+Mission, and effort choices are applied to the global settings the runner
+reads.
+
+## Key files
+
+| Path | Contents |
+|---|---|
+| `crates/nit/src/cli/mod.rs` | `Command::Multipane`, `MultipaneArgs` |
+| `crates/nit/src/multipane_setup.rs` | Validates `--backend`, builds the panes, installs terminal commands |
+| `crates/nit-core/src/state/multipane.rs` | `PaneSession`, `DirSearchState`, `MultipaneState` |
+| `crates/nit-tui/src/multipane/mod.rs`, `runtime/`, `grid.rs`, `focus.rs`, `roster_view.rs` | Render and event loop. `runtime/keys.rs` allow-lists the multipane keys and swallows the rest. |
+| `crates/nit-tui/src/multipane/dispatch.rs` | Per-pane dispatch wrapper that injects the pane's cwd and agent id |
+| `crates/nit-tui/src/multipane/dir_search.rs`, `dir_search_runner.rs` | Query parser and ranker; background walker |
+| `crates/nit-tui/src/multipane/persistence.rs` | Session file read and write |
+| `crates/nit-tui/src/tests/multipane_integration.rs` | Integration tests |
+
+## Limitations
+
+- The layout is fixed at launch. No splitting, closing, or dragging pane
+  borders.
+- One backend per pane per pick. Use `Ctrl+R` to pick again.
+- No broadcast of one prompt to every pane. `/abort all` does cross panes.
+- No confirm dialog on `Ctrl+Q`.

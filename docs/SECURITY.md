@@ -2,109 +2,81 @@
 
 ## Philosophy
 
-- Secure-by-default: no plugins, no network calls from `nit` itself, and no arbitrary command execution.
-- `nit` spawns a small set of external tools **directly (no shell)**:
-  - `git` (repo introspection, ignore checks, file listing)
-  - `codex` (Agent Station — MCP server or exec runtime; may make network requests depending on Codex configuration)
-  - `claude` (Agent Station — subprocess per turn via `claude -p`; may make network requests)
-  - `open` / `xdg-open` / `cmd` (platform-specific URL launcher, used only when the user activates a link)
-- At startup, `nit` probes for `codex`, `claude`, and `gemini` CLI availability on `PATH` and may invoke them briefly to list models. No persistent `gemini` subprocess is spawned at runtime.
-- Terminal state is restored on exit and panic.
-- Saves are atomic and confined to explicit paths provided by the user.
+- Secure by default: no plugins, no network calls from nit itself, and no arbitrary command execution.
+- nit spawns a small set of external tools directly, with no shell:
+  - `git`: repo introspection, ignore checks, file listing
+  - `codex`: Agent Station, as an MCP server or exec runtime; may use the network depending on your Codex configuration
+  - `claude`: Agent Station, one `claude -p` subprocess per turn; may use the network
+  - `open` / `xdg-open` / `cmd`: the platform URL launcher, only when you activate a link
+- At startup nit probes `PATH` for `codex`, `claude`, and `gemini` and may run them briefly to list models. It never keeps a `gemini` subprocess running.
+- Terminal state is restored on exit and on panic.
+- Saves are atomic and go only to paths you name.
 
 ## Reporting
 
-If you find a vulnerability, please open an issue or contact the maintainers privately. Avoid public disclosure until a fix is available.
+If you find a vulnerability, open an issue or contact the maintainers
+privately. Please hold public disclosure until a fix is available.
 
-## Protections Implemented
+## Protections implemented
 
-- `#![forbid(unsafe_code)]` across all crates except `nit-metal` (Metal GPU interop).
+- `#![forbid(unsafe_code)]` in every crate except `nit-metal` (Metal GPU interop) and `nit-mcp`.
 - No network I/O in-process.
-- External command execution is limited to invoking `git`/`codex`/`claude` directly (no shell).
-- Atomic file writes using temp files in the destination directory.
-- Defensive error handling around terminal raw mode; drop to a safe state on panic.
+- External commands are limited to `git`, `codex`, and `claude`, run directly with no shell.
+- Atomic file writes through temp files in the destination directory.
+- Defensive error handling around terminal raw mode. nit drops to a safe state on panic.
 
-## Security Hardening Backlog
+## Hardening backlog
 
-### Guiding principles
+Guiding principles: prefer secure-by-default behaviour with opt-outs you choose.
+Treat file contents, repo contents, and agent output as untrusted unless you
+say otherwise. When in doubt: do not execute, do not write outside the
+workspace, and do not render raw control sequences.
 
-- Prefer "secure-by-default" behavior with explicit opt-outs.
-- Assume **file contents, repo contents, and agent output are untrusted** unless user explicitly trusts them.
-- When in doubt: *don't execute*, *don't write outside workspace*, and *don't render raw control sequences*.
+### High priority
 
-### High priority (practical risk reducers)
+- [ ] Strip or neutralize ANSI escape sequences (ESC, CSI, OSC) in editor rendering, agent output, status lines, logs, and diagnostics.
+- [ ] Decide a policy for control characters (`0x00..0x1f`, `0x7f`): drop them or show visible glyphs.
+- [ ] Add tests with payloads such as OSC 52, window title changes, and cursor movement.
+- [ ] Add a debug-mode escape hatch to view raw bytes.
+- [ ] Refuse to save through symlinks (file or parent dirs) without confirmation.
+- [ ] Add an optional "confine saves to workspace root" mode that warns on writes outside it.
+- [ ] Harden atomic saves: unique temp names with `create_new(true)` or the `tempfile` crate, and fsync the parent directory after rename on Unix.
+- [ ] Show a clear UI warning when editing a symlinked path.
+- [x] Treat `git`, `codex`, and `claude` as untrusted boundaries and document that nit spawns them, plus `open` / `xdg-open` for links and `gemini` for model probing.
+- [ ] Reduce PATH hijack risk: show the resolved path to `git` / `codex` / `claude` at startup and allow pinning absolute paths in config.
+- [ ] Add a "safe mode" flag that disables all external processes.
+- [ ] Add `.nit/` to `.gitignore` by default, or store it under an OS-specific app dir.
+- [ ] Make agent run provenance optional, off by default for privacy-sensitive workflows.
+- [ ] Write provenance files with restrictive permissions (best-effort `0700` / `0600` on Unix).
+- [ ] Add optional redaction of obvious secret patterns before logs hit disk.
+- [x] Fix the RustSec advisory flagged by `cargo deny` (patched `time`).
+- [ ] Decide a policy for BSL-1.0 dependencies (allow or replace).
+- [x] Commit `Cargo.lock` for reproducible builds.
+- [x] Add CI gates for `cargo deny` (advisories and licenses) and `cargo clippy`.
 
-- [ ] **Terminal escape sanitization (untrusted text rendering)**
-  - [ ] Strip/neutralize ANSI escape sequences (ESC `\x1b` + CSI/OSC/etc) from:
-    - editor buffer rendering (`crates/nit-tui/src/widgets/editor_view.rs`)
-    - agent output rendering (`crates/nit-tui/src/widgets/agent_console_view/`)
-    - status lines / logs / diagnostics
-  - [ ] Decide policy for control characters (`0x00..0x1f`, `0x7f`): drop vs render as visible glyphs.
-  - [ ] Add tests with payloads like OSC 52, window title changes, cursor movement, etc.
-  - [ ] "Debug mode" escape hatch to view raw bytes when explicitly enabled.
+### Medium priority
 
-- [ ] **Path + symlink safety for saves**
-  - [ ] On save, refuse to write through symlinks (file or parent dirs) unless explicitly confirmed.
-  - [ ] Optional "confine saves to workspace root" mode; warn/confirm on writes outside workspace.
-  - [ ] Improve atomic saves to avoid predictable temp names and symlink races:
-    - prefer unique temp file names + `create_new(true)` (or the `tempfile` crate)
-    - consider fsyncing parent directory after rename on Unix for durability
-  - [ ] Display clear UI warning when editing a symlinked path.
+- [ ] Safer Codex defaults (sandbox and approval), with a prompt before relaxing them.
+- [ ] Show a prominent indicator in "danger-full-access" or low-approval modes.
+- [ ] Add a per-workspace allowlist or denylist of agent backends (Codex, Claude, Gemini).
+- [ ] Add a "network use" indicator based on the selected backend and runtime.
+- [ ] Show the Claude permission mode in Agent Ops.
+- [ ] Allow disabling clipboard integration entirely.
+- [ ] Optionally auto-clear the clipboard after N seconds for copied secrets.
+- [ ] Block implicit copying of content that contains control sequences.
+- [ ] Add file size limits or progressive loading for very large files.
+- [ ] Add directory walk limits and cancellation for huge repos.
+- [ ] Harden JSON parsing of external event streams (Codex, MCP) with strict line and field limits.
+- [ ] Rate-limit very verbose agent logs to avoid UI lockups.
+- [ ] Separate trusted and untrusted workspace profiles, like an editor's restricted mode.
+- [ ] Taint agent output and external events, and keep them out of file writes by default.
 
-- [ ] **External process boundary hardening**
-  - [x] Treat `git`, `codex`, and `claude` as untrusted boundaries; document that `nit` spawns all three (plus `open`/`xdg-open` for links and `gemini` for model probing).
-  - [ ] Reduce PATH hijack risk:
-    - resolve and display the full resolved path to `git`/`codex`/`claude` at startup
-    - optionally allow pinning absolute paths in config
-  - [ ] Add "safe mode" flag that disables all external processes (`git`, `codex`, `claude`, etc.).
+### Longer term
 
-- [ ] **Provenance/logging privacy**
-  - [ ] `.nit/` data: add `.nit/` to `.gitignore` by default or store under an OS-specific app dir.
-  - [ ] Make agent run provenance optional/configurable (off by default for privacy-sensitive workflows).
-  - [ ] Write provenance files with restrictive permissions (best-effort `0700`/`0600` on Unix).
-  - [ ] Add optional redaction for obvious secret patterns before writing logs to disk.
-
-- [ ] **Dependency hygiene**
-  - [x] Fix RustSec advisory currently flagged by `cargo deny` (e.g. update `time` to a patched version).
-  - [ ] Decide policy for BSL-1.0 dependencies (allow vs replace).
-  - [x] Stop ignoring `Cargo.lock` for the app (commit lockfile for reproducible builds) or document why not.
-  - [x] Add CI gates for `cargo deny` (advisories + licenses) and for `cargo clippy` correctness.
-
-### Medium priority (defense in depth)
-
-- [ ] **Agent safety UX (Codex + Claude)**
-  - [ ] Safer defaults for Codex integration (sandbox + approval), with explicit prompts to relax.
-  - [ ] Show a prominent indicator when running in "danger-full-access" / low-approval modes.
-  - [ ] Add a per-workspace allowlist/denylist for which agent backends (Codex, Claude, Gemini) can execute.
-  - [ ] Add a "network use" indicator based on the selected backend/runtime configuration.
-  - [ ] Surface Claude permission mode prominently in Agent Ops.
-
-- [ ] **Clipboard controls**
-  - [ ] Allow disabling clipboard integration entirely.
-  - [ ] Optional auto-clear clipboard after N seconds for copied secrets.
-  - [ ] Prevent implicit copying of content that contains control sequences.
-
-- [ ] **Robustness against hostile inputs (DoS)**
-  - [ ] File size limits / progressive loading for very large files.
-  - [ ] Directory walk limits + cancellation for huge repos.
-  - [ ] Harden JSON parsing of external event streams (Codex/MCP): strict limits on line length/fields.
-  - [ ] Rate-limit extremely verbose agent logs to avoid UI lockups.
-
-- [ ] **Config hardening**
-  - [ ] Separate "trusted" vs "untrusted" workspace profiles (like an editor's restricted mode).
-  - [ ] Taint certain sources (agent output, external events) and keep them out of file writes by default.
-
-### Longer-term / advanced hardening
-
-- [ ] **Sandboxing**
-  - [ ] Optional OS-level sandbox for `nit` itself (where feasible): e.g. macOS sandbox-exec profile.
-  - [ ] Stronger sandbox story for external tools (beyond Codex's own sandboxing knobs).
-
-- [ ] **Fuzzing + property tests**
-  - [ ] Add fuzz targets for: rule parsers, snapshot formats, event JSON, and any custom protocol parsing.
-  - [ ] Regression corpus for terminal escape payloads and weird Unicode edge cases.
-
-- [ ] **Security documentation & process**
-  - [x] Update `SECURITY.md` to match reality (spawns `git`, `codex`, `claude`, and `open`/`xdg-open`).
-  - [ ] Maintain a "security checklist" for releases (deny/audit, escape sanitization, safe defaults).
-  - [ ] Document recommended settings for working on untrusted repos.
+- [ ] Optional OS-level sandbox for nit itself, for example a macOS `sandbox-exec` profile.
+- [ ] Stronger sandboxing for external tools, beyond Codex's own knobs.
+- [ ] Fuzz targets for rule parsers, snapshot formats, event JSON, and custom protocol parsing.
+- [ ] Regression corpus for terminal escape payloads and odd Unicode.
+- [x] Keep `SECURITY.md` matching what nit spawns (`git`, `codex`, `claude`, `open` / `xdg-open`).
+- [ ] Maintain a release security checklist: deny and audit, escape sanitization, safe defaults.
+- [ ] Document recommended settings for working on untrusted repos.

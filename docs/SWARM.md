@@ -1,57 +1,43 @@
 # Swarm Orchestration (`@swarm`)
 
-This doc explains how to use **Swarm** (multi-agent orchestration) inside nit, how the three
-templates behave (`lab`, `parallel`, `bulk`), how to assign roles (especially for bulk), and how to
-debug common MCP/runtime issues.
+This doc is the user guide for Swarm, nit's multi-agent orchestration. It covers how to launch a swarm, how the three templates (`lab`, `parallel`, `bulk`) behave, how roles and dependencies work, size limits, prompt budgets, aborting, verification gates, output artifacts, and MCP troubleshooting. It is for people running swarms, not for contributors.
 
-If you’re looking for implementation details, see `docs/ARCHITECTURE.md` (Swarm section).
-For a practical checklist, see `docs/SMOKE_TEST.md`. For shortcuts, see `docs/KEYBINDINGS.md`.
+For implementation details, see `docs/ARCHITECTURE.md` (Swarm section). For a practical checklist, see `docs/SMOKE_TEST.md`. For shortcuts, see `docs/KEYBINDINGS.md`.
 
-> Looking for **single-agent** augmentation instead of a multi-agent DAG? See `docs/SHADOWS.md`
-> (`@shadow` + auto-shadow). Shadows run a fixed propose/judge/review pipeline behind one agent and
-> are **suppressed inside a swarm mission**, so the two features do not stack.
-
----
+Want to augment a single agent instead of planning a multi-agent DAG? See `docs/SHADOWS.md` for `@shadow` and auto-shadow. Shadows never run inside a swarm mission, so the two features do not stack.
 
 ## Quickstart
 
-### 1) Pick a template (recommended)
+### Pick a template
 
-In **Agent Ops → Roster**, use the template buttons above the models table:
+In Agent Ops → Roster, use the template buttons above the models table:
 
 - `Swarm template: [lab] [parallel] [bulk]`
 - Shortcuts: `1` = `lab`, `2` = `parallel`, `3` = `bulk`
 
-The selected template is also shown in **Agent Chat** as a small badge (e.g. `t=bulk`).
+Agent Chat shows the selected template as a small badge, for example `t=bulk`.
 
-### 2) Launch
-
-You can launch Swarm in two ways:
-
-1) **Explicit command** (always works):
+### Launch with `@swarm`
 
 ```text
 @swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] [budget=ROLE:N] <prompt>
 ```
 
-Notes:
+- `template=` can be written as `t=`, and `mission=` as `m=`.
+- `budget=ROLE:N` overrides one role's prompt-budget ceiling for this mission only, for example `budget=integrate:600k`. The `k`/`K` suffix multiplies by 1024. See [Prompt budget tiers](#prompt-budget-tiers).
+- In Agent Ops → Roster you can pin a default template and a default mission preset. `mission=...` or a `Mission: ...` line overrides the roster preset. Otherwise the roster preset applies, and `auto` falls back to prompt-based mission detection.
 
-- `template=` can also be written as `t=`.
-- `mission=` can also be written as `m=`.
-- `budget=ROLE:N` overrides a role's prompt-budget ceiling for this mission only
-  (e.g. `budget=integrate:600k`; the `k`/`K` suffix multiplies by 1024). See
-  [Prompt budget tiers](#prompt-budget-tiers).
-- In **Agent Ops → Roster**, you can pin a default template and a default mission preset.
-  `mission=...` or `Mission: ...` overrides the roster preset; otherwise the roster preset applies,
-  and `auto` falls back to prompt-based mission detection.
-- Accepted mission aliases:
-  - `general` (aka `default`, `code`, `coding`)
-  - `research`
-  - `computational-research` (aka `computational`, `computational research`, `comp-research`)
-- Accepted template aliases:
-  - `parallel` (aka `v1`)
-  - `lab` (aka `default`, `v2`)
-  - `bulk` (aka `bo`)
+Mission aliases:
+
+- `general` (also `default`, `code`, `coding`)
+- `research`
+- `computational-research` (also `computational`, `computational research`, `comp-research`)
+
+Template aliases:
+
+- `lab` (also `default`, `v2`)
+- `parallel` (also `v1`)
+- `bulk` (also `bo`)
 
 Examples:
 
@@ -63,187 +49,133 @@ Examples:
 @swarm 4 t=parallel m=computational-research model competing approaches and compare them
 ```
 
-2) **Implicit swarm launch** (no `@swarm` needed):
+### Implicit launch
 
-- If your prompt includes a `Template: ...` line, Swarm auto-launches.
-  - Examples: `Template: bulk`, `Template: "parallel"`, `- Template: \`lab\``
-- If your prompt includes a `Mission: ...` line, Swarm uses it as the mission focus.
-  - Examples: `Mission: research`, `Mission: computational-research`
-- If your prompt contains “SWARM PLANNER” or “SWARM SYNTHESIZER”, Swarm auto-launches.
-- If the roster-selected template is `bulk` or `parallel` and there are at least two Codex agents,
-  a plain prompt auto-launches Swarm.
-- Without an explicit `mission=...` or `Mission: ...`, nit infers mission focus from the operator
-  request. It only enables research roles when the request actually asks for research work (papers,
-  web/resources, source survey, modeling/experiments, etc.), not just because the word “research”
-  appears in a code-change prompt.
+A plain prompt launches a swarm without `@swarm` when:
 
-Guardrail: prompts starting with `@` (e.g. `@all ...`) are never auto-converted to Swarm.
+- it contains a `Template: ...` line, for example `Template: bulk`, `Template: "parallel"`, or `- Template: \`lab\``;
+- it contains `SWARM PLANNER` or `SWARM SYNTHESIZER`;
+- the roster template is `bulk` or `parallel` and the roster has at least two Codex agents.
 
-Tip: if you temporarily don’t want implicit swarm launches, switch the roster template back to
-`lab`.
+A `Mission: ...` line sets the mission focus, for example `Mission: research` or `Mission: computational-research`. Without `mission=...` or a `Mission:` line, nit infers the mission from your request. It enables research roles only when the request asks for research work such as papers, web resources, source surveys, modeling, or experiments. The word "research" in a code-change prompt is not enough.
 
-### Research missions (the producers write their own findings)
+Prompts starting with `@` (for example `@all ...`) are never converted to a swarm. To stop implicit launches for a while, switch the roster template back to `lab`.
 
-For `mission=research` / `mission=computational-research`, the producers ARE the writers — there
-is no separate writer fleet — and findings are always persisted to files (never just answered in
-chat). The shape depends on the template:
+### Research missions
 
-- **parallel** — survey lenses (read-only `research` / `computational-research`; comp-research is
-  the default producer in a computational-research mission) → **judge-A** dedups the survey and
-  maps each topic to exactly one output file → **writers** (`research` / `computational-research`,
-  `writes=true`) each write their own topic file → **judge-B** reconciles the written files and
-  specs the master index → one `integrate` writes the master index → `review`. This is the only
-  shape where **two** `role=judge` tasks are allowed.
-- **bulk** — read-only research lenses → one `judge` → one `integrate` writes the consolidated
-  output → `review` (bulk’s single-writer convergence).
+In `mission=research` and `mission=computational-research`, the producers are the writers. There is no separate writer fleet, and findings always go to files, never only to chat. Each template runs this sequence.
 
-Output format: an operator-named extension is honored (`Links.nb` → `.nb`); otherwise the planner
-matches the project’s convention (a Wolfram project → `.nb`, a docs repo → `.md`), falling back to
-Markdown when there is no clear convention.
+`parallel`:
 
----
+1. Survey lenses: read-only `research` or `computational-research` tasks. In a computational-research mission, `computational-research` is the default producer.
+2. judge-A: dedups the survey and maps each topic to exactly one output file.
+3. Writers: `research` or `computational-research` tasks with `writes=true`, each writing its own topic file.
+4. judge-B: reconciles the written files and specs the master index.
+5. One `integrate` task writes the master index.
+6. `review`.
 
-## How Swarm Works (high level)
+This is the only shape that allows two `role=judge` tasks.
 
-Swarm is a mission-scoped orchestration loop:
+`bulk`:
 
-1) **Planning**: a planner agent creates a plan (JSON DAG).
-2) **Validation + repair** (default): the parsed plan runs through a deterministic
-   validator (`crates/nit-tui/src/swarm/validator.rs`) before dispatch. `MustFix`
-   defects trigger a bounded LLM repair loop (`swarm/repair.rs`, capped at
-   `REPAIR_RETRY_LIMIT = 2` rounds) that only proceeds while the planner is
-   making concrete progress (strict improvement or proper subset). The
-   validator + repair pair can be disabled with `NIT_PLANNER_LEGACY=1` for a
-   one-release rollback escape hatch — once set, the planner LLM call runs
-   once and the parsed plan goes straight to `finalize_plan`.
-3) **Execution**: tasks run in parallel when dependencies are satisfied.
-4) **Verification** (optional): a verifier runs a detected gate bundle (e.g. `rust-ci`).
-5) **Synthesis**: the planner produces a final cohesive report.
+1. Read-only research lenses.
+2. One `judge`.
+3. One `integrate` task writes the consolidated output.
+4. `review`.
+
+Output format: a file extension you name is honored (`Links.nb` gives `.nb`). Otherwise the planner matches the project convention, `.nb` for a Wolfram project or `.md` for a docs repo, and falls back to Markdown when there is no clear convention.
+
+## How Swarm Works
+
+A swarm is a mission-scoped loop:
+
+1. Planning: a planner agent writes a plan as a JSON DAG.
+2. Validation and repair (default): a deterministic validator (`crates/nit-tui/src/swarm/validator.rs`) checks the plan before dispatch. `MustFix` defects start a bounded LLM repair loop (`swarm/repair.rs`), capped at `REPAIR_RETRY_LIMIT = 2` rounds. The loop continues only while the planner makes concrete progress: a strict improvement or a proper subset of the previous defects. `NIT_PLANNER_LEGACY=1` disables the validator and repair loop. The planner call then runs once and the parsed plan goes straight to `finalize_plan`.
+3. Execution: tasks run in parallel once their dependencies are satisfied.
+4. Verification (optional): a verifier runs a detected gate bundle such as `rust-ci`.
+5. Synthesis: the planner writes a final report.
 
 Where to watch it:
 
-- **Agent Chat**: shows the classic compact “Working/Queued” table and Swarm metadata.
-- **Agent Ops → DAG**: shows the full Swarm DAG (readable card rows, wraps instead of `...`).
-
----
+- Agent Chat: the compact Working/Queued table and swarm metadata.
+- Agent Ops → DAG: the full swarm DAG. See [DAG View](#dag-view).
 
 ## Templates
 
-### `template=lab` (default)
+### `lab` (default)
 
-Use this for “research lab” workflows where you want:
+Use `lab` for research-lab workflows: several read-only proposal and review tasks feed one single-writer integrator, the only task allowed to edit the workspace (`writes=true`).
 
-- multiple read-only proposal/review tasks feeding
-- a **single-writer integrator** who is the only one allowed to edit the workspace (`writes=true`).
-
-Key properties:
-
-- Tasks form a dependency DAG (`deps`).
-- Multiple tasks may target the same agent id; they run sequentially.
-- Only the integrator may have `writes=true` (enforced; non-integrator `writes=true` is forced off).
+- Tasks form a dependency DAG through `deps`.
+- Several tasks may target the same agent id. They run one after another.
+- Only the integrator may have `writes=true`. nit forces it off on any other task.
 
 Typical shape:
 
-- `propose`/`review` tasks for codebase work, or `research`/`computational-research` tasks when
-  the mission is external topic/literature/web research
-- `integrate` task (single writer, depends on upstream investigation outputs)
-- optional review/verification follow-ups
+- `propose` and `review` tasks for codebase work, or `research` and `computational-research` tasks when the mission is topic, literature, or web research
+- an `integrate` task (single writer) that depends on the upstream outputs
+- optional review or verification follow-ups
 
-Mission-aware fallback shapes:
+Fallback shapes by mission:
 
 - `general`: repo recon -> design options -> integrate/implement -> review
 - `research`: source survey -> evidence comparison / ranked strategies -> synthesis -> review
 - `computational-research`: source survey -> modeling / experiments / analysis -> synthesis -> review
 
-### `template=parallel`
+### `parallel`
 
-Use this when tasks are naturally independent:
+Use `parallel` when tasks are independent: one task per agent id, few or no dependencies, maximum parallelism. It is the plain "split the work and run it side by side" model.
 
-- one task per agent id (prefer)
-- minimal or no dependencies
-- maximum parallelism
+### `bulk`
 
-This is closest to the original “split the work and run in parallel” model.
+Use `bulk` to explore several solution candidates and then converge:
 
-### `template=bulk` (“bulk orchestration”)
+1. Proposers (parallel, read-only) draft independent solution candidates.
+2. A judge (read-only) compares them and picks the best approach plus acceptance criteria.
+3. The integrator (single writer) implements the chosen approach and validates it.
 
-Use this when you want to explore multiple solution candidates and then converge.
+Plan conventions:
 
-Bulk is explicitly designed as:
+- proposer task ids `propose-01`, `propose-02`, ...
+- a `judge` task that depends on all proposers
+- an `integrate` task with `writes=true` that depends on `judge`
 
-1) **proposers** (parallel, read-only): multiple independent solution candidates
-2) **judge** (read-only): compares proposals and selects the best approach + acceptance criteria
-3) **integrator** (single-writer): implements the chosen approach and validates
+If the planner returns an invalid bulk plan, nit falls back to a built-in bulk workflow with proposer lenses: minimal diff, correctness, UX, perf, testing, docs, security, and so on.
 
-Bulk plan conventions:
+## Roles
 
-- proposer task ids: `propose-01`, `propose-02`, …
-- a `judge` task that depends on **all** proposers
-- an `integrate` task assigned to the integrator with `writes=true` depending on `judge`
+Roles live in three places:
 
-If the planner returns an invalid bulk plan, nit falls back to a built-in bulk workflow with
-proposer “lenses” (minimal diff, correctness, UX, perf, testing, docs, security, …).
+1. Planner output: each task has an optional `role`, one of `propose`, `judge`, `research`, `computational-research`, `integrate`, `review`, `test`.
+2. Roster role hints (recommended for `parallel` and `bulk`): in Agent Ops → Roster, expand a model and use its `Role` branch to pick a preferred role, or `All`.
+3. Roster mission preset: in Agent Ops → Roster, set the global mission preset to `auto`, `general`, `research`, or `computational-research`.
 
----
+How nit uses them:
 
-## Role Assignment (especially for bulk)
+- A roster role hint is a planner preference. It does not grant write access; `writes=true` still controls workspace edits.
+- `All` means no role constraint. It does not spawn extra agents or role-specific lanes.
+- `research` means topic exploration: papers, docs, web resources, related ideas, strategy discovery.
+- `computational-research` means tool-assisted evidence gathering: targeted searches, calculations, experiments, measurements, comparative analysis. It also covers simulation, modeling, numerical methods, optimization, data and model fitting, pattern or network analysis, and reproducible computational workflows.
+- Mission focus filters roles. `general` blocks `research` and `computational-research`. `research` allows `research`. `computational-research` allows both.
+- nit keeps research-role assignments only when the request is research work or asks for those roles by name.
+- `research` and `computational-research` outputs include sources, methods, assumptions, and ranked strategy recommendations.
+- Mission-scoped clones do not inherit singleton roles such as `integrate` or `judge` as task roles when the planner omits them. Those hints stay planning preferences.
+- In `bulk`, a roster role of `integrate` makes that agent the single-writer integrator and locks it. Planner overrides are ignored.
+- Priority agents form the selection pool for `parallel` and `bulk`. Mark one with `[x]` on its model row in Agent Ops → Roster. Swarm uses only priority-marked models for worker lanes. If you request more agents than you marked, nit spawns mission-scoped clones of the marked models. If you mark none, nit clones the currently selected model.
 
-Roles exist at two layers:
+### Role-based ordering
 
-1) **Planner output**: each task has optional `role` (`propose|judge|research|computational-research|integrate|review|test`).
-2) **Roster role hints** (recommended for `parallel`/`bulk`): in **Agent Ops → Roster**, expand a
-   model and use the `Role` branch to pick a preferred role (or `All`).
-3) **Roster mission preset**: in **Agent Ops → Roster**, set the global swarm mission preset to
-   `auto`, `general`, `research`, or `computational-research`.
+Some roles are producer and consumer pairs, for example `research` or `computational-research` feeding `judge`. Swarm is a DAG scheduler, so it expresses this as dependencies. If the plan omits `deps` but tasks have recognizable roles, nit adds the missing deps so consumers run after producers.
 
-Notes:
+Default role deps:
 
-- The roster role hint is passed to the planner as a constraint/preference. It does not by itself
-  grant write access; `writes=true` still controls workspace edits.
-- `research` means topic exploration: papers, docs, web resources, related ideas, and strategy
-  discovery.
-- `computational-research` means tool-assisted evidence gathering: targeted searches, calculations,
-  experiments, measurements, and comparative analysis.
-- `computational-research` also covers broader research-computing work such as simulation,
-  modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, and
-  reproducible computational workflows across technical domains.
-- Mission focus is role-aware:
-  - `general` blocks `research` and `computational-research`
-  - `research` allows `research`
-  - `computational-research` allows both `research` and `computational-research`
-- nit only keeps research-role assignments when the operator request is actually research-oriented
-  or explicitly asks for those mission-specific roles.
-- For `research` and `computational-research` tasks, expect outputs to include sources, methods,
-  assumptions, and ranked strategy recommendations.
-- Mission-scoped clones do not automatically inherit singleton roles like `integrate` or `judge`
-  as actual task roles when the planner omits them; those hints stay planning preferences, not
-  implicit assignments.
-- `All` means “no role constraint”. It does not spawn extra agents or role-specific worker lanes.
-- In `bulk`, if you set an agent’s roster role to `integrate`, nit uses it as the single-writer
-  integrator and locks it (planner overrides are ignored).
-- You can also mark agents as **priority** in **Agent Ops → Roster** (`[x]` on the model row). For
-  `parallel`/`bulk`, priority agents act as an explicit **selection pool**: Swarm will only use
-  the priority-marked models for worker lanes. If you request more agents than you selected, nit
-  spawns mission-scoped **clones** of the selected models to reach the swarm size. If you select
-  *no* priority models, nit clones the currently selected model for the worker lanes.
+- `judge` depends on `research`, `computational-research`, and `propose`
+- `integrate` depends on `judge`, `research`, `computational-research`, and `propose`
+- `review` and `test` depend on `integrate`
 
-### Role-based ordering (producer/consumer)
+If a role-based dep would create a cycle, nit skips it and logs a `PLAN warning`.
 
-Sometimes roles are **producer/consumer** pairs (e.g. `research` or `computational-research` → `judge`): the consumer task is only
-useful *after* producer tasks finish.
-
-Swarm is fundamentally a **DAG scheduler** (`deps`), so nit can express this as dependencies:
-
-- If the plan omits `deps` but tasks/agents have recognizable roles, nit will automatically add
-  missing deps so consumer roles run after their producers.
-- Default role deps (built-in):
-  - `judge` depends on `research` + `computational-research` + `propose`
-  - `integrate` depends on `judge` + `research` + `computational-research` + `propose`
-  - `review` + `test` depend on `integrate`
-- Cycle safety: if adding a role-based dep would introduce a cycle, nit skips that dep and logs a
-  `PLAN warning`.
-
-You can override role deps per workspace via `.nit/config.toml`:
+Override the defaults per workspace in `.nit/config.toml`:
 
 ```toml
 [swarm.role_deps]
@@ -253,46 +185,37 @@ review = ["integrate"]
 test = ["integrate"]
 ```
 
-### DAG validation (cycles / unknown deps)
+### DAG validation
 
-nit preflights the planner’s task DAG before dispatching.
+nit checks the planner's task DAG before dispatch. The default mode is `strict`:
 
-Default behavior (`strict`):
+- deps that reference missing task ids abort the run
+- cycles abort the run
+- a `PLAN error` explains the problem
 
-- Unknown deps (deps that reference missing task ids) cause the swarm run to abort.
-- Cycles cause the swarm run to abort.
-- You’ll see a `PLAN error` explaining the issue.
-
-Opt-in “best effort” auto-repair:
+Opt in to best-effort repair:
 
 ```toml
 [swarm]
 dag_validation = "repair"
 ```
 
-In `repair` mode, nit drops unknown deps and removes deps that would cause cycles, emitting `PLAN warning`s.
+In `repair` mode, nit drops unknown deps and any dep that would cause a cycle, and logs a `PLAN warning` for each.
 
 ### Choosing the planner
 
-The **currently selected Codex lane** becomes the planner/synthesizer.
-
-Practical workflow:
-
-- In Agent Ops → Roster, select the model you want as planner.
-- Press `Enter` to focus Agent Chat in that context.
-- Send your `@swarm ...` (or implicit) prompt.
+The currently selected Codex or Claude lane becomes the planner and synthesizer. In Agent Ops → Roster, select the model you want, press `Enter` to focus Agent Chat in that context, and send your `@swarm` or implicit prompt.
 
 ### Steering the integrator and judge
 
-For `lab` and `bulk`, nit prefers a single-writer integrator. You can guide the planner by saying:
+For `lab` and `bulk`, nit prefers a single-writer integrator. Guide the planner by writing:
 
-- “Make `<agent-id>` the integrator (only writer).”
-- “Make `<agent-id>` the judge.”
+- "Make `<agent-id>` the integrator (only writer)."
+- "Make `<agent-id>` the judge."
 
-For `bulk`, you can also pick the integrator explicitly via **Agent Ops → Roster → Role → integrate**
-(this locks the integrator).
+For `bulk`, you can also lock the integrator through Agent Ops → Roster → Role → integrate.
 
-### Best-practice bulk prompt skeleton
+### Bulk prompt skeleton
 
 ```text
 Use bulk orchestration.
@@ -312,96 +235,71 @@ Create a judge task that depends on all proposers and outputs:
 Integrator must be the only writer (writes=true) and must implement + run the commands.
 ```
 
----
+## Swarm Size
 
-## Swarm Size (agent count)
+- `@swarm <prompt>` uses 4 agents: the planner plus 3.
+- `@swarm N <prompt>` uses N agents in total, from 1 to 256, subject to the fd ceiling below.
+- `@swarm all <prompt>` uses every available Codex and Claude agent in the roster, clamped to the fd ceiling.
+- For `parallel` and `bulk`, if the selected pool is smaller than N, nit fills the rest with mission-scoped clones of the selected models, or of the planner model when none are priority-marked.
 
-Explicit:
-
-- `@swarm <prompt>` defaults to 4 agents (planner + 3).
-- `@swarm N <prompt>` uses N agents total (1–256, FD-bound — see below).
-- `@swarm all <prompt>` uses all available Codex/Claude agents in the roster, clamped to the FD ceiling.
-- For `parallel`/`bulk`, if the selected pool is smaller than `N`, nit fills the remainder with
-  mission-scoped clones of the selected models (or clones of the planner model if none are
-  priority-marked).
-
-Implicit launches:
-
-- Default is still 4 agents.
-- If `--codex-max-parallel-turns` is set to a non-default value, nit uses it as a *size hint* for
-  implicit launches (so “bulk without @swarm” scales to your configured parallelism).
-- You can always override by typing `@swarm 3 ...` / `@swarm 5 ...`.
+Implicit launches also default to 4 agents. If `--codex-max-parallel-turns` is set to a non-default value, nit uses it as the size hint for implicit launches. Typing `@swarm 3 ...` or `@swarm 5 ...` always overrides it.
 
 ### Static and effective ceilings
 
-- **Static cap**: `MAX_SWARM_SIZE = 256`. Hard upper bound regardless of host.
-- **Effective cap**: read at runtime from `RLIMIT_NOFILE` and clamped to the static cap.
-  Each in-flight Codex/Claude exec turn opens **4 fds** (stdin + stdout + stderr + tmp out_file),
-  plus a baseline reserved for nit (terminal, log, MCP backchannel, etc.). The math:
+- Static cap: `MAX_SWARM_SIZE = 256`, on any host.
+- Effective cap: read at runtime from `RLIMIT_NOFILE` and clamped to the static cap. Each in-flight Codex or Claude exec turn opens 4 fds for stdin, stdout, stderr, and a temp out_file. nit reserves 32 fds for its own terminal, log, and MCP backchannel.
 
-  `effective = clamp((fd_limit − 32) / 4, 1, 256)`
+```text
+effective = clamp((fd_limit - 32) / 4, 1, 256)
+```
 
-  | `ulimit -n` | Effective ceiling | Soft warning fires at |
-  |---|---|---|
-  | **256** (macOS default) | 56 agents | 42 agents (75% of ceiling) |
-  | **1024** (Linux default) | 248 agents | 64 agents (`LARGE_SWARM_WARN_THRESHOLD`) |
-  | **4096** (recommended) | 256 agents (saturated) | 64 agents |
-  | **65536** | 256 agents | 64 agents |
+| `ulimit -n` | Effective ceiling | Soft warning fires at |
+|---|---|---|
+| 256 (macOS default) | 56 agents | 42 agents (75% of ceiling) |
+| 1024 (Linux default) | 248 agents | 64 agents (`LARGE_SWARM_WARN_THRESHOLD`) |
+| 4096 (recommended) | 256 agents (saturated) | 64 agents |
+| 65536 | 256 agents | 64 agents |
 
-- To lift the ceiling on macOS: `ulimit -n 4096` then restart nit. The soft limit is per-process,
-  inherited at fork; bumping it after nit started has no effect on the running process.
+To lift the ceiling on macOS, run `ulimit -n 4096` and then restart nit. The soft limit is per process and inherited at fork, so raising it after nit started has no effect on the running process.
 
 ### Soft advisories
 
-When you request a swarm, nit pushes context-aware system messages to the mission console — they
-inform but never block:
+When you request a swarm, nit posts system messages to the mission console. They inform but never block.
 
 | Trigger | Message shape |
 |---|---|
-| `@swarm N` where the request was clamped by the FD ceiling | `Requested N agents, started M (effective ceiling M; ulimit -n is …). Bump …` |
-| `@swarm N` where `N` exceeds the available roster (no FD clamp) | `Requested N agents, started M (only M eligible agents in the roster).` |
-| `@swarm bulk N` with `N > BULK_PRACTICAL_MAX (12)` | Bulk template auto-clamps to 12 with `Bulk template capped at 12 proposers (requested N, started 12). The judge's per-dep budget …` |
-| Lightweight planner (haiku / mini / nano / flash) with `N > 20` | `Planner '<id>' is a lightweight model — coherently planning N task assignments may exceed its reasoning depth. Consider a sonnet/opus-tier planner.` |
-| Final size ≥ warn threshold and not clamped | `Large swarm (N agents). Each agent spawns a Codex/Claude subprocess (~4 fds, ~50–200 MB each). Verify the host has spare RAM/CPU before continuing.` |
+| `@swarm N` clamped by the fd ceiling | `Requested N agents, started M (effective ceiling M; ulimit -n is ...). Bump ...` |
+| `@swarm N` larger than the eligible roster, no fd clamp | `Requested N agents, started M (only M eligible agents in the roster).` |
+| `bulk` with `N > BULK_PRACTICAL_MAX (12)` | nit clamps to 12: `Bulk template capped at 12 proposers (requested N, started 12). The judge's per-dep budget ...` |
+| Lightweight planner (haiku, mini, nano, flash) with `N > 20` | `Planner '<id>' is a lightweight model — coherently planning N task assignments may exceed its reasoning depth. Consider re-running with a sonnet/opus-tier planner ...` |
+| Final size at or above the warn threshold, not clamped | `Large swarm (N agents). Each agent spawns a Codex/Claude subprocess (~4 fds, ~50–200 MB each). Verify the host has spare RAM/CPU before continuing.` |
 
-The planner advisory is **independent** — it can fire alongside any of the others.
+On an fd-bound host, where the ceiling is below 64, the large-swarm message instead names the fd limit and the ceiling and suggests `ulimit -n 4096`. The planner advisory is independent and can fire alongside any of the others.
 
-### DAG view annotation
+### DAG view budget hint
 
-For tasks that use the full-output dependency budget (`role=judge`, `role=integrate`, or
-`writes=true`), the DAG dashboard appends a per-dep budget hint when the per-dep cap drops below
-`SWARM_DEP_OUTPUT_MAX_CHARS_FULL` (48 KB) — i.e. when fan-in compresses each dep's payload:
+Tasks that use the full-output dependency budget (`role=judge`, `role=integrate`, or `writes=true`) get a per-dep budget hint in the DAG view when fan-in pushes the per-dep cap below `SWARM_DEP_OUTPUT_MAX_CHARS_FULL` (48 KB):
 
-```
+```text
 ↳ budget: ~20KB/dep
 ↳ budget: ~4KB/dep — shallow (proposer reasoning truncated)
 ```
 
-The "shallow" warning fires below 8 KB/dep, where each proposer effectively contributes headers
-rather than reasoning. This hint is what motivates the bulk-template hard cap at 12.
+The "shallow" warning fires below 8 KB per dep, where each proposer contributes headers rather than reasoning. This is why the bulk template caps at 12 proposers.
 
 ### UI truncation for large swarms
 
-Three views truncate the displayed agent list when the swarm is large:
+Three views cap the visible agent list when a swarm is large:
 
-- **Roster (Agent Ops)**: per backend group, max 12 visible. Header shows `(visible of total)` —
-  e.g. `Codex (12 of 58)`. The currently-selected agent is auto-promoted into the visible window
-  so keyboard navigation never lands on a hidden lane. Running agents (`active_turns`) sort first,
-  followed by queued, idle, error.
-- **Missions tab**: max 8 agent rows per mission, then a `(+N more)` overflow row.
-- **Chat-pane breather table**: max 6 visible. Sorted running-first.
+- Roster (Agent Ops): at most 12 per backend group. The header shows `(visible of total)`, for example `Codex (12 of 58)`. The selected agent is always promoted into the visible window, so keyboard navigation never lands on a hidden lane. Running agents sort first, then queued, idle, error.
+- Missions tab: at most 8 agent rows per mission, then a `(+N more)` row.
+- Chat-pane breather table: at most 6, running first.
 
 `NIT_ROSTER_NO_TRUNCATE=1` disables all three caps when you need to inspect every clone.
 
----
-
 ## Prompt budget tiers
 
-Every swarm dispatch is assembled by `wrap_task_prompt` and then passed through a
-role-aware truncation pass before it ships to the agent
-(`crates/nit-tui/src/swarm/budgets.rs`). This keeps a fan-in task — a judge or
-integrator reading many upstream outputs — from overflowing the model's context
-window. The pass is enabled by default; disable it with `NIT_PROMPT_TIERS=0`.
+`wrap_task_prompt` assembles every swarm dispatch, then a role-aware truncation pass (`crates/nit-tui/src/swarm/budgets.rs`) trims it before it ships. This keeps a fan-in task, such as a judge or integrator reading many upstream outputs, from overflowing the model's context window. The pass is on by default; `NIT_PROMPT_TIERS=0` disables it.
 
 ### Per-role byte ceilings
 
@@ -415,153 +313,97 @@ window. The pass is enabled by default; disable it with `NIT_PROMPT_TIERS=0`.
 | `test` | 96K |
 | default | 96K |
 
-Ceilings are sized against Claude's ~200K-token window, reserving ~120K tokens for
-system framing and tool-use accumulation.
+The ceilings assume Claude's ~200K-token window and reserve about 120K tokens for system framing and tool-use accumulation.
 
 ### Three-stage truncation
 
-When an assembled prompt exceeds its role ceiling, nit shrinks it in order, stopping
-as soon as it fits:
+When a prompt exceeds its role ceiling, nit shrinks it in this order and stops as soon as it fits:
 
 1. Halve each per-dependency payload.
-2. Drop proposer — then judge — dependency payloads, leaving a one-line breadcrumb in
-   place of each.
+2. Drop proposer payloads, then judge payloads, leaving a one-line breadcrumb for each.
 3. Shrink the `## GENOME LANDSCAPE` block.
 
-Invariants **never** dropped at any stage: the `## FILE CHECKLIST`, the role contract,
-the operator request, and the `<SWARM_TASK_COMPLETE>` sign-off.
+No stage ever drops the `## FILE CHECKLIST`, the role contract, your request, or the `<SWARM_TASK_COMPLETE>` sign-off.
 
 ### Overrides
 
-- **Per-mission**: add `budget=ROLE:N` to the `@swarm` command
-  (e.g. `@swarm budget=integrate:600k …`). The `k`/`K` suffix multiplies by 1024.
-  This writes onto the run and takes precedence over the runtime defaults.
-- **Per-runtime**: `NIT_PROMPT_BUDGET_<ROLE>` sets a byte ceiling for the life of the
-  process — decimal bytes only, no `k` suffix. `<ROLE>` is one of `INTEGRATE`, `JUDGE`,
-  `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, `DEFAULT`.
-- **Off switch**: `NIT_PROMPT_TIERS=0` (or `false`/`no`/`off`) makes the pass a no-op so
-  every prompt ships at full size.
+- Per mission: add `budget=ROLE:N` to the `@swarm` command, for example `@swarm budget=integrate:600k ...`. The `k`/`K` suffix multiplies by 1024. The value is stored on the run and takes precedence over the runtime defaults.
+- Per process: `NIT_PROMPT_BUDGET_<ROLE>` sets a byte ceiling for the life of the process. Decimal bytes only, no `k` suffix. `<ROLE>` is one of `INTEGRATE`, `JUDGE`, `PROPOSE`, `REVIEW`, `TEST`, `RESEARCH`, `DEFAULT`.
+- Off switch: `NIT_PROMPT_TIERS=0` (or `false`, `no`, `off`) turns the pass into a no-op, so every prompt ships at full size.
 
-See `docs/ENVIRONMENT.md` for the env-var details.
-
----
+See `docs/ENVIRONMENT.md` for the env var details.
 
 ## Aborting a swarm
 
-When a swarm goes off the rails — wrong direction, runaway tool calls,
-hung MCP server, or just "I changed my mind" — five triggers cancel
-in-flight work:
+Abort a swarm when it heads the wrong way, when tool calls run away, when an MCP server hangs, or when you change your mind. These triggers cancel in-flight work:
 
 | Trigger | Where you press it | Scope |
 |---|---|---|
 | `/abort` (or `@abort`) | Chat input + Enter | Current mission |
-| `/abort all` | Chat input + Enter | Every active swarm + clears both runner queues |
-| `/abort <agent-id>` | Chat input + Enter | One agent (surgical strike) |
-| **Ctrl+C** | Chat input (must be empty) | Current mission |
-| **Esc Esc** (within ~500 ms) | Chat pane focused | Current mission |
-| **`x`** | Missions tab, with a mission highlighted | That mission specifically |
+| `/abort all` | Chat input + Enter | Every active swarm; also clears both runner queues |
+| `/abort <agent-id>` | Chat input + Enter | One agent |
+| Ctrl+C | Chat input, which must be empty | Current mission |
+| Esc Esc (within about 500 ms) | Chat pane focused | Current mission |
+| `x` | Missions tab, with a mission highlighted | That mission |
 
-### What "abort" actually does
+### What abort does
 
-Hard cancel. The swarm runtime moves the mission to `completed_runs`
-with `report_status = "ABORTED"`, drains queued turns from the runner
-queues, and pushes a system message to the chat:
+Abort is a hard cancel. The swarm runtime moves the mission to `completed_runs` with `report_status = "ABORTED"`, drains queued turns from the runner queues, and posts a system message to the chat:
 
-> ↳ [swarm] Mission aborted by operator. In-flight turns are being
-> killed; queued turns dropped.
+> ↳ [swarm] Mission aborted by operator. In-flight turns are being killed; queued turns dropped.
 
-The runner-side `CancelTurn` then sets a per-turn `AtomicBool`. The
-worker thread sees it within ~50 ms (`try_wait` poll interval) and calls
-`child.kill()`. The subprocess receives SIGTERM and exits.
+The runner-side `CancelTurn` sets a per-turn `AtomicBool`. The worker thread sees it within about 50 ms (the `try_wait` poll interval) and calls `child.kill()`. The subprocess receives SIGTERM and exits.
 
-### Resolving "the current mission"
+There is no soft cancel or graceful drain. If an agent was mid-write, half-written files may be left on disk. The substrate's claim lattice will show the inconsistency on the next swarm.
 
-`/abort`, Ctrl+C, and Esc-Esc all target whatever the chat is showing —
-`state.agents.selected_mission`. There's a fallback: if the selected
-mission has already terminated (e.g. you aborted once, then started
-another swarm without re-selecting it), the orchestrator falls back to
-the most recently started **active** mission. So a second `/abort` after
-starting a new swarm always hits the live work, not the stale aborted
-one.
+### Which mission is "current"
 
-### What you'll see after abort
+`/abort`, Ctrl+C, and Esc Esc target the mission the chat is showing, `state.agents.selected_mission`. If that mission has already ended, for example you aborted once and then started another swarm without re-selecting it, nit falls back to the most recently started active mission. So a second `/abort` after starting a new swarm always hits the live work, not the stale one.
 
-- **Roster status**: agents flip to `IDLE` (not `ERROR`). Operator
-  cancellation isn't an error — the bus handler routes the
-  `OPERATOR_CANCEL_TURN_MESSAGE` sentinel down a soft path: no alert
-  panel, no LAB→WARN promotion, no "Codex failed: …" status banner. The
-  Diag tab gets one Info-level entry.
-- **Mission status**: `ABORTED` in the Missions tab.
-- **Chat-pane breather**: shows `Aborted` (instead of `Done`).
-- **DAG view**: non-terminal tasks marked `Skipped`.
+### What you see after abort
 
-### Soft cancel? No.
+- Roster status: agents flip to `IDLE`, not `ERROR`. The bus handler routes the `OPERATOR_CANCEL_TURN_MESSAGE` sentinel down a soft path: no alert panel, no promotion from LAB to WARN, no "Codex failed: ..." status banner. The Diag tab gets one Info-level entry.
+- Mission status: `ABORTED` in the Missions tab.
+- Chat-pane breather: `Aborted` instead of `Done`.
+- DAG view: non-terminal tasks marked `Skipped`.
 
-There is no graceful drain. Abort kills the subprocess immediately so
-half-written files may exist on disk if the agent was mid-write. The
-substrate's claim lattice will surface inconsistencies on the next
-swarm.
+### Esc Esc details
 
-### Esc-Esc edge cases
-
-The Esc-Esc detector lives in a thread-local timestamp (chat input
-specific). A single Esc still does its existing job (drop selection,
-exit insert mode); only a second Esc within 500 ms of the first
-triggers abort. The window resets after every abort and naturally
-times out, so a stale half-press from yesterday can't fire today.
+The chat input keeps a thread-local timestamp of the last Esc. A single Esc still does its normal job (drop selection, exit insert mode). Only a second Esc within 500 ms aborts. The window resets after every abort and times out on its own, so a stale half-press cannot fire later.
 
 ### Hint strip
 
-Above the chat input, an italic dimmed line surfaces the relevant
-triggers:
+An italic dimmed line above the chat input shows the relevant triggers:
 
-- When a swarm is mid-flight: `↳ /abort · Ctrl+C · Esc Esc · x in Missions tab`
-- When idle: `↳ @swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel`
+- Swarm in flight: `↳ /abort · Ctrl+C · Esc Esc · x in Missions tab`
+- Idle: `↳ @swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel`
 
-The hint shows only when the chat pane has ≥4 rows of headroom above
-the input box, and ellipsizes when the terminal is too narrow.
+The hint appears only when the chat pane has at least 4 rows of headroom above the input box, and it ellipsizes when the terminal is too narrow.
 
----
+## DAG View
 
-## DAG View (Agent Ops → DAG)
+The DAG tab in Agent Ops is the main swarm dashboard. It shows one readable card per task, wraps long titles and fields instead of truncating with `...`, scrolls, and separates tasks from gates.
 
-The DAG tab is the canonical “Swarm dashboard”.
-
-Goals:
-
-- readable, row-by-row task cards (not a cramped table)
-- wraps long titles/fields onto more lines (no right-edge `...` truncation)
-- scrollable, with clear separation between tasks and gates
-
-Notes:
-
-- During planning, it shows `Planning: waiting for planner output`.
-- Bulk launches auto-switch Agent Ops to the DAG tab.
-- Task cards are multi-line for clarity:
-  - line 1: `id / state / title` (title wraps)
-  - detail lines: agent/role, deps/blocked-on (wraps; no `...` truncation)
-
----
+- During planning it shows `Planning: waiting for planner output`.
+- Bulk launches switch Agent Ops to the DAG tab automatically.
+- Each card has line 1 `id / state / title`, then detail lines for agent/role and deps/blocked-on.
 
 ## Verification Gates
 
-After tasks finish, swarm can optionally dispatch a **verifier agent** that runs
-a list of gate commands against the workspace and produces a JSON report. Gates
-are how you tell nit *what "done" means* for your project — formatters, linters,
-type-checkers, tests, benchmarks, whatever matters.
+After the tasks finish, swarm can dispatch a verifier agent that runs a list of gate commands against the workspace and writes a JSON report. Gates are how you tell nit what "done" means for your project: formatters, linters, type-checkers, tests, benchmarks, whatever matters.
 
 ### Selecting a bundle
 
-By default, nit auto-detects a built-in **gate bundle** from the workspace root:
+By default nit detects a built-in gate bundle from marker files in the workspace root:
 
-| Marker file          | Bundle       | Default commands                                                                                                          |
-|----------------------|--------------|---------------------------------------------------------------------------------------------------------------------------|
-| `Cargo.toml`         | `rust-ci`    | `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` |
-| `package.json`       | `node-ci`    | `npm run lint --if-present`, `npm run build --if-present`, `npm test -- --watch=false --passWithNoTests`                  |
-| `pyproject.toml` / `requirements.txt` / `setup.py` / `setup.cfg` | `python-ci`  | `python -m ruff check .`, `python -m mypy .`, `python -m pytest -q` |
-| `go.mod`             | `go-ci`      | `gofmt -l .`, `go vet ./...`, `go test ./...`                                                                             |
+| Marker file | Bundle | Default commands |
+|---|---|---|
+| `Cargo.toml` | `rust-ci` | `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` |
+| `package.json` | `node-ci` | `npm run lint --if-present`, `npm run build --if-present`, `npm test -- --watch=false --passWithNoTests` |
+| `pyproject.toml` / `requirements.txt` / `setup.py` / `setup.cfg` | `python-ci` | `python3 -m ruff check .`, `python3 -m mypy .`, `python3 -m pytest -q` |
+| `go.mod` | `go-ci` | `gofmt -l .`, `go vet ./...`, `go test ./...` |
 
-You can override the auto-detected bundle in `.nit/config.toml`:
+Override the detected bundle in `.nit/config.toml`:
 
 ```toml
 [swarm.gates]
@@ -569,19 +411,14 @@ default = "auto"
 # Values: "auto" (default), "none", "rust-ci", "node-ci", "python-ci", "go-ci"
 ```
 
-Set `default = "none"` to skip verification entirely — the swarm will jump
-straight from Executing → Synthesizing with no verifier agent.
+`default = "none"` skips verification. The swarm then goes straight from Executing to Synthesizing with no verifier agent.
 
 ### Scope-aware Rust commands
 
-The built-in `rust-ci` bundle is **scope-aware**. When the operator's prompt
-mentions one or more `crates/<pkg>/` paths, nit derives the set of touched
-cargo packages from those paths and substitutes them into the gate commands
-using the `{cargo_packages}` placeholder. The verifier then runs targeted
-commands instead of the full workspace suite:
+The `rust-ci` bundle is scope-aware. When your prompt mentions one or more `crates/<pkg>/` paths, nit derives the touched cargo packages and substitutes them into the gate commands through the `{cargo_packages}` placeholder. The verifier then runs targeted commands instead of the full workspace suite:
 
 ```text
-Operator prompt: "refactor crates/nit-utils/src/ for clarity"
+Prompt: "refactor crates/nit-utils/src/ for clarity"
   ↓ derive_cargo_packages → ["nit-utils"]
   ↓ substituted into the rust-ci templates
 Verifier runs:
@@ -590,25 +427,15 @@ Verifier runs:
   cargo test -p nit-utils --all-features
 ```
 
-If the scope spans multiple packages, the templates expand into multiple
-`-p` flags (`cargo test -p nit-utils -p nit-core --all-features`).
+A scope that spans several packages expands into several `-p` flags, for example `cargo test -p nit-utils -p nit-core --all-features`.
 
-**Fallback to full workspace** happens when:
-- No scope files were declared in the prompt, OR
-- Any scope file sits outside `crates/<pkg>/...` (e.g. a workspace-root
-  `Cargo.toml` edit, a file under `scripts/`, or `docs/`) — in that case,
-  nit can't cleanly map the scope to packages and runs `--workspace` /
-  `--all` to stay correct.
+nit falls back to the full workspace commands when the prompt names no scope files, or when any scope file sits outside `crates/<pkg>/...`, such as the workspace-root `Cargo.toml` or a file under `scripts/` or `docs/`. In that case nit cannot map the scope to packages, so it runs `--workspace` / `--all` to stay correct.
 
-The `node-ci`, `python-ci`, and `go-ci` bundles do **not** currently ship
-scoped templates — they always run their full-workspace commands. If you
-want scoped behavior on those stacks, define custom gates (see below).
+The `node-ci`, `python-ci`, and `go-ci` bundles have no scoped templates and always run their full-workspace commands. For scoped behaviour on those stacks, define custom gates.
 
-### Custom gates — `[[swarm.gates.custom]]`
+### Custom gates
 
-When the built-in bundles don't match your project's toolchain, define an
-explicit gate list in `.nit/config.toml`. Custom gates **fully override** the
-auto-detected bundle — the swarm will run exactly what you list, in order.
+When the built-in bundles do not match your toolchain, list your own gates as `[[swarm.gates.custom]]` entries in `.nit/config.toml`. Custom gates fully replace the detected bundle: the swarm runs exactly what you list, in order.
 
 ```toml
 [[swarm.gates.custom]]
@@ -629,28 +456,26 @@ scoped_command = "cargo nextest run {cargo_packages}"
 [[swarm.gates.custom]]
 name = "bench-smoke"
 command = "cargo bench --bench smoke -- --quick"
-# No scoped_command → this gate always runs the full command, even when
+# No scoped_command: this gate always runs the full command, even when
 # scope is known.
 ```
 
-**Fields:**
+Fields:
 
-| Field            | Required | Description                                                                                                                           |
-|------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------|
-| `name`           | yes      | Short label shown in the gate dashboard and in `report.json` (e.g. `"fmt"`, `"test"`, `"genome"`).                                    |
-| `command`        | yes      | Full, workspace-wide command. Used as the fallback when scope cannot be derived cleanly.                                              |
-| `scoped_command` | no       | Template run when nit successfully derives cargo packages from the prompt scope. Supports `{cargo_packages}` / `{packages}` substitution (see below). Omit to always run `command`. |
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Short label shown in the gate dashboard and in `report.json`, for example `"fmt"`, `"test"`, `"genome"`. |
+| `command` | yes | Full, workspace-wide command. Also the fallback when scope cannot be derived. |
+| `scoped_command` | no | Template used when nit derives cargo packages from the prompt scope. Supports `{cargo_packages}` and `{packages}`. Omit to always run `command`. |
 
-**Placeholders in `scoped_command`:**
+Placeholders in `scoped_command`:
 
-| Placeholder        | Expands to                                                                 |
-|--------------------|----------------------------------------------------------------------------|
-| `{cargo_packages}` | Space-joined `-p <pkg>` flags, e.g. `-p nit-tui -p nit-core`. Best for cargo. |
-| `{packages}`       | Plain space-joined package names, e.g. `nit-tui nit-core`. Best for `just`, `make`, scripts. |
+| Placeholder | Expands to |
+|---|---|
+| `{cargo_packages}` | Space-joined `-p <pkg>` flags, for example `-p nit-tui -p nit-core`. Best for cargo. |
+| `{packages}` | Plain space-joined package names, for example `nit-tui nit-core`. Best for `just`, `make`, and scripts. |
 
-If you use a language other than Rust, the simplest pattern is to wrap your
-project's scoped operations in scripts or justfile recipes, then reference
-them from `scoped_command`. Example for a pnpm workspace:
+For a language other than Rust, wrap your project's scoped operations in scripts or justfile recipes and call them from `scoped_command`. Example for a pnpm workspace:
 
 ```toml
 [[swarm.gates.custom]]
@@ -664,54 +489,32 @@ command = "pnpm -r test"
 scoped_command = "pnpm --filter {packages} test"
 ```
 
-> **Note:** `{cargo_packages}` and `{packages}` are only substituted when the
-> operator's prompt scope maps cleanly onto the `crates/<pkg>/` layout. For
-> non-Rust projects, the current scope derivation won't populate packages,
-> so `scoped_command` will never fire unless you also extend scope detection
-> (see `derive_cargo_packages` in `crates/nit-tui/src/swarm/dashboard.rs` — open to
-> contributions for language-agnostic scope mapping).
+`{cargo_packages}` and `{packages}` are substituted only when the prompt scope maps onto the `crates/<pkg>/` layout. For non-Rust projects the current scope detection finds no packages, so `scoped_command` never fires unless you extend `derive_cargo_packages` in `crates/nit-tui/src/swarm/dashboard.rs`. Contributions for language-agnostic scope mapping are welcome.
 
 ### Config resolution order
 
-1. **`[[swarm.gates.custom]]` entries exist** → use them verbatim. The
-   detected language bundle is ignored.
-2. **`[swarm.gates] default` is set to a specific bundle** (e.g. `"rust-ci"`)
-   → use that bundle's built-in commands.
-3. **`[swarm.gates] default = "none"`** → skip verification entirely.
-4. **Default (`"auto"` or no config)** → auto-detect from workspace marker
-   files and use the matching built-in bundle.
+1. `[[swarm.gates.custom]]` entries exist: use them as written and ignore the detected bundle.
+2. `[swarm.gates] default` names a bundle, for example `"rust-ci"`: use that bundle's built-in commands.
+3. `[swarm.gates] default = "none"`: skip verification.
+4. `"auto"` or no config: detect from workspace marker files and use the matching bundle.
 
-Malformed custom-gate entries surface as a `config-error:…` segment in the
-mission's "gates:" system message, and nit falls back to the detected bundle
-so the swarm still makes progress.
+A malformed custom-gate entry shows up as a `config-error:...` segment in the mission's "gates:" system message. nit then falls back to the detected bundle so the swarm still makes progress.
 
 ### Genome quality gate
 
-The `genome-quality` gate is independent of the bundle/custom selection: it
-runs automatically as a background task when `state.settings.genome.genome_gate_enabled`
-is true, evaluating the structural quality of files the integrator touched.
-Its results are injected into the verifier's prompt so the verifier can
-include a `genome-quality` entry in the report alongside the bundle gates.
+The `genome-quality` gate is independent of bundle and custom selection. When `state.settings.genome.genome_gate_enabled` is true, it runs automatically as a background task and scores the structural quality of the files the integrator touched. Its results go into the verifier's prompt so the report can include a `genome-quality` entry next to the bundle gates.
 
 ### Output artifacts
 
 Every verify pass writes:
 
-- `.nit/swarm/<mission-id>/gates/report.json` — structured `GateReport` with
-  per-gate `ok`/`status`/`notes` plus `overall_ok`.
-- `.nit/swarm/<mission-id>/gates/output.txt` — the verifier agent's raw
-  command output (truncated to `SWARM_VERIFY_MAX_CHARS`).
-- `.nit/swarm/<mission-id>/gates/verify.md` — a readable summary combining
-  the two above.
-
----
+- `.nit/swarm/<mission-id>/gates/report.json`: the structured `GateReport` with per-gate `ok`, `status`, and `notes`, plus `overall_ok`.
+- `.nit/swarm/<mission-id>/gates/output.txt`: the verifier agent's raw command output, truncated to `SWARM_VERIFY_MAX_CHARS`.
+- `.nit/swarm/<mission-id>/gates/verify.md`: a readable summary of the two files above.
 
 ## Structured Task Artifacts (`swarm_artifacts`)
 
-Tasks may declare expected artifacts in the plan (`artifacts: ["files","diffs","commands",...]`).
-If they do, the agent output should include a **JSON code block** describing artifacts.
-
-Supported shape (recommended):
+A plan may declare the artifacts a task should produce, for example `artifacts: ["files","diffs","commands",...]`. The agent's output should then include a JSON code block in this shape:
 
 ```json
 {
@@ -731,136 +534,66 @@ Supported shape (recommended):
 
 Persistence:
 
-- Swarm data is persisted under `.nit/swarm/<mission-id>/…`
-- `Agent Ops → Artifacts` surfaces the parsed task artifacts and verification summary for the
-  selected mission
-- Each task’s parsed artifacts are written under:
-  - `.nit/swarm/<mission-id>/tasks/<task-id>/artifacts.json`
-- Task outputs are written under:
-  - `.nit/swarm/<mission-id>/tasks/<task-id>/output.md`
-- Gate verification outputs live under `.nit/swarm/<mission-id>/gates/` — see
-  [Verification Gates → Output artifacts](#output-artifacts) for the file list.
+- All swarm data lives under `.nit/swarm/<mission-id>/`.
+- Each task's parsed artifacts: `.nit/swarm/<mission-id>/tasks/<task-id>/artifacts.json`.
+- Each task's output: `.nit/swarm/<mission-id>/tasks/<task-id>/output.md`.
+- Gate outputs: `.nit/swarm/<mission-id>/gates/`. See [Output artifacts](#output-artifacts).
+- Agent Ops → Artifacts shows the parsed task artifacts and the verification summary for the selected mission.
 
-If a task declares artifacts but no parseable JSON block is found, nit emits a mission message like:
+If a task declares artifacts but its output has no parseable JSON block, nit posts a mission message:
 
-- `Swarm artifacts: task 'integrate' declared artifacts but no parseable swarm_artifacts JSON block was found.`
+`Swarm artifacts: task 'integrate' declared artifacts but no parseable swarm_artifacts JSON block was found.`
 
 ### Serialization format
 
-Swarm artifacts and on-disk task state use **pretty-printed JSON** (`serde_json::to_vec_pretty`).
-The format was evaluated against MessagePack, CBOR, custom-binary, and sqlite-json; JSON won on a
-2× weighting of debuggability and migration cost over disk size and parse cost.
-
-Reasons the weighting favors JSON:
-
-- **Operator inspection.** `.nit/swarm/<mission>/` trees are routinely read with `cat`, `jq`,
-  `grep -r`, and `git diff`. Pretty-print keeps diffs line-readable; binary forks break all of
-  these workflows and would require a new `nit dump-artifact` CLI to restore parity.
-- **LLM agent self-read.** The on-disk artifact path `.nit/swarm/<mission>/tasks/<id>/artifacts.json`
-  is embedded directly in downstream agent prompts (see `crates/nit-tui/src/swarm/artifacts.rs`),
-  so swarm successors read predecessor state straight off disk. The wire format is JSON
-  (unchangeable — LLMs emit/consume text); forking the disk format from the wire format would
-  break this property.
-- **Migration cost.** Status quo is zero source edits, zero new dependencies, zero rewriting of
-  existing operator `.nit/swarm/` trees.
-
-Decisions that stay rejected under this weighting:
-
-- **Do not switch `to_vec_pretty` → `to_vec`** at the artifact write sites in
-  `crates/nit-tui/src/app/provenance.rs`. The ~30–40% byte savings are not worth losing
-  line-based `git diff` readability over the swarm tree.
-- **Do not rename `artifacts.json` / `run.json` / `summary.json` / `gates/report.json`**.
-  These extensions are referenced in (a) the LLM prompt at
-  `crates/nit-tui/src/swarm/artifacts.rs`, (b) `crates/nit-tui/src/widgets/artifacts_popup.rs`
-  and `crates/nit-tui/src/widgets/agent_ops_view.rs`, and (c) `docs/SWARM.md` +
-  `docs/SMOKE_TEST.md`. Any future format/extension change must update all five sites in
-  lockstep.
-
-Revisit only if a future requirement provably cannot be served by the JSON tree — e.g.
-cross-mission analytical queries over 10⁵+ tasks or full-text search across artifacts. In that
-case, layer a derived, rebuildable `.nit/swarm/index.db` (sqlite-json) cache **on top of** the
-file tree; source of truth stays in JSON.
-
----
+Artifacts and on-disk task state are pretty-printed JSON, so you can read them with `cat`, `jq`, and `git diff`, and downstream agents can read predecessor state straight off disk. Do not switch to compact or binary formats. Do not rename `artifacts.json`, `run.json`, `summary.json`, or `gates/report.json`: prompts and the artifacts views reference those names.
 
 ## MCP + Troubleshooting
 
-### “Stuck in Working …”
+### Stuck in "Working ..."
 
-The top “Working/Queued” breather stays active if any Codex lane is still marked as having an
-in-flight turn. If a lane shows a stage like `Context: …` for a very long time, the underlying MCP
-request may be hung.
+The Working/Queued breather stays active while any Codex lane still has an in-flight turn. If a lane shows a stage such as `Context: ...` for a very long time, the underlying MCP request may be hung. Quick checks:
 
-Quick checks:
+- Agent Ops → MCP tab: confirm `CONNECTED` and look for `last_error`.
+- Press `r` to reconnect. This cancels in-flight requests and reinitializes MCP.
 
-- Agent Ops → MCP tab: confirm `CONNECTED`, and check for `last_error`.
-- Try `r` (reconnect). This cancels in-flight requests and reinitializes MCP.
+### MCP reconnect and context
 
-### MCP reconnect and context (“Session not found for thread_id …”)
+In MCP mode, reconnecting can invalidate the Codex thread or session id that nit uses for continuations (`codex-reply`).
 
-In MCP mode, reconnecting can invalidate the Codex “thread/session id” that nit uses for
-continuations (`codex-reply`).
+- MCP reconnect (`r`) preserves saved Codex thread ids.
+- If Codex later reports `Session not found for thread_id ...`, nit drops the stored thread id for that agent so the next prompt starts a fresh thread instead of looping on a broken resume.
+- MCP stop (`x`) clears saved thread ids. The next prompt starts a new thread.
 
-Behavior:
-
-- **MCP reconnect (`r`) preserves** saved Codex thread ids for continuations.
-- If Codex later reports `Session not found for thread_id …`, nit **drops the stored thread id for
-  that agent** so the next prompt starts a fresh thread (avoids broken “resume” loops).
-- **MCP stop (`x`) clears** saved thread ids (next prompt starts a new thread).
-
-If you need more stable “resume” semantics under a flaky MCP transport, run with:
-
-- `--codex-runtime exec`
-
-(exec mode uses `codex exec` processes and can resume sessions without depending on a persistent
-MCP server.)
+For more stable resume behaviour under a flaky MCP transport, run nit with `--codex-runtime exec`. Exec mode uses `codex exec` processes and can resume sessions without a persistent MCP server.
 
 ### Optional safety valve: idle timeouts
 
-If you want a “don’t pin the UI forever” safety valve for MCP hangs, you can enable an idle
-timeout:
+To stop an MCP hang from pinning the UI forever, enable an idle timeout:
 
-- `NIT_MCP_TURN_IDLE_TIMEOUT_SECS=600`
+```text
+NIT_MCP_TURN_IDLE_TIMEOUT_SECS=600
+```
 
-This is **disabled by default** because cancelling hung turns can force a new session and may
-affect continuity for long-running prompts. The full set of timeout / planner / budget env vars
-lives in `docs/ENVIRONMENT.md`.
+It is off by default because cancelling a hung turn can force a new session and break continuity for long prompts. The full set of timeout, planner, and budget env vars is in `docs/ENVIRONMENT.md`.
 
----
+## Planned
 
-## Roadmap: toward a self-sustaining “experiments” lab
-
-The next logical steps to make bulk orchestration feel like a durable “lab” (for experiments,
-agent collaboration, and accelerating programming/research) are:
-
-- **Runbooks / presets**: one-click (or one-keystroke) bulk/lab workflows (repo health, bug triage,
-  perf investigation, refactor plan, ship-a-feature), with editable templates.
-- **Explicit role assignment UI**: pick planner/integrator/judge/verifier and proposer “lenses” from
-  the roster (and display them prominently in chat + DAG).
-- **Persistence + replay**: store plan + outputs + artifacts + diffs + gate reports; support “rerun
-  with same plan”, “re-judge”, “re-integrate”, “re-verify”, and compare runs.
-- **DAG controls**: retry a single task, skip a task, re-run the judge, and re-run verify without
-  restarting the whole swarm mission.
-- **Acceptance criteria & scoring**: require `done_when` + verification commands for integrate;
-  surface “missing artifacts”, “failed gates”, and “unmet acceptance criteria” clearly.
-
----
+- Runbooks and presets: one-keystroke bulk and lab workflows with editable templates, such as repo health, bug triage, perf investigation, refactor plan, and ship a feature.
+- Role assignment UI: pick the planner, integrator, judge, verifier, and proposer lenses from the roster, and show them in chat and the DAG.
+- Persistence and replay: rerun with the same plan, re-judge, re-integrate, re-verify, and compare runs.
+- DAG controls: retry or skip one task, re-run the judge, or re-run verify without restarting the mission.
+- Acceptance criteria and scoring: require `done_when` plus verification commands for integrate, and show missing artifacts, failed gates, and unmet criteria.
 
 ## Example Prompts
 
-Bulk implicit (select `bulk` in roster, then send):
+Bulk, implicit. Select `bulk` in the roster, then send:
 
 ```text
 do a quick repo health check and suggest next steps
 ```
 
-Bulk explicit:
-
-```text
-@swarm template=bulk do a quick repo health check and suggest next steps
-```
-
-Bulk with roles + lenses:
+Bulk with roles and lenses:
 
 ```text
 @swarm template=bulk
@@ -868,14 +601,14 @@ Triage this UI regression. Use proposer lenses (minimal diff, correctness, UX cl
 Judge picks one approach + acceptance criteria + exact commands. Integrator implements.
 ```
 
-Parallel template line (implicit):
+Parallel through a template line (implicit):
 
 ```text
 Template: parallel
 Investigate why the DAG view is slow; propose 3 fixes; include risks.
 ```
 
-Explicit agent count override:
+Explicit agent count:
 
 ```text
 @swarm 3 template=bulk scan the repo and propose a small but high-impact cleanup

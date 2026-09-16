@@ -1,51 +1,48 @@
-# Substrate — The Living-System Reference
+# Substrate
 
-This document is the architectural reference for nit's living-system layer: the **substrate** and every coordination primitive built over it. It complements:
+This document is the contributor reference for nit's living-system layer: the substrate data model, the events that mutate it, the metabolic tick, observers, arbiters, mission memory, the `nit-mcp` tools, persistence, and the TUI overlay. Read it when you change this code. Related docs:
 
-- [`LIVING_SYSTEM.md`](LIVING_SYSTEM.md) — the coordination role roster (worker / observer / arbiter / resolver).
-- [`SUBSTRATE_TESTING.md`](SUBSTRATE_TESTING.md) — how to run tests and verify each feature with concrete examples.
-- [`SWARM.md`](SWARM.md) — the per-mission task-role catalog (propose / integrate / judge / ...).
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — overall nit architecture.
+- [LIVING_SYSTEM.md](LIVING_SYSTEM.md): the four coordination roles (worker, observer, arbiter, resolver).
+- [SUBSTRATE_TESTING.md](SUBSTRATE_TESTING.md): how to run the tests and verify each feature.
+- [SWARM.md](SWARM.md): the per-mission task roles (propose, integrate, judge, and others).
+- [ARCHITECTURE.md](ARCHITECTURE.md): overall nit architecture.
 
----
+## 1. Overview
 
-## 1. Framing
+nit's agents work over a persistent, typed substrate that records coordination state across turns, sessions, and missions. Inside a mission, the DAG-based swarm scheduler runs tasks ([SWARM.md](SWARM.md)). Across missions and between turns, the substrate accumulates signals, claims, assumptions, and mood: observers read it, arbiters act on it, metabolism sweeps it on a wall-clock tick, and mission memory retrieves from it.
 
-nit's agents operate on a **persistent, typed, stigmergic substrate** that records coordination state across turns, sessions, and missions. The architecture is **layered**:
+Subprocess agents (Codex, Claude) never query the substrate directly. State enters it in two ways:
 
-- **Inside a mission**: the DAG-based swarm scheduler executes tasks (unchanged from pre-substrate nit).
-- **Across missions and between turns**: the substrate accumulates signals, claims, assumptions, observations, and mood. Observers read it, arbiters act on it, metabolism sweeps it on a wall-clock tick, mission memory retrieves from it.
+1. Runtime events. nit handles `TurnCompleted`, `TurnFailed`, `FileWrite`, and similar events and updates the substrate as a side effect.
+2. The `nit-mcp` tools, which let a Codex agent write records on purpose (section 9).
 
-The substrate is **never queried directly by subprocess agents** (Codex / Claude) — they interact with it only via:
+## 2. Design rules
 
-1. Runtime-derived events: nit observes `TurnCompleted`, `TurnFailed`, `FileWrite` etc. and emits substrate state as a side effect.
-2. The `nit-mcp` MCP tool set, for deliberate emission (Codex only in v1).
+- Stigmergy: agents coordinate through traces in the environment, not direct messages.
+- Metabolism: decay and pruning run on a wall-clock tick, independent of user activity.
+- Generation-relative time: TTLs and cooldowns count turns, not seconds. The generation advances only on `TurnCompleted`.
+- Four roles: worker (does work), observer (detects patterns), arbiter (intervenes), resolver (commits). See [LIVING_SYSTEM.md](LIVING_SYSTEM.md).
+- Tolerant persistence: missing fields take defaults, corrupt files load as empty state, and old snapshots load into new binaries.
+- Observers detect, arbiters act: observers only emit signals; arbiters can redispatch agents.
+- Shared retry budget: claim retries and arbiter interventions both draw on `GENOME_RETRY_LIMIT`, so stacked pressure on one agent stays bounded.
+- Advisory claims, no rollback: nit does not own the file-write path. A violation triggers a retry prompt, never a rollback.
+- IDs are minted on the main thread only: external processes never touch substrate counters.
 
-Design principles:
+## 3. Data model
 
-- **Stigmergy**: coordination happens through environmental traces, not direct messaging.
-- **Metabolism**: decay and pruning sweep state forward on a wall-clock tick, independent of user activity.
-- **Generation-relative time**: most TTLs and cooldowns count *turns*, not wall-clock seconds. Metabolism advances wall-clock; generation advances only on `TurnCompleted`.
-- **Layered roles**: worker (does work), observer (detects patterns), arbiter (intervenes), resolver (commits). Four distinct roles with distinct inputs, powers, and trigger conditions. See `LIVING_SYSTEM.md`.
-- **Tolerant persistence**: state on disk is forward- and backward-compatible — missing fields default; corrupt files degrade to empty state; old substrate snapshots load cleanly into new binaries.
+Defined in `crates/nit-core/src/substrate/` (`signals.rs`, `claims.rs`, `assumptions.rs`, and `mod.rs` for `SubstrateState`).
 
----
-
-## 2. Data model
-
-Defined in [`crates/nit-core/src/substrate/`](../crates/nit-core/src/substrate/) (split across `signals.rs`, `claims.rs`, `assumptions.rs`, `mod.rs` for `SubstrateState`).
-
-### 2.1 `SubstrateState`
+### 3.1 `SubstrateState`
 
 ```rust
 pub struct SubstrateState {
     pub generation: u64,
     pub signals: HashMap<SignalId, Signal>,
     pub claims: HashMap<ClaimId, Claim>,
-    pub assumptions: HashMap<AssumptionId, Assumption>,
     pub observations: Vec<serde_json::Value>,     // reserved
     pub signal_counter: u64,
     pub claim_counter: u64,
+    pub assumptions: HashMap<AssumptionId, Assumption>,
     pub assumption_counter: u64,
     pub mood: Mood,
     pub mood_override_until_gen: u64,
@@ -53,9 +50,9 @@ pub struct SubstrateState {
 }
 ```
 
-Persisted at `.nit/substrate/state.json` (single JSON object, atomic write via `nit_utils::fs::write_atomic`). All new fields use `#[serde(default)]` so older on-disk snapshots load cleanly.
+Persisted at `.nit/substrate/state.json` (section 10). Every field except `generation` has `#[serde(default)]`, so older snapshots load cleanly.
 
-### 2.2 Signal
+### 3.2 Signal
 
 ```rust
 pub struct Signal {
@@ -64,28 +61,28 @@ pub struct Signal {
     pub posted_by: String,
     pub posted_at_gen: u64,
     pub target: SignalTarget,
-    pub initial_strength: f32,            // default 1.0; observers 1.5; arbiter-emitted 2.0
+    pub initial_strength: f32,            // default 1.0; observers 1.5; arbiters 2.0
     pub payload: serde_json::Value,
 }
 ```
 
-`SignalKind`:
+`SignalKind` and its decay rate per generation:
 
-| Kind               | Decay per gen | Role                                   |
-|--------------------|---------------|----------------------------------------|
-| `HelpNeeded`       | 0.5           | Urgent, resolves or fades fast          |
-| `Lead`             | 0.7           | Suggestive tip                          |
-| `Warning`          | 0.8           | Mid-persistence caution                 |
-| `ClaimViolation`   | 0.85          | Write conflict evidence                 |
-| `Deadend`          | 0.9           | Peer warning — long-lived               |
-| `DoneMarker`       | 0.95          | Durable "this happened" fact            |
-| `InterventionEmitted` | 0.9        | Arbiter trace                           |
+| Kind                  | Decay per gen | Role                            |
+|-----------------------|---------------|---------------------------------|
+| `HelpNeeded`          | 0.5           | Urgent; resolves or fades fast  |
+| `Lead`                | 0.7           | Suggestive tip                  |
+| `Warning`             | 0.8           | Mid-persistence caution         |
+| `ClaimViolation`      | 0.85          | Write conflict evidence         |
+| `Deadend`             | 0.9           | Long-lived peer warning         |
+| `DoneMarker`          | 0.95          | Durable "this happened" fact    |
+| `InterventionEmitted` | 0.9           | Arbiter trace                   |
 
-Effective strength (lazy): `initial * (rate / mood_multiplier)^(current_gen - posted_at_gen)` where `mood_multiplier` is `state.substrate.mood.modulation().signal_decay_multiplier`. Pruned when below `DEFAULT_PRUNE_THRESHOLD = 0.05`.
+Effective strength is computed lazily: `initial * clamp(rate / m, 0.01, 0.999)^(current_gen - posted_at_gen)`, where `m` is `mood.modulation().signal_decay_multiplier`. A signal is pruned once its effective strength drops below `DEFAULT_PRUNE_THRESHOLD = 0.05`.
 
 `SignalTarget`: `File { path }` | `Agent { agent_id }` | `Global`.
 
-### 2.3 Claim
+### 3.3 Claim
 
 ```rust
 pub struct Claim {
@@ -103,7 +100,7 @@ pub struct Claim {
 
 `ClaimTarget`: `File { path }` | `Region { path, start_line, end_line }` | `Global`.
 
-**Compatibility matrix** (two claims conflict iff their targets overlap AND their kinds are incompatible):
+Two claims conflict only if their targets overlap and their kinds are incompatible (`claims_conflict`):
 
 |                 | ExclusiveWrite | SharedRead | AppendOnly | Soft  |
 |-----------------|----------------|------------|------------|-------|
@@ -112,23 +109,24 @@ pub struct Claim {
 | AppendOnly      | ❌             | ✅         | ✅         | ✅    |
 | Soft            | ✅             | ✅         | ✅         | ✅    |
 
-Target overlap semantics:
-- `Global` overlaps with anything.
-- `File(p)` + `File(p)` overlap; `File(p1)` + `File(p2)` with `p1 != p2` do not.
-- `Region(p, s1, e1)` + `Region(p, s2, e2)` overlap iff `s1 ≤ e2 && s2 ≤ e1`.
-- `Region(p, _, _)` + `File(p)` overlap (region is a subset of file).
+Target overlap (`targets_overlap`):
 
-TTL semantics: a claim is expired iff `current_gen ≥ claimed_at_gen + ttl_gens`. `expire_claims(current_gen)` drops expired entries.
+- `Global` overlaps everything.
+- `File(p)` overlaps `File(p)`. Different paths do not overlap.
+- `Region(p, s1, e1)` overlaps `Region(p, s2, e2)` when `s1 <= e2 && s2 <= e1`.
+- `Region(p, _, _)` overlaps `File(p)`.
 
-Auto-claim: every `FileWrite` event auto-asserts an `ExclusiveWrite` claim with `ttl_gens = (3 * mood.claim_ttl_multiplier).max(1) as u64`. Conflicts emit `ClaimViolation` signals and queue a `ClaimRetryRequest` on `state.pending_claim_retries`.
+A claim is expired when `current_gen >= claimed_at_gen + ttl_gens`. `expire_claims(current_gen)` drops expired entries.
 
-### 2.4 Assumption
+Auto-claim: every `FileWrite` event asserts an `ExclusiveWrite` claim on the path with `ttl_gens = (3 * mood.claim_ttl_multiplier).max(1)`. If it conflicts, the new claim is not inserted; nit emits a `ClaimViolation` signal and queues a `ClaimRetryRequest` on `state.pending_claim_retries`.
+
+### 3.4 Assumption
 
 ```rust
 pub struct Assumption {
     pub id: AssumptionId,
     pub target: AssumptionTarget,
-    pub fact: serde_json::Value,   // opaque — nit doesn't inspect
+    pub fact: serde_json::Value,   // opaque; nit does not inspect it
     pub posted_by: String,
     pub posted_at_gen: u64,
     pub ttl_gens: u64,
@@ -136,17 +134,17 @@ pub struct Assumption {
 }
 ```
 
-`AssumptionTarget` has the same shape as `ClaimTarget`. Assumptions have no compatibility lattice (read-vs-read never conflicts) — `assert_assumption` is infallible.
+`AssumptionTarget` has the same shape as `ClaimTarget`. Assumptions never conflict with each other, so `assert_assumption` cannot fail.
 
-**Auto-invalidation**: every `FileWrite` event removes any non-expired assumption whose target overlaps the written path and emits a `Warning` signal targeting the assumption's **original poster** (not the writer) with the full removed `Assumption` embedded in the payload.
+Auto-invalidation: every `FileWrite` removes each non-expired assumption whose target overlaps the written path. For each one, nit emits a `Warning` signal targeting the assumption's original poster, not the writer, with the removed `Assumption` in the payload.
 
-### 2.5 Observations
+### 3.5 Observations
 
-`Vec<serde_json::Value>` — reserved slot for a future polymorphic observation record type. Not currently written by any primitive.
+`observations: Vec<serde_json::Value>` is a reserved slot for a future observation record type. Nothing writes to it yet.
 
-### 2.6 Mood
+### 3.6 Mood
 
-Defined in [`crates/nit-core/src/mood.rs`](../crates/nit-core/src/mood.rs).
+Defined in `crates/nit-core/src/mood.rs`.
 
 ```rust
 pub enum Mood { Exploration, #[default] Consolidation, Defensive }
@@ -160,86 +158,80 @@ pub struct MoodModulation {
 }
 ```
 
-Modulation table:
+| Modulation                 | Exploration | Consolidation | Defensive |
+|----------------------------|-------------|---------------|-----------|
+| `metabolic_tick`           | 10s         | 5s            | 3s        |
+| `arbiter_max_per_tick`     | 1           | 2             | 4         |
+| `repeat_failure_threshold` | 3           | 2             | 1         |
+| `signal_decay_multiplier`  | 1.1         | 1.0           | 0.85      |
+| `claim_ttl_multiplier`     | 0.75        | 1.0           | 1.5       |
 
-| Modulation                    | Exploration | Consolidation | Defensive |
-|-------------------------------|-------------|---------------|-----------|
-| `metabolic_tick`              | 10s         | 5s            | 3s        |
-| `arbiter_max_per_tick`        | 1           | 2             | 4         |
-| `repeat_failure_threshold`    | 3           | 2             | 1         |
-| `signal_decay_multiplier`     | 1.1         | 1.0           | 0.85      |
-| `claim_ttl_multiplier`        | 0.75        | 1.0           | 1.5       |
+`signal_decay_multiplier` divides the decay rate, so a value below 1.0 slows decay. `claim_ttl_multiplier` above 1.0 lengthens TTLs. Defensive mood keeps warnings and holds claims longer; Exploration churns faster.
 
-Semantics: `signal_decay_multiplier < 1.0` ⇒ slower decay (values preserved longer). `claim_ttl_multiplier > 1.0` ⇒ longer TTL (resources held longer). Defensive mood preserves warnings and holds claims; Exploration churns faster.
+Auto-transition runs once per metabolic tick. `pressure` is the number of `ClaimViolation`, `Warning`, and `HelpNeeded` signals posted in the last 10 generations.
 
-**Auto-transition** (evaluated once per metabolic tick):
+- `Consolidation -> Defensive` when `pressure >= 8`.
+- `Defensive -> Consolidation` when `pressure <= 4` (hysteresis).
+- `Consolidation -> Exploration` when `pressure <= 1` for 3 consecutive ticks (the quiet streak).
+- `Exploration -> Consolidation` when `pressure >= 3` (instant snap-back).
+- `Defensive` and `Exploration` never switch directly; the path always goes through `Consolidation`.
 
-Let `pressure = count(ClaimViolation + Warning + HelpNeeded signals posted in last 10 generations)`.
+Manual override: `AgentBusEvent::SetMood { mood, source }` sets the mood and locks auto-transitions for `MOOD_OVERRIDE_LOCK_GENS = 20` generations. Every mood change, auto or manual, emits a `Warning` signal on `Global` with the `source` in its payload.
 
-- `Consolidation → Defensive` if `pressure ≥ 8`.
-- `Defensive → Consolidation` if `pressure ≤ 4` (hysteresis).
-- `Consolidation → Exploration` if `pressure ≤ 1` for 3 consecutive metabolic ticks (quiet-streak requirement).
-- `Exploration → Consolidation` if `pressure ≥ 3` (instant snap-back).
-- `Defensive ↔ Exploration`: never direct, always via Consolidation.
+## 4. Event system
 
-**Manual override**: `AgentBusEvent::SetMood { mood, source }` sets the mood and locks auto-transitions for `MOOD_OVERRIDE_LOCK_GENS = 20` generations. Every mood change (auto or manual) emits a `Warning` signal on `Global` with `source` in the payload.
+Defined in `crates/nit-core/src/agent_bus/` (`mod.rs`, `upsert.rs`, `turn_lifecycle.rs`, `turn_completion.rs`, `turn_error.rs`, `claims_signals.rs`, `file_ops.rs`, `mood_control.rs`, `token_count.rs`, `helpers.rs`).
 
----
+### 4.1 Event taxonomy
 
-## 3. Event system
+Runtime events, emitted by the subprocess runners:
 
-Defined in [`crates/nit-core/src/agent_bus/`](../crates/nit-core/src/agent_bus/) (split across `mod.rs`, `upsert.rs`, `turn_lifecycle.rs`, `turn_completion.rs`, `turn_error.rs`, `claims_signals.rs`, `file_ops.rs`, `mood_control.rs`, `token_count.rs`, `helpers.rs`).
-
-### 3.1 Event taxonomy
-
-**Runtime events** (emitted by subprocess runners):
 - `TurnStarted { agent_id, mission_id, resume_thread_id }`
 - `TurnCompleted { agent_id, mission_id, thread_id, token_count, message }`
 - `TurnFailed { agent_id, mission_id, thread_id, token_count, message }`
 - `FileWrite { agent_id, mission_id, path }`
 - `TokenCount { agent_id, mission_id, token_count }`
-- ... plus several others unrelated to the substrate.
+- Several others that do not touch the substrate.
 
-**Substrate-mutation events** (fully-formed records):
+Substrate-mutation events, carrying fully formed records:
+
 - `EmitSignal { signal: Signal }`
 - `AssertClaim { claim: Claim }`
 - `AssertAssumption { assumption: Assumption }`
 - `SetMood { mood: Mood, source: String }`
 
-**Substrate-mutation events with ID mint-on-apply** (used by `nit-mcp` back-channel — external processes can't mint substrate counters safely):
+Request events, whose IDs are minted on apply. The `nit-mcp` back-channel uses these because an external process cannot mint substrate counters safely:
+
 - `EmitSignalRequest { posted_by, kind, target, payload, initial_strength }`
-- `AssertClaimRequest { claimed_by, kind, target, ttl_gens, rationale }` — honors `mood.claim_ttl_multiplier`
+- `AssertClaimRequest { claimed_by, kind, target, ttl_gens, rationale }`, which applies `mood.claim_ttl_multiplier`
 - `AssertAssumptionRequest { posted_by, target, fact, ttl_gens, rationale }`
 
-### 3.2 `AgentBusEvent::apply(&mut AppState)` sequence on `TurnCompleted`
+### 4.2 `apply` sequence on `TurnCompleted`
 
 ```text
 1. Apply token counts, update agent status, store thread ids, update mission status.
-2. Emit DoneMarker signal for the completing agent (at pre-advance generation).
-3. advance_generation() — gen += 1.
-4. prune_signals_below(DEFAULT_PRUNE_THRESHOLD) — drop faded signals.
-5. expire_claims(current_gen) — drop expired claims.
-6. expire_assumptions(current_gen) — drop expired assumptions.
-7. Run observers (Vec-buffered); emit each returned signal.
-8. Run arbiters (Vec-buffered); reduce_proposals applies policy; apply_interventions emits + queues.
-9. save(&workspace_root) — persist substrate to disk.
+2. Emit a DoneMarker signal for the agent, at the pre-advance generation.
+3. advance_generation(): gen += 1.
+4. prune_signals_below(DEFAULT_PRUNE_THRESHOLD): drop faded signals.
+5. expire_claims(current_gen): drop expired claims.
+6. Run observers (buffered); emit each returned signal.
+7. Run arbiters (buffered); reduce_proposals applies policy; apply_interventions emits and queues.
+8. save(&workspace_root): persist the substrate.
 ```
 
-`TurnFailed` is similar but **does not advance generation** (failure ≠ superstep), emits a `Warning` instead of `DoneMarker`, and skips observer/arbiter runs.
+`TurnCompleted` does not expire assumptions; only the metabolic tick does.
 
-`FileWrite` performs auto-claim + assumption-invalidation but does not touch the generation counter.
+`TurnFailed` does not advance the generation, emits a `Warning` instead of a `DoneMarker`, and skips observers and arbiters.
 
-### 3.3 Emission buffering invariant
+`FileWrite` runs auto-claim and assumption invalidation and leaves the generation counter alone.
 
-Observers' and arbiters' returned `Vec<_>` of proposals are collected first, then applied. An observer/arbiter running in tick N **cannot** see another observer/arbiter's emissions from the same tick. This prevents intra-tick cascades.
+### 4.3 Emission buffering
 
----
+Observers and arbiters return `Vec`s of proposals. nit collects them all first, then applies them. So an observer or arbiter in tick N never sees another observer's or arbiter's emissions from the same tick, which prevents cascades within a tick.
 
-## 4. Metabolism
+## 5. Metabolism
 
-Defined in [`crates/nit-core/src/metabolism.rs`](../crates/nit-core/src/metabolism.rs).
-
-Wall-clock heartbeat that runs independently of turn boundaries. Integrated via frame-time check in nit-tui's main loop:
+Defined in `crates/nit-core/src/metabolism.rs`. The tick is a wall-clock heartbeat, independent of turn boundaries. nit-tui's main loop (`crates/nit-tui/src/app/runner.rs`) checks it once per frame:
 
 ```rust
 if last_metabolism.elapsed() >= nit_core::metabolism::tick_interval_for(state.substrate.mood) {
@@ -252,28 +244,22 @@ if last_metabolism.elapsed() >= nit_core::metabolism::tick_interval_for(state.su
 `tick(&mut AppState) -> MetabolicTickOutcome`:
 
 ```text
-1. pressure = state.substrate.pressure_in_window(10)
-2. mood_quiet_streak += 1 if pressure ≤ 1 else 0
-3. auto_transition → if unlocked, may shift mood and emit mood-shift Warning
-4. claims_expired = expire_claims(current_gen)
-5. assumptions_expired = expire_assumptions(current_gen)
-6. signals_pruned = prune_signals_below(DEFAULT_PRUNE_THRESHOLD)
-7. observer_emissions = run_all(state) → emit each
-8. arbiter_interventions = run_all + reduce + apply
-9. if dirty, save(&workspace_root)
+1. claims_expired = expire_claims(current_gen)
+2. assumptions_expired = expire_assumptions(current_gen)
+3. signals_pruned = prune_signals_below(DEFAULT_PRUNE_THRESHOLD)
+4. pressure = pressure_in_window(10)
+5. mood_quiet_streak += 1 if pressure <= 1, else reset to 0
+6. auto_transition, unless a manual override is active; a shift emits a Warning on Global
+7. observer_emissions = observers::run_all(state); emit each
+8. arbiter_interventions = arbiters::run_all + reduce_proposals + apply_interventions
+9. save(&workspace_root) if anything changed
 ```
 
-`advance_generation` is **not** called — gen counts turns, not wall-clock ticks. `MetabolicTickOutcome::is_noop()` returns true iff nothing changed; noop ticks skip the save entirely (prevents disk thrashing when idle).
+`advance_generation` is never called here: the generation counts turns, not ticks. `MetabolicTickOutcome::is_noop()` is true when nothing changed, and a noop tick skips the save so an idle session does not thrash the disk. The interval is the mood's `metabolic_tick` (section 3.6).
 
-Cadence is mood-modulated: 3s / 5s / 10s for Defensive / Consolidation / Exploration.
+## 6. Observers
 
----
-
-## 5. Observers
-
-Defined in [`crates/nit-core/src/observers/`](../crates/nit-core/src/observers/).
-
-Fn-pointer-based, compile-time registered:
+Defined in `crates/nit-core/src/observers/`. Observers are plain function pointers registered at compile time:
 
 ```rust
 type ObserverFn = fn(&AppState) -> Vec<ObservedEmission>;
@@ -281,25 +267,21 @@ pub struct Observer { pub name: &'static str, pub run: ObserverFn }
 pub const REGISTERED_OBSERVERS: &[Observer] = &[
     repeat_failure::OBSERVER,
     global_heat::OBSERVER,
+    sparse_plan::OBSERVER,
 ];
 ```
 
-Registry-enforced `posted_by = "observer:{name}"` — observers cannot self-spoof as agents. Observer emissions use `initial_strength = OBSERVER_INITIAL_STRENGTH = 1.5`.
+The registry sets `posted_by = "observer:{name}"`, so an observer cannot pose as an agent. Observer emissions use `initial_strength = OBSERVER_INITIAL_STRENGTH = 1.5`.
 
-**Current observers**:
+Current observers:
 
-- **`repeat_failure`** — emits `HelpNeeded` when an agent posts ≥`mood.repeat_failure_threshold` Warning signals within 5 generations. Self-silences if a recent observer-emitted HelpNeeded already targets the agent.
-- **`global_heat`** — emits a Global Warning when total signal count exceeds 100, with a 10-generation cooldown.
+- `repeat_failure`: emits `HelpNeeded` targeting an agent that posted at least `mood.repeat_failure_threshold` `Warning` signals (3 / 2 / 1 for Exploration / Consolidation / Defensive) within 5 generations. Stays silent if a recent `HelpNeeded` from this observer already targets that agent.
+- `global_heat`: emits a `Warning` on `Global` when the total signal count exceeds 100, with a 10-generation cooldown.
+- `sparse_plan`: emits `HelpNeeded` targeting a planner agent when signals posted by `planner:<agent>` include at least 3 `Warning`s with payload `reason = "unresolved_dep"` within 10 generations. The payload carries `unresolved_count` and `missing_deps_sample`. Self-silences like `repeat_failure`.
 
-See `LIVING_SYSTEM.md` for the role definition.
+## 7. Arbiters
 
----
-
-## 6. Arbiters
-
-Defined in [`crates/nit-core/src/arbiters/`](../crates/nit-core/src/arbiters/).
-
-Same fn-pointer shape as observers, plus a policy layer:
+Defined in `crates/nit-core/src/arbiters/`. Same function-pointer shape as observers, plus a policy layer:
 
 ```rust
 pub fn run_all(state: &AppState) -> Vec<(&'static str, InterventionProposal)>;
@@ -307,42 +289,42 @@ pub fn reduce_proposals(state, raw, retry_limit) -> Vec<Intervention>;
 pub fn apply_interventions(state, reduced);
 ```
 
-`reduce_proposals` enforces:
-- Per-(arbiter, target) cooldown of 10 generations (checks for recent `InterventionEmitted` signals).
-- Per-tick budget of `mood.arbiter_max_per_tick` (1 / 2 / 4 for Exploration / Consolidation / Defensive).
-- Downgrade to `EmitSignalOnly` when `state.genome_retry_count ≥ ARBITER_RETRY_LIMIT`.
+`reduce_proposals` enforces, in this order:
 
-`apply_interventions` emits an `InterventionEmitted` signal per intervention AND pushes `Intervention` entries onto `state.pending_interventions`. nit-tui's `drain_pending_interventions` (in `crates/nit-tui/src/app/genome_retry.rs`) pops each, consumes one slot of the shared `GENOME_RETRY_LIMIT` budget, and calls `dispatch_agent_prompt` with the escalated prompt.
+- A per-(arbiter, target) cooldown of `ARBITER_COOLDOWN_GENS = 10` generations, checked against recent `InterventionEmitted` signals. Proposals in cooldown are dropped.
+- A downgrade to `EmitSignalOnly` when the target's genome retry count has reached `ARBITER_RETRY_LIMIT = 3`. For an agent pair, both agents must be exhausted; for a mission or global target, any agent.
+- A per-tick budget of `mood.arbiter_max_per_tick` (1 / 2 / 4 for Exploration / Consolidation / Defensive).
 
-**Current arbiter**: `persistent_conflict` — detects ≥3 mutual `ClaimViolation` signals between an agent pair within 10 gens and emits a "permanently yield" prompt targeting the lexicographically-larger agent.
+`apply_interventions` emits one `InterventionEmitted` signal per intervention (strength 2.0) and pushes each `Intervention` onto `state.pending_interventions`. nit-tui's `drain_pending_interventions` (`crates/nit-tui/src/app/genome_retry.rs`) pops each entry and skips `EmitSignalOnly`. It sends the prompt to the agent, or for a pair to the payload's `chosen_recipient`; mission and global targets are not dispatched. Each dispatch consumes one slot of the shared `GENOME_RETRY_LIMIT` budget and goes through `dispatch_agent_prompt`.
 
----
+Current arbiters:
 
-## 7. Mission memory
+- `persistent_conflict`: at least 3 mutual `ClaimViolation` signals between an agent pair within 10 generations. Proposes `RedispatchWithEscalatedPrompt` for the pair; the "permanently yield this resource" prompt goes to the lexicographically larger agent.
+- `help_needed`: one proposal per agent targeted by a `HelpNeeded` from `observer:repeat_failure` within 5 generations. The prompt tells the agent to stop retrying, name the blocker, and downscope.
+- `sparse_plan`: one proposal per planner targeted by a `HelpNeeded` from `observer:sparse_plan` within 10 generations. The prompt tells the planner to fix `deps` entries that name task ids missing from the DAG.
 
-Defined in [`crates/nit-core/src/mission_memory/`](../crates/nit-core/src/mission_memory/) (split across `mod.rs`, `index.rs`, `io.rs`, `search.rs`).
+## 8. Mission memory
 
-Indexes completed missions from `.nit/swarm/<mission-id>/` (title, template, task summaries, touched files, precomputed tags) into a single file at `.nit/memory/index.json`.
+Defined in `crates/nit-core/src/mission_memory/` (`mod.rs`, `index.rs`, `io.rs`, `search.rs`).
 
-**Retrieval**: `retrieve_similar(&index, query, scope_file_tokens, exclude, k)`:
-- Tokenize query + file-path tokens (lowercase, strip stopwords, split snake_case, split paths on `/ \ .`).
-- Compute IDF-weighted Jaccard against each mission's `tags`: `score = weighted_overlap / weighted_union` where weights are `log((N+1)/(df+1)) + 1`.
-- Add title-term boost (cap 0.3) and file-path overlap bonus (cap 0.2).
-- Filter exclude list, drop zero-score hits, sort descending, truncate to K.
+Indexes completed missions from `.nit/swarm/<mission-id>/` (title, template, task summaries, touched files, precomputed tags) into one file, `.nit/memory/index.json`.
 
-**Integration**: at swarm planner construction (`crates/nit-tui/src/swarm/prompts.rs::build_planner_prompt` + `crates/nit-tui/src/swarm/runtime.rs::build_followup_planner_prompt`), retrieves top-3 excluding the current mission and injects as a "Prior similar missions" section before "Operator request:". Bounded to ~1-2 KB added.
+Retrieval, `retrieve_similar(&index, query, scope_file_tokens, exclude, k)`:
 
-**Update**: `upsert_mission(workspace_root, mission_id)` called after `summary.json` is written in `write_swarm_run_provenance`. Best-effort (discards Result). Bootstrap: `load_or_build` on first query in a session.
+1. Tokenize the query and file-path tokens: lowercase, drop stopwords, split snake_case, split paths on `/`, `\`, and `.`.
+2. Score each mission by IDF-weighted Jaccard against its `tags`: `score = weighted_overlap / weighted_union`, with weights `ln((N + 1) / (df + 1)) + 1`.
+3. Add a title-term boost (cap 0.3) and a file-path overlap bonus (cap 0.2).
+4. Drop excluded missions and zero scores, sort descending, keep the top `k`.
 
----
+Integration: when the swarm planner prompt is built (`build_planner_prompt` in `crates/nit-tui/src/swarm/prompts.rs` and `build_followup_planner_prompt` in `crates/nit-tui/src/swarm/runtime.rs`), nit retrieves the top 3 hits, excluding the current mission, and injects them as a "Prior similar missions" section before "Operator request:". This adds about 1 to 2 KB.
 
-## 8. nit-mcp — deliberate agent emission
+Update: `upsert_mission(workspace_root, mission_id)` runs after `summary.json` is written in `write_swarm_run_provenance`. It is best-effort; the result is discarded. `load_or_build` builds the index on the first query of a session.
 
-Defined in [`crates/nit-mcp/`](../crates/nit-mcp/). Unix-only in v1 (Windows compiles but has no listener).
+## 9. nit-mcp: tools for agents to write to the substrate
 
-**Architecture**:
+Defined in `crates/nit-mcp/`. Unix only in v1; Windows builds compile but have no listener.
 
-```
+```text
 [nit-tui main thread]
   │  binds UDS listener /tmp/nit-mcp-{pid}.sock
   │  spawns `codex mcp-server -c mcp_servers.nit={command="nit-mcp-server", env=...}`
@@ -359,129 +341,119 @@ Defined in [`crates/nit-mcp/`](../crates/nit-mcp/). Unix-only in v1 (Windows com
   │  replies ack
 ```
 
-**Tools**:
+Tools:
+
 - `emit_signal(kind, target, payload?, strength?)`
-- `assert_claim(kind, target, ttl_gens, rationale)` — honors mood TTL multiplier
+- `assert_claim(kind, target, ttl_gens, rationale)`, which applies the mood TTL multiplier
 - `assert_assumption(target, fact, ttl_gens, rationale)`
 
-**ID mint-on-apply**: the `*Request` variants carry no id / `posted_at_gen`. The main thread mints these atomically during `apply()` via `next_signal_id` / `next_claim_id` / `next_assumption_id`. The external process never touches substrate counters.
+nit looks for `nit-mcp-server` next to the running `nit` binary and skips the `-c` override if it is missing. The Codex config passes two environment variables: `NIT_MCP_BACKCHANNEL_SOCKET` and `NIT_MCP_AGENT_ID`. On hosts without Unix sockets the client reads `NIT_MCP_BACKCHANNEL_PORT` and connects to TCP `127.0.0.1`, but nit-tui does not start a listener there.
 
-**Known limitations**:
-- Coarse session-level agent attribution via `NIT_MCP_AGENT_ID` env var.
-- Codex `-c mcp_servers.nit=...` TOML inline-table syntax is defensive but unverified against live Codex.
-- Claude has no MCP support — these tools are Codex-only.
+ID minting: the `*Request` variants carry no id or `posted_at_gen`. The main thread mints them during `apply()` with `next_signal_id`, `next_claim_id`, and `next_assumption_id`. The external process never touches substrate counters.
 
----
+Known limitations:
 
-## 9. Persistence
+- Attribution is per session: every emission carries the `NIT_MCP_AGENT_ID` set at spawn (default `codex-session`).
+- The `-c mcp_servers.nit=...` inline TOML override is not verified against live Codex.
+- Only the Codex runner gets the MCP config. The Claude runner has none, so the tools are Codex-only.
 
-- **`.nit/substrate/state.json`** — atomic write via `nit_utils::fs::write_atomic`. Load is tolerant (missing/corrupt → `Default`). All new fields use `#[serde(default)]`.
-- **`.nit/memory/index.json`** — atomic write, tolerant load, single file (not sharded; cost is O(N log N) at write, negligible at hundreds of missions).
-- **`.nit/swarm/<mission-id>/`** — pre-existing mission artifacts (unchanged by the substrate layer; indexed by mission memory).
+## 10. Persistence
 
----
+- `.nit/substrate/state.json`: atomic write via `nit_utils::fs::write_atomic`. Load is tolerant: a missing or corrupt file becomes `Default`.
+- `.nit/memory/index.json`: atomic write, tolerant load, one file. Writes cost O(N log N), which is negligible at hundreds of missions.
+- `.nit/swarm/<mission-id>/`: mission artifacts, unchanged by the substrate layer and indexed by mission memory.
 
-## 10. TUI observability
+## 11. TUI overlay
 
-The substrate is inspected via a popup overlay opened from anywhere in the TUI.
+The substrate overlay is a popup you can open from anywhere in the TUI.
 
-**Open the overlay**:
-- Keybind: **F3**
-- Commands: `:substrate`, `:sub`, `:sig` (all open on Signals tab); `:claims`, `:assumptions`, `:asm` (open on the named tab)
+- Keys: `F3` or `Ctrl+Space` (outside Insert mode).
+- Commands: `:substrate`, `:sub`, `:sig`, `:signals` open the Signals tab; `:claims`, `:assumptions`, `:asm` open the named tab.
 
-The overlay has three internal sub-tabs:
+Tabs:
 
-1. `SIGNALS` — live signal table. Columns STR / KIND / BY / TARGET / AGE / ID, sorted by effective strength descending, color-coded by kind, width-adaptive.
-2. `CLAIMS` — live claim table. Columns TTL / KIND / BY / TARGET / AGE / ID, sorted by remaining TTL descending.
-3. `ASSUMPTIONS` — live assumption table. Columns TTL / BY / TARGET / AGE / RATIONALE / ID.
+1. `SIGNALS`: live signal table. Columns STR / KIND / BY / TARGET / AGE / ID, sorted by effective strength descending, colored by kind, width-adaptive.
+2. `CLAIMS`: live claim table. Columns TTL / KIND / BY / TARGET / AGE / ID, sorted by remaining TTL descending.
+3. `ASSUMPTIONS`: live assumption table. Columns TTL / BY / TARGET / AGE / RATIONALE / ID.
 
-**Tab switching inside overlay**: `Tab` key cycles; mouse-click on tab labels also cycles (clicking the active tab closes).
-**Scroll**: mouse wheel (shared across all three sub-tabs).
-**Close**: `F3` or `Esc`.
+Inside the overlay, `Tab` cycles tabs. Clicking a tab label also cycles; clicking the active tab closes the overlay. Scroll with `j`/`k`, the arrow keys, `PageUp`/`PageDown`, `Home`, or the mouse wheel. Close with `F3`, `Esc`, `q`, or `Ctrl+Space`.
 
-The mood glyph (`[E.]` / `[C.]` / `[D!]`) is always visible in the Visualizer pane's title bar — no need to open the overlay to see the current mood.
+The top bar always shows the current mood as `MOOD: EXPLORATION`, `MOOD: CONSOLIDATION`, or `MOOD: DEFENSIVE`, colored per mood. The Visualizer title keeps its APPLY / SEED / SNAP / SEARCH buttons.
 
-APPLY / SEED / SNAP / SEARCH buttons in the Visualizer title remain always-visible and clickable.
+## 12. Code map
 
----
-
-## 11. Code map
-
-| Concern                      | Crate / File                                                          |
-|------------------------------|-----------------------------------------------------------------------|
-| Substrate types              | `crates/nit-core/src/substrate/` (`signals.rs`, `claims.rs`, `assumptions.rs`, `mod.rs`) |
-| Mood                         | `crates/nit-core/src/mood.rs`                                         |
-| Metabolism                   | `crates/nit-core/src/metabolism.rs`                                   |
-| Observers (framework + two)  | `crates/nit-core/src/observers/`                                      |
-| Arbiters (framework + one)   | `crates/nit-core/src/arbiters/`                                       |
-| Mission memory               | `crates/nit-core/src/mission_memory/`                                 |
-| Event bus + apply            | `crates/nit-core/src/agent_bus/`                                      |
-| AppState + drain queues      | `crates/nit-core/src/state/`                                          |
-| Signals tab widget           | `crates/nit-tui/src/widgets/signals_view.rs`                          |
-| Claims tab widget            | `crates/nit-tui/src/widgets/claims_view.rs`                           |
-| Assumptions tab widget       | `crates/nit-tui/src/widgets/assumptions_view.rs`                      |
-| Visualizer pane              | `crates/nit-tui/src/widgets/visualizer_view.rs`                       |
-| Substrate overlay popup      | `crates/nit-tui/src/widgets/substrate_overlay.rs`                     |
-| Claim-retry / intervention drains, metabolism tick | `crates/nit-tui/src/app/mod.rs` (`drain_pending_claim_retries`, `drain_pending_interventions`, main loop) |
-| MCP back-channel listener    | `crates/nit-tui/src/mcp_backchannel.rs`                               |
-| Codex runner MCP wiring      | `crates/nit-tui/src/codex_runner/`                                    |
-| nit-mcp MCP server           | `crates/nit-mcp/src/server.rs`                                        |
-| nit-mcp protocol types       | `crates/nit-mcp/src/protocol.rs`                                      |
-| nit-mcp back-channel client  | `crates/nit-mcp/src/backchannel.rs`                                   |
-| nit-mcp binary               | `crates/nit-mcp/src/main.rs`                                          |
-
----
-
-## 12. Design-decision ledger
-
-- **Generation ≠ wall-clock.** TTLs and cooldowns are generation-relative so decay stays meaningful between turns. Metabolism advances wall-clock alone; generation only advances on `TurnCompleted`. Trade-off: during idle, TTLs don't expire via generation — metabolism handles the wall-clock-based sweep anyway.
-- **Claims + assumptions are a pair.** Claims express *write intent* ("I'm taking this"); assumptions express *read dependencies* ("I depend on this being true"). Both share target geometry, TTL semantics, and auto-interactions with `FileWrite`.
-- **Observers detect, arbiters actuate.** Observers emit signals only; arbiters can redispatch agents. This keeps detection and intervention separable and testable in isolation.
-- **Shared retry budget.** Claim-retries and arbiter interventions share `GENOME_RETRY_LIMIT` so stacked pressure on one agent is bounded.
-- **No subprocess write interception.** nit does not own the file-write path — subprocess agents write directly. Claim-based guarding is advisory (violations trigger retries, not rollbacks). Hard-blocking would require runner-side snapshot/rollback machinery, explicitly deferred.
-- **Tolerant load everywhere.** Every persistent field uses `#[serde(default)]`; corrupt files degrade to `Default`. Avoids version-lock on disk.
-- **ID mint on main thread only.** External processes (nit-mcp) never touch substrate counters. `*Request` variants exist specifically to let the main thread mint IDs atomically during `apply()`.
-
----
+| Concern | Crate / file |
+|---|---|
+| Substrate types | `crates/nit-core/src/substrate/` (`signals.rs`, `claims.rs`, `assumptions.rs`, `mod.rs`) |
+| Mood | `crates/nit-core/src/mood.rs` |
+| Metabolism | `crates/nit-core/src/metabolism.rs` |
+| Observers (framework + three) | `crates/nit-core/src/observers/` |
+| Arbiters (framework + three) | `crates/nit-core/src/arbiters/` |
+| Mission memory | `crates/nit-core/src/mission_memory/` |
+| Event bus + apply | `crates/nit-core/src/agent_bus/` |
+| AppState + drain queues | `crates/nit-core/src/state/` |
+| Signals tab widget | `crates/nit-tui/src/widgets/signals_view.rs` |
+| Claims tab widget | `crates/nit-tui/src/widgets/claims_view.rs` |
+| Assumptions tab widget | `crates/nit-tui/src/widgets/assumptions_view.rs` |
+| Substrate overlay popup | `crates/nit-tui/src/widgets/substrate_overlay.rs` |
+| Mood badge | `crates/nit-tui/src/widgets/top_bar.rs` |
+| Visualizer pane | `crates/nit-tui/src/widgets/visualizer_view.rs` |
+| Claim-retry and intervention drains | `crates/nit-tui/src/app/genome_retry.rs` (`drain_pending_claim_retries`, `drain_pending_interventions`) |
+| Metabolism tick in the main loop | `crates/nit-tui/src/app/runner.rs` |
+| Mission provenance + memory upsert | `crates/nit-tui/src/app/provenance.rs` (`write_swarm_run_provenance`) |
+| MCP back-channel listener | `crates/nit-tui/src/mcp_backchannel.rs` |
+| Codex runner MCP wiring | `crates/nit-tui/src/codex_runner/` |
+| nit-mcp MCP server loop | `crates/nit-mcp/src/server.rs` |
+| nit-mcp tool schemas + handlers | `crates/nit-mcp/src/tools.rs`, `crates/nit-mcp/src/tools_schema.json` |
+| nit-mcp JSON-RPC codes | `crates/nit-mcp/src/jsonrpc.rs` |
+| nit-mcp protocol types | `crates/nit-mcp/src/protocol.rs` |
+| nit-mcp back-channel client | `crates/nit-mcp/src/backchannel.rs` |
+| nit-mcp binary | `crates/nit-mcp/src/main.rs` |
 
 ## 13. Extension points
 
-### Adding a new signal kind
-1. Add variant to `SignalKind` in `crates/nit-core/src/substrate/signals.rs`.
-2. Add decay rate in `SignalKind::decay_rate()`.
-3. Update `signals_view.rs` for kind-label rendering.
-4. Update `LIVING_SYSTEM.md` if it represents a new coordination meaning.
+Adding a signal kind:
 
-### Adding a new claim kind
-1. Add variant to `ClaimKind`.
+1. Add the variant to `SignalKind` in `crates/nit-core/src/substrate/signals.rs`.
+2. Add its decay rate in `SignalKind::decay_rate()`.
+3. Update the kind label in `signals_view.rs`.
+4. Update [LIVING_SYSTEM.md](LIVING_SYSTEM.md) if it carries a new coordination meaning.
+
+Adding a claim kind:
+
+1. Add the variant to `ClaimKind`.
 2. Extend the compatibility matrix in `claims_conflict`.
-3. Update `claims_view.rs` color mapping if desired.
+3. Update the color mapping in `claims_view.rs` if wanted.
 
-### Adding a new observer
-1. Create `crates/nit-core/src/observers/<name>.rs` with a `pub const OBSERVER: Observer` and `fn observe(&AppState) -> Vec<ObservedEmission>`.
+Adding an observer:
+
+1. Create `crates/nit-core/src/observers/<name>.rs` with `pub const OBSERVER: Observer` and `fn observe(&AppState) -> Vec<ObservedEmission>`.
 2. Declare `pub mod <name>;` in `observers/mod.rs`.
-3. Append to `REGISTERED_OBSERVERS`.
-4. Add a test mirroring `repeat_failure`'s self-silencing pattern.
-5. Document in `LIVING_SYSTEM.md` under `Current observers`.
+3. Append it to `REGISTERED_OBSERVERS`.
+4. Add a test that mirrors `repeat_failure`'s self-silencing pattern.
+5. List it in [LIVING_SYSTEM.md](LIVING_SYSTEM.md) under the observer's current members.
 
-### Adding a new arbiter
-Same shape as observer, but also:
-- Choose actuation kind (`RedispatchWithEscalatedPrompt` or `EmitSignalOnly`).
-- Self-silencing happens for free via `reduce_proposals` cooldown if you emit `InterventionEmitted` on matching targets.
+Adding an arbiter: same steps as an observer, in `crates/nit-core/src/arbiters/`, plus:
 
-### Adding a new tool to nit-mcp
+1. Choose the intervention kind: `RedispatchWithEscalatedPrompt` or `EmitSignalOnly`.
+2. Rely on the `reduce_proposals` cooldown for self-silencing; it keys on `InterventionEmitted` signals with matching targets.
+
+Adding a nit-mcp tool:
+
 1. Extend `BackchannelRequest` in `crates/nit-mcp/src/protocol.rs`.
-2. Add tool schema + handler in `crates/nit-mcp/src/server.rs`.
+2. Add the tool schema to `crates/nit-mcp/src/tools_schema.json` and a handler in `crates/nit-mcp/src/tools.rs`.
 3. Add a matching `AgentBusEvent::*Request` in `crates/nit-core/src/agent_bus/` (extend the relevant submodule and re-export from `mod.rs`) with an `apply` arm that mints IDs.
-4. Extend `mcp_backchannel.rs`'s `backchannel_to_event` function.
+4. Extend `backchannel_to_event` in `crates/nit-tui/src/mcp_backchannel.rs`.
 
-### Adding a new mood modulation
-1. Add field to `MoodModulation` in `crates/nit-core/src/mood.rs`.
-2. Provide per-mood values in `Mood::modulation()`.
-3. Consume at the relevant call site.
+Adding a mood modulation:
 
-### Adding a new mood
-1. Add variant to `Mood`.
-2. Add modulation row in `Mood::modulation()`.
-3. Update `auto_transition` to handle the new state's entry/exit thresholds.
-4. Add TUI glyph in `signals_view.rs`.
+1. Add the field to `MoodModulation` in `crates/nit-core/src/mood.rs`.
+2. Give each mood a value in `Mood::modulation()`.
+3. Read it at the call site.
+
+Adding a mood:
+
+1. Add the variant to `Mood`.
+2. Add its row in `Mood::modulation()`.
+3. Update `auto_transition` with the entry and exit thresholds.
+4. Add the badge label and color in `crates/nit-tui/src/widgets/top_bar.rs`.

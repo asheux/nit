@@ -1,65 +1,66 @@
 # Terminal
 
-> **Status**: shipped. A real OS shell, embedded in nit and rendered as a
-> grid, with text selection/copy and scrollback. Available in the agent-chat
-> pane, as a modal popup, and per-pane in multipane mode.
+nit can run a real OS shell inside the TUI, with text selection, copy, and
+scrollback. This doc covers where the shell appears, its keys, and how
+selection and scrolling work. All key bindings live in `docs/KEYBINDINGS.md`.
 
 ## What it is
 
-nit can host your `$SHELL` (falling back to `/bin/sh`) directly inside the
-TUI. The shell runs in a PTY; its output is parsed by a `vt100` terminal
-emulator and painted into nit's frame, so it behaves like a normal xterm
-(`TERM=xterm-256color`) — colours, prompts, and full-screen programs work.
-The shell is **not** your host terminal: nit captures the mouse and keyboard
-to drive the rest of the UI, so terminal features like selection and
-scrollback are provided by nit itself (the same model `tmux`, `vim`'s
-`:terminal`, and editor integrated-terminals use).
+nit starts your `$SHELL` (or `/bin/sh` when it is unset) in a PTY. A `vt100`
+emulator parses the output and nit paints it into its own frame. The shell sees
+`TERM=xterm-256color`, so colours, prompts, and full-screen programs work.
+
+The shell is not your host terminal. nit captures the mouse and keyboard to
+drive the rest of the UI, so nit provides selection and scrollback itself. This
+is the same model `tmux`, vim's `:terminal`, and editor terminals use.
 
 ## Three surfaces
 
-- **Agent-chat tab** — the chat pane toggles between `AGENT CHAT` and
-  `TERMINAL`. The shell is parked (not killed) when you tab away, so flipping
-  back resumes the same session with its history and running processes.
-- **Modal popup** — a centered overlay shell over whatever you're doing.
-  Closing hides (not kills) it, so re-opening resumes the same session.
-- **Multipane** — any pane can flip its `NIT` / `TERM` title pill to show a
-  terminal, so a grid of independent shells runs side by side.
+| Surface | Where it appears | Behaviour |
+|---|---|---|
+| Agent-chat tab | The chat pane toggles between `AGENT CHAT` and `TERMINAL`. | Tabbing away parks the shell. Tabbing back resumes the same session. |
+| Modal popup | A centred overlay over whatever you are doing. | Closing hides the shell. Reopening resumes the same session. |
+| Multipane pane | Any pane can flip its `NIT` / `TERM` title pill to a terminal. | A grid of independent shells runs side by side. |
 
-The shell is torn down only when it exits (you run `exit`, or it dies) or when
-nit quits.
+The shell ends only when it exits (you run `exit`, or it dies) or when nit
+quits.
+
+In multipane mode, `nit multipane --terminal-command <COMMAND>` (one per pane)
+starts each pane with its terminal open running that command. See
+`docs/MULTIPANE.md`.
 
 ## Keys
 
 | Action | Key |
 |--------|-----|
 | Toggle the agent-chat terminal tab | `Ctrl+\` |
-| Open / close the modal terminal popup | `Ctrl+Shift+T` |
-| Close the popup (reaches the shell first, closes on the double-tap) | `Esc Esc` |
+| Open or close the modal popup | `Ctrl+Shift+T` |
+| Close the popup | `Esc Esc` (the first Esc reaches the shell, the second closes) |
 | Toggle a multipane pane's terminal | click its `TERM` / `NIT` pill, or `Ctrl+\` on the focused pane |
 
-All other keystrokes are forwarded to the shell, so editors, REPLs, and
-full-screen TUIs run inside the terminal as usual.
+Every other keystroke goes to the shell, so editors, REPLs, and full-screen
+TUIs run as usual.
 
 ## Selecting and copying text
 
-Drag with the left mouse button to select a rectangle of terminal text; the
-selection is highlighted and copied to the system clipboard on release (no
-extra copy keystroke needed), matching how selection works in nit's editor and
-chat panes. This works in the agent-chat terminal, the popup, and — for the
-focused pane — in multipane.
+Drag with the left mouse button to select a rectangle of terminal text. nit
+highlights the selection and copies it to the system clipboard when you release
+the button. No extra copy keystroke is needed. This matches selection in nit's
+editor and chat panes. It works in the agent-chat terminal, the popup, and the
+focused multipane pane.
 
 ## Scrolling
 
-The terminal keeps **10,000 lines** of scrollback. Scroll the mouse wheel over
-any terminal to move through history; typing snaps the view back to the live
-bottom, just like a real terminal. (Scrollback is the `vt100` emulator's own —
-the wheel just drives its offset.)
+The terminal keeps 10,000 lines of scrollback. Scroll the mouse wheel over any
+terminal to move through history. Typing snaps the view back to the live
+bottom, like a real terminal. The scrollback belongs to the `vt100` emulator;
+the wheel only moves its offset.
 
 ## Notes
 
-- Rendering is decoupled from output: a chatty process can't storm nit's
-  redraw loop. The PTY reader thread keeps the grid current on its own thread,
-  and nit samples it on its normal frame cadence (the popup repaints every
-  frame so live output stays smooth; see `docs/PERF.md`).
-- A parked or hidden terminal keeps its shell — and any running process —
-  alive in the background until you return to it or quit nit.
+- Rendering is separate from output. The PTY reader thread keeps the grid
+  current on its own, and nit samples it at its normal frame rate. A chatty
+  process cannot flood nit's redraw loop. The popup repaints every frame to
+  keep live output smooth. See `docs/PERF.md`.
+- A parked or hidden terminal keeps its shell, and any running process, alive
+  in the background until you return to it or quit nit.

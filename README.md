@@ -1,19 +1,21 @@
 # nit - Neural Interface Terminal
 
-AI agents ship code faster than any programmer can keep up with, and the code decays faster than anyone
-can refactor it. nit is a vim-keyed TUI that watches every edit an agent makes and runs it through Conway's
-Game of Life as a fitness function for scoring. Code that scores well propagates and survives, but code
-that scores badly dies out. It is experimental because as of now, we do not quite know whether GoL is indeed
-a better quality measure for code written by everyone, not just agents.
+nit is a terminal editor with vim keys and a built-in station for AI coding agents.
+It watches every file an agent writes, encodes the file as a seed for Conway's Game of
+Life, and counts how many generations the pattern survives. Code that survives is kept.
+Code that collapses is sent back to the agent for another try.
 
-[Thesis](https://community.wolfram.com/groups/-/m/t/3720941)
+This is an experiment. Nobody knows yet whether the Game of Life is a good measure of
+code quality, for agents or for people.
+
+[Read the thesis](https://community.wolfram.com/groups/-/m/t/3720941)
 
 <p align="center">
-  <img src="https://nit.tools/HeroImage.png" alt="nit — the Neural Interface Terminal: a vim-keyed editor and agent station" width="900" />
+  <img src="https://nit.tools/HeroImage.png" alt="nit editor and agent station" width="900" />
 </p>
 
 <p align="center">
-  <img src="https://nit.tools/multipane.png" alt="nit multipane mode — sixteen independent agent chat panes in a 4×4 grid" width="900" />
+  <img src="https://nit.tools/multipane.png" alt="nit multipane mode: sixteen agent chat panes in a 4x4 grid" width="900" />
 </p>
 
 ## Install
@@ -30,9 +32,14 @@ curl -fsSL https://download.nit.tools/install.sh | bash
 irm https://download.nit.tools/install.ps1 | iex
 ```
 
-If PowerShell's execution policy blocks it (rare on default Windows installs but common on managed/corporate machines), prefix with `Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; ` — the bypass is scoped to the current PowerShell process and never touches system-wide settings.
+If PowerShell blocks the script (common on managed machines), run it with a bypass
+that only applies to the current PowerShell process:
 
-**Homebrew (macOS / Linux):**
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; irm https://download.nit.tools/install.ps1 | iex
+```
+
+**Homebrew (macOS, Linux):**
 
 ```bash
 brew install asheux/tap/nit
@@ -42,363 +49,273 @@ brew install asheux/tap/nit
 
 ```bash
 git clone https://github.com/asheux/nit.git && cd nit
-```
-
-**Binaries land at target/release/{nit, nit-mcp-server}**
-```bash
 cargo build --release
 ```
 
-**Upgrade (any platform, any install method):**
+The binaries land in `target/release/` as `nit` and `nit-mcp-server`.
+
+**Upgrade (any platform):**
 
 ```bash
 nit update
 ```
 
-Detects whether nit was installed via Homebrew or one of the install scripts and runs the right upgrade command (Homebrew users get `brew upgrade asheux/tap/nit`; others get `install.sh`; Windows prints the PowerShell snippet to run from a fresh PS session, since a running `.exe` can't replace itself in place). On launch, nit also prompts you with `[i]nstall / [s]kip / [m]ute` if a newer release is available — silenceable via `NIT_NO_VERSION_CHECK=1`.
+`nit update` works out how nit was installed and runs the matching upgrade: `brew upgrade`
+for Homebrew, the install script otherwise. On Windows it prints the PowerShell command to
+run from a fresh session, because a running `.exe` cannot replace itself. nit also checks
+for a newer release at launch and offers `[i]nstall / [s]kip / [m]ute`. Set
+`NIT_NO_VERSION_CHECK=1` to silence the check.
 
-Binaries are distributed via `https://download.nit.tools/<tag>/`, with a `SHA256SUMS` file per release for checksum verification.
+Binaries are served from `https://download.nit.tools/<tag>/`. Each release ships a
+`SHA256SUMS` file.
 
 ### Supported platforms
 
-| OS         | Architecture            | Distribution                                |
-|------------|-------------------------|---------------------------------------------|
-| macOS      | arm64 + x86_64 (universal) | `install.sh`, Homebrew, direct tarball   |
-| Linux      | x86_64 (glibc)          | `install.sh`, Homebrew, direct tarball      |
-| Windows    | x86_64 (MSVC)           | `install.ps1`, direct zip                   |
+| OS      | Architecture               | Distribution                          |
+|---------|----------------------------|---------------------------------------|
+| macOS   | arm64 + x86_64 (universal) | `install.sh`, Homebrew, direct tarball |
+| Linux   | x86_64 (glibc)             | `install.sh`, Homebrew, direct tarball |
+| Windows | x86_64 (MSVC)              | `install.ps1`, direct zip              |
 
-The macOS asset is a single universal Mach-O binary — Apple Silicon and
-Intel Macs both run native code from the same file (no Rosetta needed).
+The macOS binary is universal: Apple Silicon and Intel Macs run native code from the same
+file.
 
-`nit` requires external CLIs (`codex`, `claude`, `git`) on `PATH` to drive its agent runners.
+nit drives its agents through external CLIs. Put `codex`, `claude`, and `git` on your
+`PATH`.
 
 ### Troubleshooting
 
-**macOS — "nit cannot be opened because the developer cannot be verified":**
-The downloaded binary isn't signed/notarized yet. Clear the quarantine attribute:
+**macOS says the developer cannot be verified.** The binary is not notarized yet. Clear
+the quarantine flag once:
 
 ```bash
 xattr -d com.apple.quarantine ~/.nit/bin/nit ~/.nit/bin/nit-mcp-server
 ```
 
-This is only needed once per install and only triggers on machines where the binary went through a browser download (the `curl | bash` flow usually skips it).
+This only happens when the binary came through a browser download. The `curl | bash`
+flow usually avoids it.
 
-**`nit` not found after install:**
-The installer doesn't auto-modify your shell config; it prints a `PATH` hint at the end. Either start a new shell session after adding the export line, or run with the absolute path: `~/.nit/bin/nit --version`.
+**`nit` is not found after install.** The installer does not edit your shell config. It
+prints a `PATH` line to add. Add it and open a new shell, or run
+`~/.nit/bin/nit --version` directly.
 
 ## Quick start
 
 ```bash
-nit path/to/file
+nit path/to/file   # open a file
+nit path/to/dir    # set the workspace root (opens an untitled buffer)
+nit                # current directory, untitled buffer
+nit gol [path]     # Game of Life lab (the default lab)
+nit games [path]   # Games lab: tournaments between programs
+nit multipane      # a grid of independent agent chat panes
 ```
+
+Press `F1` or `?` for the help overlay, and `:` in Normal mode for the command prompt.
+The full key map is in `docs/KEYBINDINGS.md`.
+
+## Agent station
+
+The agent station is two panes: Agent Ops (roster, missions, DAG, artifacts, MCP,
+alerts, diagnostics, scratchpad) and Agent Chat. It supports these backends:
+
+- **Codex**, through a persistent `codex mcp-server` (default) or one `codex exec` per turn.
+- **Claude**, through one `claude -p` subprocess per turn, with an optional warm worker
+  pool (`NIT_CLAUDE_POOL=1`).
+- **Local**, a mock lane for trying the UI without any agent.
+- **Gemini** models show in the roster when the CLI is installed, but there is no runner yet.
+
+Pick backends at launch:
 
 ```bash
-nit games
+nit                       # every lane nit can find (default)
+nit --agents codex        # Codex only (models from ~/.codex/models_cache.json)
+nit --agents claude       # Claude only (models from `claude models --json`)
+nit --agents local        # mock lane only (alias: mock)
+nit --agents all          # same as the default
 ```
+
+Codex options:
+
+- `--codex-runtime <mcp|exec>` (default `mcp`).
+- `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: your Codex config).
+- `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default `never`).
+- `--codex-max-parallel-turns <N>` (alias `--codex-parallel`, default `8`, range `1..=16`).
+  This cap is shared with the Claude runner.
+
+### Chat commands
+
+| Command | What it does |
+|---------|--------------|
+| `@all <prompt>` | Send the same prompt to several agents. |
+| `@swarm [all\|N] [template=lab\|parallel\|bulk] [mission=general\|research\|computational-research] <prompt>` | Plan a mission, run it as a task DAG across N agents, verify, and synthesize. `lab` is the default template. See `docs/SWARM.md`. |
+| `@shadow <prompt>` | One agent, backed by two hidden proposers, a judge, and a reviewer. Turns on by itself for prompts over 500 characters or containing words like `refactor`. See `docs/SHADOWS.md`. |
+| `@multiway [mood=…] [k=N] <prompt>` | Best-first search over git worktrees. Off unless `NIT_MULTIWAY=1`. See `docs/MULTIWAY.md`. |
+| `@new <prompt>` | Start a fresh-context clone when the agent is busy. |
+| `@queue <prompt>`, `@q <prompt>` | Queue the prompt. Prompts sent to a busy agent queue on their own, so this is optional. |
+| `/abort`, `@abort` | Cancel the active swarm mission. `/abort all` cancels every mission. `/abort <agent-id>` cancels one agent. |
+
+Before each Claude dispatch, a hidden intake agent classifies the prompt and attaches a
+file checklist to write requests. Turn it off with `intake_enabled = false` in
+`config.toml` or `NIT_INTAKE_DISABLED=1`. See `docs/INTAKE.md`.
+
+Examples:
 
 ```bash
-nit multipane
+nit --agents codex --codex-runtime exec         # Codex, one process per turn
+NIT_CLAUDE_POOL=1 nit --agents claude           # Claude with the warm pool
+nit multipane --backend claude-haiku-4-5 --panes 4
+cargo run -p nit -- --agents codex              # from source
 ```
 
-- `nit <file>` opens the file in the editor.
-- `nit <dir>` sets the workspace root (opens an untitled buffer).
-- `nit` defaults to the current directory and an untitled buffer.
-- `nit gol [path]` explicitly launches GoL mode.
-- `nit games [path]` launches Games mode (tournaments between programs).
-- `nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid of independent chat panes.
+## Multipane
+
+`nit multipane` opens a grid of independent chat panes, each with its own working
+directory. It is like `tmux` for agents.
+
+```bash
+nit multipane [--backend <model>] [--panes N] [--cwd PATH] [--terminal-command CMD ...]
+```
+
+- `--panes N`: 1 to 32 panes, default 8.
+- `--backend`: omit it to pick an agent per pane, name a family (`claude`, `codex`,
+  `gemini`, `local`) to filter the picker, or name a lane id to pre-pick every pane.
+- `--terminal-command`: start a pane with a shell command instead of a chat. Pass one
+  per pane, in order.
+
+Pane sessions persist to `<state_dir>/multipane/session-<workspace-hash>.json`. Keys are
+in `docs/KEYBINDINGS.md` under "Multipane mode"; the full spec is `docs/MULTIPANE.md`.
+
+## Game of Life lab
+
+- `Ctrl+Enter` runs the Petri Dish; `Ctrl+^` shows a hidden one.
+- In the Petri Dish: `Space` pause, `Enter` step, `+`/`-` speed, `H` hide, `S` snapshot,
+  `F2` rule picker, `P` protocol picker, `G` rule search, `A` apply the best rule.
+- Visualizer seed controls: `Ctrl+E` encoder, `Ctrl+S` symmetry, `Ctrl+V` view, `Ctrl+R`
+  seed view, `Ctrl+M` plate render, `Ctrl+Y` seed source, `Ctrl+G` search, `Ctrl+A`
+  apply, `Ctrl+N` snapshot.
+- Seven encoders turn the open file into a seed. See `docs/SEEDS.md`.
+- 28 built-in rules live in `crates/nit-gol/assets/rules.toml`. Add your own in
+  `~/.config/nit/rules.toml` or type a `B/S` string. See `docs/RULES.md`.
+- Snapshots go to `gol-snapshots/` in the workspace.
+
+## Games
+
+- `nit games [path]` opens `games.toml` by default.
+- `Ctrl+Enter` or `:games run` starts a tournament. `H` hides it, `Ctrl+^` shows it.
+- Runs are written under `runs/games/` in the workspace.
+- On macOS, set `engine.accelerator = "auto" | "cpu" | "metal"` in `games.toml` for GPU
+  acceleration.
+- Headless: `nit games {run | sweep | enumerate fsm | inspect | graph}`.
+
+Strategy types (FSM, cellular automata, one-sided Turing machines), config format, and
+analysis are in `docs/GAMES.md`.
+
+## Command prompt
+
+Press `:` in Normal mode. Commands go to the active lab; start with `--lab gol|games` to
+switch.
+
+- `:q` quit (asks first if the buffer is dirty)
+- `:help`, `:commands` open the help overlay
+- `:run` run the active lab
+- `:gol run|hide|show|stop|rule|rules|encoder|seed` (aliases `:petri`, `:life`)
+- `:games run|hide|show|stop|status|runs|replay|inspect|tm|ca|analyze|strategy`
+
+## Documentation
+
+| Doc | Covers |
+|-----|--------|
+| `docs/ARCHITECTURE.md` | Crates, state model, agent bus, runtimes. |
+| `docs/KEYBINDINGS.md` | Every key and `:` command. |
+| `docs/SWARM.md` | Swarm templates, roles, DAG, gates, budgets, abort. |
+| `docs/SHADOWS.md` | Shadow agents. |
+| `docs/INTAKE.md` | The intake classifier. |
+| `docs/MULTIPANE.md` | Multipane mode. |
+| `docs/MULTIWAY.md` | The multiway search engine (opt-in). |
+| `docs/TERMINAL.md` | The embedded shell. |
+| `docs/SUBSTRATE.md` | Signals, claims, assumptions, mood, metabolism. |
+| `docs/SUBSTRATE_TESTING.md` | How to test the substrate. |
+| `docs/LIVING_SYSTEM.md` | Worker, observer, arbiter, and resolver roles. |
+| `docs/GAMES.md` | The games engine and headless CLI. |
+| `docs/SEEDS.md` | Seed encoders, parsimony, and retries. |
+| `docs/RULES.md` | The Game of Life rule catalog. |
+| `docs/SMOKE_TEST.md` | Manual smoke checklist. |
+| `docs/PERF.md` | Render budget and benchmarks. |
+| `docs/ENVIRONMENT.md` | Every environment variable. |
+| `docs/SECURITY.md` | Security policy and hardening backlog. |
+| `docs/REPO_HEALTH.md` | Repo health checks and conventions. |
 
 ## Development
 
 ```bash
-just fmt
+just fmt                      # format
+just clippy                   # lint (warnings are errors)
+just test                     # cargo test --all
+just run -- path/to/file      # run from source
+just ci                       # fmt-check + clippy + test + cargo deny
+scripts/healthcheck.sh        # quick repo-health check (--deep adds clippy + tests)
 ```
 
-```bash
-just clippy
-```
-
-```bash
-just test
-```
-
-```bash
-just run -- path/to/file
-```
-
-**Full CI gates (fmt-check + clippy + test + cargo deny):**
-```bash
-just ci
-```
-
-**Quick repo-health preflight (add --deep to include clippy + tests):**
-```bash
-scripts/healthcheck.sh
-scripts/healthcheck.sh --deep
-```
-
-### Toolchain
-
-- Rust 1.88.0 (pinned via `rust-toolchain.toml`)
-- ratatui + crossterm for UI/input
-- ropey, unicode-segmentation, unicode-width for text correctness
-- tree-sitter 0.25 for syntax highlighting (29 active grammars; the workspace's language registry — extensions, filenames, shebangs, injection aliases, `is_code` flag — lives in `crates/nit-core/src/languages.rs`) and AST-based seed encoders
-
-### Reproducibility
-
-- `Cargo.lock` is checked in; CI uses `--locked`.
-- `time` is patched to a vendored copy at `vendor/time` (see `Cargo.toml`).
+- Rust 1.88.0, pinned in `rust-toolchain.toml`.
+- ratatui and crossterm for the UI; ropey and the unicode crates for text.
+- tree-sitter 0.25 for highlighting (29 grammars) and the AST seed encoders. The language
+  table lives in `crates/nit-core/src/languages.rs`.
+- `Cargo.lock` is committed and CI builds with `--locked`. The `time` crate is vendored at
+  `vendor/time`.
 
 ## Contributing
 
-Contributions are welcome — bug reports, feature ideas, new tree-sitter
-grammars, Game of Life rules, documentation, and code.
+Bug reports, feature ideas, new tree-sitter grammars, Game of Life rules, docs, and code
+are all welcome.
 
-- **Fork** the repo and branch off `main`.
-- **Validate locally** before opening a PR — all gates must pass (clippy runs with `-D warnings`):
+1. Fork the repo and branch off `main`.
+2. Keep changes focused, match the surrounding style, and add tests for new behaviour.
+3. Run `just fmt` and `just ci`. Clippy runs with `-D warnings`, so every gate must pass.
+4. Open a pull request against `main` with a clear description. CI must be green.
 
-```bash
-just ci
-```
-
-- **Keep changes focused**, match the surrounding style, add tests for new behaviour, and run `just fmt` before committing.
-- **Open a pull request** against `main` with a clear description of the change and its motivation; CI must be green before review.
-
-Good first contributions: new language grammars / highlight queries (`crates/nit-syntax/`), Game of Life rule presets (`docs/RULES.md`), and documentation fixes. For larger or architectural changes, open an issue first to discuss the approach — see `docs/ARCHITECTURE.md` and the subsystem guides under `docs/`.
+Good first contributions: a language grammar (`crates/nit-syntax/`), a rule preset
+(`docs/RULES.md`), or a docs fix. For larger changes, open an issue first and read
+`docs/ARCHITECTURE.md`.
 
 ### Project layout
 
-```
-nit/
-├─ crates/
-│  ├─ nit/                CLI binary entry point (args, agent discovery, lab dispatch)
-│  │  └─ src/
-│  │     ├─ agents/       Backend discovery (Claude, Codex, Gemini, discover)
-│  │     ├─ cli/          clap subcommands + arg enums (lab, agents, codex, games)
-│  │     ├─ games/        Headless games CLI (run, sweep, enumerate, inspect, graph)
-│  │     ├─ graph/        Strategy graph export (DOT / JSON)
-│  │     ├─ logging/      Tracing init + panic hook + log-path resolution
-│  │     ├─ workspace/    Workspace target resolution + notes loading
-│  │     ├─ bootstrap.rs  Runner config assembly, lab dispatch
-│  │     ├─ multipane_setup.rs  Multipane launch wiring
-│  │     └─ main.rs       Entry point + dispatch
-│  ├─ nit-core/           Pure state + protocol layer (no terminal deps)
-│  │  └─ src/
-│  │     ├─ agent_bus/    `AgentBusEvent` enum + state-mutation helpers
-│  │     ├─ arbiters/     Substrate arbiters (escalate, intervene)
-│  │     ├─ buffer/       Rope-backed text buffer + diff/edit
-│  │     ├─ config/       Settings + TOML loaders (editor, highlight, gol, swarm, genome)
-│  │     ├─ genome_report/  Code-as-genome tier scoring, parsimony, recommendations
-│  │     ├─ genome_storage/ Disk-backed report cache (sharded, atomic writes)
-│  │     ├─ mission_memory/ Cross-mission retrieval index
-│  │     ├─ observers/    Substrate observers (pattern detectors)
-│  │     ├─ rule_protocol/  Rule protocol types (GoL B/S, presets)
-│  │     ├─ seed/         GoL seed encoders (token_spectrum, ast_structure,
-│  │     │                complexity, structural, ascii, hilbert, lifehash)
-│  │     ├─ state/        AppState, AgentsState, MultipaneState, GamesState,
-│  │     │                VisualizerState, etc.
-│  │     ├─ substrate/    Signals, claims, assumptions, mood
-│  │     └─ tests/        Core unit tests
-│  ├─ nit-tui/            TUI app loop, widgets, agent runners, swarm + multipane
-│  │  └─ src/
-│  │     ├─ app/          Main event loop, key/mouse dispatch, chat input,
-│  │     │                runner, draw, terminal, scroll, popups
-│  │     ├─ codex_runner/ Codex backend (MCP + exec runtime, JSON-RPC)
-│  │     ├─ multipane/    Multipane grid (dispatch, dir search, persistence)
-│  │     ├─ swarm/        Swarm orchestrator (DAG planning/execution, gates,
-│  │     │                plan parser, dashboard, prompts, workers, scope)
-│  │     ├─ widgets/      All TUI widgets (agent ops, gate monitor, artifacts,
-│  │     │                file tree, top/bottom bar, popups, ...)
-│  │     ├─ gol_render/   Game of Life rendering
-│  │     ├─ seed_render/  Genome seed visualization
-│  │     ├─ workspace_scan/  Background workspace scanner
-│  │     ├─ claude_runner.rs   Claude CLI subprocess runtime (`claude -p`)
-│  │     ├─ claude_pool.rs     Warm worker pool (`NIT_CLAUDE_POOL=1`)
-│  │     ├─ intake.rs          Hidden intent classifier (Claude-class only)
-│  │     ├─ shadow.rs          Shadow agents (propose-a/-b → judge → review)
-│  │     ├─ seed_runtime.rs    Seed compute worker + change detection
-│  │     ├─ genome_worker.rs   Off-thread genome evaluation
-│  │     ├─ mcp_backchannel.rs Unix-domain socket for spawned `codex mcp-server`
-│  │     ├─ vitals.rs / system_stats.rs / power.rs   Process vitals + ECG
-│  │     └─ ...                (file_watcher, fuzzy_*_runner, syntax, layout, ...)
-│  ├─ nit-mcp/            MCP stdio JSON-RPC server (`nit-mcp-server` binary)
-│  │                      — bridges spawned `codex` back into substrate tools
-│  │                      (`emit_signal`, `assert_claim`, `assert_assumption`)
-│  ├─ nit-games/          Game theory tournament engine
-│  │  └─ src/
-│  │     ├─ analysis/     History-log analysis (per-match, per-strategy, trajectories)
-│  │     ├─ config/       Config parsing, normalization, payoff matrices
-│  │     ├─ fsm_enum/     FSM enumeration + canonicalization
-│  │     ├─ strategy/     Strategy codecs (FSM, CA, one-sided TM)
-│  │     ├─ tournament/   Match execution, accumulation, Metal batching, halting filter
-│  │     ├─ fast_eval.rs  Analytical evaluator (cycle detection on deterministic FSM)
-│  │     ├─ introspection.rs   Strategy introspection / export
-│  │     └─ history.rs / history_log.rs / events.rs / output.rs / ndjson.rs
-│  ├─ nit-gol/            Conway's Game of Life engine
-│  │  └─ src/             Grid, step, rules, hashing, attractor detection,
-│  │                      snapshot manager, catalog
-│  ├─ nit-metal/          Metal GPU acceleration (macOS)
-│  │  └─ src/
-│  │     ├─ macos/        Device, dispatch, shader, policy, cache
-│  │     └─ stubs.rs      No-op stubs for non-macOS platforms
-│  ├─ nit-syntax/         Tree-sitter syntax highlighting (registry derives
-│  │  │                   from `nit-core::languages::LANGUAGES`; only the
-│  │  │                   per-grammar `tree_sitter_<lang>` arms in
-│  │  │                   `language/grammars.rs` live here)
-│  │  ├─ src/             Engine, registry, captures, debounce
-│  │  └─ queries/         Tree-sitter highlight queries per language
-│  └─ nit-utils/          Shared filesystem, hashing, path utilities
-├─ docs/                  Architecture, swarm, substrate, multipane, intake,
-│                         shadows, seeds, games, keybindings, security, ...
-├─ vendor/                Vendored dependencies (`time` crate)
-├─ scripts/               Build and CI helpers (`healthcheck.sh`)
-└─ assets/                Static assets
-```
+| Crate | Purpose |
+|-------|---------|
+| `nit` | CLI entry point: args, agent discovery, lab dispatch, headless games, multipane launch. |
+| `nit-core` | State, agent bus, config, text buffers, substrate, genome reports, seed encoders. No terminal code. |
+| `nit-tui` | Event loop, widgets, agent runners, swarm, shadows, intake, multipane, terminal. |
+| `nit-multiway` | Best-first search engine over git worktrees (opt-in). |
+| `nit-mcp` | MCP server (`nit-mcp-server`) that gives Codex the substrate tools. |
+| `nit-games` | Game theory tournament engine. |
+| `nit-gol` | Game of Life engine. |
+| `nit-metal` | Metal GPU acceleration on macOS, with no-op stubs elsewhere. |
+| `nit-syntax` | Tree-sitter highlighting. |
+| `nit-utils` | Shared filesystem, hashing, and path helpers. |
 
-## Security Notes
+Other top-level directories: `docs/` (guides), `vendor/` (vendored crates), `scripts/`
+(CI helpers), `assets/` (themes).
 
-- No plugins.
-- No network calls from `nit` itself.
-- No arbitrary command execution; `nit` may invoke `git`, `codex`, `claude`, and the platform URL launcher (`open`/`xdg-open`/`cmd`) directly (no shell). At startup, `codex`, `claude`, and `gemini` are probed for model detection.
-- `#![forbid(unsafe_code)]` across all crates except `nit-metal` (Metal GPU interop).
+## Security notes
+
+- No plugins and no network calls from nit itself.
+- No shell. nit only spawns `git`, `codex`, `claude`, and the platform URL opener
+  (`open`, `xdg-open`, `cmd`) directly. At startup it probes `codex`, `claude`, and
+  `gemini` to list models.
+- Unsafe code is confined to `nit-metal` (GPU interop).
 - Atomic file writes.
-- Terminal restored on exit and panic.
+- The terminal is restored on exit and on panic.
 
-For details see `docs/SECURITY.md`.
+See `docs/SECURITY.md`.
 
-## Agent Station
+## Known limitations
 
-nit includes an Agent Station UI (Agent Ops + Agent Chat) with multiple backends: Codex (MCP or exec runtime), Claude (subprocess per turn, optional warm worker pool), and a local mock lane. Gemini models are detected at startup but display-only (no runtime runner yet).
-
-- Default: seeds all available lanes (Codex, Claude, and Gemini models when detected on `PATH`).
-- `nit --agents local` (alias: `mock`) — force local lane only.
-- `nit --agents codex` — force Codex only (loads a model roster from `~/.codex/models_cache.json`).
-- `nit --agents claude` — force Claude only (probes `claude models --json` for available models).
-- `nit --agents all` — include all available lanes.
-- Codex runtime knobs:
-  - `--codex-runtime <mcp|exec>` (default: `mcp` — runs a persistent `codex mcp-server`; `exec` spawns `codex exec` per turn).
-  - `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: Codex config).
-  - `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default: `never`).
-  - `--codex-max-parallel-turns <N>` (alias `--codex-parallel`; default `8`, range `1..=16`). Shared cap across Codex and Claude.
-
-### Agent Chat commands
-
-- `@all <prompt>` — fan-out to multiple agents (Codex and Claude).
-- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). `lab` is the default template. See `docs/SWARM.md`.
-- `@shadow <prompt>` — single-agent dispatch with hidden propose-a / propose-b → judge → review pipeline; auto-enables for heavy prompts (>500 chars or keywords like `refactor`, `rewrite`, `implement`). See `docs/SHADOWS.md`.
-- `@new <prompt>` — spawn a fresh-context clone when the agent is busy.
-- `@queue` / `@q <prompt>` — explicit queue (same as the implicit queueing below).
-- `/abort` (or `@abort`) — cancel the active swarm mission. `/abort all` cancels every running swarm; `/abort <agent-id>` is a surgical strike on one agent.
-- Prompts sent while an agent is busy are automatically queued and dispatched when the agent becomes idle.
-
-In front of every Claude-class dispatch, a hidden **intake agent** classifies the operator's intent and appends a file checklist for write/mixed prompts.
-As a prompt augmentation strategy. Disable with `intake_enabled = false` in `config.toml` or `NIT_INTAKE_DISABLED=1` for a runtime kill switch. See `docs/INTAKE.md`.
-
-Examples:
-
-**Load all available lanes (default)**
-```bash
-nit
-```
-
-**Force Codex agent station**
-```bash
-nit --agents codex
-```
-
-**Force Claude-only agent station with the warm worker pool**
-```bash
-NIT_CLAUDE_POOL=1 nit --agents claude
-```
-
-**Force Codex agent station, per-turn `codex exec`**
-```bash
-nit --agents codex --codex-runtime exec
-```
-
-**Force local-only agent station**
-```bash
-nit --agents local
-```
-
-**Multipane: 8 panes, full roster picker per pane**
-```bash
-nit multipane
-```
-
-**Multipane: 4 panes pre-picked to a specific Claude lane**
-```bash
-nit multipane --backend claude-haiku-4-5 --panes 4
-```
-
-**From source**
-```bash
-cargo run -p nit -- --agents codex
-```
-
-## Documentation
-
-- `docs/ARCHITECTURE.md` — module layout, state model, agent system, swarm orchestration, runtime modes.
-- `docs/KEYBINDINGS.md` — full keymap and `:` command reference (editor, agent ops, multipane).
-- `docs/SWARM.md` — swarm orchestration operator guide (templates, roles, DAG, gates, custom gates, abort).
-- `docs/SHADOWS.md` — shadow agents (propose-a/-b → judge → review behind a single agent).
-- `docs/INTAKE.md` — intake preprocessor (hidden Claude-class intent classifier).
-- `docs/MULTIPANE.md` — multipane grid mode (per-pane cwd, dir search, persistence).
-- `docs/TERMINAL.md` — embedded OS shell (agent-chat tab, modal popup, per multipane pane) with selection/copy + scrollback.
-- `docs/SUBSTRATE.md` — stigmergic substrate (signals, claims, assumptions, metabolism, mood).
-- `docs/SUBSTRATE_TESTING.md` — substrate testing recipes + concrete verification steps.
-- `docs/LIVING_SYSTEM.md` — coordination role roster (worker / observer / arbiter / resolver).
-- `docs/GAMES.md` — games engine (strategies, config, headless CLI, analysis, Metal accelerator).
-- `docs/SEEDS.md` — code-as-genome seed encoders, parsimony rule, retry guardrails.
-- `docs/RULES.md` — Game of Life rule catalog and contribution guide.
-- `docs/SMOKE_TEST.md` — feature tour + manual smoke checklist.
-- `docs/PERF.md` — TUI render budget, games benchmarks, and flamegraphs.
-- `docs/ENVIRONMENT.md` — runtime environment variables and tuning knobs.
-- `docs/SECURITY.md` — security policy, protections, and hardening backlog.
-- `docs/REPO_HEALTH.md` — snapshot of the last repo-health audit (fmt/clippy/tests/deny).
-
-## Command prompt (`:`)
-
-Open the command prompt with `:` in Normal mode (or press `F1` / `?` for the full help overlay). Commands are routed to the active lab; start nit with `--lab gol|games` to switch.
-
-- `:q` — quit (confirm if dirty)
-- `:help` / `:commands` — open the help overlay
-- `:run` — run the active app (GoL Petri Dish or Games tournament)
-- `:gol run|hide|show|stop|rule|rules|encoder|seed` — GoL controls (aliases: `:petri`, `:life`)
-- `:games run|hide|show|stop|status|runs|replay|inspect|tm|ca|analyze|strategy` — Games controls
-
-Full command and keybinding reference: `docs/KEYBINDINGS.md`.
-
-## GoL (Game of Life)
-
-- Run Petri Dish: `Ctrl+Enter`; show hidden: `Ctrl+^`
-- Petri Dish popup: `Space` pause, `Enter` step, `+/-` speed, `H` hide, `S` snapshot, `F2` rule picker, `P` protocol picker, `G` rule search, `A` apply best rule
-- Visualizer seed controls: `Ctrl+E` encoder, `Ctrl+S` symmetry, `Ctrl+V` view, `Ctrl+R` cycle seed view, `Ctrl+M` plate render, `Ctrl+Y` seed source, `Ctrl+G` search, `Ctrl+A` apply, `Ctrl+N` snapshot
-- Seed encoders: 7 encoders (byte-level, hybrid, AST-driven) that turn the open buffer into a Game of Life genome. See `docs/SEEDS.md`.
-- Rule selection: 28-rule built-in catalog (`crates/nit-gol/assets/rules.toml`), custom B/S input, user overlay (`~/.config/nit/rules.toml`). See `docs/RULES.md`.
-- Snapshots land in `gol-snapshots/` (async, bounded, deduped).
-
-## Games
-
-- Launch: `nit games [path]` (opens `games.toml` by default).
-- Run tournament: `Ctrl+Enter` or `:games run`; hide/show: `H` / `Ctrl+^`.
-- Outputs land in `runs/games/` under the workspace root.
-- Optional Metal GPU acceleration on macOS (`engine.accelerator = "auto" | "cpu" | "metal"` in `games.toml`).
-- Headless CLI: `nit games {run | sweep | enumerate fsm | inspect | graph}` — see `docs/GAMES.md`.
-
-For strategy types (FSM, CA, one-sided TM), config format (payoff, history, scoring, engine), headless CLI, and analysis: see `docs/GAMES.md`.
-
-## Multipane
-
-`nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid of N independent chat panes (default 8, range `1..=32`), each anchored at its own working directory. `--backend` is optional: omit for a per-pane roster picker, name a family (`claude` / `codex` / `gemini` / `local`) to filter the per-pane roster, or name a specific lane id to pre-pick every pane. Per-pane sessions persist to `<state_dir>/multipane/session-<workspace-hash>.json`.
-
-Per-pane keymap (focus cycling, dir-search, roster revert, focused-pane abort) lives in `docs/KEYBINDINGS.md` "Multipane mode"; `docs/MULTIPANE.md` has the full spec.
-
-## Known limitations (MVP)
-
-- Horizontal scrolling uses character columns; tabs before the viewport can shift alignment.
-- Syntax highlighting covers 29 languages (the canonical list lives in `crates/nit-core/src/languages.rs`) and falls back to plain text for the rest or for very large files.
-- Dockerfile detection is wired (it's an entry in the central `LANGUAGES` table) but the grammar crate is pinned to an older tree-sitter ABI; renders as plain text until upstream catches up.
-- Gemini models appear in the roster but are display-only (no runtime runner).
+- Horizontal scrolling counts character columns, so tabs before the viewport can shift
+  alignment.
+- Highlighting covers 29 languages and falls back to plain text for others and for very
+  large files.
+- Dockerfile is detected but renders as plain text until the upstream grammar supports
+  tree-sitter 0.25.
+- Gemini models appear in the roster but cannot run turns.
 
 ## License
 

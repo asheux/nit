@@ -1,44 +1,45 @@
 # Performance
 
-This doc covers two performance surfaces: the **TUI render loop** (frame budget,
-redraw cap, and how output-heavy subsystems stay off the redraw path) and the
-**`nit-games` engine benchmarks** (criterion benches + flamegraphs). For the
-environment variables referenced here, see `docs/ENVIRONMENT.md`.
+This doc covers two areas: the TUI render loop (frame budget, redraw cap,
+and how output-heavy subsystems stay off the redraw path) and the
+`nit-games` engine benchmarks (criterion benches and flamegraphs). The
+environment variables named here are listed in `docs/ENVIRONMENT.md`.
 
 ## TUI render performance
 
 ### Frame cap (`NIT_TUI_FPS`)
 
-nit's single-pane and multipane event loops gate `terminal.draw` behind a redraw
-cap, default **60 fps** (16 ms). The cap is read once at startup, clamped to
-`15..=120` (out-of-range values fall back to the default), and applies to the draw
-call only — input handling and agent-bus event application stay unthrottled, so a
-high-volume agent-bus burst can update state on every event but can't repaint faster
-than the terminal compositor keeps up. Lower it (`NIT_TUI_FPS=30`) on slow or remote
-terminals; raise it for smoother scrolling on a fast local terminal.
+The single-pane and multipane event loops gate `terminal.draw` behind a
+redraw cap, default 60 fps (16 ms). nit reads the cap once at startup and
+clamps it to `15..=120`; out-of-range values fall back to the default. The
+cap applies to the draw call only. Input handling and agent-bus event
+application stay unthrottled, so a burst of bus events can update state on
+every event but cannot repaint faster than the terminal compositor keeps
+up. Lower it (`NIT_TUI_FPS=30`) on slow or remote terminals; raise it for
+smoother scrolling on a fast local terminal.
 
-### PTY / terminal render decoupling
+### PTY and terminal render decoupling
 
-The embedded terminal's rendering is decoupled from shell output: a chatty process
-can't storm the redraw loop. The PTY reader thread keeps the `vt100` grid current on
-its own thread, and nit samples it on the normal frame cadence. See `docs/TERMINAL.md`
-("Notes") for the full model.
+The embedded terminal renders independently of shell output, so a chatty
+process cannot storm the redraw loop. The PTY reader thread keeps the
+`vt100` grid current on its own thread, and nit samples it on the normal
+frame cadence. See "Notes" in `docs/TERMINAL.md` for the full model.
 
 ### Multipane render budget
 
-Multipane runs the same per-pane render code once per ratatui frame. The grid's render
-and dir-search latency targets (initial 16-pane render < 50 ms, dir-search keystroke →
-result update < 16 ms) are documented in `docs/MULTIPANE.md` ("Performance budget").
+Multipane runs the same per-pane render code once per ratatui frame. The
+latency targets (initial 16-pane render under 50 ms, dir-search keystroke
+to result update under 16 ms) are in the "Performance budget" section of
+`docs/MULTIPANE.md`.
 
 ## Games benchmarks
-
-Run the nit-games benches:
 
 ```bash
 cargo bench -p nit-games
 ```
 
-The benchmark suite includes:
+The suite includes:
+
 - `single_match_200_rounds`
 - `tournament_small` (16 strategies, 200 rounds)
 - `tournament_medium` (128 strategies, 50 rounds)
@@ -52,7 +53,7 @@ The benchmark suite includes:
 - `tm_tournament/tm` vs `tm_tournament/baseline` (12 strategies, 200 rounds)
 - `tm_heavy/tm_steps_heavy` (8 TM strategies, 150 rounds, 512 max steps)
 - `tm_family_halting/tm_1x2_rounds200_steps1000` (TM family halting filter)
-- `sweep_cell_io` (filesystem + serialization overhead)
+- `sweep_cell_io` (filesystem and serialization overhead)
 
 ## Flamegraphs
 
@@ -68,7 +69,7 @@ Generate a flamegraph for the nit-games bench:
 cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tournament_small
 ```
 
-Useful flamegraph targets:
+Other useful targets:
 
 ```bash
 cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tm_steps_heavy
@@ -77,15 +78,16 @@ cargo flamegraph -p nit-games --bench engine_bench -- benchmark=sweep_cell_io
 
 ## Sweep benchmarks
 
-To benchmark sweep orchestration end-to-end:
+To benchmark sweep orchestration end to end:
 
 ```bash
 cargo bench -p nit-games --bench engine_bench -- sweep_cell_io
 ```
 
-## “Fast mode” knobs
+## Fast-mode knobs
 
 For the fastest batch runs:
+
 - `engine.mode = "batch"`
 - `engine.parallelism = "auto"` (or `threads = N`)
 - `engine.fast_eval = true` (eligible deterministic strategies, `noise = 0`)

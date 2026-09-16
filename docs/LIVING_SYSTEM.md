@@ -1,127 +1,112 @@
-# Living System — Coordination Roles
+# Living System
 
-nit is designed as a living system, not a stateless tool. Agents operate on a persistent **substrate** that records coordination state — signals, claims, assumptions — and sweeps itself on every turn boundary plus a wall-clock metabolic tick. Four coordination roles act over this substrate.
+nit is built as a living system, not a stateless tool. Agents work over a persistent substrate that records signals, claims, and assumptions, and that sweeps itself at every turn boundary and on a wall-clock metabolic tick. Four coordination roles act over it: worker, observer, arbiter, and resolver. This document is their roster, for contributors. [SUBSTRATE.md](SUBSTRATE.md) owns the data model, events, metabolism, and MCP tools. [SWARM.md](SWARM.md) owns the per-mission task roles.
 
-This document is the roster. For the per-mission **task-role** catalog (what an agent *does* inside one swarm run — `propose`, `integrate`, `review`, etc.), see [`SWARM.md`](SWARM.md).
+## Substrate primitives
 
----
+The substrate lives in `crates/nit-core/src/substrate/` and persists at `.nit/substrate/state.json`. In brief:
 
-## Substrate primitives (context)
-
-The substrate lives in `crates/nit-core/src/substrate/` and persists at `.nit/substrate/state.json`. Key primitives:
-
-- **Signals** — stigmergic traces (`DoneMarker`, `Warning`, `ClaimViolation`, `InterventionEmitted`, etc.). Strength decays per-kind; pruned below threshold.
-- **Claims** — typed write-intent (`ExclusiveWrite | SharedRead | AppendOnly | Soft`) with TTL and a compatibility matrix. Auto-asserted on `FileWrite`; conflicts trigger retries.
-- **Assumptions** — typed read-dependencies. Auto-invalidated when a conflicting `FileWrite` lands; a Warning signal is emitted toward the assumption's poster.
-- **Generation counter** — advances on `TurnCompleted`, not wall-clock. Decay and expiry are generation-relative.
-- **Metabolism** — wall-clock tick every 5s (`crates/nit-core/src/metabolism.rs`). Expires past-TTL claims/assumptions, prunes decayed signals, runs observers and arbiters.
-- **Mission memory** — cross-mission retrieval (`crates/nit-core/src/mission_memory/`). Surfaces past similar missions to the planner.
-- **nit-mcp — deliberate agent agency** — `crates/nit-mcp/` exposes three MCP tools (`emit_signal`, `assert_claim`, `assert_assumption`) that let subprocess Codex agents write directly into the substrate. nit-tui binds a per-process UDS listener; `codex mcp-server` is launched with a `-c mcp_servers.nit=...` override so the model can discover the nit tool set. Requests arrive as `AgentBusEvent::*Request` variants whose ids are minted atomically on the main thread (external processes never touch the counters). Unix-only in v1.
-
----
+- Signals: traces such as `DoneMarker`, `Warning`, `ClaimViolation`, and `InterventionEmitted`. Strength decays per kind; faded signals are pruned.
+- Claims: typed write intent (`ExclusiveWrite | SharedRead | AppendOnly | Soft`) with a TTL and a compatibility matrix. Asserted automatically on `FileWrite`; conflicts trigger retries.
+- Assumptions: typed read dependencies. A conflicting `FileWrite` invalidates them and sends a `Warning` to the poster.
+- Generation counter: advances on `TurnCompleted`, not on the clock. Decay and expiry are generation-relative.
+- Metabolism: a wall-clock tick every 10s in Exploration, 5s in Consolidation, or 3s in Defensive mood. It expires claims and assumptions past their TTL, prunes decayed signals, and runs observers and arbiters.
+- Mission memory: cross-mission retrieval that shows similar past missions to the planner.
+- nit-mcp: three MCP tools (`emit_signal`, `assert_claim`, `assert_assumption`) that let subprocess Codex agents write to the substrate. Requests arrive as `AgentBusEvent::*Request` events whose ids are minted on the main thread. Unix only in v1.
 
 ## The four coordination roles
 
 ### Worker
 
-**Purpose:** performs the actual mission work — reads code, writes diffs, runs tests, synthesizes outputs. Workers *do* things.
+Purpose: does the mission work. Reads code, writes diffs, runs tests, produces outputs.
 
-**Where it lives:** swarm task roles. See [`SWARM.md`](SWARM.md). Current task roles:
+Where it lives: the swarm task roles `propose`, `judge`, `integrate` (the single writer per mission), `review`, `test`, `research`, and `computational-research`. Verification and synthesis are planner phases, not task roles. [SWARM.md](SWARM.md) describes each.
 
-- `propose` — survey and plan (read-only)
-- `judge` — compare proposals; select or synthesize
-- `integrate` — apply edits (single-writer per mission)
-- `review` — audit integrated code; flag risks
-- `test` — run gates (`cargo test`, `clippy`, language-specific CI)
-- `research` / `computational-research` — exploration missions
-- `synthesizer` — produce final mission summary
-- `verifier` — implicit post-integration gate check
+Cadence: turn-driven. Each agent turn is one step of work.
 
-**Cadence:** turn-driven. Each agent turn is a step of work.
+Substrate interactions:
 
-**Substrate interactions:**
-- Signals: auto-emits `DoneMarker` on `TurnCompleted`, `Warning` on `TurnFailed` (via runtime derivation — see `crates/nit-core/src/agent_bus/`).
-- Claims: auto-asserts `ExclusiveWrite` on `FileWrite` (TTL 3 gens).
-- Assumptions / deliberate emission: available via `nit-mcp` — subprocess Codex agents can call `emit_signal`, `assert_claim`, and `assert_assumption` tools to interact with the substrate explicitly. See the *nit-mcp — deliberate agent agency* entry above under substrate primitives.
-
----
+- Signals: nit emits `DoneMarker` on `TurnCompleted` and `Warning` on `TurnFailed`.
+- Claims: nit asserts an `ExclusiveWrite` claim on every `FileWrite`, with a TTL of 3 generations times the mood's `claim_ttl_multiplier`.
+- Assumptions and direct emission: Codex agents can call the `nit-mcp` tools.
 
 ### Observer
 
-**Purpose:** reads the substrate at tick boundaries, detects patterns, emits meta-signals. Observers *surface* structural facts — they do not actuate.
+Purpose: reads the substrate at tick boundaries, detects patterns, and emits meta-signals. Observers report structural facts; they never act.
 
-**Where it lives:** `crates/nit-core/src/observers/`. Framework in `mod.rs` (`REGISTERED_OBSERVERS` compile-time array, `run_all(state)`). Individual observers in sibling files.
+Where it lives: `crates/nit-core/src/observers/`. `mod.rs` holds the compile-time `REGISTERED_OBSERVERS` array and `run_all(state)`; each observer is a sibling file.
 
-**Cadence:** runs at `TurnCompleted` (after `advance_generation` + `prune`) and on every metabolic tick.
+Cadence: at `TurnCompleted`, after `advance_generation` and pruning, and on every metabolic tick.
 
-**Safety invariants:**
-- Registry-enforced `posted_by = "observer:{name}"` — observers cannot self-spoof as agents.
-- Emissions are buffered in a `Vec` before application; no observer sees another observer's emissions within the same tick.
-- Observer signals use `initial_strength = 1.5` (worker default is 1.0) so structural facts outlast worker transients.
+Invariants:
 
-**Current observers:**
-- **`repeat_failure`** — ≥2 `Warning` signals from the same agent within 5 generations → emits `HelpNeeded` targeting that agent. Self-silencing if a recent observer-emitted `HelpNeeded` already exists.
-- **`global_heat`** — total signal count > 100 → emits `Warning` on `Global`. 10-generation cooldown.
+- The registry sets `posted_by = "observer:{name}"`, so an observer cannot pose as an agent.
+- Emissions are buffered in a `Vec` before they apply. No observer sees another observer's emissions from the same tick.
+- Observer signals use `initial_strength = 1.5` (workers default to 1.0), so structural facts outlast worker transients.
 
----
+Current observers:
+
+- `repeat_failure`: an agent with at least `repeat_failure_threshold` `Warning` signals within 5 generations (3 in Exploration, 2 in Consolidation, 1 in Defensive) gets a `HelpNeeded`. Silent while a recent observer-emitted `HelpNeeded` for that agent exists.
+- `global_heat`: more than 100 signals in total emit a `Warning` on `Global`, with a 10-generation cooldown.
+- `sparse_plan`: a `planner:<agent>` with at least 3 `Warning` signals carrying `reason = "unresolved_dep"` within 10 generations gets a `HelpNeeded`. Self-silences like `repeat_failure`.
 
 ### Arbiter
 
-**Purpose:** detects structural failures that observers have surfaced (persistent conflicts, deadlocks, stuck slots) and *actuates* corrective interventions. Arbiters are the first primitive with teeth — they redispatch agents with escalated prompts, not just surface signals.
+Purpose: acts on the structural failures observers report (persistent conflicts, repeated failures, broken plans) by redispatching agents with escalated prompts.
 
-**Where it lives:** `crates/nit-core/src/arbiters/`. Framework in `mod.rs`:
+Where it lives: `crates/nit-core/src/arbiters/`. `mod.rs` holds:
 
-- `REGISTERED_ARBITERS` — compile-time array.
-- `run_all(state)` — collects raw proposals.
-- `reduce_proposals(state, raw, retry_limit)` — policy layer: cooldown check, per-tick budget, downgrade to `EmitSignalOnly` when retry budget exhausted.
-- `apply_interventions(state, reduced)` — emits `InterventionEmitted` signal per intervention AND pushes onto `state.pending_interventions` for nit-tui to drain.
+- `REGISTERED_ARBITERS`: compile-time array.
+- `run_all(state)`: collects raw proposals.
+- `reduce_proposals(state, raw, retry_limit)`: the policy layer. Cooldown check, per-tick budget, downgrade to `EmitSignalOnly` when the retry budget is exhausted.
+- `apply_interventions(state, reduced)`: emits one `InterventionEmitted` signal per intervention and pushes it onto `state.pending_interventions` for nit-tui to drain.
 
-**Cadence:** runs *after* observers at `TurnCompleted` and on every metabolic tick. Sees observer-emitted signals from the same tick.
+Cadence: after observers at `TurnCompleted` and on every metabolic tick, so it sees observer signals from the same tick.
 
-**Safety guards (all in `reduce_proposals`):**
+Guards, all in `reduce_proposals`:
+
 - Per-(arbiter, target) cooldown: 10 generations.
-- Per-tick budget: 2 interventions max.
-- Shared retry budget with claim-retries (via `GENOME_RETRY_LIMIT` in `nit-tui`, mirrored as `ARBITER_RETRY_LIMIT` in `nit-core`).
-- No self-loop: arbiters do not read `InterventionEmitted` signals.
+- Per-tick budget: `arbiter_max_per_tick`, which is 1 in Exploration, 2 in Consolidation, and 4 in Defensive.
+- Shared retry budget with claim retries: `GENOME_RETRY_LIMIT` in `nit-tui`, mirrored as `ARBITER_RETRY_LIMIT` in `nit-core`, both 3.
+- No self-loop: arbiter functions never read `InterventionEmitted` signals. Only the cooldown check does.
 
-**Actuation:** nit-tui's `drain_pending_interventions` pops each intervention, dispatches an escalated prompt via `dispatch_agent_prompt`, and consumes one slot of the shared retry budget. Runs right after `drain_pending_claim_retries` so already-retrying agents aren't doubly escalated.
+Actuation: nit-tui's `drain_pending_interventions` (`crates/nit-tui/src/app/genome_retry.rs`) pops each intervention, dispatches its prompt through `dispatch_agent_prompt`, and consumes one slot of the shared retry budget. It runs right after `drain_pending_claim_retries`, so an agent already retrying is not escalated twice.
 
-**Current arbiters:**
-- **`persistent_conflict`** — ≥3 mutual `ClaimViolation` signals between an agent pair in 10 generations → `RedispatchWithEscalatedPrompt` on the lexicographically-larger agent with message: *"ARBITER: you and {other} have conflicted on {paths} {n} times in {w} generations. You must permanently yield this resource for this mission."*
+Current arbiters:
 
----
+- `persistent_conflict`: at least 3 mutual `ClaimViolation` signals between an agent pair within 10 generations. Redispatches the lexicographically larger agent with: `ARBITER: you and {other} have conflicted on {paths} {n} times in {w} generations. You must permanently yield this resource for this mission. Choose a different file or coordinate through an explicit artifact.`
+- `help_needed`: a `HelpNeeded` from `observer:repeat_failure` within 5 generations. Redispatches the agent with an `ARBITER: you have failed {n} times in the last 5 generations` prompt: stop retrying, state the blocker, downscope.
+- `sparse_plan`: a `HelpNeeded` from `observer:sparse_plan` within 10 generations. Redispatches the planner with an `ARBITER: your recent plans repeatedly reference task IDs that don't exist in the DAG` prompt: fix the `deps` entries.
 
 ### Resolver
 
-**Purpose:** the actuation boundary — where proposed/intended state becomes durable state.
+Purpose: the commit boundary, where proposed or intended state becomes durable state.
 
-**Where it lives:** nit's current architecture does not have an explicit `Resolver` type. The role is distributed:
+Where it lives: nit has no explicit `Resolver` type. The role is spread across:
 
-- **`AgentBusEvent::apply()`** (`crates/nit-core/src/agent_bus/`) — resolves event-driven state changes (emit signal, assert claim/assumption, turn completion, etc.).
-- **`drain_pending_claim_retries` / `drain_pending_interventions`** (`crates/nit-tui/src/app/mod.rs`) — resolve queued corrective actions into agent dispatches.
-- **`write_swarm_run_provenance`** (`crates/nit-tui/src/app/mod.rs`) — resolves mission completion into durable `.nit/swarm/` artifacts.
-- **`SubstrateState::save`** — resolves in-memory substrate into `.nit/substrate/state.json`.
+- `AgentBusEvent::apply()` (`crates/nit-core/src/agent_bus/`): resolves event-driven changes such as emitted signals, asserted claims and assumptions, and turn completion.
+- `drain_pending_claim_retries` and `drain_pending_interventions` (`crates/nit-tui/src/app/genome_retry.rs`): resolve queued corrective actions into agent dispatches.
+- `write_swarm_run_provenance` (`crates/nit-tui/src/app/provenance.rs`): resolves mission completion into durable `.nit/swarm/` artifacts.
+- `SubstrateState::save`: resolves the in-memory substrate into `.nit/substrate/state.json`.
 
-**Notable non-resolution:** nit does NOT own the subprocess file-write path. Codex/Claude agents write files directly; nit observes via `FileWrite` events after the fact. Claim-based guarding is advisory (violations trigger retries, not rollbacks).
-
-A future phase may unify the distributed resolver into an explicit type if actuation requires stronger sequencing guarantees.
-
----
+What it does not resolve: nit does not own the subprocess file-write path. Codex and Claude agents write files directly, and nit sees the `FileWrite` event afterwards. Claim guarding is advisory: violations trigger retries, not rollbacks.
 
 ## Adding a new role
 
-When introducing a new coordination primitive:
+When you add a coordination primitive:
 
-1. **Decide which role type extends.** Observer for read-only pattern detection; arbiter for actuation; worker for new swarm task types.
-2. **Mirror the existing framework.** Fn-pointer type, compile-time `REGISTERED_*` array, optional policy layer for actuators.
-3. **Register it** in the relevant module's const array.
-4. **Update this document** under the relevant role's "Current" list.
-5. **Write tests** mirroring the existing patterns in `crates/nit-core/src/tests/`.
+1. Pick the role it extends: observer for read-only pattern detection, arbiter for intervention, worker for a new swarm task type.
+2. Mirror the existing framework: a function-pointer type, a compile-time `REGISTERED_*` array, and a policy layer if it acts.
+3. Register it in the module's const array.
+4. Update this document under the role's current members.
+5. Write tests that mirror the existing patterns in `crates/nit-core/src/tests/`.
 
 ## Related docs
 
-- [`SWARM.md`](SWARM.md) — per-mission task-role catalog, DAG orchestration, template selection.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — overall nit architecture.
-- [`SEEDS.md`](SEEDS.md) — code-as-genome feedback loop (separate biological framing for file-structure analysis; distinct from the coordination-role framing here).
-- [`INTAKE.md`](INTAKE.md) — the hidden Claude-class intent classifier that runs in front of chat dispatches.
-- [`SHADOWS.md`](SHADOWS.md) — single-agent propose/judge/review pipeline (sibling to intake).
+- [SUBSTRATE.md](SUBSTRATE.md): data model, events, metabolism, observers, arbiters, MCP tools.
+- [SUBSTRATE_TESTING.md](SUBSTRATE_TESTING.md): how to run and verify the substrate.
+- [SWARM.md](SWARM.md): task roles, DAG orchestration, template selection.
+- [ARCHITECTURE.md](ARCHITECTURE.md): overall nit architecture.
+- [SEEDS.md](SEEDS.md): the code-as-genome feedback loop for file-structure analysis, a separate framing from the roles here.
+- [INTAKE.md](INTAKE.md): the hidden intent classifier that runs in front of chat dispatches.
+- [SHADOWS.md](SHADOWS.md): the single-agent propose/judge/review pipeline.

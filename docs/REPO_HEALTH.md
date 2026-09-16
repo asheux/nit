@@ -1,37 +1,47 @@
-# Repo Health Report
+# Repo Health
 
-Repo: `nit`
+How to check that the `nit` repo is healthy, and what the project enforces.
+Test counts change constantly, so this doc does not state them; run
+`cargo test --all` for the live count.
 
-> **This is a point-in-time snapshot (captured 2026-03-28), not a live status.**
-> The test counts below predate the substrate layer, which added roughly 280
-> nit-core tests — the workspace suite is now ~700+ tests. For current numbers,
-> run `scripts/healthcheck.sh --deep` (or `cargo test --all`) rather than trusting
-> the figures here.
+## How to check
 
-## Quick Checklist Run
+Quick check:
 
-1. `cargo fmt --all -- --check` -> PASS
+```bash
+scripts/healthcheck.sh
+```
 
-2. `cargo clippy --locked --all-targets --all-features -- -D warnings` -> PASS
+It prints repo probes (working tree, toolchain pins, CI config, security
+tooling), then gates on `cargo check`, `cargo fmt --all -- --check`, and
+`cargo deny check`. Add `--deep` to also run clippy and the full test suite.
+Every gate should print `[green] pass` and the script should exit 0.
 
-3. `cargo test --all --locked --no-fail-fast` -> PASS
-   - 526 tests across 8 crates (nit-tui: 360, nit-games: 68, nit-core: 56, nit-gol: 22, nit-syntax: 8, nit-metal: 7, nit: 5).
+Full local CI:
 
-4. `cargo deny check` -> PASS
-   - `advisories ok, bans ok, licenses ok, sources ok`
+```bash
+just ci
+```
 
-5. `git check-ignore -v Cargo.lock vendor vendor/time` -> PASS
-   - No output (not ignored).
+The `justfile` wraps the cargo commands (`fmt`, `fmt-check`, `clippy`,
+`test`, `deny`, `ci`, `run`). CI gates on the cargo commands themselves:
 
-## Policy Snapshot
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --all --locked --no-fail-fast
+cargo deny check
+git check-ignore -v Cargo.lock vendor vendor/time
+```
 
-- Toolchain: pinned to Rust 1.88.0 via `rust-toolchain.toml` (rustfmt + clippy).
-- MSRV: 1.88.0 (enforced across workspace crates via `rust-version`).
-- Reproducibility: `Cargo.lock` is committed; `vendor/time` is committed due to `[patch.crates-io]`.
-- CI: `.github/workflows/ci.yml` runs tests on `{1.88.0, stable}`; lint/deny on `1.88.0`. Runner: `ubuntu-24.04`.
-- Automation: Dependabot, secret scanning (gitleaks), dependency review.
-- Safety: `#![forbid(unsafe_code)]` on 7/8 crates (exception: `nit-metal` for GPU interop).
+The last command must print nothing: `Cargo.lock`, `vendor`, and
+`vendor/time` are committed, not ignored.
 
-## Notes
+## What the project enforces
 
-- `justfile` provides convenience targets (`fmt`, `clippy`, `test`, `deny`, `ci`, `run`), but CI gates on the `cargo ...` equivalents.
+- Toolchain: pinned to Rust 1.88.0 via `rust-toolchain.toml`, with rustfmt and clippy.
+- MSRV: 1.88.0, set once as `rust-version` in the workspace `Cargo.toml` and inherited by every crate.
+- Reproducibility: `Cargo.lock` is committed and CI runs with `--locked`. `vendor/time` is committed because `Cargo.toml` patches `time` through `[patch.crates-io]`.
+- CI (`.github/workflows/ci.yml`): lint (fmt, clippy, doc, deny) on `ubuntu-24.04` with 1.88.0; tests on `ubuntu-24.04`, `macos-14`, and `windows-2022` with 1.88.0; an MSRV release build with 1.88.0.
+- Automation: Dependabot and gitleaks secret scanning run from `.github/`. Dependency review is a GitHub repository setting, not a workflow file.
+- Safety: `#![forbid(unsafe_code)]` in every crate except `nit-metal` (Metal GPU interop) and `nit-mcp`.

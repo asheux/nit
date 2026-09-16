@@ -1,6 +1,11 @@
 # Seed Encoding: Code as Genome
 
-nit encodes the file open in the editor as a genome for the Game of Life simulation. Every keystroke reshapes the pattern. Every refactor changes the organism.
+nit encodes the file open in the editor as a genome for the Game of Life
+simulation. Every keystroke reshapes the pattern, and every refactor
+changes the organism. This doc covers the encoders, seed parameters and
+views, hashing, seed search, genome tiers, and the parsimony rule that
+scores agent edits. It is for contributors and for anyone tuning genome
+feedback.
 
 ## Encoding Pipeline
 
@@ -8,198 +13,282 @@ nit encodes the file open in the editor as a genome for the Game of Life simulat
 editor text → encoder → value grid (0-255) → jitter → density threshold → symmetry → simulation grid
 ```
 
-1. **Encoder** reads the source file and produces a 2D grid of cell values (0-255).
-2. **Jitter** adds pseudorandom variation (±32) to prevent deterministic banding.
-3. **Threshold** converts values to alive/dead based on target density. Values above `(1 - density) × 255` become alive.
-4. **Symmetry** mirrors the grid (mirror-x, mirror-y, rotate-180, or none). Union semantics: if either side is alive, both are alive.
-5. **Simulation** receives the final binary grid and runs Conway's Game of Life (or any of the 28 supported rules).
+1. Encoder: reads the source and produces a 2D grid of cell values from 0
+   to 255.
+2. Jitter: adds a pseudorandom offset of up to `jitter × 32` (rounded) to
+   each cell, so equal values do not band.
+3. Threshold: a cell is alive when its value is at least
+   `(1 - target_density) × 255`.
+4. Symmetry: mirrors the grid (mirror-x, mirror-y, rotate-180, or none)
+   with union semantics. If either side is alive, both are.
+5. Simulation: places the binary grid on the board with `placement` and
+   `padding`, then runs Conway's Life or any of the 28 built-in rules.
 
 ## Encoders
 
-nit ships seven encoders in two categories.
+nit ships seven encoders. Four are scored: the three AST-driven encoders
+set the genome tier, and `structural` adds a fourth quality signal. The
+three byte-level encoders are display only. `Ctrl+E` cycles them in this
+order: `ascii_bytes`, `hilbert_bits`, `lifehash16`, `structural`,
+`token_spectrum`, `ast_structure`, `complexity_field`.
 
 ### AST-Driven Encoders
 
-These use tree-sitter to parse the source file and extract structural properties. The supported set tracks the central `LANGUAGES` table in `crates/nit-core/src/languages.rs` — adding or removing a language is a single edit there. The seed encoders score every entry whose grammar arm in `nit-core/src/seed/encoders/lang.rs::SeedLanguage::ts_language` returns a tree-sitter language (28 seed-scored grammars, out of 29 highlight grammars total; Dockerfile and Wolfram appear in `LANGUAGES` for detection — and Wolfram is highlighted in `nit-syntax` via a vendored grammar — but the seed encoders skip both: Dockerfile's crate is wedged at an older tree-sitter ABI, and Wolfram's vendored grammar is a generic operator parser with no semantic nodes worth encoding). AST-driven encoders gracefully fall back to byte-level analysis for unsupported file types.
+These encoders parse the file with tree-sitter and read one shared feature
+projection (`encoders/ast_features.rs`): an entry per significant AST node
+with its role band, a 0-255 kind weight, depth, and control-flow depth.
+Comments, attributes, and macro invocations are left out, so comment
+padding, renames, and whitespace changes cannot move the seed. Each scored
+encoder then stretches its grid to the full 0-255 range and adds noise
+keyed on a hash of the features, never on the raw bytes.
+
+The encoders score every language in the `LANGUAGES` table that has a
+tree-sitter grammar arm in `nit-core/src/seed/encoders/lang.rs` (28 of the
+29 highlighted languages). Dockerfile and Wolfram are detected but skipped.
+There is no byte-level fallback: when tree-sitter cannot parse a file, the
+scored encoders return a uniform grid.
 
 #### Token Spectrum (default)
 
-- **Grid size:** 32×32
-- **Encoder ID:** `token_spectrum`
-- **Method:** Classifies each byte of source code by its semantic role using tree-sitter syntax highlighting captures. Nine categories map to distinct value ranges:
+- Grid size: 32×32
+- Encoder ID: `token_spectrum`
+- Method: one value per AST node, taken from the node's semantic role band.
 
-| Category | Value Range |
-|----------|------------|
-| Whitespace | 0-20 |
-| Comments | ~35 |
-| Punctuation | ~65 |
-| Operators | ~95 |
-| Keywords | ~125 |
-| Variables/parameters | ~153 |
-| Types/namespaces | ~178 |
-| String/number literals | ~203 |
-| Function/method names | ~228 |
-| Macros/attributes | ~248 |
+| Role band | Value |
+|---|---|
+| Declaration | 240 |
+| Control flow | 200 |
+| Expression | 160 |
+| Statement | 130 |
+| Type | 95 |
+| Literal | 60 |
+| Other | 25 |
 
-- **Grid mapping:** Byte values are chunked and averaged into 1024 cells mapped via Hilbert curve.
-- **Anti-gaming property:** Well-structured code has balanced category distributions. No comments means no low-value cushion; everything is alive and collapses. Pure comments produce all-dead grids.
-- **Fallback:** When tree-sitter cannot parse the language, falls back to byte-category classification using ASCII ranges.
+- Grid mapping: node values are chunked in order, averaged into 1024 cells,
+  and laid out along a Hilbert curve.
+- Anti-gaming property: the pattern comes from the spread of roles across
+  the file. Identifier length, comments, and whitespace change nothing;
+  only adding, removing, or restructuring code does.
 
 #### AST Structure
 
-- **Grid size:** 32×32
-- **Encoder ID:** `ast_structure`
-- **Method:** Walks the syntax tree via depth-first traversal. For each named AST node, computes a cell value from four structural properties:
-  - Nesting depth (30%): deeper nesting produces higher values
-  - Child count / branching factor (25%): more children produce higher values
-  - Byte span (25%): larger nodes (long functions) produce higher values
-  - Node kind hash (20%): different node types produce different base values
-- **Grid mapping:** Each node occupies grid cells proportional to its byte span. Mapped via Hilbert curve for spatial locality.
-- **Anti-gaming property:** Deeply nested code with large functions produces dense blobs that collapse. Flat, modular code with small functions produces separated components that sustain.
-- **Fallback:** Uses bracket-counting for depth and byte-category weighting when tree-sitter is unavailable.
+- Grid size: 32×32
+- Encoder ID: `ast_structure`
+- Method: nodes are chunked in order into 1024 cells. Each cell mixes the
+  chunk's average kind weight (30%), its maximum depth (30%), and how many
+  of the seven role bands it spans (25%), plus a small constant baseline.
+- Grid mapping: Hilbert curve. Cells past the last node repeat a fill
+  value so the tail is not empty.
+- Anti-gaming property: deeply nested code with large functions produces
+  dense blobs that collapse. Flat, modular code with small functions
+  produces separated components that sustain.
 
 #### Complexity Field
 
-- **Grid size:** 32×32
-- **Encoder ID:** `complexity_field`
-- **Method:** Computes four per-line software metrics and combines them into a spatial heatmap:
-  - **Nesting depth** (25%): Maximum AST nesting level per line, normalized to 0-255.
-  - **Cyclomatic complexity** (30%): Decision points per function (if, match, while, for, boolean operators). Assigned to all lines the function spans. Normalized across all functions.
-  - **Token entropy** (25%): Shannon entropy of highlight group categories per line. Diverse token usage scores high; uniform lines score low.
-  - **Identifier uniqueness** (20%): Ratio of unique identifiers to total identifiers per scope. High ratio means diverse naming; low ratio means repetitive variables.
-- **Grid mapping:** Y-axis maps to line number, X-axis maps to column position. Values blend the four metrics (80%) with per-byte token values (20%).
-- **Anti-gaming property:** Requires simultaneously low cyclomatic complexity, high token entropy, high identifier uniqueness, and moderate nesting. This combination naturally describes well-written code. Optimizing one axis hurts the others.
-- **Fallback:** Uses bracket-counting for nesting and byte-level Shannon entropy when tree-sitter is unavailable. Complexity and uniqueness layers default to neutral (128).
+- Grid size: 32×32
+- Encoder ID: `complexity_field`
+- Method: nodes are chunked in order into 32 windows, one per grid row.
+  Each window scores four metrics:
+  - Nesting depth (25%): maximum AST depth, normalized against 15.
+  - Cognitive complexity (30%): each control-flow node counts 1 plus its
+    control-flow ancestors, capped at 36.
+  - Role entropy (25%): Shannon entropy of the role bands in the window.
+  - Role diversity (20%): distinct role bands out of seven.
+- Grid mapping: the Y axis is the window index, so it follows node order
+  rather than line number. Every column in a row shares the row value
+  before noise is added.
+- Anti-gaming property: a good score needs low cognitive complexity, high
+  entropy, high diversity, and moderate nesting at the same time. That
+  combination describes well-written code; optimizing one axis hurts the
+  others.
 
 ### Hybrid Encoder
 
 #### Structural
 
-- **Grid size:** 32×32
-- **Encoder ID:** `structural`
-- **Method:** Extracts four per-byte features without requiring a parser:
-  - Local Shannon entropy (35%): Sliding-window (64 bytes) entropy normalized to 0-255.
-  - Bracket nesting depth (25%): Counts `(){}[]` nesting, normalized by max depth.
-  - Byte-category token signal (20%): Maps each byte to a structural weight by character class (letters=200, brackets=180, digits=160, operators=140, etc.).
-  - N-gram uniqueness (20%): Distance to nearest repeated 4-gram within a 512-byte lookback window.
-- **Grid mapping:** Hilbert curve mapping for spatial locality.
-- **Position:** Sits between byte-level and AST-driven encoders. Captures structural patterns at the byte level without needing tree-sitter.
+- Grid size: 32×32
+- Encoder ID: `structural`
+- Method: turns each AST node into a token (role band plus scaled depth)
+  and computes four per-cell channels: role diversity (35%), depth gradient
+  (25%), role entropy (20%), and role 4-gram uniqueness (20%).
+- Grid mapping: Hilbert curve.
+- Position: scored in the quality report alongside the AST-driven encoders,
+  but it does not set the tier. Varied structure gives rich genomes;
+  uniform code gives flat grids that die quickly.
 
 ### Byte-Level Encoders
 
-These operate on raw bytes. They do not understand code semantics.
+These work on raw bytes and know nothing about code.
 
 #### ASCII Bytes
 
-- **Grid size:** 32×32
-- **Encoder ID:** `ascii_bytes`
-- **Method:** Maps text bytes directly into the grid. Each byte's ASCII value is mixed with deterministic pseudo-random noise (`SplitMix64`). Formula: `base_byte + (index * 31) ^ rng_byte`.
+- Grid size: 32×32
+- Encoder ID: `ascii_bytes`
+- Method: maps text bytes into the grid in row-major order. Each byte is
+  mixed with `SplitMix64` noise: `base_byte + (index * 31) ^ rng_byte`.
 
 #### Hilbert Bits
 
-- **Grid size:** 32×32
-- **Encoder ID:** `hilbert_bits`
-- **Method:** Same as ASCII Bytes but uses a Hilbert space-filling curve for the byte-to-cell mapping instead of row-major order. Preserves spatial locality: bytes close together in the file remain close on the grid.
+- Grid size: 32×32
+- Encoder ID: `hilbert_bits`
+- Method: same as ASCII Bytes, but cells follow a Hilbert space-filling
+  curve, so bytes near each other in the file stay near each other on the
+  grid.
 
 #### Lifehash 16
 
-- **Grid size:** 16×16
-- **Encoder ID:** `lifehash16`
-- **Method:** Pure noise generator seeded by a hash of the input text. The output is deterministic but uniformly distributed. A single character change cascades into an entirely different pattern. Best used with symmetry modes.
+- Grid size: 16×16
+- Encoder ID: `lifehash16`
+- Method: pure noise from a PRNG seeded by a hash of the text. The output
+  is deterministic but uniformly distributed, so one changed character
+  gives an entirely different pattern. Best used with symmetry modes.
 
 ## Seed Parameters
 
 | Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
+|---|---|---|---|
 | `symmetry` | mirror-x | none, mirror-x, mirror-y, rotate-180 | Spatial symmetry applied after encoding. Union semantics. |
-| `target_density` | 0.31 | 0.08 - 0.7 | Target proportion of alive cells. Sweet spot: 0.2-0.4. |
+| `target_density` | 0.31 | 0.08 - 0.7 | Target share of alive cells. Sweet spot: 0.2-0.4. |
 | `padding` | 1 | 0+ | Border padding in cells around the placed seed. |
-| `placement` | center | center, top-left | Where the seed grid sits on the simulation board. |
-| `jitter` | 0.04 | 0.0 - 0.25 | Random perturbation amplitude (±32 at default). |
+| `placement` | center | center, top-left | Where the seed sits on the simulation board. |
+| `jitter` | 0.04 | 0.0 - 0.25 | Perturbation amplitude: ±1 at the default, ±8 at 0.25. |
 
 ## Seed Views
 
 Cycle with `Ctrl+R`:
 
 | View | Description |
-|------|-------------|
-| **GENOME** | Raw encoder output before placement. Encoder-specific rendering (number grid, Hilbert stream, etc.). |
-| **PLATE** | Final placed grid ready for simulation. Rendered in the current preview mode (solid, half-block, braille, tissue, heatmap). |
-| **MAP** | Component connectivity visualization. Each connected component gets a unique ID. |
-| **STATS** | Text statistics: density, component count, base grid dimensions. |
+|---|---|
+| GENOME | Raw encoder output before placement, rendered per encoder (number grid, Hilbert stream, and so on). |
+| PLATE | Final placed grid, rendered in the current preview mode (solid, half-block, braille, tissue, heatmap). |
+| MAP | Component connectivity. Each connected component gets its own id. |
+| STATS | Text statistics: density, component count, base grid dimensions. |
 
 ## Seed Hashing and Reproducibility
 
-Every seed is fully reproducible. `hash_seed()` produces a 64-bit identity hash via BLAKE3 incremental hashing. Inputs: encoder ID, parameters fingerprint, variant, grid dimensions, and cell contents.
+Every seed is reproducible. `hash_seed()` produces a 64-bit identity hash
+with BLAKE3 incremental hashing from the encoder id, the parameters
+fingerprint, the variant, the grid dimensions, and the cell contents. The
+fingerprint quantizes density and jitter to 1e-6.
 
 Two hashes are tracked:
-- **input_hash**: Hash of raw editor text bytes. Stable across encoding methods.
-- **seed_hash**: Hash of final bits after all transformations. Unique per seed configuration.
 
-Snapshots store the complete encoding context: encoder ID, parameters fingerprint, input hash, seed hash, density, and component count. Any pattern can be exactly recreated from the same source file and parameters.
+- `input_hash`: hash of the AST features, or of the raw text when the file cannot be parsed. Stable across encoders.
+- `seed_hash`: hash of the final bits after all transformations. Unique
+  per seed configuration.
+
+Snapshots store the full encoding context: encoder id, parameters
+fingerprint, input hash, seed hash, density, and component count. Any
+pattern can be recreated from the same source file and parameters.
+
+All randomness (jitter, encoders, seed search mutations) uses `SplitMix64`
+from `crates/nit-utils/src/rng.rs`, a full-period 2^64 PRNG. Jitter takes
+the upper bits (`>> 48`) before the modulo to avoid low-bit correlation.
 
 ## Seed Source
 
-The seed source is the editor's open file buffer (`GolSeedSource::Editor`). An alternative source is the notes/scratch buffer (`GolSeedSource::Notes`). Toggle with the `:gol seed source` command.
+The seed source is the editor buffer (`GolSeedSource::Editor`) or the
+notes buffer (`GolSeedSource::Notes`). Toggle it with `Ctrl+Y`.
 
-The seed runtime debounces updates with a 120ms interval (hardcoded in `seed_runtime.rs`). Parameter changes are detected by direct `PartialEq` comparison on `SeedParams`, so arbitrarily small changes trigger recomputation.
+The seed runtime debounces updates by 120 ms (`DEFAULT_DEBOUNCE_MS` in
+`seed_runtime.rs`). It detects parameter changes by `PartialEq` on
+`SeedParams`, so even tiny changes trigger recomputation.
 
 ## Seed Search
 
-Toggle with `Ctrl+G` or the **SEARCH** title button. A background worker mutates seed parameters (density, jitter, symmetry) and evaluates variants against configurable fitness criteria. The best candidate can be applied with `Ctrl+A` (**APPLY**).
+Toggle with `Ctrl+G` or the SEARCH title button. A background worker
+mutates symmetry, placement, density, jitter, and padding, and scores each
+candidate:
+
+```
+score = component_count - 40 * |actual_density - target_density|
+```
+
+Apply the best proposal with `Ctrl+A` or the APPLY title button. The title
+bar also has SEED (cycle symmetry) and SNAP (snapshot) buttons; see
+`docs/KEYBINDINGS.md`.
 
 ## Commands
 
 | Command | Description |
-|---------|-------------|
-| `:gol encoder` | Cycle to next encoder |
-| `:gol encoder <name>` | Switch to specific encoder by name |
-| `:gol seed view` | Cycle seed view (GENOME → PLATE → MAP → STATS) |
-| `:gol seed source` | Toggle seed source (editor ↔ notes) |
+|---|---|
+| `:gol encoder` | Cycle to the next encoder (alias `:seed encoder`) |
+| `:gol encoder <name>` | Switch to a named encoder (alias `:seed encoder <name>`) |
+| `:gol seed` | Cycle seed view, GENOME → PLATE → MAP → STATS (alias `:seed view`) |
 | `Ctrl+E` | Cycle encoder |
 | `Ctrl+R` | Cycle seed view |
 | `Ctrl+S` | Cycle symmetry |
 | `Ctrl+N` | Snapshot current seed |
 | `Ctrl+G` | Toggle seed search |
 | `Ctrl+A` | Apply search proposal |
+| `Ctrl+Y` | Toggle seed source (editor or notes) |
 
-## Parsimony Rule
+## Genome Tiers
 
-The genome system includes a **parsimony rule** that detects and penalizes over-engineered code. Without parsimony pressure, agents can game genome scores by inflating code structure — splitting functions into many tiny pieces, padding with comments, or adding unnecessary type declarations purely for token diversity. The parsimony system creates an equilibrium between structural quality and engineering effort.
+Each AST-driven encoder's seed is simulated, and its generation count maps
+to a tier:
 
-### How it works
-
-After computing encoder scores, `compute_genome_report` runs a parsimony analysis on the source file's AST. Three independent bloat signals are checked:
-
-| Signal | Threshold | Detects |
-|--------|-----------|---------|
-| **Over-split functions** | 15+ functions averaging < 3 significant lines | Mass function splitting to inflate AST structure scores |
-| **Comment padding** | > 40% of non-blank lines are comments | Adding doc comments / section markers for token diversity |
-| **Tiny-function fraction** | 12+ functions with > 50% having ≤ 5 significant lines | Predicate over-extraction, stub duplication |
-| **Duplicate comment lines** | ≥ 1 repeated comment line | Copy-pasted doc headers used to pad token diversity |
-
-**Any** of these signals triggers `bloat_detected = true`, which **caps the tier at Methuselah (IV)**. This means Replicator (Tier V) requires genuinely good code, not just well-gamed metrics.
+| Tier | Name | Generations |
+|---|---|---|
+| I | Still Life | 0-50 |
+| II | Oscillator | 51-200 |
+| III | Spaceship | 201-500 |
+| IV | Methuselah | 501-2000 |
+| V | Replicator | 2001+ |
 
 ### Soft bottleneck rule
 
-The tier calculation uses a **soft bottleneck** instead of a pure minimum across the three AST-driven encoders. The weakest encoder still dominates, but strong performance on the other encoders provides a modest lift (capped at 200 generations). This reduces the incentive to over-engineer just to boost one lagging encoder.
+The file's tier comes from a soft bottleneck across the three AST-driven
+encoders rather than a plain minimum. The weakest encoder still dominates,
+but the gap to the next encoder adds a modest lift, capped at 200
+generations. This reduces the incentive to over-engineer just to lift one
+lagging encoder.
 
 ```
 effective_min = raw_min + min(gap_to_next * 15%, 200)
 tier = GenomeTier::from_generations(effective_min)
 ```
 
-### Retry guardrails
-
-When an agent's code degrades genome quality, nit automatically retries:
-
-- **Max 3 retries** per turn (not 10) — avoids retry spirals that compound over-engineering
-- **No retry-side file-size gate** — the encoder's <20-significant-line auto-pass (Tier III) already filters genuinely trivial files, and the parsimony detector catches over-engineering on the next pass, so a duplicated retry-side threshold (it was 120 lines until 0.2.12) only created blind spots for mission-authored sub-120-line files
-- Retry prompts warn agents against over-engineering during fixes
-
 ### Small-file bypass
 
-Files with fewer than 20 significant lines receive an automatic Tier III (Spaceship) pass with 100% consistency. This prevents agents from padding trivial files (lib.rs, mod.rs, re-exports) with unnecessary code.
+Files with fewer than 20 significant lines skip simulation and get Tier III
+(Spaceship) with 100% consistency. This stops agents padding trivial files
+(lib.rs, mod.rs, re-exports) with needless code. The parsimony check still
+runs on them.
+
+## Parsimony Rule
+
+Without parsimony pressure, agents can game genome scores by inflating
+structure: splitting functions into tiny pieces, padding with comments, or
+adding type declarations only for token diversity. The parsimony rule
+detects and penalizes that bloat.
+
+### How it works
+
+After the encoder scores, `compute_genome_report` runs a parsimony
+analysis on the file's AST. Four bloat signals are checked:
+
+| Signal | Threshold | Detects |
+|---|---|---|
+| Over-split functions | 40+ significant lines, 15+ functions averaging < 3 significant lines | Mass function splitting to inflate structure scores |
+| Comment padding | 40+ non-blank lines, > 35% of them comments | Doc comments and section markers added for token diversity |
+| Tiny-function fraction | 12+ functions with > 50% having ≤ 5 significant lines | Predicate over-extraction, stub duplication |
+| Duplicate comment lines | ≥ 1 repeated comment line | Copy-pasted doc headers |
+
+Any signal sets `bloat_detected = true`, which caps the tier at Methuselah
+(IV). Replicator (V) needs good code, not well-gamed metrics. Softer Info
+nudges fire earlier, at 10+ functions and at a 30% comment ratio.
+
+### Retry guardrails
+
+When an agent's edit lowers genome quality, nit retries automatically:
+
+- At most 3 retries per turn (`GENOME_RETRY_LIMIT`). This avoids retry
+  spirals that compound over-engineering.
+- No retry-side file-size gate. The small-file bypass already filters
+  trivial files, and the parsimony detector catches over-engineering on
+  the next pass.
+- Retry prompts warn agents against over-engineering during fixes.
 
 ### Parsimony metrics in reports
 
@@ -217,39 +306,59 @@ Parsimony: 20 fns, avg 2.1 lines/fn, 80% tiny, 15% comments [BLOAT — tier capp
 
 ### Agent instructions
 
-Agents receive an equilibrium rule in their system prompt that explicitly lists what NOT to do:
+Agents get an equilibrium rule in their system prompt that lists what not
+to do:
 
-- Do not split clear functions into many tiny ones
-- Do not extract trivial predicates into their own functions
-- Do not copy-paste function bodies to create stubs
-- Do not add comments to boost scores — comments must explain non-obvious logic only
-- Do not add types or traits that serve no functional purpose
-- Do not vary function signatures purely for token diversity
+- Do not split clear functions into many tiny ones.
+- Do not extract trivial predicates into their own functions.
+- Do not copy-paste function bodies to create stubs.
+- Do not add comments to boost scores; comments explain non-obvious logic
+  only.
+- Do not add types or traits that serve no functional purpose.
+- Do not vary function signatures purely for token diversity.
 
 ### Key constants
 
-| Constant | Value | Location |
-|----------|-------|----------|
-| `PARSIMONY_MIN_LINES` | 40 | Minimum significant lines for bloat detection |
-| `PARSIMONY_AVG_FN_BODY_THRESHOLD` | 3.0 | Max avg fn body for over-split flag |
-| `PARSIMONY_MIN_FN_COUNT` | 15 | Min fn count for over-split flag |
-| `PARSIMONY_COMMENT_RATIO_THRESHOLD` | 0.40 | Max comment ratio before flag |
-| `PARSIMONY_TINY_FN_LINES` | 5 | Body size threshold for "tiny" |
-| `PARSIMONY_TINY_FN_FRACTION_THRESHOLD` | 0.50 | Max fraction of tiny fns before flag |
-| `PARSIMONY_TINY_FN_MIN_COUNT` | 12 | Min fn count for tiny-fn flag |
-| `PARSIMONY_DUPLICATE_COMMENT_THRESHOLD` | 1 | Min duplicate comment lines before flag |
-| `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Max generation lift from soft bottleneck |
-| `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn (defined in `crates/nit-tui/src/app/genome_retry.rs`) |
+The parsimony thresholds are fields of the `THRESHOLDS` table in
+`crates/nit-core/src/genome_report/parsimony.rs`.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `THRESHOLDS.min_lines` | 40 | Minimum lines for the over-split and comment-padding signals |
+| `THRESHOLDS.avg_fn_body_threshold` | 3.0 | Average function body below which over-split fires |
+| `THRESHOLDS.min_fn_count` | 15 | Minimum function count for the over-split flag |
+| `THRESHOLDS.comment_ratio_threshold` | 0.35 | Comment ratio above which comment padding fires |
+| `THRESHOLDS.tiny_fn_lines` | 5 | Body size at or below which a function is "tiny" |
+| `THRESHOLDS.tiny_fn_fraction_threshold` | 0.50 | Tiny fraction above which the flag fires |
+| `THRESHOLDS.tiny_fn_min_count` | 12 | Minimum function count for the tiny-function flag |
+| `THRESHOLDS.duplicate_comment_threshold` | 1 | Repeated comment lines that trigger the flag |
+| `THRESHOLDS.info_fn_count_threshold` | 10 | Function count that emits an Info nudge |
+| `THRESHOLDS.comment_ratio_info_threshold` | 0.30 | Comment ratio that emits an Info nudge |
+| `SOFT_BOTTLENECK_LIFT_PCT` | 15 | Share of the gap to the next encoder added as lift |
+| `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Maximum generation lift from the soft bottleneck |
+| `GENOME_MIN_SIGNIFICANT_LINES` | 20 | Small-file auto-pass threshold |
+| `GENOME_RETRY_LIMIT` | 3 | Maximum retries per agent turn |
+
+`SOFT_BOTTLENECK_LIFT_PCT` and `GENOME_MIN_SIGNIFICANT_LINES` live in
+`crates/nit-core/src/genome_report.rs`, `SOFT_BOTTLENECK_MAX_LIFT` in
+`crates/nit-core/src/genome_report/simulation.rs`, and
+`GENOME_RETRY_LIMIT` in `crates/nit-tui/src/app/genome_retry.rs`.
 
 ## Key Files
 
 | File | Purpose |
-|------|---------|
-| `crates/nit-core/src/seed/` | Encoder implementations + pipeline (`encoders/`, `params.rs`, `grid_types.rs`, `utils.rs`, `view_modes.rs`) — symmetry, jitter, thresholding, hashing, component counting |
-| `crates/nit-core/src/genome_report/` | Genome tier scoring, parsimony analysis, soft bottleneck, recommendations, agent instructions (split across `format.rs`, `function_scores.rs`, `instructions.rs`, `outlier.rs`, `parsimony.rs`, `recommendations/`, `simulation.rs`, `source_scan.rs`) |
+|---|---|
+| `crates/nit-core/src/seed/` | Encoder implementations and pipeline (`encoders/`, `params.rs`, `grid_types.rs`, `utils.rs`, `view_modes.rs`): symmetry, jitter, thresholding, hashing, component counting |
+| `crates/nit-core/src/seed/encoders/ast_features.rs` | Shared AST feature projection used by every scored encoder |
+| `crates/nit-core/src/seed/encoders/lang.rs` | `SeedLanguage` and the tree-sitter grammar arms |
+| `crates/nit-core/src/genome_report.rs` | Report assembly, tier boundaries, soft bottleneck, small-file bypass |
+| `crates/nit-core/src/genome_report/` | Tier scoring, parsimony analysis, recommendations, agent instructions (`format.rs`, `function_scores.rs`, `instructions.rs`, `outlier.rs`, `parsimony.rs`, `recommendations/`, `simulation.rs`, `source_scan.rs`) |
 | `crates/nit-core/src/genome_storage/` | Disk-backed report cache (sharded, atomic writes, schema migrations) |
-| `crates/nit-tui/src/seed_runtime.rs` | Runtime orchestration, change detection, debounce, search worker, snapshot dispatch |
+| `crates/nit-tui/src/seed_runtime.rs` | Runtime loop, change detection, debounce, search worker, snapshot dispatch |
 | `crates/nit-tui/src/seed_render/` | GENOME view rendering, render cache, component analysis, preview modes |
 | `crates/nit-tui/src/seed_snapshot.rs` | Snapshot I/O, deduplication, metadata persistence |
 | `crates/nit-tui/src/genome_worker.rs` | Off-thread genome evaluation worker |
-| `crates/nit-tui/src/app/genome_retry.rs` | Retry-prompt builder + cap (`GENOME_RETRY_LIMIT = 3`) |
+| `crates/nit-tui/src/app/genome_retry.rs` | Retry-prompt builder and cap (`GENOME_RETRY_LIMIT = 3`) |
+| `crates/nit-tui/src/widgets/visualizer_view.rs` | Visualizer rendering, title bar buttons, click hit detection (`title_button_hit`) |
+| `crates/nit-utils/src/rng.rs` | `SplitMix64` PRNG |
+| `crates/nit-utils/src/hashing.rs` | BLAKE3 stable hashing (`stable_hash_bytes`) |
