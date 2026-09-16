@@ -24,13 +24,17 @@ jobs:
   lint:
     name: Lint (fmt + clippy + doc + deny)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux system deps
+        # Bounded waits: a runner-side apt lock once stalled this step for the
+        # full 6-hour job limit. Give up on the lock after 5 minutes and let
+        # the job-level timeout catch anything else.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 update
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libdbus-1-dev pkg-config
 
@@ -66,6 +70,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -77,13 +82,16 @@ jobs:
           - os: windows-2022
             install_deps: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux system deps
         if: matrix.install_deps
+        # Bounded waits: a runner-side apt lock once stalled this step for the
+        # full 6-hour job limit. Give up on the lock after 5 minutes and let
+        # the job-level timeout catch anything else.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 update
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libdbus-1-dev pkg-config
 
@@ -131,37 +139,23 @@ jobs:
   msrv:
     name: MSRV (1.88.0 build check)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux system deps
+        # Bounded waits: a runner-side apt lock once stalled this step for the
+        # full 6-hour job limit. Give up on the lock after 5 minutes and let
+        # the job-level timeout catch anything else.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 update
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libdbus-1-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88.0"
-
-      - name: Ensure cargo is on PATH (macOS runner image workaround)
-        if: runner.os == 'macOS'
-        shell: bash
-        # The macos-14 runner image periodically rotates with a broken
-        # cargo proxy at $HOME/.cargo/bin/cargo (resolves to rustup-init
-        # instead of the real cargo). Prepending the proxy directory to
-        # PATH doesn't help when the file *at that path* is the wrong
-        # binary. Use `rustup which cargo` — which queries rustup's
-        # internal toolchain mapping rather than walking PATH — to get
-        # the real cargo and prepend its containing dir.
-        run: |
-          set -euo pipefail
-          REAL_CARGO="$(rustup which cargo)"
-          REAL_CARGO_DIR="$(dirname "$REAL_CARGO")"
-          echo "Real cargo: $REAL_CARGO"
-          "$REAL_CARGO" --version
-          echo "$REAL_CARGO_DIR" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -175,6 +169,7 @@ jobs:
     if: always()
     needs: [lint, test, msrv]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Check all jobs succeeded
         run: |
