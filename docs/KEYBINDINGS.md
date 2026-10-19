@@ -233,8 +233,11 @@ An OS shell inside nit: a tab in Agent Chat, a modal popup, or one per
 multipane pane. See `docs/TERMINAL.md`.
 
 - `Ctrl+\`: Toggle the Agent Chat terminal tab. In multipane mode it toggles the focused pane's terminal.
-- `Ctrl+Shift+T`: Open or close the modal terminal popup.
+- `F4` or `Ctrl+Shift+T`: Open or close the modal terminal popup.
 - `Esc Esc`: Close the popup. The first Esc goes to the shell; the second closes it.
+- Paste: use your terminal's own paste (`Cmd+V`, `Ctrl+Shift+V`, middle click). nit sends the text to the shell, with bracketed-paste markers when the program asked for them.
+- `Ctrl+Shift+V`: Paste the clipboard into the shell, on terminals that pass the chord through.
+- `Ctrl+Shift+C`: Copy the selected terminal text again. Selecting already copies on release.
 - Mouse drag (left button): Select a rectangle of terminal text. Releasing copies it to the system clipboard.
 - Mouse wheel: Scroll the 10,000-line scrollback. Typing snaps back to the live bottom.
 

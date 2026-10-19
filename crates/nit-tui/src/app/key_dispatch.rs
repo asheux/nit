@@ -756,16 +756,17 @@ pub(super) fn map_key_to_action(
             modifiers: KeyModifiers::NONE,
             ..
         } if pane_accepts_text_input(state, state.focus) => Some(Action::Redo),
-        key if is_help_toggle_key(&key) => {
-            if state.mode != Mode::Insert {
-                Some(if state.show_help {
-                    Action::HideHelp
-                } else {
-                    Action::ShowHelp
-                })
+        // `F1` toggles help in every mode. `?` only does so outside Insert
+        // mode: while typing it must stay a literal character, so the arm is
+        // skipped and the key falls through to `InsertChar` below.
+        key if is_help_toggle_key(&key)
+            && (matches!(key.code, KeyCode::F(1)) || state.mode != Mode::Insert) =>
+        {
+            Some(if state.show_help {
+                Action::HideHelp
             } else {
-                None
-            }
+                Action::ShowHelp
+            })
         }
         KeyEvent {
             code: KeyCode::F(3),

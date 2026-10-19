@@ -1099,7 +1099,7 @@ pub(super) fn handle_help_popup_key(
 
 /// Outcome of a key pressed while the modal terminal popup owns input.
 pub(crate) enum TerminalPopupKey {
-    /// `Ctrl+Shift+T` — hide the popup; the shell keeps running.
+    /// `F4` or `Ctrl+Shift+T` — hide the popup; the shell keeps running.
     Close,
     /// Encoded bytes to forward to the shell stdin.
     Forward(Vec<u8>),
@@ -1138,8 +1138,9 @@ pub(crate) fn clear_popup_esc_state() {
     LAST_POPUP_ESC_AT.with(|cell| cell.set(None));
 }
 
-/// `Ctrl+Shift+T`: the chord that both opens (`key_dispatch`) and closes
-/// (here) the popup. Centralised so the two paths cannot diverge.
+/// `F4` or `Ctrl+Shift+T`: the keys that both open (`key_dispatch`) and
+/// close (here) the popup. Centralised so the two paths cannot diverge.
+/// `F4` is the quick single key; the chord is kept for muscle memory.
 ///
 /// Two encoding schemes need to match because terminals vary on how
 /// they report Shift for letter chords:
@@ -1156,6 +1157,9 @@ pub(crate) fn clear_popup_esc_state() {
 /// matched — that's an unrelated chord operators may want for
 /// future bindings.
 pub(crate) fn is_terminal_popup_toggle_key(key: &KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::F(4)) {
+        return true;
+    }
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
@@ -1165,6 +1169,110 @@ pub(crate) fn is_terminal_popup_toggle_key(key: &KeyEvent) -> bool {
         return false;
     }
     matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+}
+
+/// `Ctrl+Shift+V` pastes the clipboard into a terminal. Shift may arrive
+/// explicitly (kitty protocol) or folded into an uppercase `V` (legacy
+/// terminals). Plain `Ctrl+V` stays a literal `0x16` for the shell.
+pub(crate) fn is_terminal_paste_key(key: &KeyEvent) -> bool {
+    ctrl_shift_letter(key, 'v')
+}
+
+/// `Ctrl+Shift+C` copies the current terminal selection to the clipboard.
+/// Plain `Ctrl+C` stays the interrupt the shell expects.
+pub(crate) fn is_terminal_copy_key(key: &KeyEvent) -> bool {
+    ctrl_shift_letter(key, 'c')
+}
+
+fn ctrl_shift_letter(key: &KeyEvent, lower: char) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    let upper = lower.to_ascii_uppercase();
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT)
+        || matches!(key.code, KeyCode::Char(c) if c == upper);
+    shift && matches!(key.code, KeyCode::Char(c) if c == lower || c == upper)
+}
+
+/// Paste the system clipboard into `session`. Returns `true` when text was sent.
+pub(crate) fn paste_clipboard_into_terminal(
+    session: &crate::pty::PtySession,
+    clipboard: &mut Option<arboard::Clipboard>,
+) -> bool {
+    let Some(cb) = clipboard.as_mut() else {
+        return false;
+    };
+    let Ok(text) = cb.get_text() else {
+        return false;
+    };
+    if text.is_empty() {
+        return false;
+    }
+    session.paste(&text).is_ok()
+}
+
+/// Copy the current terminal selection to the clipboard again. Selecting
+/// already copies on release; this is the explicit chord for the times a
+/// clipboard was not ready then. Returns `true` when a terminal selection
+/// with text existed.
+pub(crate) fn copy_terminal_selection(
+    state: &AppState,
+    clipboard: &mut Option<arboard::Clipboard>,
+) -> bool {
+    let in_terminal = state.ui_selection.is_some_and(|sel| {
+        matches!(
+            sel.pane,
+            nit_core::UiSelectionPane::Terminal | nit_core::UiSelectionPane::TerminalPopup
+        )
+    });
+    if !in_terminal {
+        return false;
+    }
+    let Some(text) = state.yank.as_deref().filter(|t| !t.is_empty()) else {
+        return false;
+    };
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text.to_owned());
+    }
+    true
+}
+
+/// Deliver one keystroke to a live terminal session. The copy and paste
+/// chords act on the clipboard; everything else encodes to PTY bytes.
+pub(crate) fn forward_terminal_key(
+    session: &crate::pty::PtySession,
+    key: KeyEvent,
+    state: &AppState,
+    clipboard: &mut Option<arboard::Clipboard>,
+) {
+    if is_terminal_paste_key(&key) {
+        paste_clipboard_into_terminal(session, clipboard);
+    } else if is_terminal_copy_key(&key) {
+        copy_terminal_selection(state, clipboard);
+    } else if let Some(bytes) = crate::pty::encode_key(key) {
+        let _ = session.write_input(&bytes);
+    }
+}
+
+/// Clipboard chords inside the terminal popup, checked before the close and
+/// forward routing. Returns `true` when the key was a copy or paste chord.
+pub(crate) fn handle_terminal_popup_clipboard_key(
+    key: &KeyEvent,
+    state: &AppState,
+    session: Option<&crate::pty::PtySession>,
+    clipboard: &mut Option<arboard::Clipboard>,
+) -> bool {
+    if is_terminal_paste_key(key) {
+        if let Some(session) = session {
+            paste_clipboard_into_terminal(session, clipboard);
+        }
+        return true;
+    }
+    if is_terminal_copy_key(key) {
+        copy_terminal_selection(state, clipboard);
+        return true;
+    }
+    false
 }
 
 /// `Ctrl+Shift+M` — the global toggle for the Phase 6b multiway popup ("watch the
@@ -1221,7 +1329,7 @@ pub(super) fn handle_multiway_popup_key(key: &KeyEvent, state: &mut AppState) ->
 /// Route a key while the terminal popup is focused. Three close
 /// affordances exist; everything else encodes to PTY bytes:
 ///
-///   * `Ctrl+Shift+T` — direct close, no PTY forwarding.
+///   * `F4` or `Ctrl+Shift+T` — direct close, no PTY forwarding.
 ///   * `Esc Esc` within ~500ms — first Esc reaches the shell so vim /
 ///     less / fzf can react, second Esc also closes the popup.
 ///   * Click outside the popup rect — handled in the runner's mouse

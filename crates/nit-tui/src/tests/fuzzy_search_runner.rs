@@ -154,3 +154,12 @@ fn content_worker_finds_first_match_and_reports_position() {
     assert!(m.snippet.contains("fn main()"));
     assert!(m.match_len >= 1);
 }
+
+#[test]
+fn trailing_whitespace_in_the_query_does_not_hide_a_file() {
+    let hay = b"rest_api/services/document_service.py";
+    let needle = normalize_fuzzy_query("rest_api/services/document_service.py ");
+    assert!(fuzzy_score_bytes(hay, &needle).is_some());
+    assert!(normalize_fuzzy_query("   ").is_empty());
+    assert_eq!(normalize_fuzzy_query("Doc Svc"), b"docsvc".to_vec());
+}
