@@ -117,6 +117,10 @@ The full key map is in `docs/KEYBINDINGS.md`.
 
 ## Agent station
 
+<p align="center">
+  <img src="https://nit.tools/HeroImage.png" alt="nit editor and agent station" width="900" />
+</p>
+
 The agent station is two panes: Agent Ops (roster, missions, DAG, artifacts, MCP,
 alerts, diagnostics, scratchpad) and Agent Chat. It supports these backends:
 
@@ -170,6 +174,10 @@ cargo run -p nit -- --agents codex              # from source
 ```
 
 ## Multipane
+
+<p align="center">
+  <img src="https://nit.tools/multipane.png" alt="nit multipane mode: sixteen agent chat panes in a 4x4 grid" width="900" />
+</p>
 
 `nit multipane` opens a grid of independent chat panes, each with its own working
 directory. It is like `tmux` for agents.
