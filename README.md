@@ -11,11 +11,13 @@ code quality, for agents or for people.
 [Read the thesis](https://community.wolfram.com/groups/-/m/t/3720941)
 
 <p align="center">
-  <img src="https://nit.tools/HeroImage.png" alt="nit editor and agent station" width="900" />
+  <a href="https://nit.tools/nit-demo.mp4">
+    <img src="https://nit.tools/nit-demo-poster.jpg" alt="nit demo video: the editor, the agent station, and a swarm mission in 32 seconds" width="900" />
+  </a>
 </p>
 
 <p align="center">
-  <img src="https://nit.tools/multipane.png" alt="nit multipane mode: sixteen agent chat panes in a 4x4 grid" width="900" />
+  <a href="https://nit.tools/nit-demo.mp4">Watch the 32-second demo</a> &middot; <a href="https://nit.tools">nit.tools</a>
 </p>
 
 ## Install
