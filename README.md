@@ -12,12 +12,12 @@ code quality, for agents or for people.
 
 <p align="center">
   <a href="https://nit.tools/nit-demo.mp4">
-    <img src="https://nit.tools/nit-demo-poster.jpg" alt="nit demo video: the editor, the agent station, and a swarm mission in 32 seconds" width="900" />
+    <img src="https://nit.tools/nit-demo.gif" alt="nit demo: the editor, the agent station, and a swarm mission in 32 seconds" width="896" />
   </a>
 </p>
 
 <p align="center">
-  <a href="https://nit.tools/nit-demo.mp4">Watch the 32-second demo</a> &middot; <a href="https://nit.tools">nit.tools</a>
+  <a href="https://nit.tools/nit-demo.mp4">Watch the full-resolution demo</a> &middot; <a href="https://nit.tools">nit.tools</a>
 </p>
 
 ## Install
