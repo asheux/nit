@@ -147,3 +147,39 @@ fn ctrl_t_without_shift_is_not_the_toggle() {
         TerminalPopupKey::Forward(_)
     ));
 }
+
+#[test]
+fn f4_toggles_the_popup_like_ctrl_shift_t() {
+    let f4 = key(KeyCode::F(4), KeyModifiers::NONE);
+    assert!(is_terminal_popup_toggle_key(&f4));
+    assert!(matches!(terminal_popup_key(&f4), TerminalPopupKey::Close));
+    assert!(!is_terminal_popup_toggle_key(&key(
+        KeyCode::F(5),
+        KeyModifiers::NONE
+    )));
+}
+
+#[test]
+fn ctrl_shift_v_and_c_are_clipboard_chords_not_pty_bytes() {
+    use crate::app::popup_keys::{is_terminal_copy_key, is_terminal_paste_key};
+    assert!(is_terminal_paste_key(&key(
+        KeyCode::Char('v'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+    )));
+    assert!(is_terminal_paste_key(&key(
+        KeyCode::Char('V'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(!is_terminal_paste_key(&key(
+        KeyCode::Char('v'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(is_terminal_copy_key(&key(
+        KeyCode::Char('C'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(!is_terminal_copy_key(&key(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL
+    )));
+}

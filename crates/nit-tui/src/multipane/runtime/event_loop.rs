@@ -454,8 +454,8 @@ fn drain_input_burst(
                 // The modal popup is top-level: while visible it swallows every
                 // key, forwarding to its shell except the two close intercepts.
                 if state.terminal_popup.visible {
-                    forward_key_to_terminal_popup(state, terminal_popup, key);
-                } else if !forward_key_to_focused_terminal(state, terminals, key)
+                    forward_key_to_terminal_popup(state, terminal_popup, key, clipboard);
+                } else if !forward_key_to_focused_terminal(state, terminals, key, clipboard)
                     && handle_key(
                         state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard,
                         area,
@@ -472,7 +472,17 @@ fn drain_input_burst(
                 if let Some(drag) = pending_drag.take() {
                     handle_mouse(state, swarm, theme, clipboard, area, drag);
                 }
-                handle_paste(state, &text);
+                // A live terminal owns pasted text: the popup first, then the
+                // focused pane's terminal; otherwise the chat input.
+                if state.terminal_popup.visible {
+                    if let Some(session) = terminal_popup.as_ref() {
+                        let _ = session.paste(&text);
+                    }
+                } else if let Some(session) = focused_terminal(state, terminals) {
+                    let _ = session.paste(&text);
+                } else {
+                    handle_paste(state, &text);
+                }
             }
             Event::Mouse(mouse) => {
                 // Wheel over any terminal grid scrolls that session instead of
@@ -673,6 +683,28 @@ pub(super) fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent
     ds.view_offset = 0;
 }
 
+/// Whether the focused pane is showing its terminal.
+fn focused_terminal_active(state: &AppState) -> bool {
+    let idx = super::keys::focused_pane_idx(state);
+    state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(idx))
+        .map(|pane| pane.terminal_active)
+        .unwrap_or(false)
+}
+
+/// The focused pane's live terminal session, when that pane is in terminal mode.
+fn focused_terminal<'a>(
+    state: &AppState,
+    terminals: &'a HashMap<usize, crate::pty::PtySession>,
+) -> Option<&'a crate::pty::PtySession> {
+    if !focused_terminal_active(state) {
+        return None;
+    }
+    terminals.get(&super::keys::focused_pane_idx(state))
+}
+
 /// Forward a keystroke to the focused pane's live terminal. The `Ctrl+\` toggle
 /// and the global quit fall through to `handle_key` so the operator can always
 /// escape. Returns whether the terminal consumed the key.
@@ -680,33 +712,37 @@ fn forward_key_to_focused_terminal(
     state: &AppState,
     terminals: &HashMap<usize, crate::pty::PtySession>,
     key: KeyEvent,
+    clipboard: &mut Option<arboard::Clipboard>,
 ) -> bool {
-    let idx = super::keys::focused_pane_idx(state);
-    let active = state
-        .multipane
-        .as_ref()
-        .and_then(|mp| mp.panes.get(idx))
-        .map(|pane| pane.terminal_active)
-        .unwrap_or(false);
-    if !active || crate::pty::is_terminal_toggle_key(&key) || is_global_quit_key(&key) {
+    if !focused_terminal_active(state)
+        || crate::pty::is_terminal_toggle_key(&key)
+        || is_global_quit_key(&key)
+    {
         return false;
     }
-    if let Some(session) = terminals.get(&idx) {
-        if let Some(bytes) = crate::pty::encode_key(key) {
-            let _ = session.write_input(&bytes);
-        }
+    if let Some(session) = focused_terminal(state, terminals) {
+        crate::app::popup_keys::forward_terminal_key(session, key, state, clipboard);
     }
     true
 }
 
-/// Route a key to the focused modal popup: the two intercepts request a close
-/// (serviced by `reconcile_grid_terminal_popup`), everything else forwards to
-/// the shell.
+/// Route a key to the focused modal popup: the clipboard chords act on the
+/// clipboard, the close intercepts request a close (serviced by
+/// `reconcile_grid_terminal_popup`), everything else forwards to the shell.
 fn forward_key_to_terminal_popup(
     state: &mut AppState,
     popup: &Option<crate::pty::PtySession>,
     key: KeyEvent,
+    clipboard: &mut Option<arboard::Clipboard>,
 ) {
+    if crate::app::popup_keys::handle_terminal_popup_clipboard_key(
+        &key,
+        state,
+        popup.as_ref(),
+        clipboard,
+    ) {
+        return;
+    }
     match crate::app::popup_keys::terminal_popup_key(&key) {
         crate::app::popup_keys::TerminalPopupKey::Close => {
             state.terminal_popup.toggle_requested = true;

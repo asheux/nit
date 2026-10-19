@@ -2109,3 +2109,34 @@ fn parse_abort_rejects_substring_matches() {
     assert_eq!(parse_abort_command("hello"), None);
     assert_eq!(parse_abort_command(""), None);
 }
+
+#[test]
+fn question_mark_is_typed_in_insert_mode_and_toggles_help_otherwise() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    let mut input = InputState::new();
+    let question_mark = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+    state.mode = Mode::Insert;
+    assert_eq!(
+        map_key_to_action(question_mark, &state, &mut input),
+        Some(Action::InsertChar('?'))
+    );
+    state.mode = Mode::Normal;
+    assert_eq!(
+        map_key_to_action(question_mark, &state, &mut input),
+        Some(Action::ShowHelp)
+    );
+}
+
+#[test]
+fn f1_toggles_help_even_in_insert_mode() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    state.mode = Mode::Insert;
+    let mut input = InputState::new();
+    let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+    assert_eq!(
+        map_key_to_action(f1, &state, &mut input),
+        Some(Action::ShowHelp)
+    );
+}

@@ -34,9 +34,11 @@ starts each pane with its terminal open running that command. See
 | Action | Key |
 |--------|-----|
 | Toggle the agent-chat terminal tab | `Ctrl+\` |
-| Open or close the modal popup | `Ctrl+Shift+T` |
+| Open or close the modal popup | `F4` or `Ctrl+Shift+T` |
 | Close the popup | `Esc Esc` (the first Esc reaches the shell, the second closes) |
 | Toggle a multipane pane's terminal | click its `TERM` / `NIT` pill, or `Ctrl+\` on the focused pane |
+| Paste the clipboard | your terminal's paste shortcut, or `Ctrl+Shift+V` |
+| Copy the selection again | `Ctrl+Shift+C` |
 
 Every other keystroke goes to the shell, so editors, REPLs, and full-screen
 TUIs run as usual.
@@ -48,6 +50,14 @@ highlights the selection and copies it to the system clipboard when you release
 the button. No extra copy keystroke is needed. This matches selection in nit's
 editor and chat panes. It works in the agent-chat terminal, the popup, and the
 focused multipane pane.
+
+## Pasting
+
+Paste with your terminal's usual shortcut (`Cmd+V` on macOS, `Ctrl+Shift+V` on
+Linux, or middle click). nit sends the text to the shell as one chunk, turns
+newlines into carriage returns like a real terminal, and wraps the text in
+bracketed-paste markers when the foreground program turned that mode on, so
+shells and editors treat it as a paste rather than typed keys.
 
 ## Scrolling
 

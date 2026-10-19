@@ -146,6 +146,16 @@ impl PtySession {
         Ok(())
     }
 
+    /// Paste `text` into the shell as one chunk, honouring the foreground
+    /// program's bracketed-paste mode. See [`paste_bytes`].
+    pub fn paste(&self, text: &str) -> io::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let bracketed = lock(&self.parser).screen().bracketed_paste();
+        self.write_input(&paste_bytes(text, bracketed))
+    }
+
     /// Scroll the viewport `lines` rows toward older output. vt100 clamps the
     /// offset to the oldest retained row, so over-scrolling is a no-op.
     pub fn scroll_up(&self, lines: usize) {
@@ -283,6 +293,23 @@ fn spawn_writer(mut writer: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>) -> Joi
             }
         }
     })
+}
+
+/// Bytes to write for pasted `text`. Newlines become carriage returns, as a
+/// real terminal does on paste, so a multi-line paste runs line by line. When
+/// the foreground program turned on bracketed paste (DECSET 2004), the text is
+/// wrapped in the `ESC [ 200 ~` / `ESC [ 201 ~` markers so shells and editors
+/// treat it as one paste instead of typed keys.
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let body = text.replace("\r\n", "\r").replace('\n', "\r");
+    if !bracketed {
+        return body.into_bytes();
+    }
+    let mut out = Vec::with_capacity(body.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(body.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
 }
 
 /// `Ctrl+\` toggles the chat pane to/from the terminal. Crossterm maps the

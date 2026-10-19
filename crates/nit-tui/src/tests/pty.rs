@@ -261,3 +261,10 @@ fn resize_updates_parser_dimensions() {
         .unwrap();
     assert_eq!(session.screen().screen().size(), (30, 100));
 }
+
+#[test]
+fn paste_bytes_translates_newlines_and_brackets_when_asked() {
+    assert_eq!(paste_bytes("ls\n", false), b"ls\r".to_vec());
+    assert_eq!(paste_bytes("a\r\nb", false), b"a\rb".to_vec());
+    assert_eq!(paste_bytes("x", true), b"\x1b[200~x\x1b[201~".to_vec());
+}

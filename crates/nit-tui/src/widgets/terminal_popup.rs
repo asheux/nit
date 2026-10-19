@@ -1,4 +1,4 @@
-//! Modal terminal popup overlay (`Ctrl+Shift+T`). A centered, dimmed-behind
+//! Modal terminal popup overlay (`F4` or `Ctrl+Shift+T`). A centered, dimmed-behind
 //! box hosting the shared `PtySession` shell. Distinct from the T6 pane: it
 //! overlays the layout without disturbing it and hides (not kills) on close,
 //! so re-opening resumes the same session.
@@ -93,8 +93,8 @@ pub fn render(
         // Both popup-close affordances on one line so operators don't
         // have to remember a chord. Esc Esc reaches the shell on the
         // first press (so vim / less can react) and only closes on the
-        // double-tap; Ctrl+Shift+T closes immediately.
-        Span::styled("[ Esc Esc · Ctrl+Shift+T close ]", hint_style),
+        // double-tap; F4 (or Ctrl+Shift+T) closes immediately.
+        Span::styled("[ Esc Esc · F4 close ]", hint_style),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)

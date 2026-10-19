@@ -452,7 +452,8 @@ fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
             }
         }
 
-        if state.query.is_empty()
+        let query_blank = normalize_fuzzy_query(&state.query).is_empty();
+        if query_blank
             && flags.index_changed
             && state.streamed < MAX_FILE_RESULTS
             && state.query_generation != 0
@@ -465,7 +466,7 @@ fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
         }
 
         let start = Instant::now();
-        if state.query.is_empty() {
+        if query_blank {
             replace_with_index_window(&mut state, &event_tx, start);
             continue;
         }
@@ -505,9 +506,20 @@ fn replace_with_index_window(
     });
 }
 
+/// Normalise a file-search query for matching: lowercase, with every
+/// whitespace character dropped. A space after a complete path, left behind
+/// by a paste or a tab completion, must not hide the file.
+pub(crate) fn normalize_fuzzy_query(query: &str) -> Vec<u8> {
+    query
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .map(|b| b.to_ascii_lowercase())
+        .collect()
+}
+
 fn replace_with_fuzzy_matches(state: &FuzzyState, event_tx: &Sender<FuzzyEvent>, start: Instant) {
-    let query_lc = state.query.to_ascii_lowercase();
-    let (heap, total_matches) = score_candidates(&state.index, query_lc.as_bytes());
+    let needle = normalize_fuzzy_query(&state.query);
+    let (heap, total_matches) = score_candidates(&state.index, &needle);
     let candidates = sort_candidates(heap, &state.index);
     let results = candidates
         .into_iter()

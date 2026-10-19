@@ -360,6 +360,15 @@ pub(super) fn run_loop(
                     // swallows every key — forwarding to the shell — except the
                     // two intercepts (Ctrl+Shift+T / Esc) that close it.
                     if state.terminal_popup.visible {
+                        if super::popup_keys::handle_terminal_popup_clipboard_key(
+                            &key,
+                            state,
+                            terminal_popup_session.as_ref(),
+                            &mut clipboard,
+                        ) {
+                            needs_redraw = true;
+                            continue;
+                        }
                         match terminal_popup_key(&key) {
                             TerminalPopupKey::Close => {
                                 state.terminal_popup.toggle_requested = true;
@@ -631,9 +640,12 @@ pub(super) fn run_loop(
                         && !is_global_quit_key(&key)
                     {
                         if let Some(session) = terminal_pane.as_ref() {
-                            if let Some(bytes) = crate::pty::encode_key(key) {
-                                let _ = session.write_input(&bytes);
-                            }
+                            super::popup_keys::forward_terminal_key(
+                                session,
+                                key,
+                                state,
+                                &mut clipboard,
+                            );
                             needs_redraw = true;
                             continue;
                         }
@@ -695,7 +707,26 @@ pub(super) fn run_loop(
                 }
                 Event::Paste(text) => {
                     handled_input = true;
-                    if handle_paste_event(&text, state, syntax, &mut fuzzy_runtime, &mut vitals) {
+                    // A live terminal owns pasted text the same way it owns
+                    // keystrokes: the popup first, then the inline chat-pane
+                    // terminal. Everything else goes to the UI text fields.
+                    if state.terminal_popup.visible {
+                        if let Some(session) = terminal_popup_session.as_ref() {
+                            let _ = session.paste(&text);
+                        }
+                        needs_redraw = true;
+                    } else if state.terminal_pane_active {
+                        if let Some(session) = terminal_pane.as_ref() {
+                            let _ = session.paste(&text);
+                        }
+                        needs_redraw = true;
+                    } else if handle_paste_event(
+                        &text,
+                        state,
+                        syntax,
+                        &mut fuzzy_runtime,
+                        &mut vitals,
+                    ) {
                         needs_redraw = true;
                     }
                 }

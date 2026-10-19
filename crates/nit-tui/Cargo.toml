@@ -39,7 +39,10 @@ nit-utils = { path = "../nit-utils" }
 
 # Platform / misc (kept outside workspace pins intentionally)
 arboard = "3.2"
-ctrlc = "3.4"
+# `termination` extends the handler from SIGINT to SIGTERM and SIGHUP, so a
+# killed or closed session still restores the host terminal (raw mode, mouse
+# capture, bracketed paste) instead of leaving mouse escape codes in the shell.
+ctrlc = { version = "3.4", features = ["termination"] }
 
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"
