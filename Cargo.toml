@@ -16,6 +16,7 @@ members = [
     "crates/nit-syntax",
     "crates/nit-tui",
     "crates/nit-utils",
+    "vendor/tree-sitter-awk",
     "vendor/tree-sitter-wolfram",
 ]
 default-members = ["crates/nit"]

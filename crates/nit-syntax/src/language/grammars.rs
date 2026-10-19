@@ -25,6 +25,10 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
         LanguageId::Toml => Some(tree_sitter_toml_ng::LANGUAGE.into()),
         LanguageId::Yaml => Some(tree_sitter_yaml::LANGUAGE.into()),
         LanguageId::Bash => Some(tree_sitter_bash::LANGUAGE.into()),
+        // AWK has no crates.io grammar either: the C parser + C scanner from
+        // Beaglefoot/tree-sitter-awk (MIT, ABI 14) are vendored at
+        // `vendor/tree-sitter-awk`, the same arrangement as Wolfram below.
+        LanguageId::Awk => Some(tree_sitter_awk::LANGUAGE.into()),
         LanguageId::Go => Some(tree_sitter_go::LANGUAGE.into()),
         LanguageId::C => Some(tree_sitter_c::LANGUAGE.into()),
         LanguageId::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
@@ -77,6 +81,7 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
         LanguageId::Toml => Some(tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
         LanguageId::Yaml => Some(include_str!("../../queries/yaml/highlights.scm")),
         LanguageId::Bash => Some(tree_sitter_bash::HIGHLIGHT_QUERY),
+        LanguageId::Awk => Some(tree_sitter_awk::HIGHLIGHTS_QUERY),
         LanguageId::Go => Some(include_str!("../../queries/go/highlights.scm")),
         LanguageId::C => Some(include_str!("../../queries/c/highlights.scm")),
         LanguageId::Cpp => Some(include_str!("../../queries/cpp/highlights.scm")),

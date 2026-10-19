@@ -22,6 +22,7 @@ pub enum LanguageId {
     Toml,
     Yaml,
     Bash,
+    Awk,
     Go,
     C,
     Cpp,
@@ -63,6 +64,7 @@ const LABELS: &[(LanguageId, &str)] = &[
     (LanguageId::Toml, "toml"),
     (LanguageId::Yaml, "yaml"),
     (LanguageId::Bash, "bash"),
+    (LanguageId::Awk, "awk"),
     (LanguageId::Go, "go"),
     (LanguageId::C, "c"),
     (LanguageId::Cpp, "cpp"),
@@ -88,7 +90,7 @@ const LABELS: &[(LanguageId, &str)] = &[
 impl LanguageId {
     /// Every variant that ships a grammar slot (excludes [`Self::PlainText`]).
     /// Used by `captures::config` to build per-language highlight configs.
-    pub const ALL: [LanguageId; 31] = [
+    pub const ALL: [LanguageId; 32] = [
         Self::Rust,
         Self::Python,
         Self::JavaScript,
@@ -100,6 +102,7 @@ impl LanguageId {
         Self::Toml,
         Self::Yaml,
         Self::Bash,
+        Self::Awk,
         Self::Go,
         Self::C,
         Self::Cpp,

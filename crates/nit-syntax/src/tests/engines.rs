@@ -55,6 +55,8 @@ fn highlights_keywords_per_language() {
         // Wolfram: the vendored grammar has no semantic nodes, so control-flow
         // builtins like `If` are surfaced as keyword.control by name match.
         (118, LanguageId::Wolfram, "If[x > 0, x, -x]\n"),
+        // AWK: `print` is an anonymous keyword token in the vendored grammar.
+        (119, LanguageId::Awk, "BEGIN { print \"hi\" }\n"),
     ];
 
     for &(buffer_id, lang, src) in cases {
@@ -67,6 +69,37 @@ fn highlights_keywords_per_language() {
             "{lang:?} did not highlight a Keyword/KeywordControl on line 0"
         );
     }
+}
+
+// AWK rides on the vendored Beaglefoot grammar and its upstream highlight
+// query, re-ordered for nit's last-pattern-wins precedence and given explicit
+// function-name patterns (see vendor/tree-sitter-awk/queries/highlights.scm).
+// Pin the groups those edits exist for: comments, function names at both the
+// definition and the call site, strings, and the `BEGIN` pattern.
+#[test]
+fn awk_highlights_functions_strings_and_comments() {
+    let mut engine = TreeSitterEngine::new();
+    let src = "# c\nfunction add(a) { return a + 1 }\nBEGIN { print add(1), \"hi\" }\n";
+    engine.schedule_rehighlight(make_request(120, 1, LanguageId::Awk, src));
+    let snap = wait_for(&mut engine, 120, 1);
+    assert!(has_group(&snap, 0, HighlightGroup::Comment));
+    assert!(
+        has_group(&snap, 1, HighlightGroup::Keyword),
+        "function/return"
+    );
+    assert!(
+        has_group(&snap, 1, HighlightGroup::Function),
+        "func_def name"
+    );
+    assert!(
+        has_group(&snap, 2, HighlightGroup::Function),
+        "func_call name"
+    );
+    assert!(has_group(&snap, 2, HighlightGroup::String));
+    assert!(
+        has_group(&snap, 2, HighlightGroup::Namespace),
+        "BEGIN pattern"
+    );
 }
 
 #[test]
@@ -278,6 +311,10 @@ fn expanded_queries_capture_operators_and_punctuation() {
         (LanguageId::Make, "all: foo\n\tgcc -o foo foo.c\n"),
         (LanguageId::Dotenv, "# c\nKEY=value\nNUM=42\nFLAG=true\n"),
         (LanguageId::Wolfram, "(* c *)\nx = 1 + 2; f[a, b]\n"),
+        (
+            LanguageId::Awk,
+            "# c\nfunction add(a) { b = a + 1; return b }\n",
+        ),
     ];
     // Only the languages whose hand-rolled queries we expanded are asserted
     // here; upstream-query languages (TS/JSON/etc.) and injection-dependent
@@ -299,6 +336,7 @@ fn expanded_queries_capture_operators_and_punctuation() {
         LanguageId::Sql,
         LanguageId::Lean,
         LanguageId::Wolfram,
+        LanguageId::Awk,
     ];
     for &(lang, src) in cases {
         if !must_be_rich.contains(&lang) {

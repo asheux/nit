@@ -119,6 +119,8 @@ fn detect_expanded_path_extensions() {
         ("Containerfile", LanguageId::Dockerfile),
         ("Dockerfile.prod", LanguageId::Dockerfile),
         ("prod.dockerfile", LanguageId::Dockerfile),
+        ("report.awk", LanguageId::Awk),
+        ("report.gawk", LanguageId::Awk),
     ];
     for &(name, expected) in cases {
         let detected = LanguageRegistry::detect(Some(Path::new(name)), None, None);
@@ -137,6 +139,8 @@ fn detect_expanded_shebangs() {
         ("#!/usr/bin/env runghc", LanguageId::Haskell),
         ("#!/usr/bin/env elixir", LanguageId::Elixir),
         ("#!/usr/bin/swift", LanguageId::Swift),
+        ("#!/usr/bin/awk -f", LanguageId::Awk),
+        ("#!/usr/bin/env -S gawk -f", LanguageId::Awk),
     ];
     for &(line, expected) in cases {
         let detected = LanguageRegistry::detect(None, Some(line), None);
@@ -225,6 +229,7 @@ fn registry_label(language: LanguageId) -> &'static str {
         LanguageId::Toml => "toml",
         LanguageId::Yaml => "yaml",
         LanguageId::Bash => "bash",
+        LanguageId::Awk => "awk",
         LanguageId::Go => "go",
         LanguageId::C => "c",
         LanguageId::Cpp => "cpp",

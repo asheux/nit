@@ -162,6 +162,19 @@ full key list is in `docs/KEYBINDINGS.md`.
   - Expect: edits revert and reapply.
 - Syntax highlight: with the Editor focused and not in Insert mode, `Shift+S`
   - Expect: highlighting toggles on and off. The Gate Monitor shows the status.
+- Question mark: in Insert mode type `?`; then press `Esc` and `?` again
+  - Expect: the character is inserted in Insert mode; in Normal mode the help overlay opens.
+
+## Terminal (embedded shell)
+
+- Open the popup: `F4` (or `Ctrl+Shift+T`)
+  - Expect: a centered shell popup. `F4` again, or `Esc Esc`, closes it; the shell keeps running.
+- Paste: copy a line of text elsewhere, then paste into the popup with your terminal's paste shortcut (`Cmd+V`, `Ctrl+Shift+V`, or middle click)
+  - Expect: the text appears at the shell prompt as one chunk.
+- Copy: drag across some terminal output and release
+  - Expect: the selection is on the system clipboard. `Ctrl+Shift+C` copies it again.
+- Inline tab: `Ctrl+\` in Agent Chat
+  - Expect: the chat pane swaps to a terminal and back; the session survives the swap.
 
 ## GoL Lab (Visualizer + Petri Dish)
 

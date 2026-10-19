@@ -18,13 +18,16 @@ perf.data
 perf.data.old
 flamegraph.svg
 .nit/
-vendor/
+vendor/*
 !vendor/time/
 !vendor/time/**
 # Vendored tree-sitter-wolfram grammar (no crates.io release); must be tracked
 # so a fresh checkout can build the nit-syntax path dependency.
 !vendor/tree-sitter-wolfram/
 !vendor/tree-sitter-wolfram/**
+# Vendored tree-sitter-awk grammar (no crates.io release); same reason.
+!vendor/tree-sitter-awk/
+!vendor/tree-sitter-awk/**
 .cargo-local/
 .claude/
 __pycache__/

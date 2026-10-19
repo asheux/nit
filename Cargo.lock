@@ -947,6 +947,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "tree-sitter 0.25.10",
+ "tree-sitter-awk",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-cpp",
@@ -1050,6 +1051,7 @@ dependencies = [
  "streaming-iterator",
  "tracing",
  "tree-sitter 0.25.10",
+ "tree-sitter-awk",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-cpp",
@@ -2031,6 +2033,15 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-awk"
+version = "0.7.2"
+dependencies = [
+ "cc",
+ "tree-sitter 0.25.10",
  "tree-sitter-language",
 ]
 

@@ -26,7 +26,7 @@ just run -- <args>  # cargo run -- <args>
 | `nit-games` | Game theory tournament engine |
 | `nit-gol` | Game of Life engine |
 | `nit-metal` | Metal GPU acceleration (macOS) |
-| `nit-syntax` | Tree-sitter highlighting (29 grammars; the language table is `nit-core::languages::LANGUAGES`) |
+| `nit-syntax` | Tree-sitter highlighting (30 grammars; the language table is `nit-core::languages::LANGUAGES`) |
 | `nit-utils` | Shared filesystem, hashing, and path helpers |
 
 ## Key source files

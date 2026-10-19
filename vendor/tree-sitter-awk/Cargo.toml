@@ -1,0 +1,31 @@
+[package]
+name = "tree-sitter-awk"
+version = "0.7.2"
+edition = "2021"
+license = "MIT"
+description = "AWK grammar for tree-sitter (vendored from Beaglefoot/tree-sitter-awk)"
+publish = false
+build = "build.rs"
+
+# Vendored grammar source. Upstream (Beaglefoot/tree-sitter-awk, MIT) is not on
+# crates.io and its Rust binding pins tree-sitter ~0.20; we ship only the C
+# parser + C scanner and expose the version-agnostic `LanguageFn` so the
+# ABI-14 grammar links into nit's tree-sitter 0.25 runtime (which loads ABI 13
+# through 15).
+#
+# Source: https://github.com/Beaglefoot/tree-sitter-awk
+# Commit: 34bbdc7cce8e803096f47b625979e34c1be38127 (tag v0.7.2, 2024-11-02)
+# Files:  src/parser.c, src/scanner.c, src/grammar.json, src/node-types.json,
+#         src/tree_sitter/parser.h, LICENSE, and queries/highlights.scm (the
+#         nit edits to the query are listed in its header comment).
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+tree-sitter = "0.25"

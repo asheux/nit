@@ -529,7 +529,7 @@ logging), the headless CLI, and output formats: `docs/GAMES.md`.
 plain-text fallback. The pipeline is split so semantic tokens (LSP) could
 later layer on top of syntactic tokens without touching UI code.
 
-Language coverage: 29 active grammars on tree-sitter 0.25. The single
+Language coverage: 30 active grammars on tree-sitter 0.25. The single
 source of truth is the `LANGUAGES` table in
 `crates/nit-core/src/languages.rs` (`LanguageInfo` entries with extensions,
 filenames, shebangs, injection aliases, and an `is_code` flag). Every
@@ -543,7 +543,7 @@ grouping below is documentation only.
 |---|---|
 | Systems | Rust, Go, C, C++, Zig |
 | JVM | Java, Kotlin |
-| Scripting | Python, JavaScript, TypeScript, Ruby, Lua, PHP, Bash |
+| Scripting | Python, JavaScript, TypeScript, Ruby, Lua, PHP, Bash, AWK |
 | Functional / Symbolic | OCaml, Haskell, Elixir, Lean, Wolfram |
 | Mobile / Apple | Swift |
 | Markup / Config | Markdown, HTML, CSS, JSON, TOML, YAML, Nix |

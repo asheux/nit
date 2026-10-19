@@ -43,8 +43,8 @@ encoder then stretches its grid to the full 0-255 range and adds noise
 keyed on a hash of the features, never on the raw bytes.
 
 The encoders score every language in the `LANGUAGES` table that has a
-tree-sitter grammar arm in `nit-core/src/seed/encoders/lang.rs` (28 of the
-29 highlighted languages). Dockerfile and Wolfram are detected but skipped.
+tree-sitter grammar arm in `nit-core/src/seed/encoders/lang.rs` (29 of the
+30 highlighted languages). Dockerfile and Wolfram are detected but skipped.
 There is no byte-level fallback: when tree-sitter cannot parse a file, the
 scored encoders return a uniform grid.
 

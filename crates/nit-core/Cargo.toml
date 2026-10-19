@@ -65,3 +65,7 @@ tree-sitter-zig = "1.1"
 tree-sitter-make = "1.1"
 tree-sitter-lean4 = "0.3"
 tree-sitter-swift = "0.7"
+# AWK has no crates.io grammar; it is vendored at `vendor/tree-sitter-awk`
+# (see nit-syntax's Cargo.toml). The seed encoders score it like any other
+# language.
+tree-sitter-awk = { path = "../../vendor/tree-sitter-awk" }

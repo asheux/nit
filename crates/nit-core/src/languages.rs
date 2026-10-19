@@ -105,6 +105,10 @@ pub struct LanguageInfo {
 /// scanner from bostick/tree-sitter-wolfram, ABI 13) and `.wl` / `.wls`
 /// now highlight.
 ///
+/// `Awk` highlights through a second vendored grammar
+/// (`vendor/tree-sitter-awk`, from Beaglefoot/tree-sitter-awk, MIT, ABI 14),
+/// wired exactly like Wolfram but also scored by the seed encoders.
+///
 /// `Dotenv` reuses `tree-sitter-bash` (shell-style `KEY=value`); no
 /// dedicated dotenv crate is pulled in. Detection covers `.env`,
 /// `.env.local`, `.env.production`, etc. via the `.env*` filename
@@ -217,6 +221,16 @@ pub const LANGUAGES: &[LanguageInfo] = &[
         filenames: &[],
         shebangs: &["bash", "sh", "zsh"],
         injection_aliases: &["bash", "sh", "shell", "shell-session", "console", "zsh"],
+        is_code: true,
+        default_indent: Some(IndentStyle::Spaces(2)),
+    },
+    LanguageInfo {
+        label: "awk",
+        display: "AWK",
+        extensions: &["awk", "gawk", "mawk", "nawk"],
+        filenames: &[],
+        shebangs: &["awk", "gawk", "mawk", "nawk"],
+        injection_aliases: &["awk", "gawk"],
         is_code: true,
         default_indent: Some(IndentStyle::Spaces(2)),
     },

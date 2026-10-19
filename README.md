@@ -258,7 +258,7 @@ scripts/healthcheck.sh        # quick repo-health check (--deep adds clippy + te
 
 - Rust 1.88.0, pinned in `rust-toolchain.toml`.
 - ratatui and crossterm for the UI; ropey and the unicode crates for text.
-- tree-sitter 0.25 for highlighting (29 grammars) and the AST seed encoders. The language
+- tree-sitter 0.25 for highlighting (30 grammars) and the AST seed encoders. The language
   table lives in `crates/nit-core/src/languages.rs`.
 - `Cargo.lock` is committed and CI builds with `--locked`. The `time` crate is vendored at
   `vendor/time`.
@@ -311,7 +311,7 @@ See `docs/SECURITY.md`.
 
 - Horizontal scrolling counts character columns, so tabs before the viewport can shift
   alignment.
-- Highlighting covers 29 languages and falls back to plain text for others and for very
+- Highlighting covers 30 languages and falls back to plain text for others and for very
   large files.
 - Dockerfile is detected but renders as plain text until the upstream grammar supports
   tree-sitter 0.25.
