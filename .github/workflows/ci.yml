@@ -77,7 +77,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             install_deps: true
-          - os: macos-14
+          - os: macos-15
             install_deps: false
           - os: windows-2022
             install_deps: false
@@ -102,7 +102,7 @@ jobs:
       - name: Ensure cargo is on PATH (macOS runner image workaround)
         if: runner.os == 'macOS'
         shell: bash
-        # The macos-14 runner image periodically rotates with a broken
+        # The macOS runner image periodically rotates with a broken
         # cargo proxy at $HOME/.cargo/bin/cargo (resolves to rustup-init
         # instead of the real cargo). Prepending the proxy directory to
         # PATH doesn't help when the file *at that path* is the wrong

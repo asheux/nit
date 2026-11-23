@@ -100,12 +100,11 @@ jobs:
             os: ubuntu-24.04
             archive: tar.gz
             install_deps: true
-          # Universal macOS binary: built on macos-14 (Apple Silicon
+          # Universal macOS binary: built on macos-15 (Apple Silicon
           # runner), targets both aarch64 + x86_64, fused with `lipo` into a
           # single fat Mach-O. Runs native on both archs without Rosetta.
-          # Avoids the macos-13 runner queue stall entirely.
           - target: universal-apple-darwin
-            os: macos-14
+            os: macos-15
             archive: tar.gz
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             universal: true
@@ -134,7 +133,7 @@ jobs:
       - name: Ensure cargo is on PATH (macOS runner image workaround)
         if: runner.os == 'macOS'
         shell: bash
-        # See ci.yml — macos-14 runner image periodically rotates with a
+        # See ci.yml — macOS runner image periodically rotates with a
         # broken cargo proxy. `rustup which cargo` returns the real
         # toolchain binary regardless of proxy state.
         run: |
@@ -157,6 +156,11 @@ jobs:
           if [ "${{ matrix.universal || 'false' }}" = "true" ]; then
             # Build both arch slices, then lipo into a universal binary.
             for slice in aarch64-apple-darwin x86_64-apple-darwin; do
+              # Preserve v0.2.20 deployment targets on newer runner SDKs.
+              case "$slice" in
+                aarch64-*) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+                x86_64-*) export MACOSX_DEPLOYMENT_TARGET=10.12 ;;
+              esac
               cargo build --release --locked --workspace \
                 --target "$slice" \
                 --bin nit \
