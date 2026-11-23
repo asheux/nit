@@ -78,7 +78,7 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         return;
     }
     frame.render_widget(Clear, area);
-    let popup_bg = theme.selection_bg;
+    let popup_bg = theme.popup_background;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
@@ -187,7 +187,7 @@ fn render_detail(
         Style::default().fg(theme.warning).bg(popup_bg)
     } else {
         Style::default()
-            .fg(theme.border)
+            .fg(theme.muted)
             .bg(popup_bg)
             .add_modifier(Modifier::DIM)
     };
@@ -202,9 +202,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, popup_bg: ratatui
     let accent_dim = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::DIM);
-    let border_dim = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let border_dim = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
     let footer_line = Line::from(vec![
         Span::styled("Enter apply", accent_dim),
         Span::styled(" | ", border_dim),

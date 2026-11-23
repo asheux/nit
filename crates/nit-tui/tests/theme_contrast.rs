@@ -52,6 +52,7 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
                 theme.background,
                 theme.panel_background,
                 theme.editor_background,
+                theme.popup_background,
                 theme.cursor_line_bg,
                 theme.selection_bg,
             ] {
@@ -104,7 +105,9 @@ fn custom_surfaces_inherit_the_configured_canvas_until_overridden() {
     assert_eq!(legacy.background, Color::Rgb(39, 56, 73));
     assert_eq!(legacy.panel_background, legacy.background);
     assert_eq!(legacy.editor_background, legacy.background);
+    assert_eq!(legacy.popup_background, legacy.background);
     assert_eq!(custom.background, legacy.background);
     assert_eq!(custom.panel_background, Color::Rgb(54, 71, 88));
     assert_eq!(custom.editor_background, Color::Rgb(41, 48, 55));
+    assert_eq!(custom.for_popup().background, custom.panel_background);
 }

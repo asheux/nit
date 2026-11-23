@@ -683,7 +683,7 @@ pub(super) fn swap_out_artifacts_popup_chat(state: &mut AppState) {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_artifacts_popup_key(
+pub(crate) fn handle_artifacts_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
     swarm: &mut SwarmRuntime,

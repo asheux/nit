@@ -146,6 +146,7 @@ pub(super) fn run_loop(
     codex_config: CodexRunnerConfig,
     claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
+    let popup_theme = theme.for_popup();
     let panel_theme = Theme {
         background: theme.panel_background,
         ..theme.clone()
@@ -1428,6 +1429,7 @@ pub(super) fn run_loop(
                 &workspace_scan,
                 theme,
                 &panel_theme,
+                &popup_theme,
                 syntax,
                 &system_stats,
                 &mut seed_runtime,

@@ -10,6 +10,7 @@ struct ThemeFile {
     background: Option<String>,
     panel_background: Option<String>,
     editor_background: Option<String>,
+    popup_background: Option<String>,
     foreground: Option<String>,
     muted: Option<String>,
     border: Option<String>,
@@ -98,6 +99,7 @@ pub struct Theme {
     pub background: Color,
     pub panel_background: Color,
     pub editor_background: Color,
+    pub popup_background: Color,
     pub foreground: Color,
     pub muted: Color,
     pub border: Color,
@@ -184,6 +186,13 @@ pub struct HighlightTheme {
 }
 
 impl Theme {
+    pub fn for_popup(&self) -> Self {
+        Self {
+            background: self.popup_background,
+            ..self.clone()
+        }
+    }
+
     pub fn load(path: Option<&Path>) -> Self {
         let Some(path) = path else {
             return Theme::default();
@@ -206,6 +215,13 @@ impl Theme {
             &mut theme.editor_background,
             cfg.editor_background
                 .as_deref()
+                .or(cfg.background.as_deref()),
+        );
+        overlay(
+            &mut theme.popup_background,
+            cfg.popup_background
+                .as_deref()
+                .or(cfg.panel_background.as_deref())
                 .or(cfg.background.as_deref()),
         );
         overlay(&mut theme.foreground, cfg.foreground.as_deref());
@@ -321,6 +337,7 @@ impl Default for Theme {
             background: Color::Rgb(10, 21, 30),
             panel_background: Color::Rgb(16, 31, 42),
             editor_background: Color::Rgb(41, 45, 53),
+            popup_background: Color::Rgb(25, 46, 59),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),
             border: Color::Rgb(96, 121, 134),

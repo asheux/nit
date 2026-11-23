@@ -9,7 +9,8 @@ use nit_core::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    style::Style,
+    style::{Modifier, Style},
+    text::Span,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
 };
@@ -45,6 +46,7 @@ pub(super) fn draw(
     workspace_scan: &crate::workspace_scan::WorkspaceScanRuntime,
     theme: &Theme,
     panel_theme: &Theme,
+    popup_theme: &Theme,
     syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
     seed_runtime: &mut Option<SeedRuntime>,
@@ -332,49 +334,49 @@ pub(super) fn draw(
         }
         if state.app_kind == AppKind::Games && state.games.analysis.open {
             let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
-            games_analysis_popup::render(f, area, state, theme);
+            games_analysis_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.run_browser.open {
             let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
-            games_run_browser_popup::render(f, area, state, theme);
+            games_run_browser_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.replay.open {
             let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
-            games_replay_popup::render(f, area, state, theme);
+            games_replay_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
             let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
-            games_strategy_popup::render(f, area, state, theme);
+            games_strategy_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.tm_sim.open {
             let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
-            games_tm_sim_popup::render(f, area, state, theme);
+            games_tm_sim_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.ca_sim.open {
             let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
-            games_ca_sim_popup::render(f, area, state, theme);
+            games_ca_sim_popup::render(f, area, state, popup_theme);
         }
         if state.app_kind == AppKind::Games && state.games.match_history.open {
             let area =
                 dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
-            games_match_history_popup::render(f, area, state, theme);
+            games_match_history_popup::render(f, area, state, popup_theme);
         }
         if state.rule_picker.open {
-            rule_picker::render(f, screen, state, theme);
+            rule_picker::render(f, screen, state, popup_theme);
         }
         if state.agents.global_archive_open {
             let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
-            artifacts_history_popup::render(f, area, state, theme);
+            artifacts_history_popup::render(f, area, state, popup_theme);
         }
         let artifacts_popup_cursor = if state.agents.artifacts_popup_open {
             let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
-            artifacts_popup::render(f, area, state, swarm, theme)
+            artifacts_popup::render(f, area, state, swarm, popup_theme)
         } else {
             None
         };
         if state.show_help {
             let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
-            help_overlay::render(f, area, state, theme);
+            help_overlay::render(f, area, state, popup_theme);
         }
         if state.definition_popup.is_some() {
             // Same-file v1: reuse the editor's live snapshot so the snippet
@@ -382,12 +384,19 @@ pub(super) fn draw(
             let area = dynamic_popup_rect(screen, definition_popup::preferred_size(screen));
             let render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
             if let Some(view) = state.definition_popup.as_ref() {
-                definition_popup::render(f, area, view, render.snapshot, render.line_map, theme);
+                definition_popup::render(
+                    f,
+                    area,
+                    view,
+                    render.snapshot,
+                    render.line_map,
+                    popup_theme,
+                );
             }
         }
         if state.show_substrate_overlay {
             let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
-            substrate_overlay::render(f, area, state, theme);
+            substrate_overlay::render(f, area, state, popup_theme);
         }
         // Phase 6b live multiway popup ("watch the agents think"). Gated on the
         // toggle, which only flips under the `multiway_enabled` guard, so the
@@ -395,7 +404,7 @@ pub(super) fn draw(
         // returns a centred Rect (do not wrap in `dynamic_popup_rect`).
         if state.agents.show_multiway_popup {
             let area = multiway_popup::preferred_size(screen);
-            multiway_popup::render(f, area, &state.agents, theme);
+            multiway_popup::render(f, area, &state.agents, popup_theme);
         }
         if state.fuzzy_search.open {
             let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
@@ -403,7 +412,7 @@ pub(super) fn draw(
                 f,
                 area,
                 state,
-                theme,
+                popup_theme,
                 fuzzy_preview,
                 fuzzy_preview_scroll_delta,
             );
@@ -411,24 +420,24 @@ pub(super) fn draw(
         if let Some(Prompt::ConfirmQuit) = state.prompt {
             let message = "Quit without saving? (Y/N)";
             let area = dynamic_popup_rect(screen, prompt_size(message));
-            render_prompt(f, area, theme, message);
+            render_prompt(f, area, popup_theme, message);
         }
         if let Some(Prompt::ConfirmCloseBuffer) = state.prompt {
             let message = "Close buffer without saving? (Y/N)";
             let area = dynamic_popup_rect(screen, prompt_size(message));
-            render_prompt(f, area, theme, message);
+            render_prompt(f, area, popup_theme, message);
         }
         let mut command_cursor = None;
         if let Some(cmd) = state.command_line.as_ref() {
             let message = format!(":{}", cmd.input);
             let area = dynamic_popup_rect(screen, prompt_size(&message));
-            render_command_prompt(f, area, theme, &message);
+            render_command_prompt(f, area, popup_theme, &message);
             command_cursor = command_prompt_cursor(area, &cmd.input, cmd.cursor);
         }
         if let Some(prompt) = state.search_prompt.as_ref() {
             let message = format!("/{}", prompt.input);
             let area = dynamic_popup_rect(screen, prompt_size(&message));
-            render_search_prompt(f, area, theme, &message);
+            render_search_prompt(f, area, popup_theme, &message);
             command_cursor = command_prompt_cursor(area, &prompt.input, prompt.cursor);
         }
         let fuzzy_cursor = if state.fuzzy_search.open {
@@ -461,7 +470,7 @@ pub(super) fn draw(
                     screen,
                     session,
                     title_cwd,
-                    theme,
+                    popup_theme,
                     selection.as_ref(),
                 )
             })
@@ -479,15 +488,27 @@ pub(super) fn draw(
                 .map(|p| p.is_visible())
                 .unwrap_or(false),
         };
-        let cursor = if let Some((x, y)) = terminal_popup_cursor {
-            Some((x, y))
+        let cursor = if state.terminal_popup.visible {
+            terminal_popup_cursor
         } else if let Some((x, y)) = command_cursor {
             Some((x, y))
         } else if let Some((x, y)) = fuzzy_cursor {
             Some((x, y))
-        } else if let Some((x, y)) = artifacts_popup_cursor {
-            Some((x, y))
-        } else if petri_visible || (state.file_tree.open && state.focus == PaneId::Editor) {
+        } else if state.prompt.is_some()
+            || state.show_help
+            || state.definition_popup.is_some()
+            || state.show_substrate_overlay
+            || state.agents.show_multiway_popup
+        {
+            None
+        } else if state.agents.artifacts_popup_open {
+            artifacts_popup_cursor
+        } else if petri_visible
+            || state.rule_picker.open
+            || state.agents.global_archive_open
+            || super::key_predicates::games_modal_popup_open(state)
+            || (state.file_tree.open && state.focus == PaneId::Editor)
+        {
             None
         } else if state.focus == PaneId::Editor {
             editor_cursor.map(|pos| (pos.x, pos.y))
@@ -589,10 +610,19 @@ fn render_titled_prompt(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
-        .title(title)
-        .style(Style::default().bg(theme.selection_bg));
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.popup_background));
     let paragraph = Paragraph::new(message)
-        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground))
+        .style(
+            Style::default()
+                .bg(theme.popup_background)
+                .fg(theme.foreground),
+        )
         .block(block);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);

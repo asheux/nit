@@ -86,7 +86,7 @@ pub fn render(
     let title_style = Style::default()
         .fg(theme.title_focused)
         .add_modifier(Modifier::BOLD);
-    let hint_style = Style::default().fg(theme.border);
+    let hint_style = Style::default().fg(theme.muted);
     let title_line = Line::from(vec![
         Span::styled(title_text, title_style),
         Span::raw("  "),

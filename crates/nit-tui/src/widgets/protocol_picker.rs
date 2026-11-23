@@ -80,7 +80,7 @@ pub(crate) fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let popup_bg = theme.selection_bg;
+    let popup_bg = theme.popup_background;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
@@ -169,7 +169,7 @@ fn render_detail(
     let detail_style = match detail.kind {
         DetailKind::Warn => Style::default().fg(theme.warning).bg(popup_bg),
         DetailKind::Dim => Style::default()
-            .fg(theme.border)
+            .fg(theme.muted)
             .bg(popup_bg)
             .add_modifier(Modifier::DIM),
     };
@@ -193,7 +193,7 @@ fn render_custom_input(
     let input_value = if is_custom_selected {
         Style::default().fg(theme.foreground).bg(popup_bg)
     } else {
-        Style::default().fg(theme.border).bg(popup_bg)
+        Style::default().fg(theme.muted).bg(popup_bg)
     };
     let prefix = "Custom: ";
     let value_width = (area.width as usize).saturating_sub(prefix.chars().count());
@@ -212,9 +212,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, popup_bg: ratatui
     let accent_dim = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::DIM);
-    let border_dim = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let border_dim = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
     let footer_line = Line::from(vec![
         Span::styled("Enter apply", accent_dim),
         Span::styled(" | ", border_dim),

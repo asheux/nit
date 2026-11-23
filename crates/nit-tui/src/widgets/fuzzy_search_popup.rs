@@ -68,7 +68,7 @@ fn popup_block(theme: &Theme, title: &str) -> Block<'static> {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background))
 }
 
@@ -317,10 +317,7 @@ fn render_file_row(item: &SearchResultFile, selected: bool, theme: &Theme) -> Li
 fn render_match_row(item: &SearchResultMatch, selected: bool, theme: &Theme) -> Line<'static> {
     let row_style = row_style(theme, selected);
     let hi_bg = highlight_bg(theme, selected);
-    let dim = Style::default()
-        .fg(theme.border)
-        .bg(hi_bg)
-        .add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(theme.muted).bg(hi_bg);
     let match_style = Style::default()
         .fg(theme.accent)
         .bg(hi_bg)
@@ -365,9 +362,7 @@ fn highlight_bg(theme: &Theme, selected: bool) -> Color {
 }
 
 fn dim_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM)
+    Style::default().fg(theme.muted)
 }
 
 fn prefix(selected: bool) -> &'static str {

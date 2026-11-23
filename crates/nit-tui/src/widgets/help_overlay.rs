@@ -332,7 +332,9 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
 /// the total line count; only the viewport window is walked through the
 /// selection pipeline so mouse-selection stays O(viewport_rows).
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let panel_style = Style::default().bg(theme.selection_bg).fg(theme.foreground);
+    let panel_style = Style::default()
+        .bg(theme.popup_background)
+        .fg(theme.foreground);
     let outer_frame = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
@@ -358,7 +360,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         window,
         state.ui_selection.as_ref(),
         UiSelectionPane::HelpPopup,
-        theme.cursor_line_bg,
+        theme.selection_bg,
         offset,
     );
 
