@@ -6,8 +6,10 @@ Use the station when you want an agent to read or change a specific checkout and
 
 1. Open the checkout with `nit --agents codex .` or `nit --agents claude .`. Use a provider CLI that you have already authenticated. For a read-only Codex session, add `--codex-sandbox read-only`.
 2. Select a model in **Agent Ops → Roster**, then press Enter. In **Agent Chat**, name the file, the decision you want explained and the evidence you want back. For example, ask “Read the session-expiry check in `auth.py`. Which test exercises an expired session? Cite the file and line.” Substitute files that exist in your project.
-3. Read the answer in **Agent Chat**. Click **Artifacts** on the banner above a reply to open its full text, even after the agent answers another question. Use `Ctrl+F` to find the cited code. Press F4 to run its test in the workspace.
+3. Watch the agent in **Agent Chat**. When **Working** changes to **Artifacts**, click it to read that turn’s reply. You can open an earlier reply from its own panel. Use `Ctrl+F` to find the cited code. Press F4 to run its test in the workspace.
 4. For follow-up work, state which files the agent may change and what behavior should hold afterward. Review the diff with `:changes`. The branch name and the two Git status columns help you see what is already staged.
+
+If your draft has no recipient, press Enter or click **Select agent** to choose a model. The draft stays in the composer. Check the name beside **To**, then press Enter to send.
 
 ## Find a result
 
