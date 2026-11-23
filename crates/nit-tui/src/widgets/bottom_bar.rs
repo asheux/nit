@@ -1,4 +1,4 @@
-use nit_core::{AppKind, AppState};
+use nit_core::{AppKind, AppState, GateMonitorSubView, PaneId};
 use ratatui::{
     layout::Alignment,
     style::{Modifier, Style},
@@ -19,7 +19,18 @@ pub fn render(
     theme: &Theme,
     stats: &SystemStats,
 ) {
-    let focus = format!("FOCUS: {}", state.focus.title());
+    let pane_title = match state.focus {
+        PaneId::Visualizer if state.change_review_active() => "CHANGES",
+        PaneId::GateMonitor if state.app_kind == AppKind::Gol => {
+            if state.gate_monitor_sub_view == GateMonitorSubView::Skills {
+                "NITSKILLS"
+            } else {
+                "CODE STRUCTURAL QUALITY"
+            }
+        }
+        pane => pane.title(),
+    };
+    let focus = format!("FOCUS: {pane_title}");
     let (line, col) = state.line_col();
     let metrics = build_metrics_line(state, stats, theme, line, col);
     let block = Block::default()
