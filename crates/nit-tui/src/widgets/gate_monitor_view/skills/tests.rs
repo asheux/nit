@@ -184,3 +184,24 @@ fn paste_joins_filter_lines_only_while_editing_the_focused_field() {
     assert_eq!(state.skill_filter, "swarm workflow");
     assert!(catalog::matches(&state).len() > 1);
 }
+
+#[test]
+fn multiword_filter_matches_all_terms_across_fields_and_id_separators() {
+    let mut state = browser();
+    for query in [
+        "research experiment",
+        "EXPERIMENT research",
+        "research-experiment",
+        "research_experiment",
+        "Research measurements",
+    ] {
+        state.skill_filter = query.to_owned();
+        let ids: Vec<_> = catalog::matches(&state)
+            .into_iter()
+            .map(|i| skills::definitions()[i].name)
+            .collect();
+        assert_eq!(ids, ["research-experiment"], "{query}");
+    }
+    state.skill_filter = "research absentword".into();
+    assert!(catalog::matches(&state).is_empty());
+}

@@ -1,16 +1,24 @@
 use nit_core::{skills, AppState};
 
 pub(super) fn matches(state: &AppState) -> Vec<usize> {
-    let query = state.skill_filter.trim().to_lowercase();
-    skills::definitions()
+    static FIELDS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        skills::definitions()
+            .iter()
+            .map(|skill| {
+                [skill.title, skill.name, skill.group, skill.summary]
+                    .join(" ")
+                    .to_lowercase()
+            })
+            .collect()
+    });
+    let query = state.skill_filter.to_lowercase();
+    let terms = query
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '-' | '_'))
+        .filter(|term| !term.is_empty());
+    FIELDS
         .iter()
         .enumerate()
-        .filter(|(_, skill)| {
-            query.is_empty()
-                || [skill.title, skill.name, skill.group, skill.summary]
-                    .iter()
-                    .any(|field| field.to_lowercase().contains(&query))
-        })
+        .filter(|(_, fields)| terms.clone().all(|term| fields.contains(term)))
         .map(|(index, _)| index)
         .collect()
 }
