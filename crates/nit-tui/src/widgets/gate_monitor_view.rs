@@ -19,11 +19,12 @@ use crate::widgets::text_selection::apply_ui_selection;
 use crate::widgets::text_utils::truncate_with_ellipsis;
 use crate::workspace_scan::{WorkspaceScanItemState, WorkspaceScanRuntime};
 
-// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES " ++ " LIVE " ++ "  EVALUATE GENOME  "
-const BTN_STATS_LABEL: &str = " STATS ";
-const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
-const BTN_SKILLS_LABEL: &str = " SKILLS ";
-const BTN_LIVE_LABEL: &str = " LIVE ";
+const FOOTER_TABS: &[(GateMonitorSubView, &str)] = &[
+    (GateMonitorSubView::Stats, " STATS "),
+    (GateMonitorSubView::FileScores, " FILES "),
+    (GateMonitorSubView::Live, " LIVE "),
+    (GateMonitorSubView::Skills, " SKILLS "),
+];
 // EVAL button uses an explicit verb-noun label so the operator knows the
 // click triggers a full-project genome evaluation (not a tab switch).
 // Counts ("stale/total") trail the verb so the operator can see at a
@@ -43,46 +44,38 @@ const GAUGE_MID_THRESHOLD: f32 = 0.3;
 const TIER_LEVELS: usize = 5;
 const LOADING_PERIOD_MS: f64 = 1600.0;
 
-// `title_prefix_len` is the display width of the dynamic prefix (varies
-// with grid size). `eval_label_width` is the display width of the EVAL
-// button's rendered label, which varies because it flips to
-// "EVALUATING N/M" while a scan is in flight and includes multibyte
-// glyphs (▶ / ⟳). Each button returns a direct-set action — returning a
-// single "toggle" action for the three sub-view tabs would collapse to a
-// cycle and take the user to the wrong tab when they click a non-adjacent
-// one.
-pub fn title_button_hit(
-    col_in_rect: u16,
-    title_prefix_len: u16,
-    eval_label_width: u16,
-) -> Option<Action> {
-    let col = col_in_rect.saturating_sub(1); // border offset
-    let stats_start = title_prefix_len + 1; // space separator
-    let stats_end = stats_start + BTN_STATS_LABEL.len() as u16;
-    let fs_start = stats_end + 1;
-    let fs_end = fs_start + BTN_FILESCORES_LABEL.len() as u16;
-    let live_start = fs_end + 1;
-    let live_end = live_start + BTN_LIVE_LABEL.len() as u16;
-    // Double-space gap before EVAL to visually separate the action button
-    // from the sub-view tabs.
-    let skills_start = live_end + 1;
-    let skills_end = skills_start + BTN_SKILLS_LABEL.len() as u16;
-    let eval_start = skills_end + 2;
-    let eval_end = eval_start + eval_label_width;
-    if (stats_start..stats_end).contains(&col) {
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
-    } else if (fs_start..fs_end).contains(&col) {
-        Some(Action::GateMonitorSetSubView(
-            GateMonitorSubView::FileScores,
-        ))
-    } else if (live_start..live_end).contains(&col) {
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
-    } else if (skills_start..skills_end).contains(&col) {
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Skills))
-    } else if (eval_start..eval_end).contains(&col) {
-        Some(Action::WorkspaceScanStart)
+// Tabs occupy the bottom border so even narrow panes have room for all four.
+pub fn footer_hit(col: u16, width: u16, state: &AppState) -> Option<Action> {
+    if col == 0 || col >= width.saturating_sub(1) {
+        return None;
+    }
+    let mut start = 1;
+    for &(tab, label) in FOOTER_TABS {
+        let end = start + display_width(label);
+        if col < end {
+            return Some(Action::GateMonitorSetSubView(tab));
+        }
+        start = end;
+    }
+    (col < start + display_width(&footer_eval_label(state, width)))
+        .then_some(Action::WorkspaceScanStart)
+}
+
+fn footer_eval_label(state: &AppState, width: u16) -> String {
+    let label = eval_button_label(state);
+    let tabs_width: u16 = FOOTER_TABS
+        .iter()
+        .map(|(_, text)| display_width(text))
+        .sum();
+    if tabs_width + display_width(&label) <= width.saturating_sub(2) {
+        return label;
+    }
+    if state.agents.workspace_scan_progress.is_some() {
+        " ⟳ EVAL ".into()
+    } else if state.agents.workspace_scan_clean {
+        " ✓ EVAL ".into()
     } else {
-        None
+        " ▶ EVAL ".into()
     }
 }
 
@@ -179,30 +172,8 @@ pub fn render(
         .bg(title_color)
         .add_modifier(Modifier::BOLD);
     let btn_inactive = Style::default().fg(title_color).add_modifier(Modifier::DIM);
-    let sep_style = Style::default().fg(title_color);
-
     let sub_view = state.gate_monitor_sub_view;
-    let stats_style = if sub_view == GateMonitorSubView::Stats {
-        btn_active
-    } else {
-        btn_inactive
-    };
-    let fs_style = if sub_view == GateMonitorSubView::FileScores {
-        btn_active
-    } else {
-        btn_inactive
-    };
-    let live_style = if sub_view == GateMonitorSubView::Live {
-        btn_active
-    } else {
-        btn_inactive
-    };
-    let skills_style = if sub_view == GateMonitorSubView::Skills {
-        btn_active
-    } else {
-        btn_inactive
-    };
-    let eval_label = eval_button_label(state);
+    let eval_label = footer_eval_label(state, area.width);
     let scanning = state.agents.workspace_scan_progress.is_some();
     let clean = !scanning && state.agents.workspace_scan_clean;
     // EVAL button is intentionally distinct from the STATS / FILESCORES /
@@ -230,26 +201,28 @@ pub fn render(
             .add_modifier(Modifier::BOLD)
     };
 
-    let title = Line::from(vec![
-        Span::styled(title_prefix, title_style),
-        Span::styled(" ", sep_style),
-        Span::styled(BTN_STATS_LABEL, stats_style),
-        Span::styled(" ", sep_style),
-        Span::styled(BTN_FILESCORES_LABEL, fs_style),
-        Span::styled(" ", sep_style),
-        Span::styled(BTN_LIVE_LABEL, live_style),
-        Span::styled(" ", sep_style),
-        Span::styled(BTN_SKILLS_LABEL, skills_style),
-        Span::styled("  ", sep_style),
-        Span::styled(eval_label, eval_style),
-    ]);
+    let mut buttons: Vec<_> = FOOTER_TABS
+        .iter()
+        .map(|&(tab, text)| {
+            Span::styled(
+                text,
+                if tab == sub_view {
+                    btn_active
+                } else {
+                    btn_inactive
+                },
+            )
+        })
+        .collect();
+    buttons.push(Span::styled(eval_label, eval_style));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(theme.background))
-        .title(title);
+        .title(Span::styled(title_prefix, title_style))
+        .title_bottom(Line::from(buttons));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -119,46 +119,29 @@ fn gate_monitor_tab_clicks_set_target_sub_view_directly() {
     // through the cycle rather than jumping to the target. Each button now
     // returns the correct direct-set action, and applying it from any
     // starting state lands on the requested tab.
-    use crate::widgets::gate_monitor_view::{display_width, title_button_hit};
+    use crate::widgets::gate_monitor_view::footer_hit;
     use nit_core::{Action, GateMonitorSubView};
-
-    let prefix = " CODE STRUCTURAL QUALITY ".len() as u16;
-    let stats_col = prefix + 1 + 3;
-    let fs_col = prefix + 1 + 7 + 1 + 5;
-    let live_col = prefix + 1 + 7 + 1 + 12 + 1 + 2;
-    // display_width counts the multibyte ▶ glyph as one cell, matching render.
-    let eval_label_width = display_width(" ▶ EVALUATE GENOME ");
-
-    assert_eq!(
-        title_button_hit(stats_col + 1, prefix, eval_label_width),
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
-    );
-    assert_eq!(
-        title_button_hit(fs_col + 1, prefix, eval_label_width),
-        Some(Action::GateMonitorSetSubView(
-            GateMonitorSubView::FileScores
-        ))
-    );
-    assert_eq!(
-        title_button_hit(live_col + 1, prefix, eval_label_width),
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
-    );
-    let skills_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 1 + 3;
-    assert_eq!(
-        title_button_hit(skills_col + 1, prefix, eval_label_width),
-        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Skills))
-    );
-    // EVAL hit-test: button starts after the skills tab and a gap, spans
-    // `eval_label_width` cells. Pick a column a few cells in from the
-    // start so we hit the button regardless of label-width drift.
-    let eval_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 1 + 8 + 2 + 3;
-    assert_eq!(
-        title_button_hit(eval_col + 1, prefix, eval_label_width),
-        Some(Action::WorkspaceScanStart)
-    );
 
     let root = temp_workspace();
     let mut state = make_state(root.clone());
+    for width in [40, 60, 100] {
+        for (col, tab) in [
+            (3, GateMonitorSubView::Stats),
+            (10, GateMonitorSubView::FileScores),
+            (17, GateMonitorSubView::Live),
+            (24, GateMonitorSubView::Skills),
+        ] {
+            assert_eq!(
+                footer_hit(col, width, &state),
+                Some(Action::GateMonitorSetSubView(tab))
+            );
+        }
+        assert_eq!(
+            footer_hit(31, width, &state),
+            Some(Action::WorkspaceScanStart)
+        );
+        assert_eq!(footer_hit(width - 1, width, &state), None);
+    }
 
     state.gate_monitor_sub_view = GateMonitorSubView::Stats;
     nit_core::apply_action(

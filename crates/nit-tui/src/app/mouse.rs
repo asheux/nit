@@ -1381,28 +1381,12 @@ pub(super) fn handle_mouse_down_with_swarm(
                 return true;
             }
         }
-        // Gate monitor title buttons (STATS / FILESCORES / LIVE / EVAL).
-        if mouse.row == layout.gate.y {
-            let col_in_rect = mouse.column.saturating_sub(layout.gate.x);
-            // Compute the title prefix length to find button positions.
-            let prefix_len = if let Some(cached_report) = state
-                .editor_buffer()
-                .path()
-                .and_then(|p| state.genome_reports.get(p))
-            {
-                format!(
-                    " CODE STRUCTURAL QUALITY [{}x{}] ",
-                    cached_report.grid_size, cached_report.grid_size
-                )
-                .len() as u16
-            } else {
-                " CODE STRUCTURAL QUALITY ".len() as u16
-            };
-            let eval_label_width =
-                gate_monitor_view::display_width(&gate_monitor_view::eval_button_label(state));
-            if let Some(action) =
-                gate_monitor_view::title_button_hit(col_in_rect, prefix_len, eval_label_width)
-            {
+        if state.app_kind != nit_core::AppKind::Games
+            && mouse.row == layout.gate.bottom().saturating_sub(1)
+            && layout.gate.contains(point)
+        {
+            let col = mouse.column - layout.gate.x;
+            if let Some(action) = gate_monitor_view::footer_hit(col, layout.gate.width, state) {
                 state.focus = PaneId::GateMonitor;
                 apply_action(state, action);
                 return true;
