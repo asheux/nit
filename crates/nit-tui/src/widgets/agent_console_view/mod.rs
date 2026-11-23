@@ -523,7 +523,9 @@ pub fn render(
                 .iter()
                 .any(|m| !matches!(m.status.as_str(), "DONE" | "ABORTED" | "FAILED" | ""));
         let hint_text = if crate::app::followup_mission(state, swarm).is_some() {
-            "Alt+←/→ task · @task ID message · /followups"
+            "Alt+←/→ task · @task ID message · @queue next turn · /followups"
+        } else if agent.is_some_and(|id| crate::swarm::is_agent_busy(state, id)) {
+            "Enter follow up · @queue next turn · /followups receipts · /abort"
         } else if any_mission_active {
             "/abort  ·  Ctrl+C  ·  Esc Esc  ·  x in Missions tab"
         } else {
