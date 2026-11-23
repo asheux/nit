@@ -65,11 +65,9 @@ pub fn render(
 struct BarStyles {
     label: Style,
     sep: Style,
-    cpu: Style,
     gpu: Style,
     dim: Style,
-    mem: Style,
-    coord: Style,
+    value: Style,
 }
 
 impl BarStyles {
@@ -77,11 +75,9 @@ impl BarStyles {
         Self {
             label: Style::default().fg(theme.title),
             sep: Style::default().fg(theme.border),
-            cpu: Style::default().fg(theme.accent),
             gpu: Style::default().fg(theme.title_focused),
             dim: theme.status_idle_style(),
-            mem: Style::default().fg(theme.warning),
-            coord: Style::default().fg(theme.foreground),
+            value: Style::default().fg(theme.foreground),
         }
     }
 }
@@ -102,15 +98,15 @@ fn build_metrics_line(
     let mut spans = Vec::with_capacity(16);
     spans.extend([
         Span::styled("Ln ", styles.label),
-        Span::styled(format!("{line}, "), styles.coord),
+        Span::styled(format!("{line}, "), styles.value),
         Span::styled("Col ", styles.label),
-        Span::styled(col.to_string(), styles.coord),
+        Span::styled(col.to_string(), styles.value),
         Span::styled(" | ", styles.sep),
         Span::styled("CPU ", styles.label),
-        Span::styled(format!("{cpu:02}%"), styles.cpu),
+        Span::styled(format!("{cpu:02}%"), styles.value),
         Span::styled(" | ", styles.sep),
     ]);
-    spans.extend(gpu_spans(gpu, styles.label, styles.gpu));
+    spans.extend(gpu_spans(gpu, styles.label, styles.value));
 
     if let Some(mut acc) = accelerator_spans(state, &styles) {
         spans.push(Span::styled(" | ", styles.sep));
@@ -122,7 +118,7 @@ fn build_metrics_line(
         spans.push(Span::styled("MEM ", styles.label));
         spans.push(Span::styled(
             format!("{mem_used:.1}/{mem_total:.1}G"),
-            styles.mem,
+            styles.value,
         ));
     }
 

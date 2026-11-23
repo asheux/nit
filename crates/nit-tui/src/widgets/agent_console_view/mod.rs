@@ -97,7 +97,7 @@ pub fn chat_tab_at_column(col_in_rect: u16) -> Option<ChatPaneTab> {
 ///
 /// Buttons are styled to match the visualizer pane: the active tab is
 /// a solid pill (`bg = title_color`, `fg = background`, BOLD), the
-/// inactive tab keeps the same outline but uses muted border-tone fg
+/// inactive tab keeps the same outline but uses muted text
 /// so it reads as a clickable button while staying secondary. `focused`
 /// shifts the title accent color between `title_focused` and `title`.
 pub fn chat_pane_title_line(selected: ChatPaneTab, focused: bool, theme: &Theme) -> Line<'static> {
@@ -110,9 +110,7 @@ pub fn chat_pane_title_line(selected: ChatPaneTab, focused: bool, theme: &Theme)
         .fg(theme.background)
         .bg(title_color)
         .add_modifier(Modifier::BOLD);
-    let inactive_btn_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::BOLD);
+    let inactive_btn_style = theme.status_idle_style().add_modifier(Modifier::BOLD);
     let sep_style = Style::default().fg(title_color);
     let agent_style = if matches!(selected, ChatPaneTab::AgentChat) {
         active_btn_style

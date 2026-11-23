@@ -899,7 +899,7 @@ fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
-            Style::default().fg(theme.border)
+            theme.status_idle_style()
         };
         spans.push(Span::styled(tab.label(), style));
     }

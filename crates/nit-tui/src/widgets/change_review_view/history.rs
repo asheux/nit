@@ -184,7 +184,10 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
                 if selected { "› " } else { "  " },
                 style.fg(theme.title_focused),
             ),
-            Span::styled(format!("{hash} "), style.fg(theme.accent)),
+            Span::styled(
+                format!("{hash} "),
+                style.fg(if selected { theme.accent } else { theme.muted }),
+            ),
             Span::styled(
                 clipped(&commit.subject, r.commits.width.saturating_sub(10)),
                 style.fg(theme.foreground),

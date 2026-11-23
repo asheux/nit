@@ -244,7 +244,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 style,
             ));
         } else {
-            rows.push(Line::styled(name, accent));
+            rows.push(Line::styled(name, muted.add_modifier(Modifier::BOLD)));
         }
     }
     frame.render_widget(
