@@ -43,7 +43,7 @@ impl BufferState {
 
     // Resets cached parse state when the language flips, then loads the
     // grammar onto the parser. `tree_sitter_language` returns `None` for
-    // variants without a shipped grammar (e.g. Dockerfile, PlainText); we
+    // the plain-text fallback; we
     // leave the parser unset in that case and let the no-config branch
     // upstream return a plain snapshot.
     fn switch_language(&mut self, language: LanguageId) -> anyhow::Result<()> {

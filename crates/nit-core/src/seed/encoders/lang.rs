@@ -4,7 +4,7 @@
 //! to avoid a dependency cycle — `nit-syntax` already depends on
 //! `nit-core`. The variant set tracks `nit_syntax::LanguageId`, minus:
 //!   - `PlainText` (enum-only sentinel),
-//!   - `Dockerfile` (grammar crate wedged at an older tree-sitter ABI),
+//!   - `Dockerfile` (highlight-only build-file grammar),
 //!   - `Wolfram` (highlighting wires a vendored grammar in `nit-syntax`,
 //!     but the seed encoders skip it: that grammar is a generic operator
 //!     parser with no semantic nodes, so it yields little genome signal;
@@ -62,7 +62,7 @@ pub(crate) enum SeedLanguage {
 impl SeedLanguage {
     /// Map a `LANGUAGES` label back to a `SeedLanguage` variant. Returns
     /// `None` for labels the seed encoders do not parse: `dockerfile`
-    /// (ABI mismatch) and `wolfram` (highlight-only vendored grammar with
+    /// (build configuration) and `wolfram` (highlight-only vendored grammar with
     /// no semantic nodes to encode).
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         Some(match label {

@@ -39,9 +39,7 @@ fn highlights_keywords_per_language() {
             "defmodule M do\n  def f(x), do: x\nend\n",
         ),
         (110, LanguageId::Swift, "func foo() -> Int { return 1 }\n"),
-        // Dockerfile crate is wedged at an old tree-sitter ABI (see
-        // grammars.rs); reinstate once upstream ships a 0.25-compatible
-        // release.
+        (111, LanguageId::Dockerfile, "FROM alpine:3.20\n"),
         (112, LanguageId::Nix, "let x = 1; in x + 1\n"),
         (113, LanguageId::Kotlin, "fun main() { val x = 1 }\n"),
         (
@@ -355,4 +353,27 @@ fn expanded_queries_capture_operators_and_punctuation() {
             "{lang:?} captured no Punctuation span"
         );
     }
+}
+
+#[test]
+fn dockerfile_parses_lowercase_directives_and_highlights_quoted_arguments() {
+    let source = "from alpine:3.20\nenv APP=\"sample value\"\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(
+            &crate::LanguageRegistry::tree_sitter_language(LanguageId::Dockerfile).unwrap(),
+        )
+        .unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    let mut engine = TreeSitterEngine::new();
+    engine.schedule_rehighlight(make_request(120, 1, LanguageId::Dockerfile, source));
+    let snapshot = wait_for(&mut engine, 120, 1);
+    assert!(has_group(&snapshot, 0, HighlightGroup::Keyword));
+    assert!(has_group(&snapshot, 1, HighlightGroup::Keyword));
+    assert!(has_group(&snapshot, 1, HighlightGroup::String));
 }

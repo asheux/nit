@@ -46,11 +46,7 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
         LanguageId::Make => Some(tree_sitter_make::LANGUAGE.into()),
         LanguageId::Lean => Some(tree_sitter_lean4::language()),
         LanguageId::Swift => Some(tree_sitter_swift::LANGUAGE.into()),
-        // tree-sitter-dockerfile 0.2 is pinned to an older tree-sitter ABI
-        // and won't link with our 0.25 runtime. `LANGUAGES` still lists
-        // Dockerfile so detection (filename + extension) keeps working;
-        // highlights are skipped until upstream ships a compatible crate.
-        LanguageId::Dockerfile => None,
+        LanguageId::Dockerfile => Some(tree_sitter_containerfile::LANGUAGE.into()),
         // Dotenv (`.env`, `.env.local`, …) reuses the bash grammar: the
         // file content is shell-style `KEY=value`, and tree-sitter-bash
         // is already a workspace dep — no new crate, no Cargo.lock churn.
@@ -99,7 +95,7 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
         LanguageId::Make => Some(include_str!("../../queries/make/highlights.scm")),
         LanguageId::Lean => Some(include_str!("../../queries/lean/highlights.scm")),
         LanguageId::Swift => Some(include_str!("../../queries/swift/highlights.scm")),
-        LanguageId::Dockerfile => Some(include_str!("../../queries/dockerfile/highlights.scm")),
+        LanguageId::Dockerfile => Some(tree_sitter_containerfile::HIGHLIGHTS_QUERY),
         // The bash grammar's stock highlight query labels every `KEY=value`
         // assignment as the noisy variable kind; a tighter query keeps
         // names crisp.

@@ -94,10 +94,6 @@ pub struct LanguageInfo {
 /// The master table. Edit here to add a language; every other gate in
 /// the workspace pulls from this list.
 ///
-/// `Dockerfile` is listed so its extension/filename resolution works,
-/// but `nit-syntax::grammars::tree_sitter_language` returns `None` for
-/// it (upstream `tree-sitter-dockerfile` is wedged at an old ABI).
-///
 /// `Wolfram` is listed for `.wl` / `.wls` detection; `.m` is not
 /// claimed (it overlaps MATLAB and Objective-C, and a wrong default
 /// produces visibly broken highlights). No grammar crate targets

@@ -30,11 +30,8 @@ toml = { workspace = true }
 
 # Tree-sitter parsers (used by the seed encoders + genome report AST analysis).
 # Versions pinned for reproducibility; CI uses --locked. Workspace shares
-# the same tree-sitter 0.25 ABI as nit-syntax; the parser set mirrors the
-# master table in `src/languages.rs` so the genome system encodes every
-# language the editor can highlight (Dockerfile excepted — wedged at old
-# ABI). The central languages table itself adds no extra deps — it uses
-# only `std` for slice-based lookup.
+# the same tree-sitter 0.25 ABI as nit-syntax. Editor-only grammars such
+# as Dockerfile and Wolfram do not participate in genome analysis.
 tree-sitter = "0.25"
 tree-sitter-bash = "0.23"
 tree-sitter-css = "0.23"

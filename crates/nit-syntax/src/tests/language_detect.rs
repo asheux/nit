@@ -180,11 +180,6 @@ fn central_table_paths_resolve_through_registry() {
 #[test]
 fn central_table_injection_aliases_resolve_through_registry() {
     for info in LANGUAGES {
-        // Dockerfile has no shipped tree-sitter language, so its alias
-        // legitimately maps to a variant that ignores the alias path.
-        if info.label == "dockerfile" {
-            continue;
-        }
         for alias in info.injection_aliases {
             assert!(
                 LanguageRegistry::from_injection_name(alias).is_some(),

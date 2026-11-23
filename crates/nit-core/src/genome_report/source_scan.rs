@@ -6,10 +6,7 @@ use crate::seed::encoders::SeedLanguage;
 
 pub(super) fn ts_parse(text: &str, file_path: &Path) -> Option<Tree> {
     // Resolve grammar through the central languages table so filename-keyed
-    // languages (Makefile, Gemfile, Dockerfile) are scanned alongside
-    // extension-keyed ones. `SeedLanguage::from_label` returns `None` for
-    // `dockerfile` (its grammar crate is wedged at an older ABI), so the
-    // scanner gracefully skips files the encoder cannot parse.
+    // languages such as Makefile and Gemfile use their encoder grammars.
     let info = crate::languages::detect_by_path(file_path)?;
     let lang = SeedLanguage::from_label(info.label)?;
     let mut parser = Parser::new();
