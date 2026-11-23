@@ -62,23 +62,24 @@ pub(crate) fn submit_focused_pane_input(
 
     // Roster mode: only `/abort` is meaningful — fall through to the
     // alias path so the operator gets parity with chat aborts. Anything
-    // else clears the input and posts a "no agent selected" notice.
+    // else stays in the composer until the operator chooses a recipient.
     if !bound && parse_abort_command(&chat_input).is_none() {
-        clear_focused_pane_input(state);
         push_pane_system_message(
             state,
-            "no agent selected — press Ctrl+R to choose one".into(),
+            "Choose an agent in the roster, then press Enter in chat to send your draft".into(),
         );
         return;
     }
 
-    with_focused_pane_aliased(state, |state| {
+    let submitted = with_focused_pane_aliased(state, |state| {
         if bound {
             pin_pane_chat_mission_on_lane(state, pane_idx);
         }
-        let _ =
-            submit_chat_input_and_dispatch(state, vitals, Some(codex), Some(claude), swarm, shadow);
+        submit_chat_input_and_dispatch(state, vitals, Some(codex), Some(claude), swarm, shadow)
     });
+    if !submitted {
+        return;
+    }
     if let Some(pane) = focused_pane_mut(state) {
         pane.has_run_mission = true;
     }

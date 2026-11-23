@@ -320,6 +320,8 @@ fn default_chat_in_pane0_not_visible_in_pane1() {
     // thread. Synthetic chat mission scopes the AgentMessage so the
     // pane-aware render filter excludes it from pane 1.
     let mut state = build_state_with_chat_missions(2);
+    state.agents.claude_cli_available = true;
+    let (claude, commands) = crate::claude_runner::ClaudeRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
@@ -338,12 +340,16 @@ fn default_chat_in_pane0_not_visible_in_pane1() {
             state,
             &mut vitals,
             None,
-            None,
+            Some(&claude),
             &mut swarm,
             &mut shadow,
         );
     });
 
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(crate::claude_runner::ClaudeCommand::RunTurn { .. })
+    ));
     let pushed = state.agents.messages.last().expect("pushed message");
     assert_eq!(
         pushed.mission_id.as_deref(),
@@ -1121,6 +1127,7 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
     // `tests/intake.rs::intake_uses_per_pane_cwd_in_multipane`.
     state.settings.intake_enabled = false;
     state.agents = AgentsState::default();
+    state.agents.claude_cli_available = true;
     state.agents.agents.push(claude_idle_lane(CLAUDE_BACKEND));
     state.multipane = Some(MultipaneState {
         backend_agent_id: CLAUDE_BACKEND.into(),
@@ -1160,13 +1167,7 @@ fn pane_dispatch_augments_with_pane_cwd_not_workspace_root() {
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
-    // A real ClaudeRunner keeps `maybe_dispatch_next_queued_claude_turn`
-    // from draining the queue as orphaned. The pane lanes are busy
-    // (active_turns populated), so dequeue defers and pushes the turn
-    // back, leaving the queue inspectable.
-    let claude = crate::claude_runner::ClaudeRunner::spawn(
-        crate::claude_runner::ClaudeRunnerConfig::default(),
-    );
+    let (claude, _commands) = crate::claude_runner::ClaudeRunner::test_channel();
 
     // Pane 0 dispatch: real-work prompt naming crates/foo (only exists
     // under cwd0). Use a writer verb (`update`) that is NOT one of the
