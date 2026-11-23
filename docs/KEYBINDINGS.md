@@ -6,7 +6,7 @@ Open a file with `nit path/to/file`, or run `nit .` to browse a directory. In th
 
 | Task | Control |
 |---|---|
-| Browse the file tree (NITTree) | `Ctrl+T` or `:tree`. Use Up/Down or `k`/`j`, then `Enter` to expand a directory or open a file. `q` or `Esc` closes the tree. |
+| Browse the file tree (NITTree) | `Ctrl+T` or `:tree`. Select a row with a click, the wheel, Up/Down, or `k`/`j`. Press `Enter` to expand a directory or open a file. `q` or `Esc` closes the tree. |
 | Create, rename, or refresh in the tree | `n` creates a file, `N` creates a directory, `r` renames, and `R` refreshes. Use `.` for hidden files and `i` for ignored files. |
 | Find by name | `Ctrl+P` or `:find`. Type part of the filename. |
 | Find text across files | `Ctrl+F` or `:grep`. Type the text to find. Open a result with `Enter` to visit its location. |

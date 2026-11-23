@@ -214,6 +214,17 @@ fn scroll_main_layout_panes(
         return true;
     }
     if point_in_rect(mouse.column, mouse.row, layout.editor) {
+        if state.file_tree.open {
+            if state.file_tree.prompt.is_none() {
+                state.file_tree.selected = state
+                    .file_tree
+                    .selected
+                    .saturating_add_signed(delta as isize)
+                    .min(state.file_tree.rows.len().saturating_sub(1));
+                adjust_file_tree_scroll(state, layout.editor);
+            }
+            return true;
+        }
         scroll_buffer(state.editor_buffer_mut(), delta);
         return true;
     }
@@ -1183,6 +1194,18 @@ pub(super) fn handle_mouse_down_with_swarm(
     reset_ui_selection(state, input_state);
     let layout = layout::split(screen);
     if point_in_rect(mouse.column, mouse.row, layout.editor) {
+        if state.file_tree.open {
+            state.focus = PaneId::Editor;
+            let inner = Block::default().borders(Borders::ALL).inner(layout.editor);
+            if state.file_tree.prompt.is_none() && inner.contains((mouse.column, mouse.row).into())
+            {
+                let index = state.file_tree.scroll_offset + usize::from(mouse.row - inner.y);
+                if index < state.file_tree.rows.len() {
+                    state.file_tree.selected = index;
+                }
+            }
+            return true;
+        }
         set_buffer_cursor_from_mouse(
             state,
             PaneId::Editor,

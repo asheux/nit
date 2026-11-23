@@ -353,8 +353,8 @@ pub(super) fn handle_file_tree_key(
             match row.kind {
                 nit_core::FileTreeKind::File => {
                     let path = row.path.clone();
-                    let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
-                    state.file_tree.open = false;
+                    apply_action_with_syntax(state, syntax, Action::OpenFile(path.clone()));
+                    state.file_tree.open = state.editor_buffer().path() != Some(&path);
                     true
                 }
                 nit_core::FileTreeKind::Dir => {

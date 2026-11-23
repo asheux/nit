@@ -4,6 +4,66 @@
 use super::*;
 
 #[test]
+fn file_tree_mouse_selects_visible_rows_without_moving_the_source_buffer() {
+    let mut state = state_for_test_in_workspace("tree-pointer");
+    let text = (0..80).map(|i| format!("line {i}\n")).collect::<String>();
+    *state.editor_buffer_mut() = nit_core::Buffer::from_str("source", &text, None);
+    state.editor_buffer_mut().set_viewport_size(12, 50);
+    state.file_tree.open = true;
+    state.file_tree.rows = (0..40)
+        .map(|i| nit_core::FileTreeRow {
+            text: format!("file-{i}"),
+            path: state.workspace_root.join(format!("file-{i}")),
+            kind: nit_core::FileTreeKind::File,
+            depth: 0,
+        })
+        .collect();
+    state.file_tree.scroll_offset = 9;
+    let screen = Rect::new(0, 0, 150, 24);
+    let area = layout::split(screen).editor;
+    let mut input = InputState::new();
+    let theme = Theme::default();
+    let mut fuzzy = FuzzySearchRuntime::new(&theme, state.settings.highlight.clone());
+    let mut clipboard = None;
+    let mut mouse = MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: area.x + 12,
+        row: area.y + 3,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(handle_mouse_event(
+        mouse,
+        screen,
+        &mut state,
+        &mut fuzzy,
+        &mut input,
+        &mut clipboard,
+        &theme
+    ));
+    assert_eq!(state.file_tree.selected, 11);
+    mouse.kind = MouseEventKind::ScrollDown;
+    assert!(handle_mouse_event(
+        mouse,
+        screen,
+        &mut state,
+        &mut fuzzy,
+        &mut input,
+        &mut clipboard,
+        &theme
+    ));
+    assert!(state.file_tree.selected > 11);
+    assert_eq!(state.editor_buffer().cursor.line, 0);
+    assert_eq!(state.editor_buffer().cursor.col, 0);
+    assert_eq!(state.editor_buffer().viewport.offset_line, 0);
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(handle_file_tree_key(&enter, &mut state, &mut syntax, area));
+    assert!(state.file_tree.open);
+    assert!(state.status.as_deref().unwrap().contains("Open failed"));
+    fs::remove_dir_all(state.workspace_root).unwrap();
+}
+
+#[test]
 fn map_agent_console_mouse_maps_chat_thread_lines() {
     let mut state = state_for_test();
     state.agents.selected_mission = None;
