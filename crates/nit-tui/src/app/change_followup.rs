@@ -25,6 +25,18 @@ pub(super) fn draft(state: &mut AppState, swarm: &SwarmRuntime, pasted: Option<&
         state.status = Some("Choose a file or commit to discuss.".into());
         return;
     };
+    // Git reports paths from the repository root. Agent tasks may have been
+    // started in a subdirectory, so preserve the real location on handoff.
+    let path = if path.is_empty() || !state.change_review.root.is_absolute() {
+        path
+    } else {
+        let absolute = state.change_review.root.join(&path);
+        absolute
+            .strip_prefix(&state.workspace_root)
+            .unwrap_or(&absolute)
+            .to_string_lossy()
+            .into_owned()
+    };
     let source = Source {
         path,
         revision,
@@ -217,6 +229,19 @@ mod tests {
         assert_eq!(state.agents.chat_input,"Earlier question\nWorking tree · src/lib.rs · new line 31\n@@ -18,2 +30,3 @@ fn result()\n\tλ界\nCan we simplify this?");
         assert!(state.agents.active_turns.is_empty());
         assert_eq!(state.change_review.preview[4], "+\tλ界new");
+    }
+
+    #[test]
+    fn paths_crossing_the_workspace_boundary_retain_their_actual_location() {
+        let mut state = state();
+        state.workspace_root = "/project/module".into();
+        state.change_review.root = "/project".into();
+        draft(&mut state, &SwarmRuntime::default(), None);
+        assert!(state.agents.chat_input.contains("/project/src/lib.rs"));
+        state.agents.chat_input.clear();
+        state.change_review.files[0].path = "module/nested.rs".into();
+        draft(&mut state, &SwarmRuntime::default(), None);
+        assert!(state.agents.chat_input.contains("Working tree · nested.rs"));
     }
 
     #[test]
