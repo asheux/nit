@@ -14,3 +14,21 @@ pub enum SteerOutcome {
     /// Input may have been accepted. Automatic replay would risk duplication.
     Unknown(String),
 }
+
+/// Match the operator's message after accounting for Nit-supplied context.
+pub(crate) fn matches_chat_prompt(provider_prompt: &str, operator_prompt: &str) -> bool {
+    if operator_prompt.is_empty() {
+        return false;
+    }
+    if provider_prompt == operator_prompt {
+        return true;
+    }
+    let hint = format!("\n{}", nit_core::skills::reference_hint());
+    let body = provider_prompt.strip_suffix(&hint).unwrap_or(provider_prompt);
+    let hygiene = crate::swarm::code_hygiene_preamble("").unwrap_or_default();
+    let body = body.strip_prefix(&hygiene).unwrap_or(body);
+    body == operator_prompt
+        || body.strip_prefix("\n[genome context]\n")
+            .and_then(|body| body.split_once("[/genome context]\n\n"))
+            .is_some_and(|(_, text)| text == operator_prompt)
+}
