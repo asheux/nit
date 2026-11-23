@@ -99,7 +99,11 @@ fn render_snapshot_reuses_shifted_lines_on_full_reparse() {
 fn idle_poll_preserves_cached_line_map_while_edit_is_pending() {
     let mut buffer = Buffer::from_str("test", "a\nb\nc\n", None);
     let mut runtime = SyntaxRuntime::new(default_config());
-    runtime.prime_buffer(1, &buffer, true);
+    runtime.prime_buffer(1, &buffer);
+    assert!(runtime.awaiting_interactive_result(1));
+    assert!(runtime.poll_results(1, buffer.version()));
+    assert!(!runtime.awaiting_interactive_result(1));
+    assert!(!runtime.poll_results(1, buffer.version()));
     buffer.insert_char('x');
     runtime.note_buffer_change(1, &mut buffer);
     assert!(runtime.render_snapshot_for(1, &buffer).line_map.is_some());
@@ -121,7 +125,7 @@ fn active_documents_are_primed_after_command_open_and_slot_replacement() {
     cfg.engine = nit_core::HighlightEngine::TreeSitter;
     let mut runtime = SyntaxRuntime::new(cfg);
     let first = state.active_editor_buffer_id;
-    runtime.prime_buffer(first, state.editor_buffer(), true);
+    runtime.prime_buffer(first, state.editor_buffer());
     apply_action(&mut state, Action::CommandPromptOpen);
     state.command_line.as_mut().unwrap().input = "e review.py".into();
     apply_action(&mut state, Action::CommandPromptExecute);
@@ -149,7 +153,7 @@ fn active_documents_are_primed_after_command_open_and_slot_replacement() {
     );
     wait(&mut runtime, first, &state.buffers[first], LanguageId::Rust);
     let previous = runtime.documents[&first].origin;
-    runtime.prime_buffer(first, &state.buffers[first], false); // An outstanding older request.
+    runtime.prime_buffer(first, &state.buffers[first]); // An outstanding older request.
     let replacement = Buffer::from_str("new.py", "class New: pass", Some(file));
     assert_eq!(state.buffers[first].version(), replacement.version());
     assert!(runtime
@@ -159,4 +163,16 @@ fn active_documents_are_primed_after_command_open_and_slot_replacement() {
     wait(&mut runtime, first, &replacement, LanguageId::Python);
     assert!(runtime.documents[&first].origin > previous);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn slow_highlights_repaint_even_after_fast_polling_expires() {
+    let buffer = Buffer::from_str("test", "let x = 1;", None);
+    let mut runtime = SyntaxRuntime::new(default_config());
+    runtime.prime_buffer(1, &buffer);
+    assert!(runtime.snapshot_for(1, buffer.version()).is_none());
+    runtime.documents.get_mut(&1).unwrap().fast_poll_until = Some(Instant::now());
+    assert!(!runtime.awaiting_interactive_result(1));
+    assert!(runtime.poll_results(1, buffer.version()));
+    assert!(runtime.snapshot_for(1, buffer.version()).is_some());
 }

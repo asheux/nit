@@ -93,9 +93,8 @@ pub fn run(
     let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;
-    let warmup_editor = state.editor_buffer().bytes_len() <= 200_000;
-    syntax.prime_buffer(editor_id, state.editor_buffer(), warmup_editor);
-    syntax.prime_buffer(notes_id, state.notes_buffer(), false);
+    syntax.prime_buffer(editor_id, state.editor_buffer());
+    syntax.prime_buffer(notes_id, state.notes_buffer());
 
     // Load git HEAD base for diff gutter on initial editor buffer.
     if let Some(path) = state.editor_buffer().path().cloned() {
@@ -341,6 +340,10 @@ pub(super) fn run_loop(
             frame_interval
                 .saturating_sub(last_render.elapsed())
                 .max(Duration::from_millis(1))
+        } else if syntax.awaiting_interactive_result(state.active_editor_buffer_id)
+            || syntax.awaiting_interactive_result(state.notes_buffer_id)
+        {
+            frame_interval.min(TICK_RATE)
         } else {
             TICK_RATE
         };
@@ -1104,8 +1107,8 @@ pub(super) fn run_loop(
         let notes_id = state.notes_buffer_id;
         syntax.tick(editor_id, state.editor_buffer());
         syntax.tick(notes_id, state.notes_buffer());
-        syntax.poll_results(editor_id, state.editor_buffer().version());
-        syntax.poll_results(notes_id, state.notes_buffer().version());
+        needs_redraw |= syntax.poll_results(editor_id, state.editor_buffer().version());
+        needs_redraw |= syntax.poll_results(notes_id, state.notes_buffer().version());
 
         if state.change_review_active() && state.visualizer.pending_run {
             state.show_change_review = false;

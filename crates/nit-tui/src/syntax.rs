@@ -56,12 +56,14 @@ struct DocumentSlot {
     identity: u64,
     origin: u64,
     latest_request: u64,
+    fast_poll_until: Option<Instant>,
 }
 
 impl DocumentSlot {
     fn request_version(&mut self, local: u64) -> u64 {
         let version = self.origin + local;
         self.latest_request = self.latest_request.max(version);
+        self.fast_poll_until = Some(Instant::now() + FAST_POLL_WINDOW);
         version
     }
 }
@@ -81,7 +83,7 @@ pub struct SyntaxRuntime {
     buffer_syntax_states: HashMap<usize, BufferSyntaxState>,
 }
 
-const INITIAL_HIGHLIGHT_WAIT_MS: u64 = 1000;
+const FAST_POLL_WINDOW: Duration = Duration::from_millis(250);
 const SCROLL_DEBOUNCE_MS: u64 = 20;
 // Cap line-map computation on buffers above these thresholds; big files keep
 // rendering with the latest snapshot and skip the diff-and-map step.
@@ -140,7 +142,7 @@ impl SyntaxRuntime {
         }
     }
 
-    pub fn prime_buffer(&mut self, buffer_id: usize, buffer: &Buffer, warmup: bool) {
+    pub fn prime_buffer(&mut self, buffer_id: usize, buffer: &Buffer) {
         if !self.manager.config().enabled {
             return;
         }
@@ -159,6 +161,7 @@ impl SyntaxRuntime {
                     identity: buffer.document_id(),
                     origin,
                     latest_request: origin,
+                    fast_poll_until: None,
                 },
             );
             self.snapshots.remove(&buffer_id);
@@ -221,22 +224,15 @@ impl SyntaxRuntime {
                 },
             );
         }
+    }
 
-        if warmup {
-            let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
-            loop {
-                if let Some(snapshot) = self.take_snapshot(buffer_id, buffer.version()) {
-                    self.snapshots.insert(buffer_id, snapshot);
-                    self.trim_edits_since_snapshot(buffer_id);
-                    self.render_cache.remove(&buffer_id);
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+    pub fn awaiting_interactive_result(&self, buffer_id: usize) -> bool {
+        self.manager.config().enabled
+            && self
+                .documents
+                .get(&buffer_id)
+                .and_then(|slot| slot.fast_poll_until)
+                .is_some_and(|until| until > Instant::now())
     }
 
     pub fn note_buffer_change(&mut self, buffer_id: usize, buffer: &mut Buffer) {
@@ -315,7 +311,7 @@ impl SyntaxRuntime {
             .is_none_or(|doc| doc.identity != buffer.document_id())
             || !self.last_sent.contains_key(&buffer_id)
         {
-            self.prime_buffer(buffer_id, buffer, false);
+            self.prime_buffer(buffer_id, buffer);
             return;
         }
         self.tick_edits(buffer_id, buffer);
@@ -451,22 +447,24 @@ impl SyntaxRuntime {
         Some(snapshot)
     }
 
-    pub fn poll_results(&mut self, buffer_id: usize, version: u64) {
-        if let Some(snapshot) = self.take_snapshot(buffer_id, version) {
-            self.snapshots.insert(buffer_id, snapshot);
-            self.trim_edits_since_snapshot(buffer_id);
-            self.render_cache.remove(&buffer_id);
-            return;
-        }
-        if let Some(last_sent) = self.last_sent.get(&buffer_id).copied() {
-            if last_sent != version {
-                if let Some(snapshot) = self.take_snapshot(buffer_id, last_sent) {
-                    self.snapshots.insert(buffer_id, snapshot);
-                    self.trim_edits_since_snapshot(buffer_id);
-                    self.render_cache.remove(&buffer_id);
-                }
+    /// A new snapshot (including a same-version progressive fill) needs a frame.
+    pub fn poll_results(&mut self, buffer_id: usize, version: u64) -> bool {
+        let last_sent = self.last_sent.get(&buffer_id).copied();
+        let snapshot = self
+            .take_snapshot(buffer_id, version)
+            .or_else(|| self.take_snapshot(buffer_id, last_sent.filter(|&sent| sent != version)?));
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        if Some(snapshot.version) == last_sent {
+            if let Some(slot) = self.documents.get_mut(&buffer_id) {
+                slot.fast_poll_until = None;
             }
         }
+        self.snapshots.insert(buffer_id, snapshot);
+        self.trim_edits_since_snapshot(buffer_id);
+        self.render_cache.remove(&buffer_id);
+        true
     }
 
     pub fn snapshot_for(&self, buffer_id: usize, version: u64) -> Option<&HighlightSnapshot> {

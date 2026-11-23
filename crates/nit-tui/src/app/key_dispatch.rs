@@ -1344,8 +1344,8 @@ pub(super) fn apply_action_with_syntax(
 
     if matches!(action, Action::ToggleSyntax) {
         syntax.update_config(state.settings.highlight.clone());
-        syntax.prime_buffer(after_editor_id, state.editor_buffer(), true);
-        syntax.prime_buffer(after_notes_id, state.notes_buffer(), false);
+        syntax.prime_buffer(after_editor_id, state.editor_buffer());
+        syntax.prime_buffer(after_notes_id, state.notes_buffer());
     }
     if matches!(action, Action::OpenFile(_)) {
         // Load git HEAD base for diff gutter indicators.
