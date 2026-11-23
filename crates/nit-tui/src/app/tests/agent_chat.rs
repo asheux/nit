@@ -826,7 +826,7 @@ fn offline_or_disconnected_runner_leaves_first_send_editable() {
 #[test]
 fn busy_chat_shows_the_accepted_followup_until_its_fifo_turn_starts() {
     use ratatui::{backend::TestBackend, Terminal};
-    let mut state = state_for_test();
+    let mut state = state_for_test_in_workspace("busy-chat-fifo");
     let (runner, commands) = select_test_recipient(&mut state);
     state.center_tab = Some(nit_core::StationCenterTab::Chat);
     let mut vitals = VitalsState::default();

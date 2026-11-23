@@ -22,7 +22,7 @@ For a PowerShell session, use `$env:NIT_TUI_FPS = "30"` before launching nit. Re
 
 | Variable | Default | Effect |
 |---|---|---|
-| `NIT_CLAUDE_POOL` | Off | Set to `1`, `true`, `yes`, or `on` to reuse Claude processes for new sessions with default effort and turn limits. Resumed sessions and turns with custom settings start their own processes. |
+| `NIT_CLAUDE_POOL` | Off | Set to `1` to reuse Claude processes. A compatible direct chat can accept follow-ups while its turn runs. Nit binds the worker to the agent, workspace, session, effort, permissions, and turn limit. |
 | `NIT_CLAUDE_POOL_SIZE` | One quarter of the effective swarm limit, bounded to 2–8 | Set a positive worker count when pooling is enabled. Parked workers use file descriptors and reduce capacity for other concurrent turns. |
 | `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | 900 seconds | End a turn after this long without streamed output. A turn that has used a recognized write tool is exempt. Set to `0` to disable. |
 | `NIT_MCP_TURN_TIMEOUT_SECS` | No limit | Limit total duration of a Codex MCP turn, in seconds. `0` disables the limit. |

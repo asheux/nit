@@ -21,9 +21,8 @@ use super::chat_input::{
 use super::{
     bump_scroll_clamped, chat_current_line_bounds, chat_current_line_indent,
     chat_cursor_move_vertical, chat_cursor_move_word_left, chat_cursor_move_word_right,
-    dynamic_popup_rect, enqueue_claude_turn, enqueue_codex_turn, is_global_quit_key,
-    maybe_dispatch_claude_turn, maybe_dispatch_codex_turn, normalize_chat_input_text,
-    popup_text_area,
+    dynamic_popup_rect, is_global_quit_key, maybe_dispatch_claude_turn, maybe_dispatch_codex_turn,
+    normalize_chat_input_text, popup_text_area,
 };
 
 pub(super) fn copy_popup_chat_input_selection(
@@ -889,11 +888,33 @@ pub(crate) fn handle_artifacts_popup_key(
             let prev_agent = state.agents.selected_agent.clone();
             let prev_mission = state.agents.selected_mission.clone();
             state.agents.selected_agent = Some(agent_id.clone());
-            if artifact_mission.is_some() {
-                state.agents.selected_mission = artifact_mission.clone();
-            }
+            state.agents.selected_mission = artifact_mission.clone();
             swap_in_artifacts_popup_chat(state);
             let main_target = state.agents.swarm_draft_target.take();
+            if is_agent_busy(state, &agent_id) {
+                // The operator is replying to a completed artifact, which may
+                // precede the lane's current task. Preserve that turn boundary.
+                let sent = super::live_followup::submit(
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    &mut swarm.chat_steers,
+                    &agent_id,
+                    artifact_mission.as_deref(),
+                    &prompt,
+                    &prompt,
+                    true,
+                );
+                state.agents.swarm_draft_target = main_target;
+                swap_out_artifacts_popup_chat(state);
+                state.agents.selected_agent = prev_agent;
+                state.agents.selected_mission = prev_mission;
+                if sent {
+                    close_artifacts_popup(state);
+                }
+                return true;
+            }
             let sent = push_chat_message(state);
             state.agents.swarm_draft_target = main_target;
             swap_out_artifacts_popup_chat(state);
@@ -907,7 +928,6 @@ pub(crate) fn handle_artifacts_popup_key(
                 // Dispatch directly to the artifact's agent. Only queue if
                 // *this specific agent* is busy — other agents running in
                 // the chat pane should not block this dispatch.
-                let agent_busy = is_agent_busy(state, &agent_id);
                 let is_claude = state
                     .agents
                     .agents
@@ -915,27 +935,7 @@ pub(crate) fn handle_artifacts_popup_key(
                     .find(|lane| lane.id == agent_id)
                     .is_some_and(|lane| lane.is_claude());
 
-                if agent_busy {
-                    if is_claude {
-                        enqueue_claude_turn(
-                            state,
-                            vitals,
-                            Some(agent_id),
-                            mission_id,
-                            prompt_text,
-                            Some(prompt_msg_idx),
-                        );
-                    } else {
-                        enqueue_codex_turn(
-                            state,
-                            vitals,
-                            Some(agent_id),
-                            mission_id,
-                            prompt_text,
-                            Some(prompt_msg_idx),
-                        );
-                    }
-                } else if is_claude {
+                if is_claude {
                     state
                         .agents
                         .claude_turn_prompt_idx
