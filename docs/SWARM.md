@@ -10,6 +10,18 @@ In Agent Ops → Roster, select a Codex or Claude model and press Enter. That mo
 
 Open **Agent Ops → DAG** to see the task IDs, owners, dependencies and blocked work. **Agent Chat** shows active and queued turns. After completion, open **Agent Ops → Artifacts** for the selected mission and inspect the diff, task outputs and verification report.
 
+## Follow up on a change
+
+Select the changed file in **Changes**, drag across the relevant lines, then click **Follow up** or press `f`. Nit opens an unsent chat draft with the path, hunk and selected text. A historical patch also includes its commit. Add the correction and check the destination above the draft.
+
+The planner assigns the original tasks. During execution, Nit routes an operator note to a task and its assigned worker. A file with one known owner can supply the destination. When several tasks could own it, use Alt+Left or Alt+Right to choose one, or enter `@task TASK-ID MESSAGE`. You can also use `@agent AGENT-ID MESSAGE` when that lane has one eligible task. Find the exact IDs in **Agent Ops → DAG**.
+
+Press Enter to queue the note. A waiting task receives it with its instructions. A busy worker receives a continuation at a turn boundary. If the writer has finished and the mission is still executing, Nit can assign that writer a follow-up task and have a second worker review the result. Once final verification starts, choose another live mission for the follow-up. You can continue reviewing while the worker finishes.
+
+Type `/followups` in chat to see recent receipts, or run `nit followups` in the workspace to see them all. Use `/followups ID` to read the original note and its status. **Pending** means Nit saved it. **Submitted** means Nit prepared the assigned turn with the note. **Delivered** means the provider completed a turn that contained it. Inspect the resulting patch or tests to check the outcome. If the worker fails or the editor closes before confirming delivery, `/followups recover ID` restores the text to an unsent draft. Select a live mission and use Alt+Left or Alt+Right to bind the recovered draft to a task before sending again.
+
+If a send has no clear destination, your text stays in the composer and Nit saves a local draft. After a restart, a single saved draft returns to its empty composer. Use `/drafts` to list saved drafts, `/drafts ID` to restore one, or `/drafts discard ID` to remove it.
+
 ## Choose the team and workflow
 
 | Template | Choose it for | How work is shared |

@@ -1,12 +1,12 @@
 # Editor and station controls
 
-Open a file with `nit path/to/file`, or run `nit .` to browse a directory. In the editor, press **i** to type, **Esc** to return to Normal mode, and **Ctrl+S** to save. Press **F1** for help. Letter case matters in the tables below. A sequence such as `gg` means two lowercase keypresses.
+Run `nit .` to open Agent Chat with NITTree on the left. Click a file to open it in the center and move keyboard focus to its source. Click **Agent Chat** or press **F6** to return to your draft. Launching `nit path/to/file` opens that file directly in Editor. In the editor, press **i** to type, **Esc** to return to Normal mode, and **Ctrl+S** to save. Press **F1** for help. Letter case matters in the tables below. A sequence such as `gg` means two lowercase keypresses.
 
 ## Find and open a file
 
 | Task | Control |
 |---|---|
-| Browse the file tree (NITTree) | `Ctrl+T` or `:tree`. Select a row with a click, the wheel, Up/Down, or `k`/`j`. Press `Enter` to expand a directory or open a file. `q` or `Esc` closes the tree. |
+| Browse the file tree (NITTree) | `Ctrl+T` or `:tree` focuses NITTree. Click a file to open it or a directory to expand it. With the keyboard, move with Up/Down or `k`/`j` and press Enter. Esc brings you back to the center pane. |
 | Create, rename, or refresh in the tree | `n` creates a file, `N` creates a directory, `r` renames, and `R` refreshes. Use `.` for hidden files and `i` for ignored files. |
 | Find by name | `Ctrl+P` or `:find`. Type part of the filename. |
 | Find text across files | `Ctrl+F` or `:grep`. Type the text to find. Open a result with `Enter` to visit its location. |
@@ -75,13 +75,14 @@ Drag across a patch to select its text. Selection copies to the yank register an
 
 ## Read a built-in reference
 
-Opening a file or directory with `nit` shows **NITSKILLS**. Focus starts in the editor or file tree. Type `:skills` to focus the catalog. Choose a reference with Up/Down, `k`/`j`, a click, or the wheel over the list. Press `/` to filter by title, skill ID, group, or description. `Enter` keeps the results, and `Esc` clears the filter. The selected preview appears beside or below the list when space permits. Press `Enter` or click **Open** to read it in the full pane. Scroll the document with the wheel or, in the full reader, the arrows and `PageUp`/`PageDown`. Press `Esc`, Left, or Backspace, or click **Back**, to return to the catalog. Click **Use skill** or press `a` to add a reference to your Agent Chat draft. Nit focuses the draft and preserves your text. Add your question and press Enter when you want to send it. The command at the top of each document prints the playbook in your shell.
+The **NitSkills** catalog opens in the lower-right pane. Click it, or run `:skills` from the editor to focus it. Choose a reference with Up/Down, `k`/`j`, a click, or the wheel over the list. Press `/` to filter by title, skill ID, group, or description. `Enter` keeps the results, and `Esc` clears the filter. The selected preview appears beside or below the list when space permits. Press `Enter` or click **Open** to read it in the full pane. Scroll the document with the wheel or, in the full reader, the arrows and `PageUp`/`PageDown`. Press `Esc`, Left, or Backspace, or click **Back**, to return to the catalog. Click **Use skill** or press `a` to add a reference to your Agent Chat draft. Nit focuses the draft and preserves your text. Add your question and press Enter when you want to send it. The command at the top of each document prints the playbook in your shell.
 
 ## Work with agents
 
 In **Agent Ops**, use Left/Right to change tabs and Up/Down or `k`/`j` to select a row. The Codex group starts expanded on a standard launch so you can select a model immediately. In **Roster**, expand a model with `l`, collapse with `h`, and choose a reasoning effort or role with `Space` or `Enter`. On a model row, `Space` toggles priority. Keys `1–3` select the lab, parallel, and bulk swarm templates. Keys `4–7` select auto, general, research, and computational research. Press `Enter` on a model to focus its chat.
 
 - **Send and revisit prompts.** `Enter` sends and `Shift+Enter` starts another line. Up/Down moves through multiline input, then through prompt history at its ends. `Ctrl+Up`/`Ctrl+Down` scrolls the conversation. A new prompt queues while the agent is busy.
+- **Address a swarm task.** Use Alt+Left or Alt+Right in the chat draft to choose the task, or type `@task TASK-ID MESSAGE`. Use `/followups` for delivery receipts and `/drafts` for unsent follow-ups saved after a routing error. [Following up on a change](SWARM.md#follow-up-on-a-change)
 - **Choose how a prompt runs.** `@new <prompt>` starts a fresh conversation, `@queue <prompt>` queues explicitly, and `@all <prompt>` sends to several agents. For delegated tasks and review, see [Swarm](SWARM.md) and [Shadow](SHADOWS.md).
 - **Read a result.** In **Artifacts**, click or press `Enter` to open a result. Scroll with Up/Down or `j`/`k`. Close with `Esc` or `q`.
 - **Cancel work.** In Agent Chat, `/abort`, two quick presses of `Esc`, or `Ctrl+C` with empty input cancels current work. `/abort AGENT-ID` targets one agent. In the standard station, `/abort all` cancels all running swarms and queued work. The **Missions** tab also accepts `x` on an active mission.
