@@ -922,6 +922,7 @@ pub(super) fn handle_mouse_down_with_swarm(
             );
         } else if !point_in_rect(mouse.column, mouse.row, popup_area) {
             reset_ui_selection(state, input_state);
+            state.agents.artifacts_popup_reply_idx = None;
             state.agents.artifacts_popup_open = false;
             state.agents.artifacts_popup_scroll = 0;
             state.agents.global_archive_opened_entry = None;
@@ -1297,6 +1298,17 @@ pub(super) fn handle_mouse_down_with_swarm(
     if try_start_terminal_selection(state, input_state, clipboard, mouse) {
         return true;
     }
+    if state.station_chat_center() && point_in_rect(mouse.column, mouse.row, layout.notes) {
+        if let Some(message_idx) =
+            agent_console_view::completed_artifact_message_at(state, mouse.column, mouse.row)
+        {
+            if super::popup_keys::open_station_reply_artifact(state, message_idx) {
+                state.focus = PaneId::Notes;
+                input_state.mouse_select_anchor = None;
+                return true;
+            }
+        }
+    }
     if let Some((line_idx, col, lines)) =
         map_agent_console_mouse_with_swarm(swarm, mouse, screen, state, false)
     {
@@ -1304,12 +1316,14 @@ pub(super) fn handle_mouse_down_with_swarm(
         state.mode = Mode::Normal;
         state.agents.chat_input_selection_anchor = None;
         if let Some(text_area) = agent_console_view::thread_text_area(layout.notes, state) {
-            if maybe_open_artifact_popup_from_console_line(
-                state,
-                Some(swarm),
-                text_area.width as usize,
-                line_idx,
-            ) {
+            if !state.station_chat_center()
+                && maybe_open_artifact_popup_from_console_line(
+                    state,
+                    Some(swarm),
+                    text_area.width as usize,
+                    line_idx,
+                )
+            {
                 input_state.mouse_select_anchor = None;
                 return true;
             }

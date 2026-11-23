@@ -639,6 +639,7 @@ pub(super) fn artifacts_popup_scroll_metrics(
 
 pub(super) fn close_artifacts_popup(state: &mut AppState) {
     state.agents.artifacts_popup_followup_draft_id = None;
+    state.agents.artifacts_popup_reply_idx = None;
     state.agents.artifacts_popup_open = false;
     state.agents.artifacts_popup_scroll = 0;
     // Sentinel triggers the fallback-compute path on the first scroll event if

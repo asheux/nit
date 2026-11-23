@@ -144,6 +144,8 @@ pub struct AgentsState {
     #[serde(skip)]
     pub artifacts_history_selected: usize,
     #[serde(skip)]
+    pub artifacts_popup_reply_idx: Option<usize>,
+    #[serde(skip)]
     pub artifacts_selected_saved_run_path: Option<String>,
     #[serde(skip, default)]
     pub artifacts_history_filter: SavedRunHistoryFilter,
@@ -516,6 +518,7 @@ impl Default for AgentsState {
             artifacts_history_popup_open: false,
             artifacts_history_popup_scroll: 0,
             artifacts_history_selected: 0,
+            artifacts_popup_reply_idx: None,
             artifacts_selected_saved_run_path: None,
             artifacts_history_filter: SavedRunHistoryFilter::All,
             artifacts_history_pending_action: None,

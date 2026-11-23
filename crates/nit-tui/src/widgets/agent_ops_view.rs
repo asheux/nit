@@ -5513,6 +5513,9 @@ pub fn artifacts_popup_ref(
     swarm: &SwarmRuntime,
     width: usize,
 ) -> Option<ArtifactsPopupRef> {
+    if let Some(idx) = state.agents.artifacts_popup_reply_idx {
+        return Some(ArtifactsPopupRef::Message { idx });
+    }
     let width = width.max(32);
     let widths = artifact_list_widths(width);
     let preview_chars = widths
@@ -5569,6 +5572,9 @@ pub fn selected_artifact_agent_id(
     swarm: &SwarmRuntime,
     width: usize,
 ) -> Option<String> {
+    if let Some(idx) = state.agents.artifacts_popup_reply_idx {
+        return state.agents.messages.get(idx)?.agent_id.clone();
+    }
     let width = width.max(32);
     let widths = artifact_list_widths(width);
     let preview_chars = widths
@@ -5617,6 +5623,9 @@ pub fn selected_artifact_mission_id(
     swarm: &SwarmRuntime,
     width: usize,
 ) -> Option<String> {
+    if let Some(idx) = state.agents.artifacts_popup_reply_idx {
+        return state.agents.messages.get(idx)?.mission_id.clone();
+    }
     let width = width.max(32);
     let widths = artifact_list_widths(width);
     let preview_chars = widths
@@ -5649,6 +5658,13 @@ pub fn selected_artifact_mission_id(
 }
 
 pub fn is_selected_artifact_prompt(state: &AppState, swarm: &SwarmRuntime, width: usize) -> bool {
+    if let Some(idx) = state.agents.artifacts_popup_reply_idx {
+        return state
+            .agents
+            .messages
+            .get(idx)
+            .is_some_and(|msg| msg.agent_id.is_none());
+    }
     let width = width.max(32);
     let widths = artifact_list_widths(width);
     let preview_chars = widths
