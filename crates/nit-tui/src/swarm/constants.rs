@@ -85,21 +85,10 @@ pub(super) const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational resea
 // (= 1) so a single retry pass happens automatically; further fixes are
 // the operator's call.
 pub(crate) const FINDINGS_RETRY_CLAUSE: &str =
-    "FINDINGS = AUTO-RETRY TRIGGER: When you detect a concrete, fixable issue \
-     (failed test, fmt drift, clippy warning, broken assertion, missing import \
-     after a rename, etc.), emit it as a STRUCTURED entry in the \
-     `swarm_artifacts.findings` array — NOT as prose in `notes`. Each finding \
-     must include at least `file` (repo-relative path) and `issue` (one-line \
-     description); add `line`, `severity` (\"error\" | \"warning\"), `category` \
-     (\"fmt\" | \"clippy\" | \"test\" | \"other\"), and `suggestion` (concrete \
-     replacement text) whenever you have them. The orchestrator parses this \
-     array and — if non-empty AND the run still has retry budget left — \
-     dispatches ONE follow-up integrator turn scoped to the cited files with \
-     your findings injected as the task description. Budget is small (1 retry \
-     by default), so high-value findings only: include things a writer can \
-     plausibly fix; leave subjective style critiques in `notes` where they \
-     inform synthesis without burning a retry turn. You remain READ-ONLY — \
-     report findings, do NOT attempt to fix them yourself.";
+    "FINDINGS = AUTO-RETRY TRIGGER: Stay READ-ONLY. Put concrete fixable issues in swarm_artifacts.findings. \
+     Each requires file (repo-relative) and issue (one line). Include line, severity (error|warning), \
+     category (fmt|clippy|test|other) and suggestion when known. Nonempty findings trigger a scoped \
+     integrator retry if budget remains (default one). Put subjective feedback in notes.";
 
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
     "TEST DISCIPLINE — Workspace-wide commands in any toolchain (including cargo test --all, \

@@ -843,16 +843,12 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "FILES ARRAY = LOAD-BEARING HANDOFF: List every existing edit and new path in swarm_artifacts.files for the structural-compliance check. Files omitted can be skipped. Do NOT include files where you concluded \"audit only / no changes needed\"; use notes to avoid false-positive re-dispatch. See NitSkill swarm-propose for examples.",
         ],
         "research" => &[
-            "Explore the topic through papers, docs, web resources, and related references when available.",
-            "Surface competing ideas, promising directions, and the best strategy candidates with evidence.",
-            "Do not turn this into a final implementation or winner-picking step; hand off concrete findings.",
-            "ROLE DISCIPLINE: You are read-only research. Do NOT run tests, builds, lints, formatters, or any CI commands — verification belongs to the integrate/test/review agents. Do NOT repeat work already covered by an upstream dependency task; cite it and move on.",
+            "Compare papers, docs, web resources and upstream findings. Hand off the best strategy candidates with evidence. See NitSkill research-evidence.",
+            "Read-only survey. Do NOT run tests, builds, lints, formatters or CI. Cite upstream work and leave implementation and final selection to downstream roles.",
         ],
         COMPUTATIONAL_RESEARCH_ROLE => &[
-            "Handle the broad computation-heavy lane: simulations, modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, and reproducible research workflows.",
-            "Perform tool-assisted research with explicit methods, commands, sources, assumptions, and computations.",
-            "Use the findings to recommend strong strategies or narrow the search space for downstream roles across technical domains.",
-            "ROLE DISCIPLINE: Tool use must be in service of computation/analysis for this task — do NOT run the project's test suite, build, lints, or CI as a side activity. Do not duplicate investigation an upstream task already produced.",
+            "Use simulations, modeling, numerical methods, optimization or other reproducible research workflows to compare strategies. Report commands, assumptions, sources and measurements. See NitSkill research-experiment.",
+            "Read-only analysis. Do NOT run project tests, builds, lints or CI. Use tools only for the assigned computation and build on upstream evidence.",
         ],
         "judge" => &[
             "Compare the dependency outputs and choose the best path. State the decision, acceptance criteria and recommended verification steps.",
@@ -872,17 +868,13 @@ pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
             NO_PADDING_CLAUSE,
         ],
         "review" => &[
-            "Critique the current output or diff for correctness, UX, and maintainability.",
-            "Call out risks, regressions, and missing tests.",
-            "Do not edit the workspace; suggest follow-ups as text only.",
+            "Review correctness, UX, maintainability, regressions and missing tests. Report findings without editing. See NitSkill swarm-review.",
             TEST_DISCIPLINE_CLAUSE,
-            "GENOME: nit measures code across four encoders. Consult NitSkill genome-encoders for targets. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
+            "For genome findings name the affected encoder, metric and concrete refactor. Targets are in NitSkill genome-encoders.",
             FINDINGS_RETRY_CLAUSE,
         ],
         "test" => &[
-            "Focus on validation commands, expected results, and edge cases.",
-            "Differentiate confirmed results from unrun suggestions.",
-            "Do not redesign the solution unless a test failure makes it necessary.",
+            "Verify expected results and edge cases. Separate confirmed outcomes from unrun commands. Report failures without editing; suggest design changes only when a failure requires one. See NitSkill swarm-test.",
             TEST_DISCIPLINE_CLAUSE,
             FINDINGS_RETRY_CLAUSE,
         ],
@@ -1154,6 +1146,14 @@ fn append_task_role_contract(out: &mut String, task: &SwarmTask) {
     let research_writer =
         task.writes && matches!(role.as_str(), "research" | COMPUTATIONAL_RESEARCH_ROLE);
     let contract_lines = if research_writer {
+        let guide = if role == COMPUTATIONAL_RESEARCH_ROLE {
+            "research-experiment"
+        } else {
+            "research-evidence"
+        };
+        out.push_str(&format!(
+            "- See NitSkill {guide} for the evidence workflow.\n"
+        ));
         research_writer_contract_lines()
     } else {
         role_contract_lines(role.as_str())

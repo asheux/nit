@@ -1614,6 +1614,35 @@ fn task_prompt_includes_role_contract_guidance() {
 }
 
 #[test]
+fn role_prompts_point_to_the_matching_evidence_workflow() {
+    for (role, skill, writes) in [
+        ("review", "swarm-review", false),
+        ("test", "swarm-test", false),
+        ("research", "research-evidence", false),
+        ("research", "research-evidence", true),
+        (COMPUTATIONAL_RESEARCH_ROLE, "research-experiment", false),
+        (COMPUTATIONAL_RESEARCH_ROLE, "research-experiment", true),
+    ] {
+        let mut task = make_task("task", "a1", Some(role), Vec::new());
+        task.writes = writes;
+        let prompt = wrap_task_prompt(
+            "root",
+            SwarmMissionKind::General,
+            &task,
+            None,
+            &[],
+            std::path::Path::new("."),
+            None,
+            false,
+        );
+        assert!(prompt.contains(&format!("NitSkill {skill}")), "{role}");
+        if writes {
+            assert!(prompt.contains("ONLY your assigned file"), "{role}");
+        }
+    }
+}
+
+#[test]
 fn research_role_contract_mentions_external_sources() {
     let task = make_task("research", "a1", Some("research"), Vec::new());
     let prompt = wrap_task_prompt(
