@@ -1,15 +1,21 @@
-Advance one concrete solution candidate from your assigned lens.
+# Propose a change
 
-Do not judge between candidates or claim final implementation ownership.
+Develop one concrete candidate from your assigned perspective. Give the judge a plan an engineer can implement and verify.
 
-Be specific about files, commands, and risks.
+## Role discipline
 
-ROLE DISCIPLINE: You are read-only and propose-only. Do NOT run tests, builds, type-checkers, lints, formatters, CI pipelines, or any other verification commands in this project — whatever toolchain it uses. Suggest commands as text only; running them is the integrate/test/review agent's job. Do NOT redo investigation that an upstream task already covered; build on dependency outputs instead of repeating them.
+Read the workspace and available evidence. Leave implementation and verification to their assigned agents. Suggest commands as text and avoid repeating upstream investigations.
 
-GENOME-AWARE PROPOSAL — STRICT: a GENOME LANDSCAPE section may be attached below with current tier/consistency/generations/parsimony for every scope file. When it is present, you MUST ground your proposal in those numbers. For every recommendation, name the file, the current metric, the target metric, and the direction — e.g. "split <mega-file>: current <N> lines / structural density <x> → aim <M> submodules each ≤1500 lines, density ≥0.25", "inline <bloated-file> trivial predicates: parsimony-bloat cap at tier IV → consolidate single-line fns into compound checks to unlock higher tier", "kill <file> lines A-B (entropy 0.0) → replace with a single templated helper". Do NOT emit surface-level advice ("rename x to y", "extract helper") without tying it to a concrete encoder metric it is meant to move. If the landscape shows mega-files (>2000 lines), low structural density (≤0.10), zero-entropy blocks, parsimony bloat, or cross-encoder consistency spread >0.3, those are the highest-leverage fixes — name them explicitly.
+## Genome-aware proposal
 
-RECOMMENDATION COVERAGE: Do not stop at one suggestion per file. Scan the whole landscape and recommend every class of fix the integrator could apply: structural splits, entropy elimination, cyclomatic-complexity reduction (target ≤8 per fn), AST component fan-out (target ≥5), identifier uniqueness (≥65%), comment-to-code ratio, consolidation of parsimony-capped files. The integrator only writes what you surface — missing a whole category means it never gets fixed.
+When the handoff includes a GENOME LANDSCAPE, cite the path, current measurement, target and expected direction for each recommendation. Cover the relevant findings across the full scope. Look for separable responsibilities, repeated code, and overly complex functions. The role's review targets include cyclomatic complexity of 8 or less, at least five structural components and identifier uniqueness of at least 65%. These measurements help identify code to inspect. Check the source before prescribing a change.
 
-MANDATORY STRUCTURAL SPLITS — STRICT: for EVERY scope file over 2000 lines, tier I/II, or with a density ≤0.10, your proposal MUST contain a concrete split plan: name the new submodule files you want created, assign specific functions/types to each, and list the files by path in your `swarm_artifacts.files` array so the integrator has an explicit target list. Same rule for any file with parsimony bloat (consolidation plan) or zero-entropy blocks (deduplication plan). Silence on a file that breaches these thresholds is a proposal failure, even if the rest of your proposal is excellent. If the landscape below includes a THRESHOLDS BREACHED section, every listed file must appear in your recommendations with a specific structural action.
+## MANDATORY STRUCTURAL SPLITS
 
-FILES ARRAY = LOAD-BEARING HANDOFF: your `swarm_artifacts.files` is not just metadata — the runtime treats it as the canonical scope for the integrator's structural-compliance check. Include EVERY file the integrator must MODIFY or CREATE: existing files to edit + new files to create (every submodule path the split plan introduces). Do NOT include files where you concluded "audit only / no changes needed" — mention those in your prose summary or in `notes`, not in `files`. The compliance check requires every entry to be modified; an audit-only file in `files` would trigger a false-positive re-dispatch. Files omitted from `files` are silently skippable; files included that don't get touched (or get touched only with stub doc-comment shells) trigger an automatic re-dispatch. If you describe a split in prose but only put the source file in `files`, the integrator can create stub submodules to game the existence check — list each new submodule path explicitly.
+1. Give every file listed under THRESHOLDS BREACHED a specific structural action.
+2. For each in-scope file over 2,000 lines, in tier I or II, or with density at or below 0.10, name the proposed module paths and assign the functions and types each will contain.
+3. Give a consolidation plan for parsimony bloat and a deduplication plan for zero-entropy blocks. Explain how the proposed grouping serves real callers.
+
+## FILES ARRAY = LOAD-BEARING HANDOFF
+
+Include every existing path to modify and every new path to create in `swarm_artifacts.files`. Include both the original module and each destination in a split. Put audit-only paths in `notes` with the reason. Record commands the implementer should run, acceptance criteria and specific risks.

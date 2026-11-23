@@ -1,5 +1,18 @@
-TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands of any toolchain — `cargo test --all` / `--workspace`, `cargo clippy --workspace`, `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, full lint/type-check sweeps, etc. — are ONLY allowed when the OPERATOR explicitly asked for them in the request above (phrases like "run full CI", "verify the whole workspace", "run all tests", "make sure nothing else broke"). If the operator did not, you MUST NOT run a workspace-wide command — not as a confirmation pass after a targeted run, not to be thorough, not "just to be safe", not even when a targeted run fails (in that case, report the failure and let the operator decide whether to widen). DEFAULT: run only targeted commands scoped to the modules/packages/files the swarm actually touched (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`, `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: combine targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per module. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: running `cargo test -p <affected-crate>` (passes) AND THEN running `cargo test --all` to "verify the full results" — exactly the duplication the rule forbids. The post-execution gate verifier handles workspace-wide gates as the next swarm stage.
+# Verify a swarm change
 
-CODE SHAPE: Do NOT add inline test modules (e.g. Rust `#[cfg(test)] mod tests { ... }`, Python `if __name__ == '__main__'` test blocks, Go `_test.go` stubs co-located in source files) inside production source files — tests live in a dedicated tests directory or test file. If you encounter an existing inline test module during a refactor, move it to the appropriate test file. Do NOT pad small files (re-export / barrel files such as `lib.rs`, `mod.rs`, `index.ts`, `__init__.py`) with unnecessary code to boost genome scores — trivially small files are auto-passed. Do NOT over-engineer trivial logic to hit a metric. COMMENTS: trim doc comments that restate type/function names, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.
+Choose checks that exercise the changed behavior and report exactly what they establish.
 
-REVERT POLICY: reverting your own BROKEN code (compile errors, failing tests, broken logic) is fine — that's how you fix things. Rolling back WORKING edits just to make a gate or metric pass vacuously (e.g. `git restore` on a real refactor because genome-quality dropped a tier, deleting a new file the proposer asked for, restoring the pre-refactor body of a function) is a task failure, not a fix. Passing a gate by throwing away real work is strictly worse than failing the gate with the work intact. If you genuinely can't improve the metric further through real edits, say so in your reply and STOP — leave the mission's actual changes on disk.
+## TEST DISCIPLINE
+
+1. Identify the affected modules, packages or files.
+2. Run targeted checks for those paths. Examples include `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...` and `npm test --workspace=<pkg>`.
+3. For multiple affected packages, combine package flags or run each package separately.
+4. Run workspace-wide tests, builds, lint or formatting sweeps only when the operator explicitly asks for that scope. Report targeted failures and their cause. The post-execution verifier owns the configured full gates.
+
+## Code shape
+
+Keep tests in dedicated test files or directories. When refactoring a source file that contains an inline test module, move the tests into a separate test file. Keep barrel files and re-exports small. Retain comments that explain decisions, constraints and assumptions. Remove comments that simply repeat the code.
+
+## Revert policy
+
+Repair or revert your own broken edits when required to restore working behavior. Preserve working changes required by the task. If an edit lowers a structural score, inspect the finding, address justified issues and report remaining tradeoffs. Removing required behavior solely to make a metric pass leaves the task incomplete.
