@@ -13,7 +13,7 @@ From a Git checkout, run `nit .`. Agent Chat opens in the center, with NITTree o
 
 ### Bring in an agent
 
-Install and sign in to the Codex or Claude CLI you want to use. Launch `nit --agents codex .` or `nit --agents claude .`, select a model in **Agent Ops** and press Enter to open **Agent Chat**. Give the agent a bounded question, such as “Read the permission check in this file. Which test covers a denied request? Cite the file and line.” Include the actual filename in your prompt. Read the reply in chat or click **Artifacts** on its banner for the full text. Follow the cited code and run the test yourself.
+Install and sign in to the Codex or Claude CLI you want to use. Launch `nit --agents codex .` or `nit --agents claude .`, select a model in **Agent Ops** and press Enter to open **Agent Chat**. Give the agent a bounded question, such as “Read the permission check in this file. Which test covers a denied request? Cite the file and line.” Include the actual filename in your prompt. When the turn finishes, click **Artifacts** in its activity panel to read the reply. Follow the cited code and run the test yourself.
 
 For independent reviews, `nit multipane --panes 4` opens four conversations. For a change with dependencies, a swarm can assign tasks, pass their results to another agent and collect verification evidence. Give it an acceptance criterion you can check. [Work with a team of agents](docs/SWARM.md) · [Use independent panes](docs/MULTIPANE.md)
 
