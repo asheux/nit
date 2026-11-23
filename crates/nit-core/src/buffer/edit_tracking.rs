@@ -43,6 +43,8 @@ impl Buffer {
     }
 
     pub(super) fn record_full_reparse(&mut self) {
+        self.current_line_hashes.clear();
+        self.changed_lines = None;
         self.pending_edits.clear();
         self.full_reparse = true;
         self.bump_version();
@@ -57,6 +59,21 @@ impl Buffer {
     }
 
     fn push_edit(&mut self, edit: BufferEdit) {
+        // A single-line edit preserves row indices. A split, join or earlier
+        // line-count change requires a fresh hash vector before the next diff.
+        let row = edit.start_point.row;
+        if row != edit.old_end_point.row
+            || row != edit.new_end_point.row
+            || self.current_line_hashes.len() != self.rope.len_lines()
+        {
+            self.current_line_hashes.clear();
+            self.changed_lines = None;
+        } else {
+            self.changed_lines = Some(match self.changed_lines.take() {
+                Some(range) => (*range.start()).min(row)..=(*range.end()).max(row),
+                None => row..=row,
+            });
+        }
         self.pending_edits.push(edit);
         self.bump_version();
     }

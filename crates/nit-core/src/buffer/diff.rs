@@ -128,10 +128,16 @@ impl Buffer {
         if self.diff_version == self.version {
             return;
         }
-        let current: Vec<u64> = (0..self.rope.len_lines())
-            .map(|i| self.line_hash(i))
-            .collect();
-        self.diff_status = patience::compute_line_diff(&self.base_line_hashes, &current);
+        let changed_lines = self.changed_lines.take();
+        if self.current_line_hashes.len() != self.rope.len_lines() {
+            self.current_line_hashes = rope_line_hashes(&self.rope);
+        } else if let Some(lines) = changed_lines {
+            for row in lines {
+                self.current_line_hashes[row] = fnv1a_line(self.rope.line(row));
+            }
+        }
+        self.diff_status =
+            patience::compute_line_diff(&self.base_line_hashes, &self.current_line_hashes);
         self.diff_version = self.version;
     }
 
@@ -141,7 +147,5 @@ impl Buffer {
 }
 
 pub(super) fn rope_line_hashes(rope: &Rope) -> Vec<u64> {
-    (0..rope.len_lines())
-        .map(|i| fnv1a_line(rope.line(i)))
-        .collect()
+    rope.lines().map(fnv1a_line).collect()
 }

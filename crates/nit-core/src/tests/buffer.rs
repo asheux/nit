@@ -1549,3 +1549,24 @@ fn watcher_reload_preserves_edits_and_clamps_cursor_after_shrink() {
     assert_eq!(buf.content_as_string(), "x!");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn gutter_hashes_survive_batched_edits_across_rows_and_undo() {
+    let base = "first\r\nsecond\nthird\n";
+    let mut buf = Buffer::from_str("sample", base, None);
+    let verify = |buf: &mut Buffer| {
+        let mut fresh = Buffer::from_str("sample", &buf.content_as_string(), None);
+        fresh.set_git_base(base);
+        fresh.compute_diff_if_needed();
+        buf.compute_diff_if_needed();
+        assert_eq!(buf.diff_statuses(), fresh.diff_statuses());
+    };
+    buf.insert_char('X');
+    buf.go_to_line(3);
+    buf.insert_char('Y');
+    verify(&mut buf);
+    buf.insert_str("λ\nnew");
+    verify(&mut buf);
+    buf.undo();
+    verify(&mut buf);
+}

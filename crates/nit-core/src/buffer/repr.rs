@@ -33,6 +33,10 @@ pub struct Buffer {
     #[serde(skip)]
     pub(super) base_line_hashes: Vec<u64>,
     #[serde(skip)]
+    pub(super) current_line_hashes: Vec<u64>,
+    #[serde(skip)]
+    pub(super) changed_lines: Option<std::ops::RangeInclusive<usize>>,
+    #[serde(skip)]
     pub(super) diff_status: Vec<LineDiffStatus>,
     #[serde(skip)]
     pub(super) diff_version: u64,
@@ -63,6 +67,8 @@ impl Buffer {
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             dirty: false,
+            current_line_hashes: base_line_hashes.clone(),
+            changed_lines: None,
             base_line_hashes,
             diff_status: Vec::new(),
             diff_version: u64::MAX,

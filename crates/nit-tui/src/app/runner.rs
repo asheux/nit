@@ -167,6 +167,7 @@ pub(super) fn run_loop(
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
     let mut stashed_event: Option<Event> = None;
+    let mut buffered_keys = 0;
     let mut review_runtime = crate::change_review::ReviewRuntime::default();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
@@ -893,6 +894,18 @@ pub(super) fn run_loop(
             }
         }
 
+        // Typing or pasting via a terminal without bracketed paste can deliver
+        // several characters together. Paint their combined edit in one frame.
+        if handled_input
+            && state.focus == PaneId::Editor
+            && state.mode == Mode::Insert
+            && buffered_keys < 16
+            && event::poll(Duration::ZERO)?
+        {
+            buffered_keys += 1;
+            continue;
+        }
+        buffered_keys = 0;
         if !handled_input && matches!(state.focus, PaneId::Editor) && state.mode == Mode::Insert {
             if let Some(action) = input_state.flush_insert_timeout() {
                 prepare_clipboard_paste(state, &mut clipboard, &action);
