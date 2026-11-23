@@ -20,6 +20,7 @@ pub mod multipane;
 pub mod multiway;
 mod runner_output;
 pub mod shadow;
+pub mod steering;
 pub mod swarm;
 
 pub mod file_tree;
