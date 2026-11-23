@@ -1,111 +1,35 @@
-# Performance
+# Editor performance and prompt size
 
-This doc covers two areas: the TUI render loop (frame budget, redraw cap,
-and how output-heavy subsystems stay off the redraw path) and the
-`nit-games` engine benchmarks (criterion benches and flamegraphs). The
-environment variables named here are listed in `docs/ENVIRONMENT.md`.
+Use these measurements to decide what to test on your own terminal and with your own agent workload.
 
-## TUI render performance
+## How quickly does an edit appear?
 
-### Interactive editor measurements
-
-The following measurements compare debug builds of `69657d0` and `ab9ab11` on the same Mac. Each build ran in its own 160×48 tmux session. The station opened a tracked 68,011-byte UTF-8 file with 2,001 lines of text. Input latency covers sending keys through tmux until the updated line first appeared in a pane capture. Each median uses 12 edits. The benchmark saved the file and checked its contents.
-
-| Measurement | Before | After |
+| Measurement | Earlier build | Revised build |
 | --- | ---: | ---: |
-| One key to visible edit | 23.6 ms | 13.2 ms |
-| Three keys to visible edit | 39.4 ms | 13.2 ms |
-| Idle station, percent of one CPU core | 8.2% | 1.8% |
-| Idle eight-pane local session, percent of one CPU core | 14.7% | 0.3% |
+| One key to visible edit, median | 23.6 ms | 13.2 ms |
+| Three keys to visible edit, median | 39.4 ms | 13.2 ms |
+| Idle editor, percent of one CPU core | 8.2% | 1.8% |
+| Eight idle local chat panes, percent of one CPU core | 14.7% | 0.3% |
 
-CPU figures use process CPU time over eight seconds for the station and six seconds for multipane, after allowing startup activity to settle. Terminal size, hardware, repository size and active agent output can change these results.
+**Test conditions.** The two Git revisions were `69657d0` and `ab9ab11`. Both were Rust debug builds on the same Apple M4 Max with 36 GiB RAM, macOS 26.5.2 and tmux 3.6a. Each ran in a separate 160×48 session. The editor opened a tracked UTF-8 file of 68,011 bytes with 2,001 nonempty lines.
 
-The station batches up to 16 ready input events per frame. In Changes, with the simulation idle, it refreshes periodic information four times per second. Input and terminal activity can request an earlier frame. Multipane also repaints for input, PTY output and active agent turns.
+**How to repeat the comparison.** Allow startup to settle for at least 22 seconds. Send a key through tmux and measure elapsed time until a pane capture contains the expected edit. Repeat 12 times, use the median, and verify saved file contents. Repeat with three-character bursts. For idle CPU, divide the increase in process CPU time by elapsed wall time over eight seconds for the editor or six seconds for multipane, after 35 seconds of multipane warm-up. One fully occupied core corresponds to 100%.
 
-### Frame cap (`NIT_TUI_FPS`)
+These are local observations. The latency includes tmux input and capture overhead. Terminal size, workload, build profile and hardware matter. On a slow remote terminal, try `NIT_TUI_FPS=30 nit .` and compare scrolling and idle CPU at the same dimensions. The default frame cap is 60 frames per second. [Configuration](ENVIRONMENT.md)
 
-The single-pane and multipane event loops gate `terminal.draw` behind a
-redraw cap, default 60 fps (16 ms). nit reads the cap once at startup and
-clamps it to `15..=120`; out-of-range values fall back to the default. The
-cap applies to the draw call only. Input handling and agent-bus event
-application stay unthrottled, so a burst of bus events can update state on
-every event but cannot repaint faster than the terminal compositor keeps
-up. Lower it (`NIT_TUI_FPS=30`) on slow or remote terminals; raise it for
-smoother scrolling on a fast local terminal.
+## How much text do NitSkills save?
 
-### PTY and terminal render decoupling
+Nit puts required instructions in each request and lets agents fetch detailed references when needed. We counted representative prompt text before and after this change with the `o200k_base` tokenizer. The current counts include the Codex hint pointing to the local skills directory.
 
-The embedded terminal renders independently of shell output, so a chatty
-process cannot storm the redraw loop. The PTY reader thread keeps the
-`vt100` grid current on its own thread, and nit samples it on the normal
-frame cadence. See "Notes" in `docs/TERMINAL.md` for the full model.
+| Prompt | Earlier input tokens | With NitSkills |
+| --- | ---: | ---: |
+| Plain turn | 210 | 117 |
+| Swarm proposer | 3,249 | 1,349 |
+| Swarm judge | 3,527 | 1,605 |
+| Swarm integrator | 4,637 | 1,787 |
 
-### Multipane render budget
+One of each totals 11,623 and 4,858 estimated input tokens respectively, a 58.2% reduction in this sample. A real mission can have different numbers of each role. Provider framing, tool definitions, replies, later skill reads and provider caching affect usage and billing. For a cost comparison, keep the model, task and verification requirements fixed and compare provider-reported usage across completed runs. [How to use NitSkills](../README.md#give-agents-only-the-guidance-they-need)
 
-Multipane runs the same per-pane render code once per ratatui frame. The
-latency targets (initial 16-pane render under 50 ms, dir-search keystroke
-to result update under 16 ms) are in the "Performance budget" section of
-`docs/MULTIPANE.md`.
+## Compare game throughput
 
-## Games benchmarks
-
-```bash
-cargo bench -p nit-games
-```
-
-The suite includes:
-
-- `single_match_200_rounds`
-- `tournament_small` (16 strategies, 200 rounds)
-- `tournament_medium` (128 strategies, 50 rounds)
-- `parallel/tournament_parallel_auto` (64 strategies, 50 rounds)
-- `parallel/tournament_parallel_large` (256 strategies, 50 rounds)
-- `logging_on` vs `logging_off`
-- `fast_eval/deterministic_fast` vs `fast_eval/deterministic_slow` (5000 rounds)
-- `fast_eval/mixed_fsm_ca_tm` (mixed strategy families, 500 rounds)
-- `fsm_fast_eval/fsm_fast` vs `fsm_fast_eval/fsm_slow` (32 FSM strategies, 3000 rounds)
-- `tm_micro_steps` (256 steps per iteration)
-- `tm_tournament/tm` vs `tm_tournament/baseline` (12 strategies, 200 rounds)
-- `tm_heavy/tm_steps_heavy` (8 TM strategies, 150 rounds, 512 max steps)
-- `tm_family_halting/tm_1x2_rounds200_steps1000` (TM family halting filter)
-- `sweep_cell_io` (filesystem and serialization overhead)
-
-## Flamegraphs
-
-Install cargo-flamegraph once:
-
-```bash
-cargo install cargo-flamegraph
-```
-
-Generate a flamegraph for the nit-games bench:
-
-```bash
-cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tournament_small
-```
-
-Other useful targets:
-
-```bash
-cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tm_steps_heavy
-cargo flamegraph -p nit-games --bench engine_bench -- benchmark=sweep_cell_io
-```
-
-## Sweep benchmarks
-
-To benchmark sweep orchestration end to end:
-
-```bash
-cargo bench -p nit-games --bench engine_bench -- sweep_cell_io
-```
-
-## Fast-mode knobs
-
-For the fastest batch runs:
-
-- `engine.mode = "batch"`
-- `engine.parallelism = "auto"` (or `threads = N`)
-- `engine.fast_eval = true` (eligible deterministic strategies, `noise = 0`)
-- `event_log.enabled = false` (or `include_rounds = false`)
-- `history.enabled = false`
-- `engine.progress_interval_ms = 0` (no UI throttling)
+From a source checkout, `cargo bench -p nit-games` runs the tournament benchmarks. To compare settings, keep the strategy list, seed, number of matches, and rounds fixed. Record whether history, event logging and acceleration are enabled. Check that scores agree before interpreting elapsed time. [Tournament guide](GAMES.md)

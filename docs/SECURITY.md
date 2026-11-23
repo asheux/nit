@@ -1,82 +1,37 @@
-# Security Policy
+# Permissions, network access and local records
 
-## Philosophy
+Choose what a session can access before sending it a repository question. Opening a file in the editor, launching a model and starting a shell have different effects.
 
-- Secure by default: no plugins, no network calls from nit itself, and no arbitrary command execution.
-- nit spawns a small set of external tools directly, with no shell:
-  - `git`: repo introspection, ignore checks, file listing
-  - `codex`: Agent Station, as an MCP server or exec runtime; may use the network depending on your Codex configuration
-  - `claude`: Agent Station, one `claude -p` subprocess per turn; may use the network
-  - `open` / `xdg-open` / `cmd`: the platform URL launcher, only when you activate a link
-- At startup nit probes `PATH` for `codex`, `claude`, and `gemini` and may run them briefly to list models. It never keeps a `gemini` subprocess running.
-- Terminal state is restored on exit and on panic.
-- Saves are atomic and go only to paths you name.
+| Action | What it can access |
+| --- | --- |
+| Edit and save | Files your OS account can write. Saving an existing symlink updates its target. The target can be outside the workspace. Existing regular files retain their Unix read, write and execute bits. |
+| Open **Changes** | Local Git status and the selected path’s staged and unstaged patches. Opening the pane leaves the index and working tree alone. |
+| Use the embedded terminal | A shell running with your account’s permissions. Commands you enter can change files and make network requests. |
+| Send a Codex or Claude turn | An external provider CLI using its configured credentials. The prompt, repository material read by that CLI and tool results may reach the provider. |
+| Run a swarm verification command | The project’s tests or commands specified in `.nit/config.toml`. Read custom commands before running a mission in an unfamiliar checkout. |
+| Start or update nit | The release check can contact `download.nit.tools`. Set `NIT_NO_VERSION_CHECK=1` to skip the startup check. Updating downloads release software. |
 
-## Reporting
+## Review a repository
 
-If you find a vulnerability, open an issue or contact the maintainers
-privately. Please hold public disclosure until a fix is available.
+For a local editing session, use `nit --agents local .`. For a live Codex review where the agent should only read files, start a session from the project directory.
 
-## Protections implemented
+```sh
+nit --agents codex --codex-sandbox read-only .
+```
 
-- `#![forbid(unsafe_code)]` in every crate except `nit-metal` (Metal GPU interop) and `nit-mcp`.
-- No network I/O in-process.
-- External commands are limited to `git`, `codex`, and `claude`, run directly with no shell.
-- Atomic file writes through temp files in the destination directory.
-- Defensive error handling around terminal raw mode. nit drops to a safe state on panic.
+Codex uses its own sandbox configuration when you omit the flag. Nit defaults the Codex approval policy to `never` for noninteractive turns. The sandbox controls what commands may do, and the approval setting controls requests for escalation. Claude’s standard writing turns allow file editing, shell commands and web tools subject to the CLI and account configuration. File claims displayed by the station are advisory. Other processes can still write the same files. [Agent coordination](SUBSTRATE.md)
 
-## Hardening backlog
+## Decide what to share
 
-Guiding principles: prefer secure-by-default behaviour with opt-outs you choose.
-Treat file contents, repo contents, and agent output as untrusted unless you
-say otherwise. When in doubt: do not execute, do not write outside the
-workspace, and do not render raw control sequences.
+| Location | What to inspect |
+| --- | --- |
+| `.nit/agents/runs/` | Mission records, messages and patch evidence |
+| `.nit/swarm/` | Task outputs, reported commands, verification results and final reports |
+| nit’s application state or data directory | Workspace logs and saved sessions. `NIT_LOG_PATH` selects a path for the workspace log. |
+| `gol-snapshots/` and `runs/games/` | Simulation snapshots and tournament output when you use those labs |
 
-### High priority
+Review generated files before committing them or attaching them to an issue. Provider sessions and credentials are also subject to the provider CLI’s storage settings. [Configuration](ENVIRONMENT.md)
 
-- [ ] Strip or neutralize ANSI escape sequences (ESC, CSI, OSC) in editor rendering, agent output, status lines, logs, and diagnostics.
-- [ ] Decide a policy for control characters (`0x00..0x1f`, `0x7f`): drop them or show visible glyphs.
-- [ ] Add tests with payloads such as OSC 52, window title changes, and cursor movement.
-- [ ] Add a debug-mode escape hatch to view raw bytes.
-- [ ] Refuse to save through symlinks (file or parent dirs) without confirmation.
-- [ ] Add an optional "confine saves to workspace root" mode that warns on writes outside it.
-- [ ] Harden atomic saves: unique temp names with `create_new(true)` or the `tempfile` crate, and fsync the parent directory after rename on Unix.
-- [ ] Show a clear UI warning when editing a symlinked path.
-- [x] Treat `git`, `codex`, and `claude` as untrusted boundaries and document that nit spawns them, plus `open` / `xdg-open` for links and `gemini` for model probing.
-- [ ] Reduce PATH hijack risk: show the resolved path to `git` / `codex` / `claude` at startup and allow pinning absolute paths in config.
-- [ ] Add a "safe mode" flag that disables all external processes.
-- [ ] Add `.nit/` to `.gitignore` by default, or store it under an OS-specific app dir.
-- [ ] Make agent run provenance optional, off by default for privacy-sensitive workflows.
-- [ ] Write provenance files with restrictive permissions (best-effort `0700` / `0600` on Unix).
-- [ ] Add optional redaction of obvious secret patterns before logs hit disk.
-- [x] Fix the RustSec advisory flagged by `cargo deny` (patched `time`).
-- [ ] Decide a policy for BSL-1.0 dependencies (allow or replace).
-- [x] Commit `Cargo.lock` for reproducible builds.
-- [x] Add CI gates for `cargo deny` (advisories and licenses) and `cargo clippy`.
+## Report a security issue
 
-### Medium priority
-
-- [ ] Safer Codex defaults (sandbox and approval), with a prompt before relaxing them.
-- [ ] Show a prominent indicator in "danger-full-access" or low-approval modes.
-- [ ] Add a per-workspace allowlist or denylist of agent backends (Codex, Claude, Gemini).
-- [ ] Add a "network use" indicator based on the selected backend and runtime.
-- [ ] Show the Claude permission mode in Agent Ops.
-- [ ] Allow disabling clipboard integration entirely.
-- [ ] Optionally auto-clear the clipboard after N seconds for copied secrets.
-- [ ] Block implicit copying of content that contains control sequences.
-- [ ] Add file size limits or progressive loading for very large files.
-- [ ] Add directory walk limits and cancellation for huge repos.
-- [ ] Harden JSON parsing of external event streams (Codex, MCP) with strict line and field limits.
-- [ ] Rate-limit very verbose agent logs to avoid UI lockups.
-- [ ] Separate trusted and untrusted workspace profiles, like an editor's restricted mode.
-- [ ] Taint agent output and external events, and keep them out of file writes by default.
-
-### Longer term
-
-- [ ] Optional OS-level sandbox for nit itself, for example a macOS `sandbox-exec` profile.
-- [ ] Stronger sandboxing for external tools, beyond Codex's own knobs.
-- [ ] Fuzz targets for rule parsers, snapshot formats, event JSON, and custom protocol parsing.
-- [ ] Regression corpus for terminal escape payloads and odd Unicode.
-- [x] Keep `SECURITY.md` matching what nit spawns (`git`, `codex`, `claude`, `open` / `xdg-open`).
-- [ ] Maintain a release security checklist: deny and audit, escape sanitization, safe defaults.
-- [ ] Document recommended settings for working on untrusted repos.
+Contact the project maintainers privately for a vulnerability involving active credentials, private repository contents or a risk to other users. A version, platform and minimal example with synthetic data help maintainers reproduce the problem.

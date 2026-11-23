@@ -15,7 +15,7 @@ Open a Git workspace with `NIT_MULTIWAY=1 nit --agents claude .`, then enter a r
 | `mood` | How wide the search stays. `explore` keeps every viable branch, `exploit` follows the current best, `balanced` sits between. | `balanced` |
 | `k` | How many candidates each expansion forks. Clamped by the effective swarm size. | `3` |
 
-Every run has a budget of 64 nodes and 32 turns.
+The default search budget is 64 candidate nodes and 32 turns. The broadcast form below uses one expansion.
 
 - Each turn runs in its own git worktree under
   `<state_dir>/multiway/worktrees/<mission>/…`. nit never edits your working
@@ -33,7 +33,7 @@ Add the `mode=multiway` token to `@shadow`, `@swarm`, `@all`, or an ordinary cha
 - `@shadow mode=multiway <task>`: a `k=2`, `balanced` search. The judge evaluates merges.
 - `@swarm [N] [template=lab|parallel|bulk] [mission=…] mode=multiway <task>`:
   `N` maps to `k`. `parallel` and `bulk` map to `explore`, `lab` to
-  `balanced`. `mission=` is the search mission id. The prompt is the task.
+  `balanced`. The mission type selects the task role. nit assigns the run its own archive ID.
 - `@all mode=multiway <task>`: one expansion with `k` equal to the fan-out
   count, value-ranked.
 - A bare chat prompt with the token runs with the default mood and `k`, and the
@@ -109,7 +109,7 @@ Candidate edits and commits stay in temporary worktrees and refs, which Nit clea
 
 ## Interpret a result
 
-Read the stop reason, the gate outcomes and the number of turns used. A “solution” met the configured gates and tier threshold. Passing a weak or empty gate set says little about correctness. The search tests candidates sequentially and can stop when it exhausts its budget without finding a viable change. The saved graph records what was tried. Review the candidate diff and run appropriate checks before using it.
+Read the stop reason, the gate outcomes and the number of turns used. A “solution” met the configured gates and tier threshold. Passing a weak or empty gate set says little about correctness. The search tests candidates sequentially and can stop when it exhausts its budget without finding a viable change. The saved graph records what was tried. In the original repository, use `git show <commit>` with the candidate’s commit ID from that graph to read its patch. To keep a candidate, create a named branch at its commit while the object is still available. Git can eventually prune commits left without a reference.
 
 To export a saved graph from a source checkout, replace the path with your mission's graph file.
 
