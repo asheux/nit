@@ -23,7 +23,11 @@ fn selected_row_spans_the_tree_interior_and_retains_nested_alignment() {
     })
     .collect();
     state.file_tree.selected = 1;
-    let theme = Theme::default();
+    let theme = Theme {
+        editor_background: ratatui::style::Color::Rgb(7, 15, 25),
+        background: ratatui::style::Color::Rgb(16, 31, 42),
+        ..Theme::default()
+    };
     for width in [18, 65] {
         for focused in [true, false] {
             state.focus = if focused {
@@ -45,9 +49,9 @@ fn selected_row_spans_the_tree_interior_and_retains_nested_alignment() {
             assert_eq!(buf.get(1, 2).symbol(), if focused { "▸" } else { " " });
             assert_eq!(buf.get(7, 2).symbol(), "l");
             assert_eq!(buf.get(7, 3).symbol(), "t");
-            assert_eq!(buf.get(7, 3).bg, theme.background);
-            assert_eq!(buf.get(0, 2).bg, theme.background);
-            assert_eq!(buf.get(width - 1, 2).bg, theme.background);
+            assert_eq!(buf.get(7, 3).bg, theme.editor_background);
+            assert_eq!(buf.get(0, 2).bg, theme.editor_background);
+            assert_eq!(buf.get(width - 1, 2).bg, theme.editor_background);
         }
     }
 }
