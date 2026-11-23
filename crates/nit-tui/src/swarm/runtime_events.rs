@@ -48,6 +48,11 @@ impl SwarmRuntime {
         }
 
         match event {
+            AgentBusEvent::OperatorFollowupInput {
+                agent_id,
+                mission_id,
+                receipt_ids,
+            } => self.provider_input(mission_id, agent_id, receipt_ids),
             AgentBusEvent::TurnStarted {
                 agent_id,
                 mission_id: Some(mid),
@@ -61,7 +66,17 @@ impl SwarmRuntime {
                 message,
                 ..
             } => {
-                self.handle_turn_completed(state, &mut outcome, mid, agent_id, message);
+                if self.awaiting_provider_input(mid, agent_id) {
+                    return outcome;
+                }
+                if let Some(dispatch) =
+                    self.finish_followup_turn(state, mid, agent_id, true, message)
+                {
+                    outcome.dispatches.push(dispatch);
+                } else {
+                    self.handle_turn_completed(state, &mut outcome, mid, agent_id, message);
+                }
+                self.close_undelivered(state, mid);
             }
             AgentBusEvent::TurnFailed {
                 agent_id,
@@ -69,11 +84,16 @@ impl SwarmRuntime {
                 message,
                 ..
             } => {
+                self.finish_followup_turn(state, mid, agent_id, false, message);
                 self.handle_turn_failed(state, &mut outcome, mid, agent_id, message);
+                self.close_undelivered(state, mid);
             }
             _ => {}
         }
 
+        for dispatch in &mut outcome.dispatches {
+            self.attach_followups(state, dispatch);
+        }
         outcome
     }
 

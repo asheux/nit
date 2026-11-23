@@ -34,6 +34,12 @@ pub(crate) fn resolve_dispatch_cwd(state: &AppState, agent_id: &str) -> PathBuf 
         .unwrap_or_else(|| state.workspace_root.clone())
 }
 
+fn turn_workspace(state: &AppState, agent: &str, mid: Option<&str>) -> PathBuf {
+    mid.and_then(|id| state.agents.followup_workspaces.get(id))
+        .cloned()
+        .unwrap_or_else(|| resolve_dispatch_cwd(state, agent))
+}
+
 fn remove_from_mission_map<V>(
     maps: &mut HashMap<String, HashMap<String, V>>,
     mission_id: &str,
@@ -438,7 +444,7 @@ pub(super) fn maybe_dispatch_codex_turn(
     // contract on intake lanes.
     let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some()
         || crate::intake::parse_intake_lane_id(&model).is_some();
-    let cwd = resolve_dispatch_cwd(state, &model);
+    let cwd = turn_workspace(state, &model, mission_id.as_deref());
     let ok = codex.send(CodexCommand::RunTurn {
         model: model.clone(),
         cwd,
@@ -879,7 +885,7 @@ pub(super) fn maybe_dispatch_claude_turn(
                 }
             }
         });
-    let cwd = resolve_dispatch_cwd(state, &model);
+    let cwd = turn_workspace(state, &model, mission_id.as_deref());
     // The dispatch call site stays unchanged regardless of whether
     // `NIT_CLAUDE_POOL` is enabled — see `claude_pool.rs`. The pool sits
     // entirely behind `ClaudeRunner`'s worker thread; specialised turns

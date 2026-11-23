@@ -69,7 +69,20 @@ pub(super) fn try_dispatch_verifier_findings_retry(
     let prompt = build_verifier_retry_prompt(run, &actionable, completed_task_id, attempt);
     let task_id = format!("verifier-retry-{completed_task_id}");
 
-    enqueue_verifier_retry_task(run, integrator.clone(), task_id.clone(), prompt.clone());
+    let lane_busy = run.tasks.iter().any(|t| {
+        t.agent_id == integrator
+            && matches!(
+                t.state,
+                SwarmTaskState::Running | SwarmTaskState::Dispatched
+            )
+    });
+    enqueue_verifier_retry_task(
+        run,
+        integrator.clone(),
+        task_id.clone(),
+        prompt.clone(),
+        lane_busy,
+    );
     run.verifier_retry_budget = run.verifier_retry_budget.saturating_sub(1);
 
     push_system_message_to_mission(
@@ -85,6 +98,9 @@ pub(super) fn try_dispatch_verifier_findings_retry(
     update_mission_phase(state, &run.mission_id, MissionPhase::Execute);
     update_mission_status(state, run, Some(tasks_terminal_count(&run.tasks)));
 
+    if lane_busy {
+        return None;
+    }
     Some(SwarmDispatch {
         agent_id: integrator,
         mission_id: run.mission_id.clone(),
@@ -98,6 +114,7 @@ fn enqueue_verifier_retry_task(
     integrator: String,
     task_id: String,
     prompt: String,
+    lane_busy: bool,
 ) {
     run.tasks.push(SwarmTask {
         id: task_id,
@@ -112,7 +129,11 @@ fn enqueue_verifier_retry_task(
         writes: true,
         artifacts: Vec::new(),
         done_when: Some("Findings addressed; ready for verify re-run.".into()),
-        state: SwarmTaskState::Dispatched,
+        state: if lane_busy {
+            SwarmTaskState::Ready
+        } else {
+            SwarmTaskState::Dispatched
+        },
         output: None,
         parsed_artifacts: None,
         expected_artifacts_missing: false,

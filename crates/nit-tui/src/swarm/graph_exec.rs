@@ -701,7 +701,7 @@ pub(super) fn build_task_prompt_for_test(run: &SwarmRun, task: &SwarmTask) -> St
     build_task_prompt(run, task, &[])
 }
 
-fn build_task_prompt(
+pub(super) fn build_task_prompt(
     run: &SwarmRun,
     task: &SwarmTask,
     deps_payload: &[(String, String)],
@@ -794,7 +794,7 @@ pub(super) fn effective_dep_count_for_payload(run: &SwarmRun, task: &SwarmTask) 
 // returns None when no propose/judge artifacts have produced files yet (the
 // caller falls back to operator scope). Sorted + deduped so the prompt is
 // stable across re-dispatches.
-fn collect_integrate_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
+pub(super) fn collect_integrate_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
     let mut declared = aggregate_judge_or_proposer_files(run, task);
     if declared.is_empty() {
         return None;
@@ -844,7 +844,7 @@ fn collect_proposer_scope(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String
 // canonical scope), falling back to `run.scope_files` if those haven't
 // been published yet. Same partition function as the compliance check so
 // the prompt and the post-turn check agree on which files the shard owns.
-fn collect_shard_files(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
+pub(super) fn collect_shard_files(run: &SwarmRun, task: &SwarmTask) -> Option<Vec<String>> {
     let (idx, total) = task.shard_index?;
     let mut declared: Vec<String> = Vec::new();
     for dep_id in task.deps.iter() {
@@ -890,9 +890,23 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
                 )
         });
 
+    // Provider completion events identify a mission and lane. Keep just one
+    // outstanding task for each lane so a continuation retains its task.
+    let mut occupied: HashSet<&str> = run
+        .tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.state,
+                SwarmTaskState::Running | SwarmTaskState::Dispatched
+            )
+        })
+        .map(|t| t.agent_id.as_str())
+        .collect();
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
-        if !matches!(task.state, SwarmTaskState::Ready) {
+        if !matches!(task.state, SwarmTaskState::Ready) || occupied.contains(task.agent_id.as_str())
+        {
             continue;
         }
         if task.writes && enforce_single_writer {
@@ -901,6 +915,7 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
             }
             writer_taken = true;
         }
+        occupied.insert(task.agent_id.as_str());
         indices.push(idx);
     }
     indices
@@ -940,7 +955,10 @@ pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> 
 // they're the only source. The skip is signalled to the agent by a
 // breadcrumb in the dependency-outputs section so it knows where the
 // proposer detail lives if it needs to consult the on-disk artifacts.
-fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
+pub(super) fn collect_dependency_payload(
+    run: &SwarmRun,
+    task: &SwarmTask,
+) -> Vec<(String, String)> {
     let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
     let skip_proposers = needs_full_output && judge_with_artifacts_in_deps(run, task);
     let effective_dep_count = effective_dep_count_for_payload(run, task);

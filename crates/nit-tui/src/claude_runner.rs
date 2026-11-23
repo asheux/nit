@@ -293,6 +293,12 @@ fn runner_loop(
                     mission_id: mission_id.clone(),
                     resume_thread_id: resume_session_id.clone(),
                 });
+                crate::swarm::report_provider_followup_input(
+                    &event_tx,
+                    &model,
+                    mission_id.as_deref(),
+                    &prompt,
+                );
                 seq = seq.wrapping_add(1);
                 active.push(spawn_turn_worker(
                     &event_tx,

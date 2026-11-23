@@ -64,6 +64,13 @@ pub enum AgentBusEvent {
         mission_id: Option<String>,
         resume_thread_id: Option<String>,
     },
+    /// Receipt IDs present in the concrete input dequeued by a provider worker.
+    #[serde(skip)]
+    OperatorFollowupInput {
+        agent_id: String,
+        mission_id: String,
+        receipt_ids: Vec<String>,
+    },
     TurnHeartbeat {
         agent_id: String,
         mission_id: Option<String>,
@@ -233,6 +240,7 @@ impl AgentBusEvent {
             AgentBusEvent::McpStatus { status } => {
                 state.agents.mcp = status.clone();
             }
+            AgentBusEvent::OperatorFollowupInput { .. } => {}
             AgentBusEvent::TurnStarted {
                 agent_id,
                 mission_id,

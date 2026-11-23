@@ -405,6 +405,12 @@ fn runner_loop_exec(
                     mission_id: mission_id.clone(),
                     resume_thread_id: resume_thread_id.clone(),
                 });
+                crate::swarm::report_provider_followup_input(
+                    &event_tx,
+                    &model,
+                    mission_id.as_deref(),
+                    &prompt,
+                );
                 seq = seq.wrapping_add(1);
                 active.push(spawn_turn_worker(
                     &event_tx,
@@ -1264,6 +1270,12 @@ fn runner_loop_mcp(
                     mission_id: mission_id.clone(),
                     resume_thread_id: resume_thread_id.clone(),
                 });
+                crate::swarm::report_provider_followup_input(
+                    &event_tx,
+                    &model,
+                    mission_id.as_deref(),
+                    &prompt,
+                );
                 let _ = event_tx.send(AgentBusEvent::McpStatus {
                     status: McpStatus {
                         state: McpConnectionState::Connected,

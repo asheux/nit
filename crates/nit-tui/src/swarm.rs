@@ -21,8 +21,10 @@ mod json;
 pub(crate) mod limits;
 mod mission;
 mod multiway;
+mod operator_followups;
 mod plan_parser;
 mod prompts;
+pub(crate) use operator_followups::report_provider_followup_input;
 mod repair;
 mod runtime;
 mod runtime_events;
@@ -53,6 +55,7 @@ mod swarm_budgets_tests;
 mod followup_context_tests;
 
 pub struct SwarmRuntime {
+    followups: HashMap<String, operator_followups::Inbox>,
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
     /// Resolved once at construction from `NIT_PLANNER_LEGACY`. When `true`,
@@ -71,6 +74,7 @@ pub struct SwarmRuntime {
 impl Default for SwarmRuntime {
     fn default() -> Self {
         Self {
+            followups: HashMap::new(),
             runs: HashMap::new(),
             completed_runs: HashMap::new(),
             legacy_planner: read_legacy_planner_env(),
