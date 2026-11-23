@@ -178,9 +178,9 @@ pub fn render(
         Span::styled(mode, Style::default().fg(theme.title)),
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(app_label, Style::default().fg(theme.title)),
-        Span::styled(" | UTF-8", Style::default().fg(theme.border)),
+        Span::styled(" | UTF-8", theme.status_idle_style()),
         Span::styled(" | ", Style::default().fg(theme.border)),
-        Span::styled("MOOD: ", Style::default().fg(theme.border)),
+        Span::styled("MOOD: ", theme.status_idle_style()),
         Span::styled(
             mood_label,
             Style::default().fg(mood_color).add_modifier(Modifier::BOLD),

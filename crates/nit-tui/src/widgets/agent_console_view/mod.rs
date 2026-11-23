@@ -124,9 +124,7 @@ pub fn chat_pane_title_line(selected: ChatPaneTab, focused: bool, theme: &Theme)
     } else {
         inactive_btn_style
     };
-    let hint_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let hint_style = theme.status_idle_style();
     let hint_text = match selected {
         ChatPaneTab::AgentChat => "   [Enter] send ",
         // The inline terminal absorbs typed keys; the only escape is
@@ -315,9 +313,7 @@ pub fn render(
             })
             .copied()
     });
-    let label_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
     let mission_style = if mission.is_some() {
         Style::default()
             .fg(theme.title_focused)
@@ -362,9 +358,7 @@ pub fn render(
         } else {
             "@swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel"
         };
-        let hint_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::ITALIC | Modifier::DIM);
+        let hint_style = theme.status_idle_style().add_modifier(Modifier::ITALIC);
         let max_width = layout.hint_chunk.width as usize;
         let truncated = if UnicodeWidthStr::width(hint_text) > max_width {
             // Cheap byte-level cut + ellipsis is fine here — hint is
@@ -1635,12 +1629,7 @@ fn push_agent_text_with_inline_highlights(
     }
     // Avoid confusing the inline-code highlighter with fenced code blocks.
     if text.trim_start().starts_with("```") {
-        spans.push(Span::styled(
-            text.to_string(),
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::DIM),
-        ));
+        spans.push(Span::styled(text.to_string(), theme.status_idle_style()));
         return;
     }
     if !text.contains('`') {
@@ -1648,9 +1637,7 @@ fn push_agent_text_with_inline_highlights(
         return;
     }
 
-    let tick_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let tick_style = theme.status_idle_style();
     let mut remaining = text;
     while let Some(start) = remaining.find('`') {
         let (before, after_tick) = remaining.split_at(start);
@@ -1999,18 +1986,12 @@ fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
     if is_rule {
         return Line::from(Span::styled(
             text.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .bg(bg)
-                .add_modifier(Modifier::DIM),
+            theme.status_idle_style().bg(bg),
         ));
     }
     Line::from(Span::styled(
         text.to_string(),
-        Style::default()
-            .fg(theme.border)
-            .bg(bg)
-            .add_modifier(Modifier::DIM),
+        theme.status_idle_style().bg(bg),
     ))
 }
 
@@ -2034,10 +2015,7 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
     if is_swarm_meta {
         return Line::from(Span::styled(
             text.to_string(),
-            Style::default()
-                .fg(theme.title)
-                .bg(bg)
-                .add_modifier(Modifier::DIM),
+            theme.status_idle_style().bg(bg),
         ));
     }
     // Genome retry header: "↳ genome retry 1/10"
@@ -2117,34 +2095,19 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
                     theme.foreground
                 };
                 return Line::from(vec![
-                    Span::styled(
-                        format!("{indent}↳ "),
-                        Style::default()
-                            .fg(theme.title)
-                            .bg(bg)
-                            .add_modifier(Modifier::DIM),
-                    ),
+                    Span::styled(format!("{indent}↳ "), theme.status_idle_style().bg(bg)),
                     Span::styled(
                         file_name.to_string(),
                         Style::default().fg(file_color).bg(bg),
                     ),
-                    Span::styled(
-                        rest.to_string(),
-                        Style::default()
-                            .fg(theme.title)
-                            .bg(bg)
-                            .add_modifier(Modifier::DIM),
-                    ),
+                    Span::styled(rest.to_string(), theme.status_idle_style().bg(bg)),
                 ]);
             }
         }
     }
     Line::from(Span::styled(
         text.to_string(),
-        Style::default()
-            .fg(theme.title)
-            .bg(bg)
-            .add_modifier(Modifier::DIM),
+        theme.status_idle_style().bg(bg),
     ))
 }
 

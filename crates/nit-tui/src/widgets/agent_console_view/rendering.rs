@@ -66,9 +66,7 @@ pub fn render_pane(
             })
             .copied()
     });
-    let label_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
     // BOLD mission style only when a real swarm mission is attached;
     // the synthetic chat id should not light up the agent= label.
     let mission_style = if pane.mission_id.is_some() {

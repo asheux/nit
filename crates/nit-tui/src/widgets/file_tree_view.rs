@@ -99,13 +99,7 @@ fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a>
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            commands,
-            Style::default()
-                .fg(theme.border)
-                .bg(theme.background)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled(commands, theme.status_idle_style().bg(theme.background)),
     ]);
     Block::default()
         .borders(Borders::ALL)

@@ -9,6 +9,7 @@ use std::path::Path;
 struct ThemeFile {
     background: Option<String>,
     foreground: Option<String>,
+    muted: Option<String>,
     border: Option<String>,
     border_focused: Option<String>,
     title: Option<String>,
@@ -94,6 +95,7 @@ struct SeedThemeFile {
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,
+    pub muted: Color,
     pub border: Color,
     pub border_focused: Color,
     pub title: Color,
@@ -192,6 +194,10 @@ impl Theme {
         overlay(&mut theme.background, cfg.background.as_deref());
         overlay(&mut theme.foreground, cfg.foreground.as_deref());
         overlay(&mut theme.border, cfg.border.as_deref());
+        overlay(
+            &mut theme.muted,
+            cfg.muted.as_deref().or(cfg.border.as_deref()),
+        );
         overlay(&mut theme.border_focused, cfg.border_focused.as_deref());
         overlay(&mut theme.title, cfg.title.as_deref());
         overlay(&mut theme.title_focused, cfg.title_focused.as_deref());
@@ -218,9 +224,6 @@ impl Theme {
     pub fn highlight_style(&self, group: HighlightGroup) -> Style {
         let color = self.highlight_color(group);
         let mut style = Style::default().fg(color);
-        if matches!(group, HighlightGroup::Comment | HighlightGroup::DocComment) {
-            style = style.add_modifier(Modifier::DIM);
-        }
         if matches!(group, HighlightGroup::Emphasis) {
             style = style.add_modifier(Modifier::ITALIC);
         }
@@ -267,7 +270,7 @@ impl Theme {
     }
 
     pub fn status_idle_style(&self) -> Style {
-        Style::default().fg(self.border).add_modifier(Modifier::DIM)
+        Style::default().fg(self.muted)
     }
 
     pub fn status_ok_style(&self) -> Style {
@@ -301,24 +304,25 @@ impl Default for Theme {
         Theme {
             background: Color::Rgb(8, 19, 31),
             foreground: Color::Rgb(215, 229, 255),
-            border: Color::Rgb(42, 143, 156),
-            border_focused: Color::Rgb(109, 238, 252),
-            title: Color::Rgb(78, 208, 208),
-            title_focused: Color::Rgb(127, 252, 255),
+            muted: Color::Rgb(171, 191, 205),
+            border: Color::Rgb(110, 152, 159),
+            border_focused: Color::Rgb(105, 216, 223),
+            title: Color::Rgb(136, 204, 200),
+            title_focused: Color::Rgb(164, 236, 234),
             cursor: Color::Rgb(255, 209, 102),
             cursor_line_bg: Color::Rgb(20, 52, 77),
             selection_bg: Color::Rgb(27, 63, 92),
-            bracket_match: Color::Rgb(56, 102, 138),
+            bracket_match: Color::Rgb(36, 73, 99),
             warning: Color::Rgb(242, 165, 65),
             success: Color::Rgb(154, 216, 143),
-            error: Color::Rgb(242, 95, 92),
+            error: Color::Rgb(255, 147, 144),
             accent: Color::Rgb(255, 209, 102),
             hl: HighlightTheme::default(),
             gol: GolTheme::default(),
             seed: SeedTheme::default(),
             diff_added: Color::Rgb(154, 216, 143),
             diff_modified: Color::Rgb(242, 165, 65),
-            diff_deleted: Color::Rgb(242, 95, 92),
+            diff_deleted: Color::Rgb(255, 147, 144),
         }
     }
 }
@@ -335,7 +339,7 @@ impl Default for GolTheme {
             trail_3: Color::Rgb(6, 39, 52),
             bbox: Color::Rgb(26, 214, 214),
             hud_dim: Color::Rgb(58, 169, 179),
-            hud_text: Color::Rgb(127, 252, 255),
+            hud_text: Color::Rgb(164, 236, 234),
             hud_spark: Color::Rgb(255, 209, 102),
         }
     }
@@ -351,7 +355,7 @@ impl Default for SeedTheme {
             halo_2: Color::Rgb(8, 69, 90),
             grid: Color::Rgb(11, 47, 61),
             bbox: Color::Rgb(26, 214, 214),
-            hud_text: Color::Rgb(127, 252, 255),
+            hud_text: Color::Rgb(164, 236, 234),
             hud_dim: Color::Rgb(58, 169, 179),
             accent: Color::Rgb(255, 209, 102),
             accent_2: Color::Rgb(179, 136, 255),
@@ -369,33 +373,33 @@ impl Default for SeedTheme {
 impl Default for HighlightTheme {
     fn default() -> Self {
         HighlightTheme {
-            comment: Color::Rgb(84, 117, 150),
+            comment: Color::Rgb(160, 182, 198),
             doc_comment: Color::Rgb(122, 193, 255),
             string: Color::Rgb(154, 216, 143),
             char: Color::Rgb(177, 235, 143),
             number: Color::Rgb(242, 165, 65),
             boolean: Color::Rgb(245, 201, 111),
-            keyword: Color::Rgb(127, 252, 255),
+            keyword: Color::Rgb(164, 236, 234),
             keyword_control: Color::Rgb(255, 159, 28),
             keyword_operator: Color::Rgb(255, 209, 102),
             r#type: Color::Rgb(122, 201, 255),
-            type_builtin: Color::Rgb(78, 208, 208),
+            type_builtin: Color::Rgb(136, 204, 200),
             function: Color::Rgb(255, 209, 102),
             method: Color::Rgb(255, 204, 140),
             macro_token: Color::Rgb(210, 155, 255),
             attribute: Color::Rgb(160, 196, 255),
-            namespace: Color::Rgb(109, 238, 252),
+            namespace: Color::Rgb(105, 216, 223),
             variable: Color::Rgb(215, 229, 255),
             parameter: Color::Rgb(255, 217, 102),
-            property: Color::Rgb(78, 208, 208),
-            constant: Color::Rgb(255, 118, 118),
+            property: Color::Rgb(136, 204, 200),
+            constant: Color::Rgb(255, 150, 148),
             operator: Color::Rgb(196, 210, 223),
-            punctuation: Color::Rgb(108, 147, 177),
-            tag: Color::Rgb(78, 208, 208),
-            heading: Color::Rgb(127, 252, 255),
+            punctuation: Color::Rgb(162, 183, 200),
+            tag: Color::Rgb(136, 204, 200),
+            heading: Color::Rgb(164, 236, 234),
             emphasis: Color::Rgb(255, 209, 102),
             link: Color::Rgb(87, 199, 255),
-            error: Color::Rgb(242, 95, 92),
+            error: Color::Rgb(255, 147, 144),
             warning: Color::Rgb(242, 165, 65),
         }
     }
