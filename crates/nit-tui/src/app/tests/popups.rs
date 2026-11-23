@@ -821,3 +821,50 @@ fn fuzzy_mode_switch_rejects_pending_results_and_preview() {
     assert!(!state.fuzzy_search.searching);
     runtime.shutdown();
 }
+
+#[test]
+fn fuzzy_missing_content_match_preserves_cursor_and_picker() {
+    let mut state = state_for_test_in_workspace("missing-content-result");
+    let mut runtime = FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    state.fuzzy_search.open = true;
+    state.fuzzy_search.mode = SearchMode::Content;
+    state
+        .fuzzy_search
+        .match_results
+        .push(nit_core::SearchResultMatch {
+            rel_path: "deleted.rs".into(),
+            abs_path: state.workspace_root.join("deleted.rs"),
+            line: 8,
+            col: 20,
+            snippet: "needle".into(),
+            match_start: 0,
+            match_len: 6,
+        });
+    let cursor = state.editor_buffer().cursor;
+    file_tree_fuzzy::handle_fuzzy_search_key(
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut syntax,
+        &mut runtime,
+        ratatui::layout::Rect::new(0, 0, 100, 40),
+    );
+    assert_eq!(state.editor_buffer().cursor, cursor);
+    assert!(state.fuzzy_search.open);
+    assert!(state.fuzzy_search.status_msg.contains("Open failed"));
+    // The indexed position is stale even after the file reappears.
+    let restored = state.workspace_root.join("deleted.rs");
+    fs::write(&restored, "αβ").unwrap();
+    file_tree_fuzzy::handle_fuzzy_search_key(
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut syntax,
+        &mut runtime,
+        ratatui::layout::Rect::new(0, 0, 100, 40),
+    );
+    assert!(!state.fuzzy_search.open);
+    assert_eq!(state.editor_buffer().path(), Some(&restored));
+    assert_eq!(state.editor_buffer().cursor, nit_core::Cursor::new(0, 2));
+    runtime.shutdown();
+    fs::remove_dir_all(&state.workspace_root).unwrap();
+}

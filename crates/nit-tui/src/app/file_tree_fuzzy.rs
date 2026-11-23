@@ -583,50 +583,45 @@ pub(super) fn handle_fuzzy_search_key(
             code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
             modifiers,
             ..
-        } if modifiers.is_empty() => match state.fuzzy_search.mode {
-            SearchMode::Files => {
-                let Some(item) = state
+        } if modifiers.is_empty() => {
+            let selected = state.fuzzy_search.selected;
+            let target = match state.fuzzy_search.mode {
+                SearchMode::Files => state
                     .fuzzy_search
                     .file_results
-                    .get(state.fuzzy_search.selected)
-                else {
-                    return true;
-                };
-                let path = item.abs_path.clone();
-                let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
-                state.file_tree.open = false;
-                state.fuzzy_search.close();
-                runtime.preview_model = None;
-                runtime.last_preview_key = None;
-                true
-            }
-            SearchMode::Content => {
-                let Some(item) = state
+                    .get(selected)
+                    .map(|item| (item.abs_path.clone(), None)),
+                SearchMode::Content => state
                     .fuzzy_search
                     .match_results
-                    .get(state.fuzzy_search.selected)
-                else {
-                    return true;
-                };
-                let path = item.abs_path.clone();
-                let line = item.line;
-                let col = item.col;
-                let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
-                {
-                    let buf = state.editor_buffer_mut();
-                    let total = buf.lines_len().max(1);
-                    let target_line = line.saturating_sub(1).min(total.saturating_sub(1));
-                    buf.cursor.line = target_line;
-                    buf.cursor.col = col.saturating_sub(1);
-                    buf.ensure_visible();
+                    .get(selected)
+                    .map(|item| (item.abs_path.clone(), Some((item.line, item.col)))),
+            };
+            let Some((path, location)) = target else {
+                return true;
+            };
+            let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path.clone()));
+            if state.editor_buffer().path() != Some(&path) {
+                if let Some(message) = &state.status {
+                    state.fuzzy_search.status_msg.clone_from(message);
                 }
-                state.file_tree.open = false;
-                state.fuzzy_search.close();
-                runtime.preview_model = None;
-                runtime.last_preview_key = None;
-                true
+                return true;
             }
-        },
+            if let Some((line, col)) = location {
+                let buf = state.editor_buffer_mut();
+                buf.go_to_line(line);
+                buf.cursor.col = col
+                    .saturating_sub(1)
+                    .min(buf.line_char_len(buf.cursor.line));
+                buf.cursor.desired_col = None;
+                buf.ensure_visible();
+            }
+            state.file_tree.open = false;
+            state.fuzzy_search.close();
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
         KeyEvent {
             code: KeyCode::Tab, ..
         } => {
