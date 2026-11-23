@@ -311,6 +311,20 @@ fn command_wq_quits_when_launched_with_file_path() {
 }
 
 #[test]
+fn command_wq_saves_active_file_and_protects_other_dirty_buffers() {
+    let (root, mut state) = empty_state("cmd-wq-other-dirty");
+    state.launched_with_file_path = true;
+    state.editor_buffer_mut().insert_char('!');
+    let file = root.join("second.txt");
+    fs::write(&file, "second").unwrap();
+    apply_action(&mut state, Action::OpenFile(file.clone()));
+    state.editor_buffer_mut().insert_char('+');
+    assert!(!handle_command_line(&mut state, "wq"));
+    assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
+    assert_eq!(fs::read_to_string(file).unwrap(), "+second");
+}
+
+#[test]
 fn command_wq_in_directory_mode_opens_nittree_when_only_one_buffer() {
     // `nit src/` launch with only one editor buffer open: `:wq` saves,
     // closes the buffer (replacing with untitled to keep the

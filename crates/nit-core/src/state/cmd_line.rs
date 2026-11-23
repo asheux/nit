@@ -324,9 +324,7 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 return false;
             }
             if state.launched_with_file_path {
-                // `nit foo.rs` style launch — `:wq` quits the editor,
-                // matching vim's single-file ergonomics.
-                true
+                quit_or_close_buffer(state)
             } else {
                 // `nit` / `nit src/` style launch — close the buffer in
                 // place, stay in the editor pane on an untitled buffer.
