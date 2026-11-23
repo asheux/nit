@@ -236,7 +236,7 @@ impl LiveInput {
         let secondary = matched_session && ids.iter().any(|id| self.pending.contains_key(*id));
         let ids_foreign = !ids.is_empty() && !primary;
         if v["type"] == "result" {
-            if !self.pending.is_empty() && (!matched_session || (!primary && !secondary)) {
+            if !self.pending.is_empty() && (!matched_session || ids.is_empty()) {
                 // A terminal response without a reliable identity cannot be assigned
                 // to either prompt. The owner will retire this process.
                 self.uncertain = true;
@@ -299,6 +299,56 @@ impl Drop for LiveInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn identified_duplicate_and_foreign_results_leave_other_inputs_pending() {
+        let mut stream = LiveInput::new(
+            Default::default(),
+            "sonnet",
+            None,
+            Path::new("work"),
+            "session",
+            "primary".into(),
+            "first",
+        );
+        let mut listener = |id: &str| {
+            let (tx, rx) = mpsc::channel();
+            stream.pending.insert(
+                id.into(),
+                Request {
+                    id: id.into(),
+                    text: id.into(),
+                    reply: Some(tx),
+                    written: true,
+                    received: false,
+                },
+            );
+            rx
+        };
+        let first = listener("first-followup");
+        let second = listener("second-followup");
+        let result = |id: &str| {
+            json!({
+                "type":"result", "session_id":"session", "subtype":"success",
+                "user_message_uuid":id, "result":id,
+            })
+            .to_string()
+        };
+        for id in ["second-followup", "second-followup", "unrelated"] {
+            assert!(stream.observe(&result(id)));
+        }
+        assert!(
+            matches!(second.recv().unwrap(), SteerOutcome::Completed { message, failed: false } if message == "second-followup")
+        );
+        assert!(first.try_recv().is_err());
+        assert!(!stream.uncertain);
+        assert!(!stream.observe(&result("primary")));
+        assert!(stream.observe(&result("first-followup")));
+        assert!(
+            matches!(first.recv().unwrap(), SteerOutcome::Completed { message, failed: false } if message == "first-followup")
+        );
+        assert!(stream.pending.is_empty());
+    }
+
     #[test]
     fn missing_association_is_unknown_and_never_returns_a_reply_to_another_request() {
         let mut stream = LiveInput::new(
