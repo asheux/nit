@@ -2,7 +2,7 @@ use nit_core::state::file_tree::{FileTreePrompt, FileTreePromptKind};
 use nit_core::{AppState, FileTreeKind, FileTreeRow, PaneId};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -12,33 +12,45 @@ use crate::theme::Theme;
 
 const INDENT_STEP: usize = 2;
 const ARROW_CHARS: usize = 2;
-const FILE_FG_BLEND: f32 = 0.28;
-const BLOCK_BORDER_ROWS: u16 = 2;
 
 pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let focused = state.focus == PaneId::Editor;
     let commands = header_commands(state);
     let block = build_block(theme, focused, &commands);
 
-    let inner_height = area.height.saturating_sub(BLOCK_BORDER_ROWS) as usize;
-    let rows = &state.file_tree.rows;
-    let scroll = state.file_tree.scroll_offset;
-    let selected = state.file_tree.selected;
-    let file_fg = blend(theme.foreground, theme.title, FILE_FG_BLEND);
-
-    let end = (scroll + inner_height).min(rows.len());
-    let lines: Vec<Line> = rows
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let tree = &state.file_tree;
+    for (offset, row) in tree
+        .rows
         .iter()
+        .skip(tree.scroll_offset)
+        .take(inner.height as usize)
         .enumerate()
-        .take(end)
-        .skip(scroll)
-        .map(|(idx, row)| row_line(row, idx == selected, theme, file_fg))
-        .collect();
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .style(Style::default().bg(theme.background).fg(theme.foreground));
-    f.render_widget(paragraph, area);
+    {
+        let selected = tree.scroll_offset + offset == tree.selected;
+        let bg = if selected && focused {
+            theme.selection_bg
+        } else if selected {
+            theme.cursor_line_bg
+        } else {
+            theme.background
+        };
+        let mut line = row_line(row, theme);
+        let marker = if selected && focused { "▸ " } else { "  " };
+        line.spans.insert(
+            0,
+            Span::styled(marker, Style::default().fg(theme.border_focused)),
+        );
+        let mut style = Style::default().bg(bg);
+        if selected && focused {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        f.render_widget(
+            Paragraph::new(line).style(style),
+            Rect::new(inner.x, inner.y + offset as u16, inner.width, 1),
+        );
+    }
 
     if let Some(prompt) = &state.file_tree.prompt {
         render_prompt_bar(f, area, prompt, theme);
@@ -109,20 +121,16 @@ fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a>
         .title(title)
 }
 
-fn row_line<'a>(row: &'a FileTreeRow, selected: bool, theme: &Theme, file_fg: Color) -> Line<'a> {
-    let mut style = match row.kind {
+fn row_line<'a>(row: &'a FileTreeRow, theme: &Theme) -> Line<'a> {
+    let style = match row.kind {
         FileTreeKind::Dir => Style::default().fg(theme.title),
-        FileTreeKind::File => Style::default().fg(file_fg),
-        FileTreeKind::Loading => Style::default().fg(theme.warning),
+        FileTreeKind::File => Style::default().fg(theme.foreground),
+        FileTreeKind::Loading => theme.status_idle_style(),
     };
-    if selected {
-        style = style.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
-    }
-
-    if matches!(row.kind, FileTreeKind::Dir) {
+    if row.kind == FileTreeKind::Dir {
         return render_dir_row(row, style, theme);
     }
-    Line::from(Span::styled(row.text.clone(), style))
+    Line::from(Span::styled(row.text.as_str(), style))
 }
 
 fn render_dir_row<'a>(row: &'a FileTreeRow, style: Style, theme: &Theme) -> Line<'a> {
@@ -134,7 +142,7 @@ fn render_dir_row<'a>(row: &'a FileTreeRow, style: Style, theme: &Theme) -> Line
     if arrow.is_empty() {
         return Line::from(Span::styled(row.text.clone(), style));
     }
-    let arrow_style = style.fg(theme.accent).add_modifier(Modifier::BOLD);
+    let arrow_style = style.fg(theme.muted);
     Line::from(vec![
         Span::styled(indent, style),
         Span::styled(arrow, arrow_style),
@@ -142,17 +150,6 @@ fn render_dir_row<'a>(row: &'a FileTreeRow, style: Style, theme: &Theme) -> Line
     ])
 }
 
-fn blend(a: Color, b: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    match (a, b) {
-        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
-            let mix = |x: u8, y: u8| -> u8 {
-                let xf = x as f32;
-                let yf = y as f32;
-                (xf * (1.0 - t) + yf * t).round().clamp(0.0, 255.0) as u8
-            };
-            Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
-        }
-        _ => a,
-    }
-}
+#[cfg(test)]
+#[path = "../tests/file_tree_view.rs"]
+mod tests;
