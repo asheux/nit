@@ -1128,6 +1128,7 @@ pub(crate) fn handle_abort(
         return false;
     }
     for agent_id in &targets {
+        swarm.chat_steers.cancel(agent_id);
         if let Some(c) = codex {
             let _ = c.send(CodexCommand::CancelTurn {
                 agent_id: agent_id.clone(),
@@ -1463,7 +1464,9 @@ pub(crate) fn submit_chat_input_and_dispatch(
         && super::followup_mission(state, swarm).is_none()
         && state.agents.selected_context_mission().is_none();
     if !direct_address {
-        if let Some(result) = super::swarm_chat::submit_active_followup(state, swarm, &raw, codex, claude) {
+        if let Some(result) =
+            super::swarm_chat::submit_active_followup(state, swarm, &raw, codex, claude)
+        {
             return result;
         }
     }
@@ -1551,7 +1554,9 @@ pub(crate) fn submit_chat_input_and_dispatch(
                 cmd
             })
             .or_else(|| {
-                chat_recipient(state).filter(|id| !is_agent_busy(state, id)).and_then(|_| detect_implicit_swarm_command(state, &raw))
+                chat_recipient(state)
+                    .filter(|id| !is_agent_busy(state, id))
+                    .and_then(|_| detect_implicit_swarm_command(state, &raw))
             })
     };
     if let Some(cmd) = cmd.as_mut() {
@@ -1636,10 +1641,26 @@ pub(crate) fn submit_chat_input_and_dispatch(
         if direct_address {
             state.agents.selected_agent = selected_agent.clone();
         }
-        if !completed_team && !force_new && !shadow_explicit && matches!(channel, AgentChannel::Agent) {
-            if let Some(agent) = selected_agent.as_deref().filter(|id| is_agent_busy(state, id)) {
+        if !completed_team
+            && !force_new
+            && !shadow_explicit
+            && matches!(channel, AgentChannel::Agent)
+        {
+            if let Some(agent) = selected_agent
+                .as_deref()
+                .filter(|id| is_agent_busy(state, id))
+            {
                 return super::live_followup::submit(
-                    state, vitals, codex, claude, &mut swarm.chat_steers, agent, mission_id.as_deref(), &text, &raw, legacy_queue,
+                    state,
+                    vitals,
+                    codex,
+                    claude,
+                    &mut swarm.chat_steers,
+                    agent,
+                    mission_id.as_deref(),
+                    &text,
+                    &raw,
+                    legacy_queue,
                 );
             }
         }
@@ -1880,7 +1901,12 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
     Some((channel, text))
 }
 
-pub(super) fn record_chat_message(state: &mut AppState, channel: AgentChannel, text: &str, raw: &str) {
+pub(super) fn record_chat_message(
+    state: &mut AppState,
+    channel: AgentChannel,
+    text: &str,
+    raw: &str,
+) {
     let message = AgentMessage {
         at: timestamp_label(state),
         channel,

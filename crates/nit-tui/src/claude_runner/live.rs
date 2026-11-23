@@ -91,21 +91,7 @@ impl Drop for Request {
     }
 }
 
-pub(super) fn uuid() -> Option<String> {
-    let mut b = [0u8; 16];
-    getrandom::getrandom(&mut b).ok()?;
-    b[6] = (b[6] & 15) | 64;
-    b[8] = (b[8] & 63) | 128;
-    let n = u128::from_be_bytes(b);
-    Some(format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        n >> 96,
-        (n >> 80) & 0xffff,
-        (n >> 64) & 0xffff,
-        (n >> 48) & 0xffff,
-        n & 0xffffffffffff
-    ))
-}
+pub(super) use crate::steering::message_id as uuid;
 pub(super) fn envelope(input: &str, session: &str, prompt: &str) -> String {
     format!(
         "{}\n",
