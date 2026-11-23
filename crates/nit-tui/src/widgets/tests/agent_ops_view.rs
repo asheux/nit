@@ -1824,3 +1824,39 @@ fn compact_roster_opens_on_models_and_keeps_setup_scrollable() {
     super::position_compact_roster(&mut state, &rows, 28);
     assert_eq!(state.agents.compact_roster_anchor, None);
 }
+
+#[test]
+fn archived_replies_keep_their_prompt_and_delivery_receipts_stay_out_of_artifacts() {
+    for mission in [None, Some("mission")] {
+        let msg = |text, owner: Option<&str>, parent: Option<usize>, kind: Option<&str>| {
+            serde_json::json!({
+                "at": "t", "channel": "Agent", "agent_id": owner, "mission_id": mission,
+                "text": text, "prompt_msg_idx": parent, "kind": kind
+            })
+        };
+        let mut run: super::PersistedArtifactsRun = serde_json::from_value(serde_json::json!({
+            "prompt_indices_local": true,
+            "messages": [
+                msg("first", None, None, None),
+                msg("second", None, None, None),
+                msg("delivered", Some("codex"), Some(1), Some("followup-history")),
+                msg("fast", Some("codex"), Some(1), None),
+                msg("late", Some("codex"), Some(0), None)
+            ]
+        }))
+        .unwrap();
+        let previews = |run: &super::PersistedArtifactsRun| {
+            let cards = match mission {
+                Some(id) => super::build_persisted_mission_cards(run, id, 120),
+                None => super::build_persisted_ad_hoc_cards(run, "codex", 120),
+            };
+            cards
+                .into_iter()
+                .map(|card| card.preview)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(previews(&run), ["first", "late", "second", "fast"]);
+        run.prompt_indices_local = false;
+        assert_eq!(previews(&run), ["first", "second", "fast", "late"]);
+    }
+}
