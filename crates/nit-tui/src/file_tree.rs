@@ -34,6 +34,7 @@ pub fn needed_dirs(state: &AppState) -> Vec<PathBuf> {
 }
 
 pub fn clear_cache(state: &mut AppState) {
+    state.file_tree.listings_scheduled = false;
     state.file_tree.cache.clear();
     state.file_tree.loading_dirs.clear();
     state.file_tree.rows.clear();

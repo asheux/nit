@@ -24,7 +24,7 @@ pub(super) fn map_agent_console_mouse_with_swarm(
     state: &AppState,
     clamp: bool,
 ) -> Option<(usize, usize, Vec<String>)> {
-    let layout = layout::split(screen);
+    let layout = layout::split_for_state(screen, state);
     let text_area = agent_console_view::thread_text_area(layout.notes, state)?;
     if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
         return None;
@@ -201,7 +201,7 @@ pub(crate) fn auto_scroll_agent_console_for_drag(
     screen: ratatui::layout::Rect,
     state: &mut AppState,
 ) {
-    let layout = layout::split(screen);
+    let layout = layout::split_for_state(screen, state);
     let Some(text_area) = agent_console_view::thread_text_area(layout.notes, state) else {
         return;
     };

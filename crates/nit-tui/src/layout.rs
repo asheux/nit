@@ -3,6 +3,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub struct MainLayout {
     pub top: Rect,
     pub bottom: Rect,
+    pub center_tabs: Rect,
+    pub tree: Rect,
     pub notes: Rect,
     pub job: Rect,
     pub editor: Rect,
@@ -59,10 +61,44 @@ pub fn split(frame: Rect) -> MainLayout {
     MainLayout {
         top,
         bottom,
+        tree: Rect::default(),
+        center_tabs: Rect::default(),
         notes: left_col[0],
         job: left_col[1],
         editor: columns[1],
         visualizer: right_col[0],
         gate: right_col[1],
     }
+}
+
+/// Resolve the visible input and drawing surfaces from the same station layout.
+pub fn split_for_state(frame: Rect, state: &nit_core::AppState) -> MainLayout {
+    let mut areas = split(frame);
+    if !state.station_chat_center() {
+        if state.file_tree.open {
+            areas.tree = areas.editor;
+        }
+        return areas;
+    }
+    let center = areas.editor;
+    let tab_height = center.height.min(1);
+    areas.tree = areas.notes;
+    areas.center_tabs = Rect::new(center.x, center.y, center.width, tab_height);
+    let content = Rect::new(
+        center.x,
+        center.y.saturating_add(tab_height),
+        center.width,
+        center.height - tab_height,
+    );
+    match state.station_center_tab() {
+        nit_core::StationCenterTab::Editor => {
+            areas.editor = content;
+            areas.notes = Rect::default();
+        }
+        nit_core::StationCenterTab::Chat | nit_core::StationCenterTab::Terminal => {
+            areas.notes = content;
+            areas.editor = Rect::default();
+        }
+    }
+    areas
 }

@@ -434,6 +434,7 @@ fn clicking_swarm_clone_artifact_row_opens_matching_task_card() {
         &swarm,
         click,
         screen,
+        &mut SyntaxRuntime::new(state.settings.highlight.clone()),
         &mut state,
         &mut input_state,
         &mut clipboard,
@@ -711,4 +712,70 @@ fn agent_console_mouse_drag_copies_selected_chat_text() {
         .as_deref()
         .unwrap_or_default()
         .contains("done (see ARTIFACTS)"));
+}
+
+#[test]
+fn station_tree_click_opens_source_and_keeps_the_chat_draft() {
+    use nit_core::{FileTreeKind, FileTreeRow, StationCenterTab};
+    let mut state = state_for_test_in_workspace("station-tree-open");
+    let root = state.workspace_root.clone();
+    let filename = root.join("audit.rs");
+    fs::write(&filename, "fn main() {}\n").unwrap();
+    state.center_tab = Some(StationCenterTab::Chat);
+    state.select_station_center(StationCenterTab::Chat);
+    state.file_tree.open = true;
+    state.agents.chat_input = "Read the return value.".into();
+    state.file_tree.rows = vec![FileTreeRow {
+        text: "audit.rs".into(),
+        path: filename.clone(),
+        kind: FileTreeKind::File,
+        depth: 0,
+    }];
+    let screen = Rect::new(0, 0, 140, 42);
+    let tree = layout::split_for_state(screen, &state).tree;
+    let theme = Theme::default();
+    let mut fuzzy = FuzzySearchRuntime::new(&theme, state.settings.highlight.clone());
+    let mut input = InputState::new();
+    let mut clipboard = None;
+    let point = MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: tree.x + 4,
+        row: tree.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(handle_mouse_event(
+        point,
+        screen,
+        &mut state,
+        &mut fuzzy,
+        &mut input,
+        &mut clipboard,
+        &theme
+    ));
+    assert_eq!(state.focus, PaneId::Editor);
+    assert_eq!(state.station_center_tab(), StationCenterTab::Editor);
+    assert_eq!(state.editor_buffer().path(), Some(&filename));
+    assert!(state.file_tree.open);
+    let areas = layout::split_for_state(screen, &state);
+    assert!(areas.notes.is_empty());
+    assert_eq!(areas.tree, tree);
+    let choose_chat = MouseEvent {
+        column: areas.center_tabs.x + 3,
+        row: areas.center_tabs.y,
+        ..point
+    };
+    assert!(handle_mouse_event(
+        choose_chat,
+        screen,
+        &mut state,
+        &mut fuzzy,
+        &mut input,
+        &mut clipboard,
+        &theme
+    ));
+    assert_eq!(state.focus, PaneId::Notes);
+    assert_eq!(state.station_center_tab(), StationCenterTab::Chat);
+    assert_eq!(state.agents.chat_input, "Read the return value.");
+    assert_eq!(state.editor_buffer().path(), Some(&filename));
+    fs::remove_dir_all(root).unwrap();
 }

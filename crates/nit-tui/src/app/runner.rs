@@ -644,6 +644,25 @@ pub(super) fn run_loop(
                             continue;
                         }
                     }
+                    // Switch the central surface before the shell or chat consumes F6.
+                    if state.station_chat_center()
+                        && key.code == crossterm::event::KeyCode::F(6)
+                        && key.modifiers.is_empty()
+                        && state.command_line.is_none()
+                        && state.prompt.is_none()
+                        && state.search_prompt.is_none()
+                        && state.file_tree.prompt.is_none()
+                    {
+                        let tab = if state.station_center_tab() == nit_core::StationCenterTab::Chat
+                        {
+                            nit_core::StationCenterTab::Editor
+                        } else {
+                            nit_core::StationCenterTab::Chat
+                        };
+                        state.select_station_center(tab);
+                        needs_redraw = true;
+                        continue;
+                    }
                     // Terminal pane owns input while live; the Ctrl+\ toggle and
                     // the global quit fall through so the operator can escape.
                     if state.terminal_pane_active
@@ -678,10 +697,10 @@ pub(super) fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
-                    if state.file_tree.open && state.focus == PaneId::Editor {
+                    if state.tree_focused() {
                         let screen = terminal.size().unwrap_or_default();
-                        let layout = layout::split(screen);
-                        if handle_file_tree_key(&key, state, syntax, layout.editor) {
+                        let tree_area = layout::split_for_state(screen, state).tree;
+                        if handle_file_tree_key(&key, state, syntax, tree_area) {
                             needs_redraw = true;
                             continue;
                         }
@@ -811,6 +830,7 @@ pub(super) fn run_loop(
                                     &swarm,
                                     mouse,
                                     screen,
+                                    syntax,
                                     state,
                                     &mut fuzzy_runtime,
                                     &mut input_state,
@@ -869,6 +889,7 @@ pub(super) fn run_loop(
                         &swarm,
                         to_handle,
                         screen,
+                        syntax,
                         state,
                         &mut fuzzy_runtime,
                         &mut input_state,
@@ -892,6 +913,7 @@ pub(super) fn run_loop(
                                         &swarm,
                                         m,
                                         screen,
+                                        syntax,
                                         state,
                                         &mut fuzzy_runtime,
                                         &mut input_state,
@@ -1531,9 +1553,12 @@ fn scroll_terminal_under_pointer(
 
 /// Inner chat-pane dimensions for the terminal PTY winsize. The chat pane draws
 /// an all-borders block, so the shell fills the area minus one cell per side.
-fn terminal_pane_size(terminal: &Terminal<CrosstermBackend<Stdout>>) -> crate::pty::PtySize {
+fn terminal_pane_size(
+    terminal: &Terminal<CrosstermBackend<Stdout>>,
+    state: &AppState,
+) -> crate::pty::PtySize {
     let screen = terminal.size().unwrap_or_default();
-    let notes = layout::split(screen).notes;
+    let notes = layout::split_for_state(screen, state).notes;
     crate::pty::PtySize {
         rows: notes.height.saturating_sub(2).max(1),
         cols: notes.width.saturating_sub(2).max(1),
@@ -1562,27 +1587,27 @@ fn reconcile_terminal_pane(
             if let Some(mut session) = terminal_pane.take() {
                 session.shutdown();
             }
-            state.terminal_pane_active = false;
-            state.focus = PaneId::Editor;
+            state.terminal_pane_ended();
             return true;
         }
         if terminal_pane.is_none() {
-            match crate::pty::PtySession::spawn(&state.workspace_root, terminal_pane_size(terminal))
-            {
+            match crate::pty::PtySession::spawn(
+                &state.workspace_root,
+                terminal_pane_size(terminal, state),
+            ) {
                 Ok(session) => {
                     *terminal_pane = Some(session);
                     return true;
                 }
                 Err(err) => {
-                    state.terminal_pane_active = false;
-                    state.focus = PaneId::Editor;
+                    state.terminal_pane_ended();
                     state.status = Some(format!("Terminal: {err}"));
                     return true;
                 }
             }
         }
         if let Some(session) = terminal_pane.as_ref() {
-            let _ = session.resize(terminal_pane_size(terminal));
+            let _ = session.resize(terminal_pane_size(terminal, state));
         }
         false
     } else {

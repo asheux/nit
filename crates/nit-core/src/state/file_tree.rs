@@ -55,6 +55,9 @@ pub struct FileTreeState {
     pub show_ignored: bool,
     #[serde(skip)]
     pub rows: Vec<FileTreeRow>,
+    /// True once this expansion and filter state has scheduled its directory reads.
+    #[serde(skip)]
+    pub listings_scheduled: bool,
     #[serde(skip)]
     pub expanded_dirs: HashSet<PathBuf>,
     #[serde(skip)]

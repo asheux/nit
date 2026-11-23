@@ -15,54 +15,43 @@ pub(super) enum FocusDir {
 
 pub(super) fn focus_by_direction(state: &AppState, dir: FocusDir) -> PaneId {
     use FocusDir::*;
-    match state.focus {
-        PaneId::Notes => match dir {
-            Left => PaneId::Notes,
-            Right => PaneId::Editor,
-            Up => PaneId::Notes,
-            Down => PaneId::JobOutput,
-        },
-        PaneId::JobOutput => match dir {
-            Left => PaneId::JobOutput,
-            Right => PaneId::Editor,
-            Up => PaneId::Notes,
-            Down => PaneId::JobOutput,
-        },
-        PaneId::Visualizer => match dir {
-            Left => PaneId::Editor,
-            Right => PaneId::Visualizer,
-            Up => PaneId::Visualizer,
-            Down => PaneId::GateMonitor,
-        },
-        PaneId::GateMonitor => match dir {
-            Left => PaneId::Editor,
-            Right => PaneId::GateMonitor,
-            Up => PaneId::Visualizer,
-            Down => PaneId::GateMonitor,
-        },
-        PaneId::Editor => {
-            let buf = state.editor_buffer();
-            let cursor_line = buf.cursor.line.saturating_sub(buf.viewport.offset_line);
-            let top_half = cursor_line < buf.viewport.height.saturating_div(2).max(1);
+    // The sidebar and the active center tab exchange physical slots in
+    // the station. The explicit labs retain their original pane geometry.
+    let station = state.station_chat_center();
+    let upper_left = if station {
+        PaneId::FileTree
+    } else {
+        PaneId::Notes
+    };
+    let center = if station && state.station_center_tab() != nit_core::StationCenterTab::Editor {
+        PaneId::Notes
+    } else {
+        PaneId::Editor
+    };
+    match (state.focus, dir) {
+        (pane, Right) if pane == upper_left || pane == PaneId::JobOutput => center,
+        (PaneId::Visualizer | PaneId::GateMonitor, Left) => center,
+        (PaneId::JobOutput, Up) => upper_left,
+        (pane, Down) if pane == upper_left => PaneId::JobOutput,
+        (PaneId::GateMonitor, Up) => PaneId::Visualizer,
+        (PaneId::Visualizer, Down) => PaneId::GateMonitor,
+        (pane, dir) if pane == center => {
+            let buffer = state.editor_buffer();
+            let cursor_row = buffer
+                .cursor
+                .line
+                .saturating_sub(buffer.viewport.offset_line);
+            let top_half =
+                pane == PaneId::Notes || cursor_row < (buffer.viewport.height / 2).max(1);
             match dir {
-                Left => {
-                    if top_half {
-                        PaneId::Notes
-                    } else {
-                        PaneId::JobOutput
-                    }
-                }
-                Right => {
-                    if top_half {
-                        PaneId::Visualizer
-                    } else {
-                        PaneId::GateMonitor
-                    }
-                }
-                Up => PaneId::Notes,
+                Left if !top_half => PaneId::JobOutput,
+                Left | Up => upper_left,
+                Right if top_half => PaneId::Visualizer,
+                Right => PaneId::GateMonitor,
                 Down => PaneId::JobOutput,
             }
         }
+        (pane, _) => pane,
     }
 }
 

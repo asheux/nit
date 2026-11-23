@@ -25,6 +25,7 @@ pub(super) fn handle_mouse_event_with_swarm(
     swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
+    syntax: &mut SyntaxRuntime,
     state: &mut AppState,
     fuzzy_runtime: &mut FuzzySearchRuntime,
     input_state: &mut InputState,
@@ -43,6 +44,7 @@ pub(super) fn handle_mouse_event_with_swarm(
                     swarm,
                     mouse,
                     screen,
+                    syntax,
                     state,
                     input_state,
                     clipboard,
@@ -202,7 +204,7 @@ fn scroll_main_layout_panes(
     delta: i32,
     theme: &Theme,
 ) -> bool {
-    let layout = layout::split(screen);
+    let layout = layout::split_for_state(screen, state);
     let point = (mouse.column, mouse.row).into();
     if state.change_review_active() && layout.visualizer.contains(point) {
         crate::widgets::change_review_view::mouse_scroll(
@@ -213,18 +215,18 @@ fn scroll_main_layout_panes(
         );
         return true;
     }
-    if point_in_rect(mouse.column, mouse.row, layout.editor) {
-        if state.file_tree.open {
-            if state.file_tree.prompt.is_none() {
-                state.file_tree.selected = state
-                    .file_tree
-                    .selected
-                    .saturating_add_signed(delta as isize)
-                    .min(state.file_tree.rows.len().saturating_sub(1));
-                adjust_file_tree_scroll(state, layout.editor);
-            }
-            return true;
+    if layout.tree.contains(point) {
+        if state.file_tree.prompt.is_none() {
+            state.file_tree.selected = state
+                .file_tree
+                .selected
+                .saturating_add_signed(delta as isize)
+                .min(state.file_tree.rows.len().saturating_sub(1));
+            adjust_file_tree_scroll(state, layout.tree);
         }
+        return true;
+    }
+    if layout.editor.contains(point) {
         scroll_buffer(state.editor_buffer_mut(), delta);
         return true;
     }
@@ -835,6 +837,7 @@ pub(super) fn handle_mouse_down_with_swarm(
     swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
+    syntax: &mut SyntaxRuntime,
     state: &mut AppState,
     input_state: &mut InputState,
     clipboard: &mut Option<Clipboard>,
@@ -1192,20 +1195,31 @@ pub(super) fn handle_mouse_down_with_swarm(
         return true;
     }
     reset_ui_selection(state, input_state);
-    let layout = layout::split(screen);
-    if point_in_rect(mouse.column, mouse.row, layout.editor) {
-        if state.file_tree.open {
-            state.focus = PaneId::Editor;
-            let inner = Block::default().borders(Borders::ALL).inner(layout.editor);
-            if state.file_tree.prompt.is_none() && inner.contains((mouse.column, mouse.row).into())
-            {
-                let index = state.file_tree.scroll_offset + usize::from(mouse.row - inner.y);
-                if index < state.file_tree.rows.len() {
-                    state.file_tree.selected = index;
+    let layout = layout::split_for_state(screen, state);
+    let point = (mouse.column, mouse.row).into();
+    if let Some(tab) = crate::widgets::station_tabs::tab_at(layout.center_tabs, point) {
+        state.select_station_center(tab);
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    if layout.tree.contains(point) {
+        let station = state.station_chat_center();
+        state.focus_file_tree();
+        let inner = Block::default().borders(Borders::ALL).inner(layout.tree);
+        if state.file_tree.prompt.is_none() && inner.contains(point) {
+            let index = state.file_tree.scroll_offset + usize::from(mouse.row - inner.y);
+            if index < state.file_tree.rows.len() {
+                state.file_tree.selected = index;
+                if station {
+                    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                    handle_file_tree_key(&enter, state, syntax, layout.tree);
                 }
             }
-            return true;
         }
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    if layout.editor.contains(point) {
         set_buffer_cursor_from_mouse(
             state,
             PaneId::Editor,
@@ -1232,7 +1246,7 @@ pub(super) fn handle_mouse_down_with_swarm(
     // and is NOT triggered here — see `popup_keys.rs`. No-op when the
     // click already matches the active surface. Mirrors the visualizer
     // / gate-monitor title-button pattern.
-    if mouse.row == layout.notes.y && point_in_rect(mouse.column, mouse.row, layout.notes) {
+    if !state.station_chat_center() && mouse.row == layout.notes.y && layout.notes.contains(point) {
         let col_in_rect = mouse.column.saturating_sub(layout.notes.x);
         if let Some(tab) = agent_console_view::chat_tab_at_column(col_in_rect) {
             reset_ui_selection(state, input_state);
@@ -1386,7 +1400,7 @@ pub(super) fn handle_mouse_down_with_swarm(
         return true;
     }
     {
-        let layout = layout::split(screen);
+        let layout = layout::split_for_state(screen, state);
         let point = (mouse.column, mouse.row).into();
         if state.change_review_active() && layout.visualizer.contains(point) {
             state.focus = PaneId::Visualizer;
@@ -1783,7 +1797,7 @@ pub(super) fn handle_mouse_drag_with_swarm(
     }
     match anchor.target {
         MouseSelectTarget::Buffer(pane) => {
-            let layout = layout::split(screen);
+            let layout = layout::split_for_state(screen, state);
             let (pane_rect, tab_width) = match pane {
                 PaneId::Editor => (layout.editor, state.settings.editor.tab_width as usize),
                 PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => (
@@ -1823,7 +1837,7 @@ pub(super) fn handle_mouse_drag_with_swarm(
             true
         }
         MouseSelectTarget::ChatInput => {
-            let layout = layout::split(screen);
+            let layout = layout::split_for_state(screen, state);
             state.focus = PaneId::Notes;
             state.mode = Mode::Normal;
             let Some(cursor_char_idx) = agent_console_view::map_chat_input_point_to_cursor(
