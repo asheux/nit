@@ -34,6 +34,7 @@ mod pool;
 mod worker;
 
 pub use pool::ClaudePool;
+pub(crate) use worker::DirectSession;
 pub use worker::{PoolLine, PoolWorker, RecycleReason, SpawnedChild, WorkerKey, WorkerSpawn};
 
 pub const POOL_LINE_CAPACITY: usize = 64;

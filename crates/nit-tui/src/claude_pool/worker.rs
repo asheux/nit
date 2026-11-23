@@ -25,14 +25,26 @@ pub struct WorkerKey {
     pub model_slug: String,
     pub cwd: PathBuf,
     pub read_only: bool,
+    /// Persistent direct-chat sessions may only reuse their own process.
+    pub(crate) session: Option<DirectSession>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DirectSession {
+    pub id: String,
+    pub resume: bool,
+    pub agent: String,
+    pub mission: Option<String>,
+    pub effort: Option<String>,
+    pub max_turns: Option<u32>,
+}
 impl WorkerKey {
     pub fn new(model_slug: impl Into<String>, cwd: impl Into<PathBuf>, read_only: bool) -> Self {
         Self {
             model_slug: model_slug.into(),
             cwd: cwd.into(),
             read_only,
+            session: None,
         }
     }
 }
@@ -198,6 +210,12 @@ impl PoolWorker {
             .as_ref()
             .and_then(|i| i.stderr.lock().ok().map(|g| g.clone()))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn mark_session_resumable(&mut self) {
+        if let Some(session) = &mut self.inner.as_mut().expect("checked out").key.session {
+            session.resume = true;
+        }
     }
 
     pub fn check_in(mut self) {
