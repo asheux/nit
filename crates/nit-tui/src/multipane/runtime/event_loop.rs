@@ -78,6 +78,7 @@ pub fn run_loop(
             let _ = persistence::merge_prior(mp, prior);
         }
     }
+    crate::app::restore_followup_drafts(state);
     let mut last_save = Instant::now();
     let mut last_focused = state.multipane.as_ref().map(|mp| mp.focused);
     let save_debounce = Duration::from_secs(1);

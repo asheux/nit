@@ -101,3 +101,27 @@ fn workspace_hash_is_deterministic() {
     let p = PathBuf::from("/workspace/example");
     assert_eq!(workspace_hash(&p), workspace_hash(&p));
 }
+
+#[test]
+fn saves_full_hunk_and_requires_fresh_target_after_reload() {
+    let mut prior = fixture_state();
+    let pane = &mut prior.panes[0];
+    pane.chat_input = "line with an edited value\n".repeat(350);
+    let draft = pane.chat_input.clone();
+    pane.swarm_draft_target = Some(nit_core::SwarmDraftTarget {
+        mission_id: "m".into(),
+        task_id: Some("t".into()),
+        ..Default::default()
+    });
+    cap_chat_input(pane);
+    let mut next = fixture_state();
+    assert!(merge_prior(&mut next, prior));
+    assert_eq!(next.panes[0].chat_input, draft);
+    assert!(
+        next.panes[0]
+            .swarm_draft_target
+            .as_ref()
+            .unwrap()
+            .needs_choice
+    );
+}

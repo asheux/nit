@@ -638,6 +638,7 @@ pub(super) fn artifacts_popup_scroll_metrics(
 }
 
 pub(super) fn close_artifacts_popup(state: &mut AppState) {
+    state.agents.artifacts_popup_followup_draft_id = None;
     state.agents.artifacts_popup_open = false;
     state.agents.artifacts_popup_scroll = 0;
     // Sentinel triggers the fallback-compute path on the first scroll event if
@@ -830,13 +831,21 @@ pub(crate) fn handle_artifacts_popup_key(
                 .swarm_draft_target
                 .replace(nit_core::SwarmDraftTarget {
                     mission_id: mid.clone(),
+                    saved_draft: state.agents.artifacts_popup_followup_draft_id.take(),
+                    needs_choice: false,
                     suggested_task: None,
-                    task_id: artifact_agent.clone(),
+                    agent_id: artifact_agent.clone(),
+                    task_id: None,
                     source: None,
                 });
             swap_in_artifacts_popup_chat(state);
             let submitted = super::swarm_chat::submit_active_followup(state, swarm, &prompt);
             swap_out_artifacts_popup_chat(state);
+            state.agents.artifacts_popup_followup_draft_id = state
+                .agents
+                .swarm_draft_target
+                .as_mut()
+                .and_then(|target| target.saved_draft.take());
             state.agents.swarm_draft_target = previous;
             if submitted == Some(true) {
                 close_artifacts_popup(state);

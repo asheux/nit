@@ -257,6 +257,9 @@ fn composer_title(
     agent: Option<&str>,
     draft: &str,
 ) -> String {
+    if target.is_some_and(|t| t.needs_choice) {
+        return "Choose live task · Alt+→".into();
+    }
     let mut words = draft.split_whitespace();
     let typed = match words.next() {
         Some("@task" | "@agent") => words.next(),
@@ -271,6 +274,7 @@ fn composer_title(
                     target
                         .task_id
                         .as_deref()
+                        .or(target.agent_id.as_deref())
                         .or(target.suggested_task.as_deref())
                 })
             })

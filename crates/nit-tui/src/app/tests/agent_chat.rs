@@ -642,3 +642,59 @@ fn changes_followup_keeps_an_existing_draft_and_rejects_a_conflicting_handoff() 
     assert_eq!(target.mission_id, "one");
     assert_eq!(target.source.as_ref(), Some(&source));
 }
+
+#[test]
+fn rejected_swarm_draft_recovers_without_dispatching_to_a_reused_mission() {
+    let mut before = state_for_test_in_workspace("followup-restart");
+    let mid = "mission-1";
+    let mut swarm = crate::swarm::test_runtime_with_running_tasks(
+        mid,
+        &[("writer", "integrate"), ("reviewer", "review")],
+    );
+    swarm.set_test_workspace(mid, &before.workspace_root);
+    before.agents.selected_mission = Some(mid.into());
+    before.agents.chat_input = "@task wrong-id Keep the selected lines.\n".repeat(160);
+    let mut vitals = VitalsState::default();
+    before.focus = PaneId::Notes;
+    let send = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    for _ in 0..2 {
+        handle_agent_station_key(send, &mut before, &mut vitals, None, None, &mut swarm);
+    }
+    let files = before.workspace_root.join(".nit/followup-drafts");
+    assert_eq!(fs::read_dir(&files).unwrap().count(), 1);
+    let mut after = state_for_test();
+    after.workspace_root = before.workspace_root.clone();
+    after.agents.selected_mission = Some(mid.into());
+    after.focus = PaneId::Notes;
+    restore_followup_drafts(&mut after);
+    assert_eq!(after.agents.chat_input, before.agents.chat_input);
+    handle_agent_station_key(send, &mut after, &mut vitals, None, None, &mut swarm);
+    assert!(
+        after
+            .agents
+            .swarm_draft_target
+            .as_ref()
+            .unwrap()
+            .needs_choice
+    );
+    assert!(!nit_core::followups::directory(&after.workspace_root, mid).exists());
+    handle_agent_station_key(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+        &mut after,
+        &mut vitals,
+        None,
+        None,
+        &mut swarm,
+    );
+    assert!(after.agents.chat_input.starts_with("@task task-00 Keep"));
+    handle_agent_station_key(send, &mut after, &mut vitals, None, None, &mut swarm);
+    assert!(after.agents.chat_input.is_empty());
+    assert_eq!(fs::read_dir(&files).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(nit_core::followups::directory(&after.workspace_root, mid))
+            .unwrap()
+            .count(),
+        1
+    );
+    fs::remove_dir_all(after.workspace_root).unwrap();
+}

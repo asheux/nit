@@ -485,8 +485,11 @@ pub(super) fn handle_agent_ops_key(
                         let mid = mid.as_ref().filter(|mid| swarm.is_active_mission(mid))?;
                         Some(nit_core::SwarmDraftTarget {
                             mission_id: mid.clone(),
+                            saved_draft: None,
+                            needs_choice: false,
                             suggested_task: None,
-                            task_id: Some(lane.id.clone()),
+                            agent_id: Some(lane.id.clone()),
+                            task_id: None,
                             source: None,
                         })
                     });

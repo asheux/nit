@@ -15,14 +15,21 @@ fn default_offline_mcp_status() -> McpStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SwarmDraftTarget {
     pub mission_id: String,
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     /// File owner displayed while composing. Revalidated on submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_task: Option<String>,
     pub source: Option<crate::followups::Source>,
+    /// Local failed-submission snapshot. Nothing is dispatched when it is restored.
+    #[serde(default)]
+    pub saved_draft: Option<String>,
+    #[serde(default)]
+    pub needs_choice: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -122,6 +129,8 @@ pub struct AgentsState {
     pub artifacts_popup_last_max_scroll: usize,
     #[serde(skip)]
     pub artifacts_popup_chat_input: String,
+    #[serde(skip)]
+    pub artifacts_popup_followup_draft_id: Option<String>,
     #[serde(skip)]
     pub artifacts_popup_chat_cursor: usize,
     #[serde(skip)]
@@ -500,6 +509,7 @@ impl Default for AgentsState {
             artifacts_popup_scroll: 0,
             artifacts_popup_last_max_scroll: usize::MAX,
             artifacts_popup_chat_input: String::new(),
+            artifacts_popup_followup_draft_id: None,
             artifacts_popup_chat_cursor: 0,
             artifacts_popup_chat_selection_anchor: None,
             artifacts_popup_chat_scroll: chat_input_scroll_default(),

@@ -41,7 +41,7 @@ fn workspace_hash(workspace: &Path) -> u64 {
 }
 
 fn cap_chat_input(pane: &mut PaneSession) {
-    if pane.chat_input.len() <= CHAT_INPUT_CAP_BYTES {
+    if pane.swarm_draft_target.is_some() || pane.chat_input.len() <= CHAT_INPUT_CAP_BYTES {
         return;
     }
     let mut end = CHAT_INPUT_CAP_BYTES;
@@ -131,7 +131,10 @@ pub fn merge_prior(target: &mut MultipaneState, prior: MultipaneState) -> bool {
     for (slot, prior) in target.panes.iter_mut().zip(prior.panes.into_iter()) {
         slot.cwd = prior.cwd;
         slot.chat_input = prior.chat_input;
-        slot.swarm_draft_target = prior.swarm_draft_target;
+        slot.swarm_draft_target = prior.swarm_draft_target.map(|mut target| {
+            target.needs_choice = true;
+            target
+        });
         slot.chat_input_cursor = prior.chat_input_cursor;
         slot.chat_prompt_history = prior.chat_prompt_history;
         slot.swarm_template = prior.swarm_template;

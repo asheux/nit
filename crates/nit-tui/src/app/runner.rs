@@ -146,6 +146,7 @@ pub(super) fn run_loop(
     codex_config: CodexRunnerConfig,
     claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
+    restore_followup_drafts(state);
     let popup_theme = theme.for_popup();
     let panel_theme = Theme {
         background: theme.panel_background,
@@ -762,6 +763,14 @@ pub(super) fn run_loop(
                         &mut fuzzy_runtime,
                         &mut vitals,
                     ) {
+                        if state.focus == PaneId::Notes
+                            && !state.agents.artifacts_popup_open
+                            && state.command_line.is_none()
+                            && state.search_prompt.is_none()
+                            && !state.fuzzy_search.open
+                        {
+                            pin_composing_mission(state, &swarm);
+                        }
                         needs_redraw = true;
                     }
                 }
