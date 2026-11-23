@@ -1,5 +1,6 @@
 use super::*;
 use nit_core::Buffer;
+use nit_core::PaneId;
 use ratatui::{backend::TestBackend, Terminal};
 
 #[test]
@@ -28,6 +29,7 @@ fn selected_row_spans_the_tree_interior_and_retains_nested_alignment() {
         background: ratatui::style::Color::Rgb(16, 31, 42),
         ..Theme::default()
     };
+    state.file_tree.open = true;
     for width in [18, 65] {
         for focused in [true, false] {
             state.focus = if focused {

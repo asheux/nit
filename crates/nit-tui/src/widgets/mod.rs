@@ -30,6 +30,7 @@ mod picker_utils;
 pub mod protocol_picker;
 pub mod rule_picker;
 pub mod signals_view;
+pub(crate) mod station_tabs;
 pub mod substrate_overlay;
 pub(crate) mod tab_expand;
 pub mod terminal_popup;

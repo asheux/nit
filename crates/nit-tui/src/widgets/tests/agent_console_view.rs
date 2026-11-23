@@ -2010,3 +2010,60 @@ fn chat_tab_at_column_maps_agent_chat_and_terminal_labels() {
     assert_eq!(chat_tab_at_column(24), None);
     assert_eq!(chat_tab_at_column(40), None);
 }
+
+#[test]
+fn central_chat_composer_stays_at_the_bottom_as_the_draft_grows() {
+    let mut state = test_state();
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    for (width, height) in [(32, 14), (76, 40)] {
+        let area = ratatui::layout::Rect::new(21, 4, width, height);
+        state.agents.chat_input.clear();
+        let initial = super::compute_console_layout(area, &state).unwrap();
+        state.agents.chat_input = "follow up\n".repeat(20);
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let growing = super::compute_console_layout(area, &state).unwrap();
+        assert_eq!(initial.input_area, growing.input_area);
+        assert_eq!(initial.thread_area, growing.thread_area);
+        assert_eq!(growing.input_chunk.bottom(), area.bottom() - 1);
+        assert!(growing.thread_area.height > growing.input_area.height);
+        assert!(growing.input_lines_all.len() > usize::from(growing.input_area.height));
+    }
+}
+
+#[test]
+fn central_chat_renders_the_reply_in_order_and_bounds_long_output() {
+    let mut state = test_state();
+    let mut msg = AgentMessage {
+        at: "10:00:00".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: Some("codex".into()),
+        mission_id: None,
+        text: "The first line.\nThe second line.".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    };
+    let legacy = format_message_rows(&state, None, &msg, 50);
+    assert!(!legacy
+        .iter()
+        .any(|row| matches!(row.kind, ThreadRowKind::Reply)));
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    let station = format_message_rows(&state, None, &msg, 50);
+    assert_eq!(
+        station
+            .iter()
+            .filter(|r| matches!(r.kind, ThreadRowKind::Reply))
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>(),
+        ["The first line.", "The second line."]
+    );
+    msg.text = "0123456789 data output\n".repeat(10000);
+    let oversized = format_message_rows(&state, None, &msg, 50);
+    assert_eq!(
+        oversized
+            .iter()
+            .filter(|row| matches!(row.kind, ThreadRowKind::Reply))
+            .count(),
+        96
+    );
+    assert!(oversized.len() < 101);
+}

@@ -1,5 +1,5 @@
 use nit_core::state::file_tree::{FileTreePrompt, FileTreePromptKind};
-use nit_core::{AppState, FileTreeKind, FileTreeRow, PaneId};
+use nit_core::{AppState, FileTreeKind, FileTreeRow};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -17,7 +17,7 @@ const INDENT_STEP: usize = 2;
 const ARROW_CHARS: usize = 2;
 
 pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let focused = state.focus == PaneId::Editor;
+    let focused = state.tree_focused();
     let commands = header_commands(state, area.width);
     let block = build_block(theme, focused, &commands);
 
@@ -91,7 +91,11 @@ fn header_commands(state: &AppState, pane_width: u16) -> String {
     let mut commands = Vec::new();
     for hint in [
         "[Enter open]",
-        "[Esc close]",
+        if state.station_chat_center() {
+            "[Esc back]"
+        } else {
+            "[Esc close]"
+        },
         "[F1 help]",
         "[n new]",
         "[r rename]",

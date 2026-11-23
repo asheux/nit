@@ -62,7 +62,8 @@ pub(super) fn draw(
     let start = Instant::now();
     terminal.draw(|f| {
         let screen = f.size();
-        let layout = layout::split(screen);
+        let layout = layout::split_for_state(screen, state);
+        let station = state.station_chat_center();
 
         // Rebuilt every frame: each terminal grid registers its on-screen
         // region + visible text here so mouse handlers can hit-test and copy
@@ -80,7 +81,7 @@ pub(super) fn draw(
             .saturating_sub(editor_gutter);
         let editor_height = layout.editor.height.saturating_sub(2) as usize;
         let editor_width = editor_text_width as usize;
-        {
+        if !layout.editor.is_empty() {
             let buf = state.editor_buffer_mut();
             let resized =
                 buf.viewport.height != editor_height || buf.viewport.width != editor_width;
@@ -92,9 +93,20 @@ pub(super) fn draw(
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
         top_bar::render(f, layout.top, state, panel_theme, vitals);
-        let editor_cursor = if state.file_tree.open {
-            adjust_file_tree_scroll(state, layout.editor);
-            file_tree_view::render(f, layout.editor, state, theme);
+        if station {
+            crate::widgets::station_tabs::render(
+                f,
+                layout.center_tabs,
+                state.station_center_tab(),
+                state.change_review_active(),
+                panel_theme,
+            );
+        }
+        if !layout.tree.is_empty() {
+            adjust_file_tree_scroll(state, layout.tree);
+            file_tree_view::render(f, layout.tree, state, theme);
+        }
+        let editor_cursor = if layout.editor.is_empty() || (!station && state.file_tree.open) {
             None
         } else {
             state.editor_buffer_mut().compute_diff_if_needed();
@@ -143,17 +155,18 @@ pub(super) fn draw(
         };
         let mut terminal_cursor: Option<(u16, u16)> = None;
         let notes_cursor = match (state.terminal_pane_active, terminal_pane) {
+            _ if layout.notes.is_empty() => None,
             (true, Some(session)) => {
                 let focused = state.focus == PaneId::Notes;
-                // Render the same AGENT CHAT / TERMINAL tab line the
-                // chat console uses so the operator can click AGENT
-                // CHAT to switch back. `chat_tab_at_column` in
-                // app/mouse.rs hit-tests the same columns.
-                let title_line = agent_console_view::chat_pane_title_line(
-                    agent_console_view::ChatPaneTab::Terminal,
-                    focused,
-                    theme,
-                );
+                let title_line = if station {
+                    ratatui::text::Line::from(" TERMINAL · Ctrl+\\ back to chat ")
+                } else {
+                    agent_console_view::chat_pane_title_line(
+                        agent_console_view::ChatPaneTab::Terminal,
+                        focused,
+                        theme,
+                    )
+                };
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Thick)
@@ -507,7 +520,7 @@ pub(super) fn draw(
             || state.rule_picker.open
             || state.agents.global_archive_open
             || super::key_predicates::games_modal_popup_open(state)
-            || (state.file_tree.open && state.focus == PaneId::Editor)
+            || state.tree_focused()
         {
             None
         } else if state.focus == PaneId::Editor {

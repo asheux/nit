@@ -319,7 +319,11 @@ pub fn render(
     // inline terminal pane is inactive (`draw.rs` swaps to a TERMINAL-
     // active title when `terminal_pane_active`). Both labels are
     // clickable — see chat_tab_at_column + app/mouse.rs.
-    let title_line = chat_pane_title_line(ChatPaneTab::AgentChat, focused, theme);
+    let title_line = if state.station_chat_center() {
+        Line::default()
+    } else {
+        chat_pane_title_line(ChatPaneTab::AgentChat, focused, theme)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title_line)
@@ -1209,7 +1213,11 @@ fn compute_console_layout(area: Rect, state: &AppState) -> Option<ConsoleLayout>
         cursor_char_idx,
         input_wrap_width,
     );
-    let input_inner_height = input_inner_height_for(inner, input_boxed, input_lines_all.len());
+    let input_inner_height = if state.station_chat_center() {
+        input_inner_height_for(inner, input_boxed, if inner.height >= 16 { 4 } else { 2 })
+    } else {
+        input_inner_height_for(inner, input_boxed, input_lines_all.len())
+    };
     let input_height = if input_boxed {
         input_inner_height + 2
     } else {
@@ -1542,6 +1550,9 @@ pub(super) fn thread_lines<'a>(
 ) -> Vec<Line<'static>> {
     rows.into_iter()
         .map(|row| match row.kind {
+            ThreadRowKind::Reply => {
+                Line::styled(row.text.clone(), Style::default().fg(theme.foreground))
+            }
             ThreadRowKind::User => user_line_with_prompt_bg(&row.text, theme),
             ThreadRowKind::Agent => agent_line_with_accent_ecg(&row.text, theme),
             ThreadRowKind::ArtifactLink => artifact_link_line(&row.text, theme),
@@ -2284,7 +2295,9 @@ fn thread_rows(
     // Ensure artifact/done callouts never appear after the last breather.
     // This can happen when a turn completes and a queued prompt dequeues
     // simultaneously — the "done" reply gets pushed after the new prompt.
-    hoist_stale_callouts_above_breather(&mut rows);
+    if !state.station_chat_center() {
+        hoist_stale_callouts_above_breather(&mut rows);
+    }
 
     rows
 }
@@ -2459,14 +2472,10 @@ pub(super) fn format_message_rows(
     width: usize,
 ) -> Vec<ThreadRow> {
     let width = width.max(1);
-    let text_lines: Vec<&str> = if msg.text.is_empty() {
-        vec![""]
-    } else {
-        msg.text.split('\n').collect()
-    };
     if msg.kind.as_deref() == Some("followup-history") {
-        return text_lines
-            .iter()
+        return msg
+            .text
+            .split('\n')
             .flat_map(|line| wrap_visual_line(line, width))
             .map(|text| ThreadRow {
                 text,
@@ -2475,7 +2484,7 @@ pub(super) fn format_message_rows(
             .collect();
     }
     if msg.agent_id.is_none() {
-        let bubble = format_user_bubble_rows(msg, &text_lines, width);
+        let bubble = format_user_bubble_rows(msg, &msg.text.split('\n').collect::<Vec<_>>(), width);
         return bubble
             .into_iter()
             .map(|text| ThreadRow {
@@ -2507,7 +2516,7 @@ pub(super) fn format_message_rows(
             .saturating_sub(UnicodeWidthStr::width(continuation))
             .max(1);
         let mut out = Vec::new();
-        for line in text_lines.iter() {
+        for line in msg.text.split('\n') {
             let wrapped = wrap_visual_line(line, first_avail);
             // Re-wrap continuation rows at their own (smaller) width so
             // the indented "[swarm] ..." lines don't overflow either.
@@ -2602,6 +2611,35 @@ pub(super) fn format_message_rows(
             text: callout,
             kind: ThreadRowKind::Agent,
         });
+    }
+    if state.station_chat_center() {
+        // Artifacts retain the full response. Bound long output in the station's
+        // cached transcript so resizing cannot reflow an entire tool log.
+        const REPLY_ROWS: usize = 96;
+        const REPLY_BYTES: usize = 16 * 1024;
+        let mut end = msg.text.len().min(REPLY_BYTES);
+        while !msg.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut reply = msg.text[..end]
+            .split('\n')
+            .flat_map(|line| wrap_visual_line(line, width));
+        for text in reply.by_ref().take(REPLY_ROWS) {
+            out.push(ThreadRow {
+                text,
+                kind: ThreadRowKind::Reply,
+            });
+        }
+        if end < msg.text.len() || reply.next().is_some() {
+            out.push(ThreadRow {
+                text: if artifact_target.is_some() {
+                    "… Full reply in ARTIFACTS".into()
+                } else {
+                    "… Reply preview truncated".into()
+                },
+                kind: ThreadRowKind::StatusSubRow,
+            });
+        }
     }
     // Spacer after agent reply to separate chat turns.
     out.push(ThreadRow {

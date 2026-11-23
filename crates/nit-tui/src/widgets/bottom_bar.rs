@@ -20,7 +20,8 @@ pub fn render(
     stats: &SystemStats,
 ) {
     let pane_title = match state.focus {
-        PaneId::Editor if state.file_tree.open => "NITTREE",
+        PaneId::FileTree => "NITTREE",
+        PaneId::Editor if !state.station_chat_center() && state.file_tree.open => "NITTREE",
         PaneId::Visualizer if state.change_review_active() => "CHANGES",
         PaneId::GateMonitor if state.app_kind == AppKind::Gol => {
             if state.gate_monitor_sub_view == GateMonitorSubView::Skills {
