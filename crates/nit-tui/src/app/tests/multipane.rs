@@ -133,6 +133,7 @@ fn multipane_runtime_drains_queued_codex_turn_on_finish() {
         .agents
         .queued_codex_turns
         .push_back(nit_core::QueuedCodexTurn {
+            operator_workspace: None,
             agent_id: "gpt-test".into(),
             mission_id: None,
             prompt: "queued".into(),

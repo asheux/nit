@@ -169,10 +169,13 @@ pub(super) fn enqueue_codex_turn(
         }
     }
 
+    let operator_workspace =
+        prompt_msg_idx.map(|_| turn_workspace(state, &model, mission_id.as_deref()));
     state
         .agents
         .queued_codex_turns
         .push_back(nit_core::QueuedCodexTurn {
+            operator_workspace,
             agent_id: model,
             mission_id,
             prompt,
@@ -215,6 +218,18 @@ pub(super) fn maybe_dispatch_next_queued_codex_turn(
         }
 
         // Queue length was incremented when we queued; only dispatch if this is still a Codex lane.
+        if queued
+            .operator_workspace
+            .as_ref()
+            .is_some_and(|cwd| *cwd != turn_workspace(state, &model, mission_id.as_deref()))
+        {
+            release_queued_slot(state, &model);
+            state.status = Some(format!(
+                "Workspace changed for {model}. Follow-up saved in its original workspace."
+            ));
+            continue;
+        }
+
         let is_codex = state
             .agents
             .agents
@@ -573,10 +588,13 @@ pub(super) fn enqueue_claude_turn(
         }
     }
 
+    let operator_workspace =
+        prompt_msg_idx.map(|_| turn_workspace(state, &model, mission_id.as_deref()));
     state
         .agents
         .queued_claude_turns
         .push_back(nit_core::QueuedClaudeTurn {
+            operator_workspace,
             agent_id: model,
             mission_id,
             prompt,
@@ -613,6 +631,18 @@ pub(super) fn maybe_dispatch_next_queued_claude_turn(
 
         if state.agents.active_turns.contains_key(&model) {
             state.agents.queued_claude_turns.push_back(queued);
+            continue;
+        }
+
+        if queued
+            .operator_workspace
+            .as_ref()
+            .is_some_and(|cwd| *cwd != turn_workspace(state, &model, mission_id.as_deref()))
+        {
+            release_queued_slot(state, &model);
+            state.status = Some(format!(
+                "Workspace changed for {model}. Follow-up saved in its original workspace."
+            ));
             continue;
         }
 

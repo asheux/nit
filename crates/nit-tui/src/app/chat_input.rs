@@ -1462,7 +1462,10 @@ pub(crate) fn submit_chat_input_and_dispatch(
     }
     let direct_address = raw.split_whitespace().next() == Some("@agent")
         && super::followup_mission(state, swarm).is_none()
-        && state.agents.selected_context_mission().is_none();
+        && state
+            .agents
+            .selected_context_mission()
+            .is_none_or(crate::multipane::agent_id::is_pane_chat_mission_id);
     if !direct_address {
         if let Some(result) =
             super::swarm_chat::submit_active_followup(state, swarm, &raw, codex, claude)
@@ -1555,7 +1558,7 @@ pub(crate) fn submit_chat_input_and_dispatch(
             })
             .or_else(|| {
                 chat_recipient(state)
-                    .filter(|id| !is_agent_busy(state, id))
+                    .filter(|id| !direct_address && !is_agent_busy(state, id))
                     .and_then(|_| detect_implicit_swarm_command(state, &raw))
             })
     };
@@ -1603,6 +1606,15 @@ pub(crate) fn submit_chat_input_and_dispatch(
                 state.status = Some("Use @agent MODEL MESSAGE.".into());
                 return false;
             };
+            if let Some(mp) = &state.multipane {
+                if mp.panes.get(mp.focused).is_none_or(|pane| {
+                    pane.agent_id != id && pane.selected_agent_id.as_deref() != Some(id)
+                }) {
+                    state.status =
+                        Some("Draft kept. Open the pane for the addressed agent.".into());
+                    return false;
+                }
+            }
             selected_agent = Some(id.to_owned());
             body = message.trim_start();
         } else if force_new || legacy_queue || shadow_explicit {

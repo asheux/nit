@@ -530,6 +530,8 @@ pub struct QueuedCodexTurn {
     pub mission_id: Option<String>,
     pub prompt: String,
     pub prompt_msg_idx: Option<usize>,
+    /// Workspace shown to the operator when this follow-up was queued.
+    pub operator_workspace: Option<PathBuf>,
 }
 
 /// Claude analogue of [`QueuedCodexTurn`] — see that struct for semantics.
@@ -539,6 +541,8 @@ pub struct QueuedClaudeTurn {
     pub mission_id: Option<String>,
     pub prompt: String,
     pub prompt_msg_idx: Option<usize>,
+    /// Workspace shown to the operator when this follow-up was queued.
+    pub operator_workspace: Option<PathBuf>,
 }
 
 /// Operator chat-state stashed while an intake turn is in flight. The

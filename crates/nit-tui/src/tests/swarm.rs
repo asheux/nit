@@ -5077,6 +5077,7 @@ fn abort_mission_drains_queued_turns_for_assigned_agents() {
         .agents
         .queued_codex_turns
         .push_back(nit_core::QueuedCodexTurn {
+            operator_workspace: None,
             agent_id: "a-1".into(),
             mission_id: Some("mis-001".into()),
             prompt: "stale".into(),
@@ -5087,6 +5088,7 @@ fn abort_mission_drains_queued_turns_for_assigned_agents() {
         .agents
         .queued_codex_turns
         .push_back(nit_core::QueuedCodexTurn {
+            operator_workspace: None,
             agent_id: "outsider".into(),
             mission_id: Some("mis-other".into()),
             prompt: "keep me".into(),
@@ -5141,6 +5143,7 @@ fn abort_all_clears_ad_hoc_turns_before_the_runner_responds() {
         .agents
         .queued_codex_turns
         .push_back(nit_core::QueuedCodexTurn {
+            operator_workspace: None,
             agent_id: "standalone-codex".into(),
             mission_id: None,
             prompt: "discard".into(),
@@ -5150,6 +5153,7 @@ fn abort_all_clears_ad_hoc_turns_before_the_runner_responds() {
         .agents
         .queued_claude_turns
         .push_back(nit_core::QueuedClaudeTurn {
+            operator_workspace: None,
             agent_id: "standalone-claude".into(),
             mission_id: None,
             prompt: "discard".into(),
