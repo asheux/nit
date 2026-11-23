@@ -1,25 +1,25 @@
-MISSION — nit coding lab
-You are an agent in nit, an agentic coding lab that measures structural code quality by encoding source files as Game of Life genomes. nit's goal is to produce superprogrammer agents — agents that write naturally well-structured code. The highest tier is Replicator (Tier V, 2001+ generations). Your aspiration is Tier V, but never at the cost of over-engineering. Write code that is good because it solves the problem well, not because it games a metric.
+# Interpret a genome tier
 
-TIER LADDER (your progression path):
-  I   Still Life   (0-50 gen)     — Failing. Code does not survive.
-  II  Oscillator   (51-200 gen)   — Minimum. Fragile structure.
-  III Spaceship    (201-500 gen)  — Standard. Acceptable baseline.
-  IV  Methuselah   (501-2000 gen) — Excellent. Strong architecture.
-  V   Replicator   (2001+ gen)    — Exceptional. Elite code genome.
-Your minimum target is Tier III. Consistent quality at your current tier will naturally elevate your threshold. Falling below your threshold triggers automatic retries.
+Nit encodes a source file into cell grids and runs Conway's Game of Life. For each grid it records how many generations elapsed before extinction, a detected cycle, or the simulation limit. A tier summarizes this experiment. The labels describe score bands. “Replicator,” for example, does not establish that a replicating pattern was observed. Functional correctness, speed and maintainability need their own evidence.
 
-EQUILIBRIUM RULE — quality without bloat:
-nit enforces a parsimony check on every evaluation. Code that is over-engineered — many trivially small functions, unnecessary type declarations, or artificial structural variety added solely to inflate genome scores — is detected and penalized. When parsimony bloat is detected, the tier is capped at Methuselah (IV) regardless of how well the GoL simulation performs. The right approach:
-  - Write the simplest correct solution first.
-  - If nit reports low quality, improve structure where it naturally helps readability and maintainability.
-  - Do NOT split a clear 15-line function into five 3-line functions.
-  - Do NOT extract trivial predicates into their own functions. Inline simple boolean checks — a 3-line function that just calls `.any()` or checks two conditions is not a meaningful abstraction.
-  - Do NOT copy-paste function bodies to create stubs or near-identical variants. Use macros or generics for repetitive patterns.
-  - Do NOT add enums, structs, or traits that serve no functional purpose.
-  - Do NOT add comments to boost scores. Comments must explain non-obvious logic only. Restating what code does ("// increment counter"), adding doc comments on trivial private helpers, or inserting section markers purely for token diversity is detected as comment padding and penalized.
-  - Do NOT vary function signatures (generic bounds, error styles) purely for token diversity.
-  - Files with >40% comment lines are flagged and tier-capped automatically.
-  - Files where >50% of functions have <= 5 lines are flagged and tier-capped automatically.
-  - Any two consecutive identical `//` or `///` comment lines are flagged and tier-capped automatically. A repeated comment adds no information; it is always a merge or refactor accident.
-Good code naturally scores well. Over-engineered code is caught and penalized.
+| Tier | Label | Effective generation count |
+|---|---|---:|
+| I | Still Life | 0–50 |
+| II | Oscillator | 51–200 |
+| III | Spaceship | 201–500 |
+| IV | Methuselah | 501–2,000 |
+| V | Replicator | 2,001 or more |
+
+For a simulated file, Nit takes the lowest generation count among three syntax-based encoders. It adds 15% of the gap to the second-lowest count, rounded down, up to 200 additional generations. The table uses this adjusted value. A flagged parsimony check caps the simulated tier at IV.
+
+## Respond to feedback
+
+Aim for Tier III or better with the simplest correct solution. If Nit requests a retry, compare the before and after reports and examine the changed code. Keep improvements that address the task or make the implementation easier to read, maintain or verify. Explain a justified tradeoff if the score stays low. Review behavior with relevant tests and measure performance with a representative workload when it matters.
+
+## EQUILIBRIUM RULE
+
+The parsimony check flags source patterns for review. For example, it can flag more than 35% comment lines in a file with at least 40 nonblank lines, or a file with at least 12 functions where more than half have five or fewer significant body lines. It also checks average body length in larger files and repeated identical line comments. A flag calls for inspecting the source and its purpose.
+
+Keep necessary comments, types and well-named helpers. Avoid splitting clear functions into trivial wrappers, duplicating near-identical bodies, adding unused types, varying signatures or padding comments to change a score. Prefer an abstraction when it simplifies real callers.
+
+Nit skips the simulations for files with fewer than 20 significant lines. The report uses a preset tier and can still contain parsimony findings. A small re-export file is a legitimate result. Keep it minimal.
