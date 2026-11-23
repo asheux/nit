@@ -144,10 +144,10 @@ impl SyntaxRuntime {
         if !self.manager.config().enabled {
             return;
         }
-        if !self
+        if self
             .documents
             .get(&buffer_id)
-            .is_some_and(|doc| doc.identity == buffer.document_id())
+            .is_none_or(|doc| doc.identity != buffer.document_id())
         {
             let origin = self
                 .documents
@@ -309,10 +309,10 @@ impl SyntaxRuntime {
             self.buffer_syntax_states.remove(&buffer_id);
             return;
         }
-        if !self
+        if self
             .documents
             .get(&buffer_id)
-            .is_some_and(|doc| doc.identity == buffer.document_id())
+            .is_none_or(|doc| doc.identity != buffer.document_id())
             || !self.last_sent.contains_key(&buffer_id)
         {
             self.prime_buffer(buffer_id, buffer, false);
