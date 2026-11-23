@@ -16,14 +16,32 @@ const SKILLS: &[(&str, &str, &str)] = &[
         "Targeted verification, code hygiene, and gate retries",
         include_str!("skills/swarm-verification.md"),
     ),
+    (
+        "swarm-propose",
+        "Landscape analysis, structural plans, and file handoff",
+        include_str!("skills/swarm-propose.md"),
+    ),
+    (
+        "swarm-judge",
+        "Proposal comparison and verdict scope",
+        include_str!("skills/swarm-judge.md"),
+    ),
+    (
+        "swarm-integrate",
+        "Implementation scope, blockers, and structural checks",
+        include_str!("skills/swarm-integrate.md"),
+    ),
 ];
 
-pub fn catalog() -> String {
-    SKILLS
-        .iter()
-        .map(|(name, summary, _)| format!("{name}  {summary}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+pub fn catalog() -> &'static str {
+    static INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        SKILLS
+            .iter()
+            .map(|(name, summary, _)| format!("{name}  {summary}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    &INDEX
 }
 
 pub fn read(name: &str) -> Option<&'static str> {
@@ -35,7 +53,7 @@ pub fn read(name: &str) -> Option<&'static str> {
 
 pub fn lookup(name: Option<&str>) -> Result<String, String> {
     match name {
-        None => Ok(catalog()),
+        None => Ok(catalog().into()),
         Some(name) => read(name).map(str::to_owned).ok_or_else(|| {
             format!(
                 "Unknown NitSkill {name:?}. Available skills:\n{}",
@@ -64,5 +82,33 @@ pub fn write_references(dir: &std::path::Path) -> std::io::Result<()> {
         let path = dir.join(format!("{name}.md"));
         nit_utils::write_atomic(&path, |file| file.write_all(body.as_bytes()))?;
     }
-    Ok(())
+    nit_utils::write_atomic(&dir.join("INDEX.md"), |file| {
+        file.write_all(catalog().as_bytes())
+    })
+}
+
+/// Share one directory across backends, including sessions without a shell or PATH entry.
+pub fn reference_dir() -> Option<&'static std::path::Path> {
+    static DIR: std::sync::LazyLock<Option<std::path::PathBuf>> = std::sync::LazyLock::new(|| {
+        let path = nit_utils::paths::cache_dir()?.join("nitskills");
+        write_references(&path).ok()?;
+        Some(path)
+    });
+    DIR.as_deref()
+}
+
+pub fn reference_hint() -> String {
+    if let Some(dir) = reference_dir() {
+        return format!(
+            "NitSkills: read INDEX.md or NAME.md in {} on demand.",
+            dir.display()
+        );
+    }
+    match std::env::current_exe() {
+        Ok(path) => format!(
+            "NitSkills: run the executable at {} with arguments skills [NAME].",
+            path.display()
+        ),
+        Err(_) => "NitSkills: use nit_skill or run nit skills [NAME].".into(),
+    }
 }

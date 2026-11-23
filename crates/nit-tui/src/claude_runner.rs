@@ -990,24 +990,13 @@ fn prepare_claude_command(
 }
 
 fn add_skill_references(args: &mut Vec<String>) {
-    // The same immutable read-only references serve cold and pooled sessions.
-    static DIR: std::sync::LazyLock<Option<PathBuf>> = std::sync::LazyLock::new(|| {
-        let path = nit_utils::paths::cache_dir()?.join("nitskills");
-        nit_core::skills::write_references(&path).ok()?;
-        Some(path)
-    });
-    if let Some(path) = DIR.as_ref() {
-        args.extend([
-            "--add-dir".into(),
-            path.display().to_string(),
-            "--append-system-prompt".into(),
-            format!(
-                "NitSkills: Read NAME.md in {} when needed. Available:\n{}",
-                path.display(),
-                nit_core::skills::catalog()
-            ),
-        ]);
+    if let Some(dir) = nit_core::skills::reference_dir() {
+        args.extend(["--add-dir".into(), dir.display().to_string()]);
     }
+    args.extend([
+        "--append-system-prompt".into(),
+        nit_core::skills::reference_hint(),
+    ]);
 }
 
 #[allow(clippy::too_many_arguments)]

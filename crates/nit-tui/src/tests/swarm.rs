@@ -7581,3 +7581,24 @@ mod scope_tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
+#[test]
+fn role_prompts_link_to_on_demand_playbooks() {
+    for role in ["propose", "judge", "integrate"] {
+        let task = make_task(role, "agent", Some(role), vec![]);
+        let prompt = wrap_task_prompt(
+            "Improve error reporting in src/parser.rs",
+            SwarmMissionKind::General,
+            &task,
+            None,
+            &["src/parser.rs".into()],
+            std::path::Path::new("."),
+            None,
+            false,
+        );
+        let name = format!("swarm-{role}");
+        let playbook = nit_core::skills::read(&name).expect("registered role playbook");
+        assert!(prompt.contains(&format!("NitSkill {name}")));
+        assert!(!prompt.contains(playbook.trim()));
+    }
+}

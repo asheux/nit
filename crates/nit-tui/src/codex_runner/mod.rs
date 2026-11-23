@@ -131,7 +131,11 @@ impl CodexRunner {
 
     /// Returns `true` if the command was accepted, `false` if the runner's
     /// channel is disconnected (runner shut down or crashed).
-    pub fn send(&self, command: CodexCommand) -> bool {
+    pub fn send(&self, mut command: CodexCommand) -> bool {
+        if let CodexCommand::RunTurn { prompt, .. } = &mut command {
+            prompt.push('\n');
+            prompt.push_str(&nit_core::skills::reference_hint());
+        }
         self.cmd_tx.send(command).is_ok()
     }
 
