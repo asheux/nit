@@ -4,6 +4,40 @@ use crate::{EngineKind, LanguageId, SyntaxEngine, SyntaxStatus, ViewportRange};
 use super::{make_viewport_request, poll_until, wait_for, wait_for_long, LONG_TIMEOUT};
 
 #[test]
+fn coalesced_edits_do_not_copy_line_colors_from_a_skipped_revision() {
+    let mut engine = TreeSitterEngine::new();
+    engine.schedule_rehighlight(super::make_request(
+        91,
+        1,
+        LanguageId::Rust,
+        "// old title\nfn main() {}\n",
+    ));
+    wait_for(&mut engine, 91, 1);
+
+    // Revision 2 changed the first line but never reached the worker.
+    // Only the edit from revision 2 to 3 is available.
+    let base = "fn title() {}\nfn main() {}\n";
+    let mut buffer = nit_core::Buffer::from_str("test.rs", base, None);
+    buffer.cursor.line = 1;
+    buffer.insert_char(' ');
+    let mut job = super::make_request(91, 3, LanguageId::Rust, &buffer.content_as_string());
+    job.full_reparse = false;
+    job.edits = buffer.take_pending_edits();
+    engine.schedule_rehighlight(job);
+    let snapshot = wait_for(&mut engine, 91, 3);
+    assert!(super::has_group(
+        &snapshot,
+        0,
+        crate::HighlightGroup::Function
+    ));
+    assert!(!super::has_group(
+        &snapshot,
+        0,
+        crate::HighlightGroup::Comment
+    ));
+}
+
+#[test]
 fn viewport_refresh_after_skipped_edit_uses_current_text() {
     let mut engine = TreeSitterEngine::new();
     let viewport = ViewportRange {

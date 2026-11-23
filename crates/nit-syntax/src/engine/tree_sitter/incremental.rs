@@ -21,7 +21,7 @@ use super::modes::collect_spans;
 /// snapshot.
 pub(super) fn incremental_highlight(
     prev: &HighlightSnapshot,
-    edited_old: Option<&Tree>,
+    edited_old: &Tree,
     tree: &Tree,
     cursor: &mut QueryCursor,
     job: &HighlightRequest,
@@ -103,27 +103,25 @@ fn carry_forward_lines(
 /// or when no previous content could be carried forward to it.
 fn compute_dirty_lines(
     copied: &[bool],
-    edited_old: Option<&Tree>,
+    edited_old: &Tree,
     tree: &Tree,
     offsets: &[usize],
     line_count: usize,
 ) -> Vec<bool> {
     let mut dirty = vec![false; line_count];
 
-    if let Some(old_tree) = edited_old {
-        for range in old_tree.changed_ranges(tree) {
-            if range.end_byte == 0 || line_count == 0 {
-                continue;
-            }
-            let start = find_line(offsets, range.start_byte).saturating_sub(1);
-            let end = cmp::min(
-                find_line(offsets, range.end_byte.saturating_sub(1)).saturating_add(1),
-                line_count.saturating_sub(1),
-            );
-            let bound = end.saturating_add(1).min(dirty.len());
-            if start < bound {
-                dirty[start..bound].fill(true);
-            }
+    for range in edited_old.changed_ranges(tree) {
+        if range.end_byte == 0 || line_count == 0 {
+            continue;
+        }
+        let start = find_line(offsets, range.start_byte).saturating_sub(1);
+        let end = cmp::min(
+            find_line(offsets, range.end_byte.saturating_sub(1)).saturating_add(1),
+            line_count.saturating_sub(1),
+        );
+        let bound = end.saturating_add(1).min(dirty.len());
+        if start < bound {
+            dirty[start..bound].fill(true);
         }
     }
 

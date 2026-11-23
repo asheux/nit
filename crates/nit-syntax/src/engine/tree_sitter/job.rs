@@ -195,12 +195,14 @@ fn highlight_job(
         ));
     };
 
-    let snapshot = if !has_injections && should_incremental_update(state, job) {
-        if let Some(prev) = state.snapshot.as_ref() {
-            incremental_highlight(prev, edited_old.as_ref(), &tree, &mut state.cursor, job)
-        } else {
-            full_highlight(highlighter, job)?
-        }
+    // Only a tree edited from the exact base revision can carry prior
+    // colors forward. A partial snapshot also has uncolored rows to fill.
+    let base = state
+        .snapshot
+        .as_ref()
+        .filter(|s| !has_injections && s.highlighted_range.is_none());
+    let snapshot = if let (Some(previous), Some(old_tree)) = (base, edited_old.as_ref()) {
+        incremental_highlight(previous, old_tree, &tree, &mut state.cursor, job)
     } else if job.viewport.is_some() {
         viewport_highlight(highlighter, &tree, job, &mut state.cursor)?
     } else {
@@ -240,10 +242,6 @@ fn parse_job_tree(state: &mut BufferState, job: &HighlightRequest) -> (Option<Tr
         .parse(job.text.as_bytes(), Some(&existing))
         .or(Some(existing));
     (tree, Some(edited_old))
-}
-
-pub(super) fn should_incremental_update(state: &BufferState, job: &HighlightRequest) -> bool {
-    !job.full_reparse && !job.edits.is_empty() && state.snapshot.is_some() && state.tree.is_some()
 }
 
 // Produces a no-span plain snapshot but stamps `EngineKind::TreeSitter` so the
