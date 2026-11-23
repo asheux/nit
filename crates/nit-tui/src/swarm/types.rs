@@ -742,10 +742,26 @@ impl SwarmTask {
         deps: Vec<String>,
         writes: bool,
     ) -> Self {
+        Self::pending(
+            id.into(),
+            agent_id.into(),
+            role.map(str::to_string),
+            deps,
+            writes,
+        )
+    }
+
+    pub(super) fn pending(
+        id: String,
+        agent_id: String,
+        role: Option<String>,
+        deps: Vec<String>,
+        writes: bool,
+    ) -> Self {
         Self {
-            id: id.into(),
-            agent_id: agent_id.into(),
-            role: role.map(str::to_string),
+            id,
+            agent_id,
+            role,
             title: String::new(),
             task_prompt: String::new(),
             deps,

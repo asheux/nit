@@ -201,3 +201,115 @@ fn sibling_tasks_on_one_lane_keep_separate_turns_and_receipts() {
     assert_eq!(receipt(&dir).task_id, "task-01");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn finished_writer_followup_waits_for_existing_work_then_gets_independent_review() {
+    let (mut rt, mut state, dir) = fixture();
+    {
+        let original = &mut rt.runs.get_mut(MID).unwrap().tasks[0];
+        original.role = Some("integrate".into());
+        original.writes = true;
+    }
+    let source = Source {
+        path: "src/fees.rs".into(),
+        ..Default::default()
+    };
+    rt.handle_event(
+        &mut state,
+        &AgentBusEvent::FileWrite {
+            agent_id: "a".into(),
+            mission_id: Some(MID.into()),
+            path: dir.join(&source.path),
+        },
+    );
+    rt.handle_event(&mut state, &completed("a"));
+    let original_output = rt.runs[MID].tasks[0].output.clone();
+    assert_eq!(rt.runs[MID].tasks[0].state, SwarmTaskState::Done);
+    let queued = rt
+        .queue_operator_followup(
+            &state,
+            MID,
+            None,
+            "Check the zero-item invoice",
+            Some(&source),
+        )
+        .unwrap();
+    assert!(queued.contains("followup-01") && queued.contains("b reviews"));
+    assert_eq!(rt.runs[MID].tasks[1].state, SwarmTaskState::Running);
+    assert_eq!(rt.runs[MID].tasks[2].state, SwarmTaskState::Pending);
+    assert_eq!(rt.runs[MID].tasks[3].deps, ["followup-01"]);
+    let dispatch = rt.handle_event(&mut state, &completed("b"));
+    assert_eq!(dispatch.len(), 1);
+    assert_eq!(dispatch[0].agent_id, "a");
+    assert_eq!(dispatch[0].task_role.as_deref(), Some("integrate"));
+    assert!(dispatch[0].prompt.contains("Check the zero-item invoice"));
+    assert_eq!(rt.runs[MID].tasks[0].output, original_output);
+    let (tx, rx) = std::sync::mpsc::channel();
+    report_provider_followup_input(&tx, "a", Some(MID), &dispatch[0].prompt);
+    rt.handle_event(&mut state, &rx.recv().unwrap());
+    let checked = rt.handle_event(&mut state, &completed("a"));
+    assert_eq!(receipt(&dir).status, Status::Delivered);
+    assert_eq!(checked.len(), 1);
+    assert_eq!(checked[0].agent_id, "b");
+    assert_eq!(checked[0].task_role.as_deref(), Some("review"));
+    assert!(checked[0].prompt.contains("Check the zero-item invoice"));
+    assert_eq!(rt.runs[MID].stage, SwarmStage::Executing);
+    rt.handle_event(&mut state, &completed("b"));
+    assert!(!rt
+        .runs
+        .get(MID)
+        .is_some_and(|r| r.stage == SwarmStage::Executing));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn followup_does_not_reopen_verification_or_create_an_unreviewable_write() {
+    let (mut rt, state, dir) = fixture();
+    {
+        let run = rt.runs.get_mut(MID).unwrap();
+        run.tasks[0].state = SwarmTaskState::Done;
+        run.tasks[0].writes = true;
+        run.tasks[1].role = Some("propose".into());
+    }
+    let before = rt.runs[MID].tasks.len();
+    assert!(rt
+        .queue_operator_followup(&state, MID, Some("task-00"), "More", None)
+        .unwrap_err()
+        .contains("reviewer"));
+    rt.runs.get_mut(MID).unwrap().stage = SwarmStage::Verifying;
+    assert!(rt
+        .queue_operator_followup(&state, MID, Some("task-00"), "More", None)
+        .is_err());
+    assert_eq!(rt.runs[MID].tasks.len(), before);
+    assert!(!directory(&dir, MID).exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deferred_writer_waits_for_repair_added_by_earlier_reviewer() {
+    let (mut rt, mut state, dir) = fixture();
+    let run = rt.runs.get_mut(MID).unwrap();
+    run.integrator_agent_id = Some("a".into());
+    run.tasks[0].writes = true;
+    run.tasks[0].state = SwarmTaskState::Done;
+    run.tasks[0].role = Some("integrate".into());
+    let note = "Check the boundary invoice";
+    rt.queue_operator_followup(&state, MID, Some("task-00"), note, None)
+        .unwrap();
+    let mut review = completed("b");
+    if let AgentBusEvent::TurnCompleted { message, .. } = &mut review {
+        *message = concat!("\u{60}\u{60}\u{60}json\n", r#"{"type":"swarm_artifacts","version":1,"task_id":"task-01","summary":"failure","artifacts":{"findings":[{"file":"src/fees.rs","issue":"Missing test"}]}}"#, "\n\u{60}\u{60}\u{60}\n<SWARM_TASK_COMPLETE>").into();
+    }
+    let repair = rt.handle_event(&mut state, &review);
+    assert_eq!(repair.len(), 1);
+    assert!(!repair[0].prompt.contains(note));
+    assert!(rt.runs[MID].tasks[2]
+        .deps
+        .iter()
+        .any(|id| id == "verifier-retry-task-01"));
+    assert_eq!(receipt(&dir).status, Status::Pending);
+    let next = rt.handle_event(&mut state, &completed("a"));
+    assert_eq!(next.len(), 1);
+    assert!(next[0].prompt.contains(note));
+    fs::remove_dir_all(dir).unwrap();
+}

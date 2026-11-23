@@ -37,6 +37,7 @@ pub(super) struct Inbox {
     root: PathBuf,
     entries: Vec<Receipt>,
     confirmed_input: BTreeSet<String>,
+    pub(super) deferred_writers: Vec<String>,
 }
 
 fn save(root: &Path, receipt: &Receipt) -> io::Result<()> {
@@ -57,7 +58,10 @@ fn transition(
     state: &mut AppState,
 ) {
     receipt.status = status;
-    receipt.detail = Some(detail.into());
+    receipt.detail = Some(match receipt.detail.take() {
+        Some(previous) => format!("{previous}. {detail}"),
+        None => detail.into(),
+    });
     if let Err(error) = save(dir, receipt) {
         push_system_message_to_mission(state, &receipt.mission_id, format!(
             "Follow-up {}: {detail}. Could not update disk receipt: {error}. Check the turn before resending.", receipt.id));
@@ -134,11 +138,16 @@ impl SwarmRuntime {
     }
 
     pub(crate) fn operator_followup_tasks(&self, mid: &str) -> Vec<String> {
-        self.runs
+        let Some(run) = self
+            .runs
             .get(mid)
-            .into_iter()
-            .flat_map(|run| &run.tasks)
-            .filter(|t| !t.state.is_terminal())
+            .filter(|run| run.stage == SwarmStage::Executing)
+        else {
+            return vec![];
+        };
+        run.tasks
+            .iter()
+            .filter(|t| !t.state.is_terminal() || super::finished_followup::available(run, t))
             .map(|t| t.id.clone())
             .collect()
     }
@@ -176,12 +185,20 @@ impl SwarmRuntime {
             })
             .map(|c| c.claimed_by.as_str())
             .collect();
+        let recorded = self
+            .task_writes
+            .get(mid)
+            .and_then(|paths| paths.get(&absolute));
         let mut owners = vec![];
-        for task in run
-            .tasks
-            .iter()
-            .filter(|t| t.writes && !t.state.is_terminal())
-        {
+        for task in run.tasks.iter().filter(|t| {
+            t.writes && (!t.state.is_terminal() || super::finished_followup::available(run, t))
+        }) {
+            if task.state.is_terminal() {
+                if recorded.is_some_and(|ids| ids.contains(&task.id)) {
+                    owners.push(task);
+                }
+                continue;
+            }
             let is_running = task.state == SwarmTaskState::Running;
             let written = is_running
                 && state
@@ -224,8 +241,10 @@ impl SwarmRuntime {
         let run = self.runs.get(mid).ok_or(
             "That mission is no longer running. Choose a live task or start a new mission.",
         )?;
-        if run.stage != SwarmStage::Executing {
-            return Err("This mission has no executing task graph. Wait for its plan or start a new mission.".into());
+        match run.stage {
+            SwarmStage::Planning => return Err("The mission is planning. Keep the draft and choose a task when its DAG appears.".into()),
+            SwarmStage::Verifying | SwarmStage::Synthesizing => return Err("The mission is verifying or reporting. Its tasks are closed. Keep the draft for a new mission.".into()),
+            SwarmStage::Executing => {}
         }
         if text.trim().is_empty() {
             return Err("Enter a follow-up before sending.".into());
@@ -256,34 +275,55 @@ impl SwarmRuntime {
                 self.operator_followup_tasks(mid).join(", ")
             )
         })?;
-        if task.state.is_terminal() {
-            return Err(format!(
-                "Task {id} is finished. Choose a live task or start a new mission."
-            ));
-        }
+        let successor = if task.state.is_terminal() {
+            Some(super::finished_followup::successor_tasks(run, task, text)?)
+        } else {
+            None
+        };
+        let recipient = successor.as_ref().map_or(task, |tasks| &tasks[0]);
         let inbox = self.followups.entry(mid.into()).or_insert_with(|| Inbox {
             id: unique_id(),
             root: run.spawn_cwd.clone(),
             entries: vec![],
             confirmed_input: BTreeSet::new(),
+            deferred_writers: Vec::new(),
         });
         let receipt = Receipt {
             id: unique_id(),
             run_id: inbox.id.clone(),
             mission_id: mid.into(),
-            task_id: task.id.clone(),
+            task_id: recipient.id.clone(),
             agent_id: task.agent_id.clone(),
             text: text.into(),
             source: source.cloned(),
             status: Status::Pending,
-            detail: None,
+            detail: successor.as_ref().map(|tasks| {
+                format!(
+                    "Continuation of {}; review assigned to {}",
+                    task.id, tasks[1].agent_id
+                )
+            }),
         };
         save(&inbox.root, &receipt).map_err(|e| format!("Could not save follow-up: {e}"))?;
-        let confirmation = format!(
-            "Queued for {} ({}) · {mid} · receipt {}",
-            task.id, task.agent_id, receipt.id
-        );
+        let confirmation = match &successor {
+            Some([writer, review]) => format!(
+                "Queued {} for {} after existing work · {} reviews · {mid} · receipt {}",
+                writer.id, writer.agent_id, review.agent_id, receipt.id
+            ),
+            None => format!(
+                "Queued for {} ({}) · {mid} · receipt {}",
+                task.id, task.agent_id, receipt.id
+            ),
+        };
         inbox.entries.push(receipt);
+        if let Some(tasks) = successor {
+            inbox.deferred_writers.push(tasks[0].id.clone());
+            self.runs
+                .get_mut(mid)
+                .expect("validated active mission")
+                .tasks
+                .extend(tasks);
+        }
         Ok(confirmation)
     }
 
@@ -432,13 +472,16 @@ impl SwarmRuntime {
     }
 
     pub(super) fn close_undelivered(&mut self, state: &mut AppState, mid: &str) {
-        let Some(inbox) = self.followups.get_mut(mid) else {
-            return;
-        };
         let active = self
             .runs
             .get(mid)
             .filter(|run| run.stage == SwarmStage::Executing);
+        if active.is_none() {
+            self.task_writes.remove(mid);
+        }
+        let Some(inbox) = self.followups.get_mut(mid) else {
+            return;
+        };
         for r in inbox
             .entries
             .iter_mut()

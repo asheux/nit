@@ -48,6 +48,11 @@ impl SwarmRuntime {
         }
 
         match event {
+            AgentBusEvent::FileWrite {
+                agent_id,
+                mission_id: Some(mid),
+                path,
+            } => self.record_task_write(mid, agent_id, path),
             AgentBusEvent::OperatorFollowupInput {
                 agent_id,
                 mission_id,
@@ -124,9 +129,16 @@ impl SwarmRuntime {
                 message,
                 self.legacy_planner,
             ),
-            SwarmStage::Executing => {
-                handle_completed_executing(state, outcome, &mut run, agent_id, message)
-            }
+            SwarmStage::Executing => handle_completed_executing(
+                state,
+                outcome,
+                &mut run,
+                agent_id,
+                message,
+                self.followups
+                    .get(mid)
+                    .map_or(&[], |inbox| inbox.deferred_writers.as_slice()),
+            ),
             SwarmStage::Verifying => {
                 handle_completed_verifying(state, outcome, &mut run, agent_id, message)
             }
@@ -718,6 +730,7 @@ fn handle_completed_executing(
     run: &mut SwarmRun,
     agent_id: &str,
     message: &str,
+    deferred_writers: &[String],
 ) -> RunFate {
     let agent_has_writes = state
         .genome_turn_modified
@@ -767,6 +780,7 @@ fn handle_completed_executing(
             run,
             state,
             &completed.task_id,
+            deferred_writers,
         ) {
             outcome.dispatches.push(dispatch);
             refresh_task_readiness(run);

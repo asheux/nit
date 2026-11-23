@@ -14,6 +14,7 @@ mod constants;
 mod dag;
 mod dashboard;
 mod fallback;
+mod finished_followup;
 mod gate_retry;
 mod graph_exec;
 pub mod intent;
@@ -56,6 +57,7 @@ mod followup_context_tests;
 
 pub struct SwarmRuntime {
     followups: HashMap<String, operator_followups::Inbox>,
+    task_writes: HashMap<String, finished_followup::TaskWrites>,
     runs: HashMap<String, SwarmRun>,
     completed_runs: HashMap<String, SwarmRun>,
     /// Resolved once at construction from `NIT_PLANNER_LEGACY`. When `true`,
@@ -75,6 +77,7 @@ impl Default for SwarmRuntime {
     fn default() -> Self {
         Self {
             followups: HashMap::new(),
+            task_writes: HashMap::new(),
             runs: HashMap::new(),
             completed_runs: HashMap::new(),
             legacy_planner: read_legacy_planner_env(),
