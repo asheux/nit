@@ -59,6 +59,10 @@ full key list is in `docs/KEYBINDINGS.md`.
 
 ## Agent Station (Codex/Claude/MCP)
 
+- Run `nit skills`, then `nit skills swarm-judge`. The list should name six references and the second command should print the judge playbook.
+- Open `:skills` in the station. Select a reference in Code Structural Quality, resize to 120 columns and check that its tabs stay reachable. In Agent Chat, submit `/skills swarm-judge` and check that the reference opens locally.
+- With a Codex CLI that offers `exec` only, launch with `--agents codex` and the default runtime. Ask the agent to explain one line from the active file. Open its reply in Artifacts and check it against the source.
+
 - Preconditions:
   - `codex` installed and on `$PATH` (for `--agents codex`)
   - `~/.codex/models_cache.json` present (seeds the Codex roster)
@@ -152,6 +156,10 @@ full key list is in `docs/KEYBINDINGS.md`.
 
 ## Editor + Notes
 
+- In a disposable Git worktree, stage an edit, make a second edit to the same file and create an untracked file. Open `:changes`. Select the tracked path and verify both patches against `git diff --cached` and `git diff`. Select the untracked path and open it with Enter. Switch to `:gol` and back with `:changes`.
+- Open a symlink to a file with mode `0700`, edit and save. Verify that the symlink survives, the target contains the edit and its mode is still `0700`.
+- Leave a buffer dirty and replace its backing file externally. The editor should report the conflict and keep the unsaved text. Open a second file, edit it and run `:wq`. Check that the first dirty buffer is still available.
+
 - Mode switching: `Esc` to Normal; `i` / `a` / `o` / `Shift+O` to Insert; `v` to Visual
   - Expect: vim-like modal behaviour for movement versus editing.
 - Editing: type in Insert mode; use `Backspace` / `Delete`; press `Enter` for newlines
@@ -166,6 +174,8 @@ full key list is in `docs/KEYBINDINGS.md`.
   - Expect: the character is inserted in Insert mode; in Normal mode the help overlay opens.
 
 ## Terminal (embedded shell)
+
+- Open the inline terminal, then focus the editor. Type and paste into the editor and check the saved file. Refocus the terminal, run `pwd`, open the shell popup with F4 and close it. Check that the inline shell still accepts input.
 
 - Open the popup: `F4` (or `Ctrl+Shift+T`)
   - Expect: a centered shell popup. `F4` again, or `Esc Esc`, closes it; the shell keeps running.

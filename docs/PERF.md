@@ -7,6 +7,21 @@ environment variables named here are listed in `docs/ENVIRONMENT.md`.
 
 ## TUI render performance
 
+### Interactive editor measurements
+
+The following measurements compare debug builds of `69657d0` and `ab9ab11` on the same Mac. Each build ran in its own 160×48 tmux session. The station opened a tracked 68,011-byte UTF-8 file with 2,001 lines of text. Input latency covers sending keys through tmux until the updated line first appeared in a pane capture. Each median uses 12 edits. The benchmark saved the file and checked its contents.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| One key to visible edit | 23.6 ms | 13.2 ms |
+| Three keys to visible edit | 39.4 ms | 13.2 ms |
+| Idle station, percent of one CPU core | 8.2% | 1.8% |
+| Idle eight-pane local session, percent of one CPU core | 14.7% | 0.3% |
+
+CPU figures use process CPU time over eight seconds for the station and six seconds for multipane, after allowing startup activity to settle. Terminal size, hardware, repository size and active agent output can change these results.
+
+The station batches up to 16 ready input events per frame. In Changes, with the simulation idle, it refreshes periodic information four times per second. Input and terminal activity can request an earlier frame. Multipane also repaints for input, PTY output and active agent turns.
+
 ### Frame cap (`NIT_TUI_FPS`)
 
 The single-pane and multipane event loops gate `terminal.draw` behind a
