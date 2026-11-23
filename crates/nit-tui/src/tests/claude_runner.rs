@@ -247,6 +247,13 @@ fn test_build_claude_args_basic() {
         None,
         &config,
     );
+    assert!(!has_arg(&args, "--strict-mcp-config"));
+    assert!(!has_arg(&args, "--tools"));
+    assert!(args.windows(2).any(|args| args
+        == [
+            "--allowedTools",
+            "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch",
+        ]));
     assert!(has_arg(&args, "-p"));
     assert!(has_arg(&args, "stream-json"));
     assert!(has_arg(&args, "claude-opus-4-6"));
@@ -291,7 +298,19 @@ fn test_build_claude_args_read_only_for_shadow_turns() {
         None,
         &config,
     );
-    assert!(args.contains(&"Read,Glob,Grep".to_string()));
+    assert!(args.windows(5).any(|args| args
+        == [
+            "--tools",
+            "Read,Glob,Grep",
+            "--allowedTools",
+            "Read,Glob,Grep",
+            "--strict-mcp-config",
+        ]));
+    if let Some(dir) = nit_core::skills::reference_dir() {
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--add-dir", &dir.display().to_string()]));
+    }
     assert!(!args
         .iter()
         .any(|a| a.contains("Write") || a.contains("Edit") || a.contains("Bash")));
@@ -439,6 +458,13 @@ fn pool_worker_args_carry_stream_json_input_format() {
         false,
     );
     let args = super::build_pool_worker_args(&key, &config);
+    assert!(!has_arg(&args, "--strict-mcp-config"));
+    assert!(!has_arg(&args, "--tools"));
+    assert!(args.windows(2).any(|args| args
+        == [
+            "--allowedTools",
+            "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch",
+        ]));
     assert!(has_arg(&args, "--input-format"));
     assert_eq!(
         args.iter().filter(|a| a.as_str() == "stream-json").count(),
@@ -457,7 +483,19 @@ fn pool_worker_args_honour_read_only_tool_allowlist() {
         true,
     );
     let args = super::build_pool_worker_args(&key, &config);
-    assert!(args.contains(&"Read,Glob,Grep".to_string()));
+    assert!(args.windows(5).any(|args| args
+        == [
+            "--tools",
+            "Read,Glob,Grep",
+            "--allowedTools",
+            "Read,Glob,Grep",
+            "--strict-mcp-config",
+        ]));
+    if let Some(dir) = nit_core::skills::reference_dir() {
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--add-dir", &dir.display().to_string()]));
+    }
     assert!(!args
         .iter()
         .any(|a| a.contains("Write") || a.contains("Edit") || a.contains("Bash")));

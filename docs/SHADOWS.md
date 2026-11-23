@@ -8,7 +8,7 @@ In Agent Ops → Roster, select a Codex or Claude model and press Enter. In Agen
 
 Nit sends the request to two advisory turns independently. A third compares their proposals, and a fourth reviews the chosen approach for missing files, edge cases and assumptions. The selected agent receives those outputs and your original request. A complete run therefore uses five model turns. The two proposals can run concurrently if the runner has capacity.
 
-The chat status moves through **Proposing**, **Judging**, **Reviewing** and **Finalizing**. Only the selected agent appears in the thread. Open Agent Ops → Artifacts → REPLY to read its answer. The advisory stages request read-only access. The final agent uses its usual permissions.
+The chat status moves through **Proposing**, **Judging**, **Reviewing** and **Finalizing**. Only the selected agent appears in the thread. Open Agent Ops → Artifacts → REPLY to read its answer. The advisory stages request read-only access. For Claude, Nit limits built-in tools to Read, Glob and Grep and excludes configured MCP servers. These tools can still read accessible files, including NitSkills references. The final agent uses its usual permissions.
 
 ## When it starts automatically
 

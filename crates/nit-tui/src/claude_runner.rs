@@ -1022,6 +1022,29 @@ fn add_skill_references(args: &mut Vec<String>) {
     ]);
 }
 
+fn add_tool_permissions(args: &mut Vec<String>, read_only: bool, config: &ClaudeRunnerConfig) {
+    if read_only {
+        args.extend([
+            "--tools".into(),
+            "Read,Glob,Grep".into(),
+            "--allowedTools".into(),
+            "Read,Glob,Grep".into(),
+            "--strict-mcp-config".into(),
+        ]);
+    } else if let Some(mode) = config
+        .permission_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--permission-mode".into());
+        args.push(mode.to_string());
+    } else {
+        args.push("--allowedTools".into());
+        args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_claude_args(
     agent_id: &str,
@@ -1066,25 +1089,7 @@ fn build_claude_args(
         args.push("--no-session-persistence".into());
     }
 
-    // Permission handling: auto-allow common tools for headless operation.
-    // Shadow/advisory turns restrict tools to read-only so the subprocess
-    // can't edit files or run commands regardless of what the prompt says.
-    if read_only {
-        args.push("--allowedTools".into());
-        args.push("Read,Glob,Grep".into());
-    } else if let Some(mode) = config
-        .permission_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        args.push("--permission-mode".into());
-        args.push(mode.to_string());
-    } else {
-        // Default: allow standard tools for autonomous operation.
-        args.push("--allowedTools".into());
-        args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
-    }
+    add_tool_permissions(&mut args, read_only, config);
 
     // Max turns to prevent runaway sessions. Role-aware: integrators
     // routinely need more budget because they run real verify loops
@@ -1400,21 +1405,7 @@ fn build_pool_worker_args(key: &WorkerKey, config: &ClaudeRunnerConfig) -> Vec<S
         "--no-session-persistence".into(),
     ];
     add_skill_references(&mut args);
-    if key.read_only {
-        args.push("--allowedTools".into());
-        args.push("Read,Glob,Grep".into());
-    } else if let Some(mode) = config
-        .permission_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        args.push("--permission-mode".into());
-        args.push(mode.to_string());
-    } else {
-        args.push("--allowedTools".into());
-        args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
-    }
+    add_tool_permissions(&mut args, key.read_only, config);
     args.push("--max-turns".into());
     args.push(DEFAULT_MAX_TURNS.to_string());
     args

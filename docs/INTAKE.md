@@ -16,6 +16,6 @@ To disable it for one launch, use `NIT_INTAKE_DISABLED=1 nit`. Ordinary Codex ch
 
 ## When the checklist is missing
 
-The preparatory turn requests read-only access. Nit accepts an addition only when the original prompt stays intact and the expected checklist heading follows it. A malformed reply, a failed backend call or the 30-second timeout causes the main agent to receive the original request. Look in Agent Ops → Diag for `intake.skipped`, `intake.timeout`, `intake.parse_failed`, `intake.prefix_violation` or `intake.turn_failed`.
+The preparatory turn requests read-only access. For Claude, Nit exposes the Read, Glob and Grep built-ins and excludes configured MCP servers. Nit accepts an addition only when the original prompt stays intact and the expected checklist heading follows it. A malformed reply, a failed backend call or the 30-second timeout causes the main agent to receive the original request. Look in Agent Ops → Diag for `intake.skipped`, `intake.timeout`, `intake.parse_failed`, `intake.prefix_violation` or `intake.turn_failed`.
 
 Use `/abort` to cancel before dispatch. Cancellation drops the deferred request. If the main agent already started, use its normal cancellation controls. [Agent keybindings](KEYBINDINGS.md)
