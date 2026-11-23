@@ -108,3 +108,18 @@ fn write_atomic_cleans_tmp_when_callback_panics() {
         "temp file must be cleaned up when the callback panics"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn atomic_replacement_preserves_restricted_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ScratchDir::new("fs_mode");
+    let path = dir.join("deploy.sh");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    nit_utils::write_atomic(&path, |w| w.write_all(b"new")).unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}

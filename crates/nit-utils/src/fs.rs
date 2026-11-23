@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,9 +39,35 @@ pub fn write_atomic<F>(path: &Path, f: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
 {
-    let tmp_path = tmp_sibling(path);
-    let file = File::create(&tmp_path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => {
+                let mode = meta.permissions().mode() & 0o777;
+                options.mode(mode);
+                Some(fs::Permissions::from_mode(mode))
+            }
+            Ok(_) => None,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        }
+    };
+    let (tmp_path, file) = loop {
+        let candidate = tmp_sibling(path);
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    };
     let mut guard = TempGuard(Some(&tmp_path));
+    #[cfg(unix)]
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)?;
+    }
     let mut writer = BufWriter::new(file);
 
     f(&mut writer)?;
