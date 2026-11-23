@@ -774,6 +774,18 @@ fn run_turn(
         }
     }
 
+    if report_terminal_error(
+        &stdout,
+        event_tx,
+        &model,
+        &mission_id,
+        resume_session_id.as_deref(),
+        started_at,
+    ) {
+        let _ = std::fs::remove_file(&out_file);
+        return;
+    }
+
     // Skip the subprocess-error path when WE killed the child — the
     // non-zero status is from our `child.kill()`, not from Claude
     // genuinely crashing.  The buffered stream-json still holds the
@@ -1561,6 +1573,16 @@ fn run_turn_pooled(
         }
     }
 
+    if report_terminal_error(
+        &stdout,
+        event_tx,
+        &model,
+        &mission_id,
+        resume_session_id.as_deref(),
+        started_at,
+    ) {
+        return;
+    }
     let message = extract_result_text_from_jsonl(&stdout).unwrap_or_default();
     if message.is_empty() {
         let session_id = extract_session_id_from_jsonl(&stdout);
@@ -1635,6 +1657,63 @@ fn run_turn_pooled(
         token_count,
         message,
     });
+}
+
+fn terminal_result_error(stdout: &[u8]) -> Option<String> {
+    let result = stdout
+        .rsplit(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find(is_stream_result_event)?;
+    let subtype = result["subtype"].as_str().unwrap_or_default();
+    if result["is_error"].as_bool() != Some(true) && !subtype.starts_with("error_") {
+        return None;
+    }
+    if let Some(message) = result["result"]
+        .as_str()
+        .filter(|msg| !msg.trim().is_empty())
+    {
+        return Some(message.to_string());
+    }
+    let errors: Vec<_> = result["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .collect();
+    Some(if errors.is_empty() {
+        format!("Claude reported an unsuccessful turn ({subtype}).")
+    } else {
+        errors.join(" | ")
+    })
+}
+
+fn report_terminal_error(
+    stdout: &[u8],
+    event_tx: &Sender<AgentBusEvent>,
+    model: &str,
+    mission_id: &Option<String>,
+    resume_session: Option<&str>,
+    started_at: Instant,
+) -> bool {
+    let Some(message) = terminal_result_error(stdout) else {
+        return false;
+    };
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Error,
+            endpoint: claude_endpoint_label(model, resume_session),
+            latency_ms: Some(elapsed_ms(started_at)),
+            last_error: Some(message.clone()),
+        },
+    });
+    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+        agent_id: model.to_string(),
+        mission_id: mission_id.clone(),
+        thread_id: extract_session_id_from_jsonl(stdout),
+        token_count: extract_token_count_from_jsonl(stdout),
+        message,
+    });
+    true
 }
 
 fn elapsed_ms(started_at: Instant) -> u64 {

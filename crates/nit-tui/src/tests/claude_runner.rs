@@ -487,3 +487,36 @@ fn claude_turn_idle_timeout_env_parsing() {
         None => std::env::remove_var(VAR),
     }
 }
+
+#[test]
+fn provider_error_result_never_completes_the_turn() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stream = br#"{"type":"assistant","message":"Starting"}
+{"type":"result","subtype":"success","is_error":true,"session_id":"abc","result":"Subscription access disabled"}"#;
+    assert!(report_terminal_error(
+        stream,
+        &tx,
+        "claude",
+        &None,
+        None,
+        Instant::now()
+    ));
+    assert!(matches!(
+        rx.recv().unwrap(),
+        AgentBusEvent::McpStatus { .. }
+    ));
+    assert!(
+        matches!(rx.recv().unwrap(), AgentBusEvent::TurnFailed { message, .. } if message == "Subscription access disabled")
+    );
+    assert_eq!(
+        terminal_result_error(
+            br#"{"type":"result","subtype":"error_during_execution","errors":["bad argument"]}"#
+        )
+        .as_deref(),
+        Some("bad argument")
+    );
+    assert!(terminal_result_error(
+        br#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#
+    )
+    .is_none());
+}
