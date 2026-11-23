@@ -68,6 +68,8 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
+    /// List saved swarm follow-ups in this workspace, or read one by receipt ID
+    Followups { id: Option<String> },
     /// Browse built-in NitSkills or read one by name
     Skills { name: Option<String> },
     /// Open the GoL visualizer

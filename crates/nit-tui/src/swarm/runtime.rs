@@ -349,6 +349,7 @@ impl SwarmRuntime {
             })
             .collect::<Vec<_>>();
         Some(SwarmPersistenceView {
+            workspace: run.spawn_cwd.clone(),
             mission_id: run.mission_id.clone(),
             template: run.template.label().into(),
             phase: stage_label(run).into(),
@@ -405,7 +406,17 @@ impl SwarmRuntime {
 
         let template_kind = super::parse_swarm_template(template.as_deref());
         let mission_kind = classify_swarm_mission_kind(&root_prompt, mission_kind);
-        let mission_id = next_mission_id(state);
+        let spawn_cwd = crate::app::resolve_dispatch_cwd(state, &planner_agent_id);
+        let mission_id = match next_mission_id(state, &spawn_cwd) {
+            Ok(id) => id,
+            Err(error) => {
+                state.status = Some(format!(
+                    "Cannot start swarm in {}: {error}",
+                    spawn_cwd.display()
+                ));
+                return None;
+            }
+        };
 
         scale_clones_preserving_roster(
             state,
@@ -417,6 +428,8 @@ impl SwarmRuntime {
         );
 
         if agents.len() < 2 {
+            let _ = std::fs::remove_dir(spawn_cwd.join(".nit/swarm").join(&mission_id));
+            state.status = Some("A swarm needs at least two available lanes.".into());
             return None;
         }
 
@@ -457,7 +470,6 @@ impl SwarmRuntime {
         // Every prompt builder, scope walk, gate detector and mission-memory
         // load is keyed off this — never `state.workspace_root` directly —
         // so a non-Rust pane doesn't inherit Rust gates from the harness.
-        let spawn_cwd = crate::app::resolve_dispatch_cwd(state, &planner_agent_id);
         let memory_hits =
             load_memory_hits(spawn_cwd.as_path(), &root_prompt, &[mission_id.as_str()]);
 
@@ -586,6 +598,8 @@ impl SwarmRuntime {
             }
         }
         self.completed_runs.insert(mission_id.to_string(), run);
+
+        self.close_undelivered(state, mission_id);
 
         // Drop queued turns for this mission's agents and bring queue_len
         // back to zero — otherwise the UI shows ghost queues.

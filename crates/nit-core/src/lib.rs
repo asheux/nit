@@ -8,6 +8,7 @@ pub mod arbiters;
 pub mod buffer;
 pub mod config;
 pub mod cursor;
+pub mod followups;
 pub mod genome_report;
 pub mod genome_report_cache;
 pub mod genome_storage;
@@ -83,7 +84,6 @@ pub use state::jumplist::{
     apply_step as jumplist_apply_step, step_back as jumplist_step_back,
     step_forward as jumplist_step_forward, JumpDirection, JumpStepOutcome,
 };
-pub use state::YankRegister;
 pub use state::{
     apply_action, apply_family_run_runtime_overrides, build_family_run_override_for_request,
     build_family_run_override_for_request_with_timings, build_family_run_override_from_base_config,

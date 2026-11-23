@@ -3,10 +3,43 @@ use nit_core::{AgentLane, AgentLaneKind, Buffer};
 use std::path::PathBuf;
 
 fn new_state() -> AppState {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = make_temp_workspace("swarm");
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     let editor = Buffer::empty("editor", None);
     let notes = Buffer::empty("notes", None);
     AppState::new(root, editor, notes)
+}
+
+#[test]
+fn separate_editors_reserve_distinct_missions_without_overwriting_an_archive() {
+    let root = make_temp_workspace("concurrent-missions");
+    let archived = root.join(".nit/swarm/mis-007");
+    std::fs::create_dir_all(&archived).unwrap();
+    std::fs::write(archived.join("run.json"), "earlier run").unwrap();
+    let mut ids = std::thread::scope(|s| {
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            threads.push(s.spawn(|| {
+                let state = AppState::new(
+                    root.clone(),
+                    Buffer::empty("e", None),
+                    Buffer::empty("n", None),
+                );
+                next_mission_id(&state, &root).unwrap()
+            }));
+        }
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    ids.sort();
+    assert_eq!(ids, ["mis-008", "mis-009", "mis-010", "mis-011"]);
+    assert_eq!(
+        std::fs::read_to_string(archived.join("run.json")).unwrap(),
+        "earlier run"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

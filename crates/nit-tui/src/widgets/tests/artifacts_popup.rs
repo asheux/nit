@@ -152,6 +152,7 @@ fn render_markdown_document_uses_builtin_syntax_highlighting_for_rust_blocks() {
 fn build_swarm_task_lines_renders_raw_markdown_output() {
     let theme = Theme::default();
     let view = SwarmPersistenceView {
+        workspace: ".".into(),
         mission_id: "mis-001".into(),
         template: "rust-ci".into(),
         phase: "EXEC".into(),

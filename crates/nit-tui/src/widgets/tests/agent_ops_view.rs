@@ -155,6 +155,7 @@ fn dag_lines_wrap_instead_of_ellipsis() {
 #[test]
 fn artifact_lines_include_task_and_verify_paths() {
     let view = SwarmPersistenceView {
+        workspace: ".".into(),
         mission_id: "mis-011".into(),
         template: "bulk".into(),
         phase: "REPORT".into(),

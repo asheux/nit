@@ -38,9 +38,12 @@ pub(crate) fn resolve_app_target(
         // resolver runs; the arms are here only to satisfy the
         // compiler's exhaustiveness check. If either is reached the
         // safe default is the lab fallback — same as the `None` case.
-        Some(Command::Multipane(_) | Command::Update | Command::Skills { .. }) => {
-            (LabId::from(lab), fallback_path)
-        }
+        Some(
+            Command::Multipane(_)
+            | Command::Update
+            | Command::Skills { .. }
+            | Command::Followups { .. },
+        ) => (LabId::from(lab), fallback_path),
         None => (LabId::from(lab), fallback_path),
     }
 }

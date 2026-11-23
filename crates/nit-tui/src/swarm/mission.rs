@@ -8,8 +8,31 @@ use super::{
     SwarmMissionKind, SwarmRun, SwarmSize, SwarmStage, SwarmTemplate, DEFAULT_SWARM_SIZE,
 };
 
-pub(super) fn next_mission_id(state: &AppState) -> String {
-    format!("mis-{:03}", state.agents.missions.len() + 1)
+pub(super) fn next_mission_id(
+    state: &AppState,
+    workspace: &std::path::Path,
+) -> std::io::Result<String> {
+    use std::fs;
+    let directory = nit_core::followups::ensure_directory(workspace, &[".nit", "swarm"])?;
+    let mut last = state.agents.missions.len();
+    let number = |id: &str| id.strip_prefix("mis-")?.parse::<usize>().ok();
+    for mission in &state.agents.missions {
+        last = last.max(number(&mission.id).unwrap_or(0));
+    }
+    for entry in fs::read_dir(&directory)? {
+        last = last.max(number(&entry?.file_name().to_string_lossy()).unwrap_or(0));
+    }
+    loop {
+        last = last
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("no mission IDs available"))?;
+        let id = format!("mis-{last:03}");
+        match fs::create_dir(directory.join(&id)) {
+            Ok(()) => return Ok(id),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub(super) fn swarm_mission_title(

@@ -674,6 +674,7 @@ pub struct SwarmTaskPersistenceView {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SwarmPersistenceView {
+    pub workspace: std::path::PathBuf,
     pub mission_id: String,
     pub template: String,
     pub phase: String,

@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+mod receipts;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
     AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus, AppState,
@@ -189,6 +190,9 @@ fn try_dispatch_swarm_command(
             maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
             maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
             true
+        } else if raw.split_whitespace().next() == Some("@swarm") {
+            // A failed team launch leaves the original command available for retry.
+            true
         } else {
             state.agents.chat_input = cmd.prompt.clone();
             sync_cursor_to_input_end(state);
@@ -196,8 +200,6 @@ fn try_dispatch_swarm_command(
         }
     } else {
         state.status = Some("@swarm requires at least one Codex or Claude agent".into());
-        state.agents.chat_input.clear();
-        state.agents.chat_input_cursor = 0;
         true
     }
 }
@@ -1356,14 +1358,14 @@ fn dispatch_swarm_followup(
     prompt: &str,
     prompt_msg_idx: usize,
 ) -> bool {
-    let swarm_config = mission_id
-        .as_deref()
     if mission_id
         .as_ref()
         .is_some_and(|mid| !swarm.mission_is_complete(mid))
     {
         return false;
     }
+    let swarm_config = mission_id
+        .as_deref()
         .and_then(|mid| swarm.session_config(mid));
     let Some(config) = swarm_config else {
         return false;
@@ -1422,6 +1424,9 @@ pub(crate) fn submit_chat_input_and_dispatch(
     if raw.trim().is_empty() {
         return false;
     }
+    if let Some(handled) = receipts::handle(state, swarm, &raw) {
+        return handled;
+    }
     if let Some(reply) = nit_core::skills::chat_reply(&raw) {
         let message = AgentMessage {
             at: timestamp_label(state),
@@ -1459,14 +1464,14 @@ pub(crate) fn submit_chat_input_and_dispatch(
         reset_chat_input_and_history_nav(state);
         return aborted;
     }
+    if let Some(result) = super::swarm_chat::submit_active_followup(state, swarm, &raw) {
+        return result;
+    }
     // Multiway routing (Phase 6/7), gated behind `NIT_MULTIWAY` (snapshotted into
     // `multiway_enabled` at run start). With the flag off this whole block is
     // skipped and `raw` flows untouched to the existing parsers below — the
     // byte-identical off-path (the FROZEN non-negotiable). Each branch only
     // records an intent on `state.agents`; the run loop owns the `MultiwayRuntime`,
-    if let Some(result) = super::swarm_chat::submit_active_followup(state, swarm, &raw) {
-        return result;
-    }
     // so this signature stays frozen for the shared multipane path.
     if state.agents.multiway_enabled {
         // Phase 6a: render the current DAG to an image on demand.
@@ -1839,12 +1844,12 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
         mark_ad_hoc_provenance_dirty(state, &agent_id);
     }
     state.agents.messages.push(message);
+    state.agents.swarm_draft_target = None;
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Info,
         source: "thread".into(),
         message: format!("sent message: {raw}"),
         at: timestamp_label(state),
-    state.agents.swarm_draft_target = None;
     });
     state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
     state.agents.chat_input.clear();

@@ -246,11 +246,7 @@ pub(super) fn write_swarm_run_provenance(
         return Ok(());
     };
 
-    let run_dir = state
-        .workspace_root
-        .join(".nit")
-        .join("swarm")
-        .join(mission_id);
+    let run_dir = view.workspace.join(".nit").join("swarm").join(mission_id);
     let tasks_dir = run_dir.join("tasks");
     let gates_dir = run_dir.join("gates");
     let report_dir = run_dir.join("report");
