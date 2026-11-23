@@ -377,3 +377,38 @@ fn dockerfile_parses_lowercase_directives_and_highlights_quoted_arguments() {
     assert!(has_group(&snapshot, 1, HighlightGroup::Keyword));
     assert!(has_group(&snapshot, 1, HighlightGroup::String));
 }
+
+#[test]
+fn jsx_and_tsx_highlight_tag_names_and_attributes_without_changing_ts_assertions() {
+    for (lang, source) in [
+        (
+            LanguageId::JavaScript,
+            "const item = <button title=\"go\">ok</button>;",
+        ),
+        (
+            LanguageId::Tsx,
+            "const item: JSX.Element = <button title=\"go\">ok</button>;",
+        ),
+        (LanguageId::TypeScript, "const cast = <number>value;"),
+    ] {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::LanguageRegistry::tree_sitter_language(lang).unwrap())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{lang:?}: {}",
+            tree.root_node().to_sexp()
+        );
+        if lang == LanguageId::TypeScript {
+            assert!(tree.root_node().to_sexp().contains("type_assertion"));
+            continue;
+        }
+        let mut engine = TreeSitterEngine::new();
+        engine.schedule_rehighlight(make_request(121, 1, lang, source));
+        let snap = wait_for(&mut engine, 121, 1);
+        assert!(has_group(&snap, 0, HighlightGroup::Tag), "{lang:?}");
+        assert!(has_group(&snap, 0, HighlightGroup::Attribute));
+    }
+}

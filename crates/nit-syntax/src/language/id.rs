@@ -15,6 +15,7 @@ pub enum LanguageId {
     Python,
     JavaScript,
     TypeScript,
+    Tsx,
     Markdown,
     Html,
     Css,
@@ -57,6 +58,7 @@ const LABELS: &[(LanguageId, &str)] = &[
     (LanguageId::Python, "python"),
     (LanguageId::JavaScript, "javascript"),
     (LanguageId::TypeScript, "typescript"),
+    (LanguageId::Tsx, "tsx"),
     (LanguageId::Markdown, "markdown"),
     (LanguageId::Html, "html"),
     (LanguageId::Css, "css"),
@@ -90,11 +92,12 @@ const LABELS: &[(LanguageId, &str)] = &[
 impl LanguageId {
     /// Every variant that ships a grammar slot (excludes [`Self::PlainText`]).
     /// Used by `captures::config` to build per-language highlight configs.
-    pub const ALL: [LanguageId; 32] = [
+    pub const ALL: [LanguageId; 33] = [
         Self::Rust,
         Self::Python,
         Self::JavaScript,
         Self::TypeScript,
+        Self::Tsx,
         Self::Markdown,
         Self::Html,
         Self::Css,

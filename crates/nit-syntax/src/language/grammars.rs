@@ -18,6 +18,7 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
         LanguageId::Python => Some(tree_sitter_python::LANGUAGE.into()),
         LanguageId::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
         LanguageId::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        LanguageId::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         LanguageId::Markdown => Some(tree_sitter_md::LANGUAGE.into()),
         LanguageId::Html => Some(tree_sitter_html::LANGUAGE.into()),
         LanguageId::Css => Some(tree_sitter_css::LANGUAGE.into()),
@@ -60,6 +61,22 @@ pub(crate) fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitte
     }
 }
 
+const TS_HIGHLIGHTS: &str = include_str!("../../queries/typescript/highlights.scm");
+static JS_HIGHLIGHTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+    )
+});
+static TSX_HIGHLIGHTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        TS_HIGHLIGHTS,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+    )
+});
+
 #[must_use]
 pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> {
     // Crates that ship `HIGHLIGHTS_QUERY` (sometimes `HIGHLIGHT_QUERY`)
@@ -68,8 +85,9 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
     match language_id {
         LanguageId::Rust => Some(include_str!("../../queries/rust/highlights.scm")),
         LanguageId::Python => Some(tree_sitter_python::HIGHLIGHTS_QUERY),
-        LanguageId::JavaScript => Some(tree_sitter_javascript::HIGHLIGHT_QUERY),
-        LanguageId::TypeScript => Some(include_str!("../../queries/typescript/highlights.scm")),
+        LanguageId::JavaScript => Some(&JS_HIGHLIGHTS),
+        LanguageId::TypeScript => Some(TS_HIGHLIGHTS),
+        LanguageId::Tsx => Some(&TSX_HIGHLIGHTS),
         LanguageId::Markdown => Some(include_str!("../../queries/markdown/highlights.scm")),
         LanguageId::Html => Some(tree_sitter_html::HIGHLIGHTS_QUERY),
         LanguageId::Css => Some(tree_sitter_css::HIGHLIGHTS_QUERY),

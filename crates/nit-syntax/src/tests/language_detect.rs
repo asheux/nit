@@ -73,7 +73,7 @@ fn detect_path_extension_lookup() {
     let cases: &[(&str, LanguageId)] = &[
         ("foo.rs", LanguageId::Rust),
         ("foo.py", LanguageId::Python),
-        ("foo.tsx", LanguageId::TypeScript),
+        ("foo.tsx", LanguageId::Tsx),
         ("foo.mjs", LanguageId::JavaScript),
         ("Cargo.toml", LanguageId::Toml),
         ("Makefile", LanguageId::Make),
@@ -217,6 +217,7 @@ fn registry_label(language: LanguageId) -> &'static str {
         LanguageId::Python => "python",
         LanguageId::JavaScript => "javascript",
         LanguageId::TypeScript => "typescript",
+        LanguageId::Tsx => "tsx",
         LanguageId::Markdown => "markdown",
         LanguageId::Html => "html",
         LanguageId::Css => "css",
