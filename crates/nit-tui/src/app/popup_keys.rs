@@ -776,11 +776,11 @@ pub fn maybe_open_artifact_popup_from_console_line_for_pane(
 /// Pin the original reply without changing the conversation or relying on a
 /// card offset that may move when another agent finishes.
 pub(super) fn open_station_reply_artifact(state: &mut AppState, message_idx: usize) -> bool {
-    if !state
+    if state
         .agents
         .messages
         .get(message_idx)
-        .is_some_and(|msg| msg.agent_id.is_some())
+        .is_none_or(|msg| msg.agent_id.is_none())
     {
         return false;
     }
