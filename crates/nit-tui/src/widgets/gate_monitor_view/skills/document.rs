@@ -1,19 +1,17 @@
 //! Formats the blocks used in the bundled playbooks. The catalog supplies the title.
 use crate::theme::Theme;
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(super) fn lines(body: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub(super) fn lines(body: &str, width: usize, theme: &Theme, heading: Color) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let title = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
+    let title = Style::default().fg(heading).add_modifier(Modifier::BOLD);
     let normal = Style::default().fg(theme.foreground);
     let mut source = body.trim().lines().map(str::trim).peekable();
     if source.peek().is_some_and(|line| line.starts_with("# ")) {
@@ -29,7 +27,7 @@ pub(super) fn lines(body: &str, width: usize, theme: &Theme) -> Vec<Line<'static
             while source.peek().is_some_and(|line| line.starts_with('|')) {
                 rows.push(source.next().unwrap());
             }
-            table(&rows, width, theme, &mut out);
+            table(&rows, width, theme, title, &mut out);
         } else if let Some(heading) = line
             .trim_start_matches('#')
             .strip_prefix(' ')
@@ -74,7 +72,7 @@ pub(super) fn lines(body: &str, width: usize, theme: &Theme) -> Vec<Line<'static
     out
 }
 
-fn table(rows: &[&str], width: usize, theme: &Theme, out: &mut Vec<Line<'static>>) {
+fn table(rows: &[&str], width: usize, theme: &Theme, key: Style, out: &mut Vec<Line<'static>>) {
     let cells: Vec<Vec<_>> = rows
         .iter()
         .map(|row| {
@@ -86,9 +84,6 @@ fn table(rows: &[&str], width: usize, theme: &Theme, out: &mut Vec<Line<'static>
         .filter(|r| !r.iter().all(|s| s.chars().all(|c| matches!(c, '-' | ':'))))
         .collect();
     let Some(headers) = cells.first() else { return };
-    let key = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
     let normal = Style::default().fg(theme.foreground);
     let widths: Vec<_> = (0..headers.len())
         .map(|i| {
@@ -154,7 +149,7 @@ fn wrap(text: &str, width: usize, base: Style, theme: &Theme) -> Vec<Line<'stati
             }
             let mut style = base;
             if code {
-                style = style.fg(theme.accent);
+                style = style.fg(theme.hl.string);
             }
             if bold {
                 style = style.add_modifier(Modifier::BOLD);

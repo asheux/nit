@@ -205,3 +205,51 @@ fn multiword_filter_matches_all_terms_across_fields_and_id_separators() {
     state.skill_filter = "research absentword".into();
     assert!(catalog::matches(&state).is_empty());
 }
+
+#[test]
+fn category_colors_follow_the_theme_across_catalog_reader_and_focus() {
+    let mut state = browser();
+    let mut theme = Theme::default();
+    theme.hl.macro_token = Color::Rgb(201, 155, 235);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    let locate = |buf: &ratatui::buffer::Buffer, text: &str| {
+        (0..area.height)
+            .find_map(|y| {
+                let row = (0..area.width)
+                    .map(|x| buf.get(x, y).symbol())
+                    .collect::<String>();
+                row.find(text).map(|i| (row[..i].chars().count() as u16, y))
+            })
+            .unwrap()
+    };
+    for (group, color) in [
+        ("Code structure", theme.hl.r#type),
+        ("Swarm workflow", theme.hl.macro_token),
+        ("Research", theme.hl.string),
+        ("Workspace", theme.hl.link),
+    ] {
+        let index = skills::definitions()
+            .iter()
+            .position(|s| s.group == group)
+            .unwrap();
+        select(&mut state, index);
+        term.draw(|f| render(f, inner(area), &mut state, &theme))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let (x, y) = locate(buf, group);
+        assert_eq!(buf.get(x, y).fg, color);
+        let (x, y) = locate(buf, "› ");
+        assert_eq!(buf.get(x, y).fg, theme.border_focused);
+        assert_eq!(buf.get(x + 2, y).fg, theme.foreground);
+        state.skill_reader_open = true;
+        term.draw(|f| render(f, inner(area), &mut state, &theme))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let (x, y) = locate(buf, entry(&state).title);
+        assert_eq!(buf.get(x, y).fg, color);
+        let (x, y) = locate(buf, "‹ Back");
+        assert!(buf.get(x, y).modifier.contains(Modifier::UNDERLINED));
+        state.skill_reader_open = false;
+    }
+}

@@ -5,7 +5,7 @@ use nit_core::{skills, AppKind, AppState, GateMonitorSubView, PaneId, UiSelectio
 use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
@@ -125,6 +125,16 @@ fn entry(state: &AppState) -> &'static skills::Skill {
     &entries[state.selected_skill.min(entries.len() - 1)]
 }
 
+fn group_color(group: &str, theme: &Theme) -> Color {
+    match group {
+        "Code structure" => theme.hl.r#type,
+        "Swarm workflow" => theme.hl.macro_token,
+        "Research" => theme.hl.string,
+        "Workspace" => theme.hl.link,
+        _ => theme.foreground,
+    }
+}
+
 struct DocumentCache {
     id: &'static str,
     width: usize,
@@ -139,7 +149,8 @@ thread_local! {
 fn document_rows(state: &AppState, theme: &Theme, width: usize) -> Rc<[Line<'static>]> {
     let skill = entry(state);
     let width = width.max(1);
-    let colors = [theme.title, theme.foreground, theme.accent];
+    let heading = group_color(skill.group, theme);
+    let colors = [heading, theme.foreground, theme.hl.string];
     DOCUMENT.with_borrow_mut(|cache| {
         if let Some(hit) = cache
             .as_ref()
@@ -150,9 +161,9 @@ fn document_rows(state: &AppState, theme: &Theme, width: usize) -> Rc<[Line<'sta
         let mut rows: Vec<_> =
             crate::widgets::picker_utils::wrap_text(&format!("nit skills {}", skill.name), width)
                 .into_iter()
-                .map(|line| Line::styled(line, Style::default().fg(theme.accent)))
+                .map(|line| Line::styled(line, Style::default().fg(theme.hl.string)))
                 .collect();
-        rows.extend(document::lines(skill.body, width, theme));
+        rows.extend(document::lines(skill.body, width, theme, heading));
         let rows = Rc::from(rows);
         *cache = Some(DocumentCache {
             id: skill.name,
@@ -192,7 +203,15 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
         .add_modifier(Modifier::BOLD);
     let regular = Style::default().fg(theme.foreground);
     let muted = Style::default().fg(theme.muted);
-    let selected = regular.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
+    let has_focus = focused(state);
+    let selected = regular
+        .bg(if has_focus {
+            theme.selection_bg
+        } else {
+            theme.cursor_line_bg
+        })
+        .add_modifier(Modifier::BOLD);
+    let entries = skills::definitions();
     let indices = catalog::matches(state);
     if r.filter.height > 0 {
         let mark = if state.skill_filter_editing {
@@ -230,21 +249,34 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
             let (marker, style) = if i == state.selected_skill {
                 ("›", selected)
             } else {
-                (" ", regular)
+                (" ", regular.fg(group_color(entries[i].group, theme)))
             };
             let name = crate::widgets::text_utils::truncate_with_ellipsis(
                 name,
                 usize::from(r.catalog.width.saturating_sub(2)),
             );
-            rows.push(Line::styled(
-                format!(
-                    "{marker} {name:<width$}",
-                    width = usize::from(r.catalog.width.saturating_sub(2))
+            let marker_style = if i == state.selected_skill && has_focus {
+                style.fg(theme.border_focused)
+            } else {
+                style
+            };
+            rows.push(Line::from(vec![
+                Span::styled(format!("{marker} "), marker_style),
+                Span::styled(
+                    format!(
+                        "{name:<width$}",
+                        width = usize::from(r.catalog.width.saturating_sub(2))
+                    ),
+                    style,
                 ),
-                style,
-            ));
+            ]));
         } else {
-            rows.push(Line::styled(name, muted.add_modifier(Modifier::BOLD)));
+            rows.push(Line::styled(
+                name,
+                Style::default()
+                    .fg(group_color(name, theme))
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
     }
     frame.render_widget(
@@ -260,13 +292,40 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
             r.divider,
         );
     }
-    let name = entry(state).title;
+    let skill = entry(state);
+    let heading = Style::default()
+        .fg(group_color(skill.group, theme))
+        .add_modifier(Modifier::BOLD);
+    let link = Style::default()
+        .fg(theme.hl.link)
+        .add_modifier(Modifier::UNDERLINED);
+    let available = usize::from(r.header.width);
+    let action_space = if state.skill_reader_open { 9 } else { 8 };
+    let name = crate::widgets::text_utils::truncate_with_ellipsis(
+        skill.title,
+        available.saturating_sub(action_space),
+    );
     let header = if state.skill_reader_open {
-        format!("‹ Back   {name}")
+        let mut spans = vec![
+            Span::styled("‹ Back", link),
+            Span::raw("   "),
+            Span::styled(name, heading),
+        ];
+        if spans.iter().map(Span::width).sum::<usize>() + 3 + Span::raw(skill.group).width()
+            <= usize::from(r.header.width)
+        {
+            spans.push(Span::styled(" · ", muted));
+            spans.push(Span::styled(skill.group, heading));
+        }
+        Line::from(spans)
     } else {
-        format!("{name}  ↗ Open")
+        Line::from(vec![
+            Span::styled(name, heading),
+            Span::raw("  "),
+            Span::styled("↗ Open", link),
+        ])
     };
-    frame.render_widget(Paragraph::new(header).style(accent), r.header);
+    frame.render_widget(Paragraph::new(header), r.header);
     if !r.body.is_empty() {
         let body = document_rows(state, theme, usize::from(r.body.width));
         state.gate_monitor_last_max_scroll = body.len().saturating_sub(usize::from(r.body.height));
