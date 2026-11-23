@@ -1023,3 +1023,85 @@ fn assert_claim_request_mints_id_and_honors_mood_ttl() {
     // No conflicts → no ClaimViolation signals.
     assert!(state.substrate.signals.is_empty());
 }
+
+fn discover_claude_models(state: &mut AppState, models: &[&str]) {
+    AgentBusEvent::BackendModelsLoaded {
+        backend: BackendKind::Claude,
+        models: models.iter().map(|model| model.to_string()).collect(),
+        error: None,
+        metadata: None,
+    }
+    .apply(state);
+}
+
+#[test]
+fn model_discovery_keeps_running_turns_clones_and_mission_assignments() {
+    let mut state = test_state();
+    for id in ["claude", "claude#clone-01", "sonnet", "prior"] {
+        add_claude_agent(&mut state, id);
+    }
+    state.agents.claude_models.push("prior".into());
+    state.agents.selected_agent = Some("claude".into());
+    state.agents.active_turns.remove("prior");
+    let prior = state.agents.agents_get_mut("prior").unwrap();
+    prior.status = AgentStatus::Idle;
+    prior.queue_len = 0;
+    state.agents.missions.push(MissionRecord {
+        id: "m".into(),
+        title: "mission".into(),
+        phase: MissionPhase::Plan,
+        swarm: true,
+        assigned_agents: vec!["prior".into()],
+        status: "LIVE".into(),
+        updated_at: String::new(),
+    });
+    discover_claude_models(&mut state, &["sonnet", "opus"]);
+    discover_claude_models(&mut state, &["sonnet", "opus"]);
+    for id in ["claude", "claude#clone-01", "sonnet"] {
+        let lane = state.agents.agents_get(id).unwrap();
+        assert_eq!(lane.status, AgentStatus::Running);
+        assert_eq!(lane.queue_len, 1);
+    }
+    assert_eq!(
+        state.agents.agents_get("prior").unwrap().status,
+        AgentStatus::Idle
+    );
+    assert_eq!(
+        state.agents.agents_get("opus").unwrap().status,
+        AgentStatus::Idle
+    );
+    assert_eq!(
+        state
+            .agents
+            .agents
+            .iter()
+            .filter(|l| l.id == "sonnet")
+            .count(),
+        1
+    );
+    assert_eq!(state.agents.selected_agent.as_deref(), Some("claude"));
+    assert_eq!(
+        state.agents.agents[state.agents.roster_selected].id,
+        "claude"
+    );
+}
+
+#[test]
+fn model_discovery_replaces_unused_placeholder_only_when_models_available() {
+    let mut state = test_state();
+    add_claude_agent(&mut state, "claude");
+    state.agents.active_turns.clear();
+    let lane = state.agents.agents_get_mut("claude").unwrap();
+    lane.status = AgentStatus::Idle;
+    lane.queue_len = 0;
+    state.agents.selected_agent = Some("claude".into());
+    discover_claude_models(&mut state, &[]);
+    assert!(state.agents.agents_get("claude").is_some());
+    discover_claude_models(&mut state, &["sonnet"]);
+    assert!(state.agents.agents_get("claude").is_none());
+    assert_eq!(state.agents.selected_agent.as_deref(), Some("sonnet"));
+    assert_eq!(
+        state.agents.agents_index.get("sonnet"),
+        Some(&state.agents.roster_selected)
+    );
+}

@@ -380,9 +380,9 @@ fn apply_backend_models_loaded(
     error: &Option<String>,
     metadata: Option<&BackendModelsMetadata>,
 ) {
-    let (display_name, kind) = match backend {
+    let (display_name, kind, previous_models) = match backend {
         BackendKind::Claude => {
-            state.agents.claude_models = models.to_vec();
+            let previous = std::mem::replace(&mut state.agents.claude_models, models.to_vec());
             state.agents.claude_models_error = error.clone();
             state.agents.claude_models_loading = false;
             // Replace per-model metadata maps in lock-step with the
@@ -399,26 +399,48 @@ fn apply_backend_models_loaded(
                 state.agents.claude_default_effort = meta.default_effort.clone();
                 state.agents.claude_selected_effort = meta.selected_effort.clone();
             }
-            ("Claude", AgentLaneKind::Claude)
+            ("Claude", AgentLaneKind::Claude, previous)
         }
         BackendKind::Gemini => {
-            state.agents.gemini_models = models.to_vec();
+            let previous = std::mem::replace(&mut state.agents.gemini_models, models.to_vec());
             state.agents.gemini_models_error = error.clone();
             state.agents.gemini_models_loading = false;
             // Gemini has no per-model effort/context map today, so
             // metadata is currently unused for this backend — the
             // field is reserved for symmetry with Claude.
-            ("Gemini", AgentLaneKind::Gemini)
+            ("Gemini", AgentLaneKind::Gemini, previous)
         }
     };
 
-    // Drop the placeholder lanes (if any) and re-materialize one row per
-    // discovered model. Mirrors `agents::sync_backend_model_lanes` in the
-    // `nit` crate; replicated here so the apply path doesn't have to dip
-    // back across the crate boundary at event time.
-    state.agents.agents.retain(|lane| lane.kind != kind);
+    if models.is_empty() {
+        // A failed probe still leaves the generic backend available for dispatch.
+        return;
+    }
+
+    // Discovery can finish after the user dispatched work. Runtime clones and
+    // lanes referenced by turns or missions must keep their IDs and state.
+    let roster = &mut state.agents;
+    roster.agents.retain(|lane| {
+        let catalog_lane =
+            lane.id.eq_ignore_ascii_case(display_name) || previous_models.contains(&lane.id);
+        lane.kind != kind
+            || !catalog_lane
+            || models.contains(&lane.id)
+            || lane.status != AgentStatus::Idle
+            || lane.queue_len > 0
+            || lane.current_mission.is_some()
+            || roster.active_turns.contains_key(&lane.id)
+            || roster.claude_session_ids.contains_key(&lane.id)
+            || roster
+                .missions
+                .iter()
+                .any(|mission| mission.assigned_agents.contains(&lane.id))
+    });
     for model_id in models {
-        state.agents.agents.push(AgentLane {
+        if roster.agents.iter().any(|lane| lane.id == *model_id) {
+            continue;
+        }
+        roster.agents.push(AgentLane {
             id: model_id.clone(),
             role: model_id.clone(),
             lane: display_name.into(),
@@ -432,13 +454,13 @@ fn apply_backend_models_loaded(
         });
     }
 
-    // Selection invariant: if the operator was selecting a stale placeholder
-    // row that got retained-out, point them at the first lane that still
-    // exists. Mirrors `restore_selection_after_expansion`.
-    if let Some(selected) = state.agents.selected_agent.clone() {
-        if !state.agents.agents.iter().any(|l| l.id == selected) {
-            state.agents.selected_agent = state.agents.agents.first().map(|l| l.id.clone());
-            state.agents.roster_selected = 0;
+    roster.rebuild_agents_index();
+    if let Some(selected) = roster.selected_agent.as_ref() {
+        if let Some(&index) = roster.agents_index.get(selected) {
+            roster.roster_selected = index;
+        } else {
+            roster.roster_selected = 0;
+            roster.selected_agent = roster.agents.first().map(|lane| lane.id.clone());
         }
     }
 }
