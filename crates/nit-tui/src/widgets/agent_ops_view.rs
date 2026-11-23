@@ -365,6 +365,29 @@ struct BackendInventoryRow {
     active: bool,
 }
 
+impl BackendInventoryRow {
+    fn labels(self) -> (&'static str, &'static str, &'static str) {
+        let name = match self.backend {
+            BackendInventoryBackend::Codex => "Codex",
+            BackendInventoryBackend::Claude => "Claude",
+            BackendInventoryBackend::Gemini => "Gemini",
+            BackendInventoryBackend::Local => "Local",
+        };
+        let availability = if self.backend == BackendInventoryBackend::Local {
+            "built-in"
+        } else if self.available {
+            "available"
+        } else {
+            "not found"
+        };
+        (
+            name,
+            availability,
+            if self.active { "active" } else { "idle" },
+        )
+    }
+}
+
 fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &Theme) -> Color {
     match backend {
         BackendInventoryBackend::Codex => theme.title,
@@ -1437,44 +1460,8 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
     let selected_row = roster_selected_row(state);
     let mut out = vec![" Backends".into()];
     for row in roster_backend_inventory_rows(state) {
-        match row.backend {
-            BackendInventoryBackend::Codex => out.push(roster_backend_line(
-                "Codex",
-                if row.available {
-                    "available"
-                } else {
-                    "not found"
-                },
-                if row.active { "active" } else { "idle" },
-                width,
-            )),
-            BackendInventoryBackend::Claude => out.push(roster_backend_line(
-                "Claude",
-                if row.available {
-                    "available"
-                } else {
-                    "not found"
-                },
-                if row.active { "active" } else { "idle" },
-                width,
-            )),
-            BackendInventoryBackend::Gemini => out.push(roster_backend_line(
-                "Gemini",
-                if row.available {
-                    "available"
-                } else {
-                    "not found"
-                },
-                if row.active { "active" } else { "idle" },
-                width,
-            )),
-            BackendInventoryBackend::Local => out.push(roster_backend_line(
-                "Local",
-                "built-in",
-                if row.active { "active" } else { "idle" },
-                width,
-            )),
-        }
+        let (name, primary, secondary) = row.labels();
+        out.push(roster_backend_line(name, primary, secondary, width));
     }
 
     out.push(String::new());
@@ -7091,26 +7078,23 @@ fn split_marker_and_columns(line: &str, widths: &[usize]) -> Option<(String, Vec
 }
 
 fn roster_backend_styled_line(
-    name: &str,
-    primary: &str,
-    secondary: &str,
-    accent: Color,
-    available: bool,
-    active: bool,
+    row: BackendInventoryRow,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let name_style = if available {
+    let (name, primary, secondary) = row.labels();
+    let accent = roster_inventory_backend_accent(row.backend, theme);
+    let name_style = if row.available {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         theme.status_idle_style()
     };
-    let primary_style = if available {
+    let primary_style = if row.available {
         Style::default().fg(theme.foreground)
     } else {
         theme.status_idle_style()
     };
-    let secondary_style = if active {
+    let secondary_style = if row.active {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         theme.status_idle_style()
@@ -7158,68 +7142,7 @@ fn roster_styled_line(
             ));
         };
 
-        match row.backend {
-            BackendInventoryBackend::Codex => {
-                return roster_backend_styled_line(
-                    "Codex",
-                    if row.available {
-                        "available"
-                    } else {
-                        "not found"
-                    },
-                    if row.active { "active" } else { "idle" },
-                    roster_inventory_backend_accent(row.backend, theme),
-                    row.available,
-                    row.active,
-                    usable,
-                    theme,
-                );
-            }
-            BackendInventoryBackend::Claude => {
-                return roster_backend_styled_line(
-                    "Claude",
-                    if row.available {
-                        "available"
-                    } else {
-                        "not found"
-                    },
-                    if row.active { "active" } else { "idle" },
-                    roster_inventory_backend_accent(row.backend, theme),
-                    row.available,
-                    row.active,
-                    usable,
-                    theme,
-                );
-            }
-            BackendInventoryBackend::Gemini => {
-                return roster_backend_styled_line(
-                    "Gemini",
-                    if row.available {
-                        "available"
-                    } else {
-                        "not found"
-                    },
-                    if row.active { "active" } else { "idle" },
-                    roster_inventory_backend_accent(row.backend, theme),
-                    row.available,
-                    row.active,
-                    usable,
-                    theme,
-                );
-            }
-            BackendInventoryBackend::Local => {
-                return roster_backend_styled_line(
-                    "Local",
-                    "built-in",
-                    if row.active { "active" } else { "idle" },
-                    roster_inventory_backend_accent(row.backend, theme),
-                    true,
-                    row.active,
-                    usable,
-                    theme,
-                );
-            }
-        }
+        return roster_backend_styled_line(*row, usable, theme);
     }
 
     if line_idx == offsets.blank_after_backends {
