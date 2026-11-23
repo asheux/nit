@@ -74,10 +74,13 @@ fn main() -> anyhow::Result<()> {
     let review_on_launch = resolved.is_none() && cli.lab.is_none();
     let (app_kind, target_path) =
         bootstrap::resolve_app_target(resolved, cli.lab.unwrap_or(cli::LabArg::Gol), cli.path);
-    let (mut app_state, theme, log_receiver) =
-        prepare_app_state(app_kind, target_path.as_deref(), backend_selection)?;
+    let (app_state, theme, log_receiver) = prepare_app_state(
+        app_kind,
+        target_path.as_deref(),
+        backend_selection,
+        review_on_launch,
+    )?;
 
-    app_state.show_change_review = review_on_launch;
     run(
         app_state,
         theme,
@@ -108,6 +111,7 @@ fn prepare_app_state(
     app_kind: AppKind,
     target_path: Option<&Path>,
     agents: Option<AgentsArg>,
+    review_on_launch: bool,
 ) -> anyhow::Result<(AppState, Theme, mpsc::Receiver<String>)> {
     let (workspace_root, editor_buffer) = match app_kind {
         AppKind::Gol => open_target_gol(target_path)?,
@@ -126,7 +130,7 @@ fn prepare_app_state(
     let notes_buffer = load_notes(&workspace_root);
     let mut state = AppState::new(workspace_root, editor_buffer, notes_buffer);
     state.substrate = SubstrateState::load(&state.workspace_root);
-    bootstrap::configure_app_state(&mut state, agents, app_kind, target_path);
+    bootstrap::configure_app_state(&mut state, agents, app_kind, target_path, review_on_launch);
 
     if app_kind == AppKind::Gol {
         bootstrap::init_gol_rules(&mut state);

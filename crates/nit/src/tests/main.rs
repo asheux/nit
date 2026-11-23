@@ -368,3 +368,61 @@ fn runtime_defaults_to_auto_and_preserves_explicit_mcp() {
     let explicit = Cli::try_parse_from(["nit", "--codex-runtime", "mcp"]).unwrap();
     assert!(matches!(explicit.codex_runtime, CodexRuntimeArg::Mcp));
 }
+
+#[test]
+fn launch_selects_skills_for_editor_sessions_and_preserves_editor_focus() {
+    use nit_core::{AppKind, AppState, Buffer, GateMonitorSubView, PaneId};
+
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let file = directory.join("Cargo.toml");
+    for (target, tree_open) in [(Some(&file), false), (Some(&directory), true), (None, true)] {
+        for (review, tab) in [
+            (true, GateMonitorSubView::Skills),
+            (false, GateMonitorSubView::Stats),
+        ] {
+            let mut state = AppState::new(
+                directory.clone(),
+                Buffer::empty("editor", None),
+                Buffer::empty("notes", None),
+            );
+            crate::bootstrap::configure_app_state(
+                &mut state,
+                Some(AgentsArg::Local),
+                AppKind::Gol,
+                target.map(PathBuf::as_path),
+                review,
+            );
+            assert_eq!(state.gate_monitor_sub_view, tab);
+            assert_eq!(state.show_change_review, review);
+            assert_eq!(state.focus, PaneId::Editor);
+            assert_eq!(state.file_tree.open, tree_open);
+            assert_eq!(state.selected_skill, 0);
+            assert!(!state.skill_reader_open);
+        }
+    }
+}
+
+#[test]
+fn switching_between_changes_and_gol_preserves_selected_quality_tab() {
+    use nit_core::{apply_action, Action, AppState, Buffer, GateMonitorSubView, PaneId};
+
+    let mut state = AppState::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        Buffer::empty("editor", None),
+        Buffer::empty("notes", None),
+    );
+    apply_action(
+        &mut state,
+        Action::GateMonitorSetSubView(GateMonitorSubView::FileScores),
+    );
+    for (command, review) in [("gol", false), ("changes", true)] {
+        apply_action(&mut state, Action::CommandPromptOpen);
+        for ch in command.chars() {
+            apply_action(&mut state, Action::CommandPromptInput(ch));
+        }
+        apply_action(&mut state, Action::CommandPromptExecute);
+        assert_eq!(state.show_change_review, review);
+        assert_eq!(state.gate_monitor_sub_view, GateMonitorSubView::FileScores);
+        assert_eq!(state.focus, PaneId::Visualizer);
+    }
+}

@@ -50,10 +50,15 @@ pub(crate) fn configure_app_state(
     agent_selection: Option<AgentsArg>,
     requested_kind: AppKind,
     target_path: Option<&Path>,
+    review_on_launch: bool,
 ) {
     state.agents = agents::init_agents(agent_selection.unwrap_or(AgentsArg::All));
     state.app_kind = requested_kind;
     state.mode = Mode::Normal;
+    state.show_change_review = review_on_launch;
+    if review_on_launch {
+        state.gate_monitor_sub_view = nit_core::GateMonitorSubView::Skills;
+    }
 
     migrate_legacy_notes(state);
 

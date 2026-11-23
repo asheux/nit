@@ -67,7 +67,7 @@ Use **:changes** to focus Git change review. Each row shows two Git status chara
 
 ## Read a built-in reference
 
-Type `:skills` to open the Skills catalog in **Code Structural Quality**. Choose a reference with Up/Down or `k`/`j` and press `Enter`, or click its name. Use the arrows, `PageUp`/`PageDown`, or the wheel to scroll. `Esc`, Left, or Backspace returns to your selection. Click the **Skills** tab to reopen the catalog.
+Opening a file or directory with `nit` shows the Skills catalog in **Code Structural Quality**. Focus starts in the editor or file tree. Type `:skills` to focus the catalog. Choose a reference with Up/Down or `k`/`j` and press `Enter`, or click its name. Use the arrows, `PageUp`/`PageDown`, or the wheel to scroll. `Esc`, Left, or Backspace returns to your selection. Click the **Skills** tab to reopen the catalog.
 
 ## Work with agents
 
