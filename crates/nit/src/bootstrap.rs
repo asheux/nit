@@ -52,7 +52,15 @@ pub(crate) fn configure_app_state(
     target_path: Option<&Path>,
     review_on_launch: bool,
 ) {
-    state.agents = agents::init_agents(agent_selection.unwrap_or(AgentsArg::All));
+    let selection = agent_selection.unwrap_or(AgentsArg::All);
+    state.agents = agents::init_agents(selection);
+    if matches!(selection, AgentsArg::All | AgentsArg::Codex) {
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Codex);
+        state.agents.roster_selected_backend = Some(nit_core::AgentLaneKind::Codex);
+    }
     state.app_kind = requested_kind;
     state.mode = Mode::Normal;
     state.show_change_review = review_on_launch;

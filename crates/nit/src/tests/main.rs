@@ -426,3 +426,69 @@ fn switching_between_changes_and_gol_preserves_selected_quality_tab() {
         assert_eq!(state.focus, PaneId::Visualizer);
     }
 }
+
+#[test]
+fn station_expands_codex_once_and_respects_user_choice_during_model_refresh() {
+    use nit_core::{AgentLaneKind, AppKind, AppState, Buffer};
+    let root = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(
+        root.path().to_owned(),
+        Buffer::empty("editor", None),
+        Buffer::empty("notes", None),
+    );
+    crate::bootstrap::configure_app_state(
+        &mut state,
+        Some(AgentsArg::Codex),
+        AppKind::Gol,
+        Some(root.path()),
+        true,
+    );
+    assert_eq!(
+        state.agents.roster_selected_backend,
+        Some(AgentLaneKind::Codex)
+    );
+    assert_eq!(
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [AgentLaneKind::Codex]
+    );
+    state
+        .agents
+        .roster_expanded_backend_kinds
+        .remove(&AgentLaneKind::Codex);
+    state
+        .agents
+        .roster_expanded_backend_kinds
+        .insert(AgentLaneKind::Claude);
+    state.agents.roster_selected_backend = Some(AgentLaneKind::Claude);
+    state.agents.claude_models = vec!["claude-test".into()];
+    sync_backend_model_lanes(&mut state.agents, AgentsArg::All);
+    assert_eq!(
+        state.agents.roster_selected_backend,
+        Some(AgentLaneKind::Claude)
+    );
+    assert!(state
+        .agents
+        .roster_expanded_backend_kinds
+        .contains(&AgentLaneKind::Claude));
+    assert!(!state
+        .agents
+        .roster_expanded_backend_kinds
+        .contains(&AgentLaneKind::Codex));
+    crate::bootstrap::configure_app_state(
+        &mut state,
+        Some(AgentsArg::Local),
+        AppKind::Gol,
+        Some(root.path()),
+        true,
+    );
+    assert!(state.agents.roster_expanded_backend_kinds.is_empty());
+    assert_ne!(
+        state.agents.roster_selected_backend,
+        Some(AgentLaneKind::Codex)
+    );
+}
