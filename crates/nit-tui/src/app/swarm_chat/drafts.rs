@@ -141,7 +141,7 @@ pub(crate) fn restore_on_start(state: &mut AppState) {
         let (initial, count) = (mp.focused, mp.panes.len());
         for i in 0..count {
             state.multipane.as_mut().unwrap().focused = i;
-            crate::multipane::dispatch::with_pane_aliased(state, i, &restore_one);
+            crate::multipane::dispatch::with_pane_aliased(state, i, restore_one);
         }
         state.multipane.as_mut().unwrap().focused = initial;
     } else {
