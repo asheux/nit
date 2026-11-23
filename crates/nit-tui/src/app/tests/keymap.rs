@@ -4,6 +4,50 @@
 use super::*;
 
 #[test]
+fn expanded_commit_patch_scrolls_without_changing_the_selected_commit() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Visualizer;
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let area = ratatui::layout::Rect::new(0, 0, 66, 19);
+    let mut press = |state: &mut AppState, key| {
+        handle_change_review_key(
+            KeyEvent::new(key, KeyModifiers::NONE),
+            state,
+            &mut syntax,
+            area,
+        )
+    };
+    state.change_review.commits = ["new", "old"]
+        .map(|label| nit_core::state::ReviewCommit {
+            id: label.into(),
+            subject: label.into(),
+            author: "Author".into(),
+            date: "2026-01-01".into(),
+        })
+        .to_vec();
+    assert!(press(&mut state, KeyCode::End));
+    assert_eq!(state.change_review.selected, 1);
+    state.change_review.preview_commit = Some("old".into());
+    state.change_review.preview = (0..100).map(|n| n.to_string()).collect();
+    assert!(press(&mut state, KeyCode::Enter));
+    assert!(state.change_review.history_patch_open);
+    assert!(press(&mut state, KeyCode::End));
+    assert!(state.change_review.scroll > 50);
+    assert!(press(&mut state, KeyCode::Home));
+    assert!(press(&mut state, KeyCode::Char('j')));
+    assert_eq!(state.change_review.scroll, 1);
+    assert_eq!(state.change_review.selected, 1);
+    assert!(press(&mut state, KeyCode::Esc));
+    assert!(!state.change_review.history_patch_open);
+    assert_eq!(state.focus, PaneId::Visualizer);
+    assert!(press(&mut state, KeyCode::Home));
+    assert_eq!(state.change_review.selected, 0);
+    assert!(press(&mut state, KeyCode::Right));
+    assert!(press(&mut state, KeyCode::Left));
+    assert!(!state.change_review.history_patch_open);
+}
+
+#[test]
 fn normal_editor_percent_matches_brackets_in_both_directions() {
     let mut state = state_for_test();
     state.focus = PaneId::Editor;

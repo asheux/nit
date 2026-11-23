@@ -70,9 +70,9 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+F", " content search"),
                 ("F4 / Ctrl+Shift+T", " open / close terminal popup"),
                 ("F1 / ?", " toggle help"),
-                (":changes", " review Git status and patches"),
+                (":changes", " review working changes or recent commits"),
                 (":gol", " open the GoL visualizer"),
-                (":skills", " open NitSkills in Code Structural Quality"),
+                (":skills", " browse agent playbooks"),
                 ("Tab/Shift+Tab", " focus panes"),
                 ("Ctrl+1/2/3", " focus Editor / Agent Ops / Agent Chat"),
                 (
@@ -83,6 +83,16 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+Enter", " run Petri Dish (active app)"),
                 ("Ctrl+^ / Ctrl+6", " show hidden Petri Dish"),
                 (":", " command prompt (Normal mode)"),
+            ],
+        ),
+        (
+            "CHANGES",
+            &[
+                ("j/k or ↑/↓", " select a changed file or a recent commit"),
+                ("PgUp/PgDn", " scroll the selected patch"),
+                ("Enter", " open the file or expand the commit patch"),
+                ("Esc / ←", " return from the expanded patch to the commit list"),
+                ("r", " refresh Git status from this checkout"),
             ],
         ),
         (

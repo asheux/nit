@@ -22,12 +22,29 @@ pub(super) fn handle_change_review_key(
         return false;
     }
     let review = &mut state.change_review;
+    let history = review.files.is_empty() && !review.commits.is_empty();
+    let expanded = history && review.history_patch_open;
+    let movement = match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(-1),
+        KeyCode::Down | KeyCode::Char('j') => Some(1),
+        KeyCode::Home => Some(isize::MIN),
+        KeyCode::End => Some(isize::MAX),
+        _ => None,
+    };
+    if let Some(delta) = movement {
+        if expanded {
+            scroll_patch(review, area, delta, false);
+        } else {
+            move_file(review, delta);
+        }
+        return true;
+    }
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => move_file(review, -1),
-        KeyCode::Down | KeyCode::Char('j') => move_file(review, 1),
         KeyCode::PageUp => scroll_patch(review, area, -1, true),
         KeyCode::PageDown => scroll_patch(review, area, 1, true),
         KeyCode::Char('r') => review.refresh = true,
+        KeyCode::Esc | KeyCode::Left if expanded => review.history_patch_open = false,
+        KeyCode::Enter | KeyCode::Right if history => review.history_patch_open = true,
         KeyCode::Enter => {
             if let Some(file) = review.files.get(review.selected) {
                 let path = review.root.join(&file.path);
