@@ -9,8 +9,16 @@ use super::diff;
 use super::types::{BufferEdit, LineDiffStatus};
 use super::undo_log::UndoLog;
 
+fn next_document_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Buffer {
+    #[serde(skip, default = "next_document_id")]
+    document_id: u64,
     pub(super) name: String,
     pub(super) path: Option<PathBuf>,
     #[serde(skip)]
@@ -55,6 +63,7 @@ impl Buffer {
     pub fn new(name: impl Into<String>, content: Rope, path: Option<PathBuf>) -> Self {
         let base_line_hashes = diff::rope_line_hashes(&content);
         Self {
+            document_id: next_document_id(),
             name: name.into(),
             path,
             saved_rope: content.clone(),
@@ -95,6 +104,8 @@ impl Buffer {
     }
 
     impl_buffer_thin_methods! {
+        /// Runtime identity survives edits and moves between buffer slots.
+        pub fn document_id(&self) -> u64 { self.document_id }
         pub fn name(&self) -> &str { &self.name }
         pub fn path(&self) -> Option<&PathBuf> { self.path.as_ref() }
         pub fn is_dirty(&self) -> bool { self.dirty }

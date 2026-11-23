@@ -106,3 +106,57 @@ fn idle_poll_preserves_cached_line_map_while_edit_is_pending() {
     runtime.poll_results(1, buffer.version());
     assert!(runtime.render_cache.contains_key(&1));
 }
+
+#[test]
+fn active_documents_are_primed_after_command_open_and_slot_replacement() {
+    use nit_core::{apply_action, Action, AppState};
+    use nit_syntax::LanguageId;
+    let root = std::env::temp_dir().join(format!("nit-syntax-switch-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("review.py");
+    std::fs::write(&file, "def review():\n    return 42\n").unwrap();
+    let editor = Buffer::from_str("review.rs", "fn review() {}", Some(root.join("review.rs")));
+    let mut state = AppState::new(root.clone(), editor, Buffer::empty("notes", None));
+    let mut cfg = default_config();
+    cfg.engine = nit_core::HighlightEngine::TreeSitter;
+    let mut runtime = SyntaxRuntime::new(cfg);
+    let first = state.active_editor_buffer_id;
+    runtime.prime_buffer(first, state.editor_buffer(), true);
+    apply_action(&mut state, Action::CommandPromptOpen);
+    state.command_line.as_mut().unwrap().input = "e review.py".into();
+    apply_action(&mut state, Action::CommandPromptExecute);
+    let second = state.active_editor_buffer_id;
+    assert_ne!(first, second);
+    fn wait(runtime: &mut SyntaxRuntime, id: usize, buf: &Buffer, language: LanguageId) {
+        runtime.tick(id, buf);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            runtime.poll_results(id, buf.version());
+            if let Some(snap) = runtime.snapshot_for(id, buf.version()) {
+                assert_eq!(snap.language, language);
+                assert!(!snap.per_line.is_empty());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    wait(
+        &mut runtime,
+        second,
+        state.editor_buffer(),
+        LanguageId::Python,
+    );
+    wait(&mut runtime, first, &state.buffers[first], LanguageId::Rust);
+    let previous = runtime.documents[&first].origin;
+    runtime.prime_buffer(first, &state.buffers[first], false); // An outstanding older request.
+    let replacement = Buffer::from_str("new.py", "class New: pass", Some(file));
+    assert_eq!(state.buffers[first].version(), replacement.version());
+    assert!(runtime
+        .render_snapshot_for(first, &replacement)
+        .snapshot
+        .is_none());
+    wait(&mut runtime, first, &replacement, LanguageId::Python);
+    assert!(runtime.documents[&first].origin > previous);
+    std::fs::remove_dir_all(root).unwrap();
+}

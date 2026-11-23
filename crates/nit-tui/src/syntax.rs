@@ -50,7 +50,24 @@ struct BufferSyntaxState {
     last_scroll_send: Option<Instant>,
 }
 
+// Buffer slots may be reused after closing a file. Give the next document
+// revisions above all previously submitted work for that slot.
+struct DocumentSlot {
+    identity: u64,
+    origin: u64,
+    latest_request: u64,
+}
+
+impl DocumentSlot {
+    fn request_version(&mut self, local: u64) -> u64 {
+        let version = self.origin + local;
+        self.latest_request = self.latest_request.max(version);
+        version
+    }
+}
+
 pub struct SyntaxRuntime {
+    documents: HashMap<usize, DocumentSlot>,
     manager: SyntaxManager,
     debouncers: HashMap<usize, Debouncer>,
     pending: HashMap<usize, PendingSyntax>,
@@ -76,6 +93,7 @@ impl SyntaxRuntime {
         let manager = SyntaxManager::new(config_to_syntax(config));
         Self {
             manager,
+            documents: HashMap::new(),
             debouncers: HashMap::new(),
             pending: HashMap::new(),
             snapshots: HashMap::new(),
@@ -126,6 +144,29 @@ impl SyntaxRuntime {
         if !self.manager.config().enabled {
             return;
         }
+        if !self
+            .documents
+            .get(&buffer_id)
+            .is_some_and(|doc| doc.identity == buffer.document_id())
+        {
+            let origin = self
+                .documents
+                .get(&buffer_id)
+                .map_or(0, |doc| doc.latest_request + 1);
+            self.documents.insert(
+                buffer_id,
+                DocumentSlot {
+                    identity: buffer.document_id(),
+                    origin,
+                    latest_request: origin,
+                },
+            );
+            self.snapshots.remove(&buffer_id);
+            self.edits_since_snapshot.remove(&buffer_id);
+            self.full_reparse_pending.remove(&buffer_id);
+            self.scroll_debouncers.remove(&buffer_id);
+            self.buffer_syntax_states.remove(&buffer_id);
+        }
         let max_spans_per_line = adaptive_max_spans_per_line(
             self.manager.config().max_spans_per_line,
             buffer.bytes_len(),
@@ -147,7 +188,11 @@ impl SyntaxRuntime {
         // Send request immediately - skip debounce for initial file load (instant syntax)
         let request = HighlightRequest {
             buffer_id,
-            version: buffer.version(),
+            version: self
+                .documents
+                .get_mut(&buffer_id)
+                .unwrap()
+                .request_version(buffer.version()),
             language,
             text: buffer.content_as_string(),
             edits: Vec::new(),
@@ -155,7 +200,7 @@ impl SyntaxRuntime {
             max_spans_per_line,
             viewport,
         };
-        self.last_sent.insert(buffer_id, request.version);
+        self.last_sent.insert(buffer_id, buffer.version());
         self.manager.schedule_rehighlight(request);
         if let Some(debouncer) = self.debouncers.get_mut(&buffer_id) {
             debouncer.clear();
@@ -180,7 +225,7 @@ impl SyntaxRuntime {
         if warmup {
             let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
             loop {
-                if let Some(snapshot) = self.manager.take_highlights(buffer_id, buffer.version()) {
+                if let Some(snapshot) = self.take_snapshot(buffer_id, buffer.version()) {
                     self.snapshots.insert(buffer_id, snapshot);
                     self.trim_edits_since_snapshot(buffer_id);
                     self.render_cache.remove(&buffer_id);
@@ -264,6 +309,15 @@ impl SyntaxRuntime {
             self.buffer_syntax_states.remove(&buffer_id);
             return;
         }
+        if !self
+            .documents
+            .get(&buffer_id)
+            .is_some_and(|doc| doc.identity == buffer.document_id())
+            || !self.last_sent.contains_key(&buffer_id)
+        {
+            self.prime_buffer(buffer_id, buffer, false);
+            return;
+        }
         self.tick_edits(buffer_id, buffer);
         self.tick_scroll(buffer_id, buffer);
     }
@@ -294,7 +348,11 @@ impl SyntaxRuntime {
 
         let request = HighlightRequest {
             buffer_id,
-            version: pending.version,
+            version: self
+                .documents
+                .get_mut(&buffer_id)
+                .unwrap()
+                .request_version(pending.version),
             language: pending.language,
             text,
             edits: pending.edits,
@@ -302,7 +360,7 @@ impl SyntaxRuntime {
             max_spans_per_line,
             viewport,
         };
-        self.last_sent.insert(buffer_id, request.version);
+        self.last_sent.insert(buffer_id, pending.version);
         log_rate_limited(&HIGHLIGHT_SCHEDULE_LOG, Duration::from_secs(1), || {
             tracing::debug!(
                 buffer_id,
@@ -367,7 +425,11 @@ impl SyntaxRuntime {
         );
         let request = HighlightRequest {
             buffer_id,
-            version: buffer.version(),
+            version: self
+                .documents
+                .get_mut(&buffer_id)
+                .unwrap()
+                .request_version(buffer.version()),
             language,
             text: buffer.content_as_string(),
             edits: Vec::new(),
@@ -375,15 +437,22 @@ impl SyntaxRuntime {
             max_spans_per_line: max_spans,
             viewport: Some(current_vp.clone()),
         };
-        self.last_sent.insert(buffer_id, request.version);
+        self.last_sent.insert(buffer_id, buffer.version());
         self.manager.schedule_rehighlight(request);
         state.last_sent_viewport = Some(current_vp);
         state.last_scroll_send = Some(Instant::now());
         debouncer.clear();
     }
 
+    fn take_snapshot(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
+        let origin = self.documents.get(&buffer_id)?.origin;
+        let mut snapshot = self.manager.take_highlights(buffer_id, origin + version)?;
+        snapshot.version = version;
+        Some(snapshot)
+    }
+
     pub fn poll_results(&mut self, buffer_id: usize, version: u64) {
-        if let Some(snapshot) = self.manager.take_highlights(buffer_id, version) {
+        if let Some(snapshot) = self.take_snapshot(buffer_id, version) {
             self.snapshots.insert(buffer_id, snapshot);
             self.trim_edits_since_snapshot(buffer_id);
             self.render_cache.remove(&buffer_id);
@@ -391,7 +460,7 @@ impl SyntaxRuntime {
         }
         if let Some(last_sent) = self.last_sent.get(&buffer_id).copied() {
             if last_sent != version {
-                if let Some(snapshot) = self.manager.take_highlights(buffer_id, last_sent) {
+                if let Some(snapshot) = self.take_snapshot(buffer_id, last_sent) {
                     self.snapshots.insert(buffer_id, snapshot);
                     self.trim_edits_since_snapshot(buffer_id);
                     self.render_cache.remove(&buffer_id);
@@ -411,6 +480,16 @@ impl SyntaxRuntime {
     }
 
     pub fn render_snapshot_for(&mut self, buffer_id: usize, buffer: &Buffer) -> RenderSnapshot<'_> {
+        if self
+            .documents
+            .get(&buffer_id)
+            .is_some_and(|doc| doc.identity != buffer.document_id())
+        {
+            return RenderSnapshot {
+                snapshot: None,
+                line_map: None,
+            };
+        }
         let buffer_version = buffer.version();
         let current_lines = buffer.lines_len();
         let Some(snapshot_version) = self.snapshots.get(&buffer_id).map(|s| s.version) else {

@@ -1348,8 +1348,6 @@ pub(super) fn apply_action_with_syntax(
         syntax.prime_buffer(after_notes_id, state.notes_buffer(), false);
     }
     if matches!(action, Action::OpenFile(_)) {
-        // Avoid blocking highlight warmup when hopping files from NITTree.
-        syntax.prime_buffer(after_editor_id, state.editor_buffer(), false);
         // Load git HEAD base for diff gutter indicators.
         if let Some(path) = state.editor_buffer().path() {
             if let Some(base) = git_head_content(path) {
