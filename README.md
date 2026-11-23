@@ -17,6 +17,18 @@ Install and sign in to the Codex or Claude CLI you want to use. Launch `nit --ag
 
 For independent reviews, `nit multipane --panes 4` opens four conversations. For a change with dependencies, a swarm can assign tasks, pass their results to another agent and collect verification evidence. Give it an acceptance criterion you can check. [Work with a team of agents](docs/SWARM.md) · [Use independent panes](docs/MULTIPANE.md)
 
+### Follow up while Codex is working
+
+To send a correction to an active Codex turn, launch Nit with the app-server runtime. This example keeps the review read-only.
+
+```sh
+nit --agents codex --codex-runtime app-server --codex-sandbox read-only .
+```
+
+Select a model in **Agent Ops**, ask a question, then send the correction in the same chat. When Codex confirms delivery to that turn, the follow-up receipt updates. Use `@queue MESSAGE` to reserve a separate turn. If the connection drops before confirmation, check the receipt and original reply before sending the correction again.
+
+This option requires a Codex CLI with `codex app-server` and a model your provider allows for that client. A model listed by the CLI can still be refused by the account. If the provider reports `model_not_found`, select an available model or relaunch with `--codex-runtime auto` and resend your question. The default runtime continues to use MCP when the CLI supports it, otherwise exec. App-server declines requests for additional permissions. [Agent permissions](docs/SECURITY.md)
+
 ### Give agents only the guidance they need
 
 The **NitSkills** pane opens with the editor. Its 16 playbooks cover code structure, swarm work, research and shared-workspace decisions. Select a playbook to preview it, or press Enter to read it in full. Click **Use skill** or press `a` to add a reference to your chat draft. When you send the draft, the agent can fetch that playbook. Swarm tasks receive their required instructions automatically. Use `:skills` to focus the pane, `/skills` in chat, or `nit skills NAME` from a shell. [Measured effect on prompt size](docs/PERF.md)

@@ -31,11 +31,13 @@ impl CodexLiveTurn {
     pub fn matches_task_turn(&self, nonce: &str) -> bool {
         !nonce.is_empty()
             && nonce.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
-            && self.origin.lines().any(|line| {
+            && self.origin.lines().rev().find_map(|line| {
                 line.strip_prefix("[nit-task-turn ")
                     .and_then(|s| s.strip_suffix(']'))
-                    == Some(nonce)
-            })
+                    .filter(|s| {
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                    })
+            }) == Some(nonce)
     }
     pub fn matches_chat_prompt(&self, text: &str) -> bool {
         crate::steering::matches_chat_prompt(&self.origin, text)
@@ -216,7 +218,7 @@ impl Rpc {
                 }
                 Ok(v) => self.reject_server_request(&v)?,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(_) => return Err(format!("Codex disconnected during {method}")),
+                Err(_) => return Err(format!("Codex app-server disconnected during {method}. Check codex app-server --help and your provider settings, or relaunch Nit with --codex-runtime auto.")),
             }
         }
     }
@@ -251,6 +253,20 @@ fn rpc_error(value: &Value) -> String {
 fn text_input(text: &str) -> Value {
     json!([{"type":"text","text":text,"text_elements":[]}])
 }
+fn provider_failure(message: String) -> String {
+    if !message.contains("model_not_found")
+        && !message.contains("not supported when using Codex with a ChatGPT account")
+    {
+        return message;
+    }
+    let parsed: Option<Value> = serde_json::from_str(&message).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .unwrap_or(&message);
+    format!("{detail} Choose another available model, or relaunch Nit with --codex-runtime auto and resend the prompt.")
+}
 struct Task<'a> {
     agent: &'a str,
     mission: &'a Option<String>,
@@ -266,16 +282,24 @@ impl Task<'_> {
     fn open(&self, rpc: &mut Rpc, stop: &ExecStop) -> Result<CodexLiveTurn, String> {
         rpc.request(1,"initialize",json!({"clientInfo":{"name":"nit","title":"Nit","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),stop)?;
         rpc.send(json!({"method":"initialized"}))?;
-        let mut p = json!({"cwd":self.cwd,"model":args::codex_model_slug_for_agent_id(self.agent)});
-        if let Some(s) = if self.read_only {
+        let cwd = self
+            .cwd
+            .to_str()
+            .ok_or("Codex app-server requires a UTF-8 working directory")?;
+        let mut p = json!({"cwd":cwd,"model":args::codex_model_slug_for_agent_id(self.agent)});
+        let sandbox = if self.read_only {
             Some("read-only")
         } else {
             self.config.sandbox.as_deref()
-        } {
-            p["sandbox"] = json!(s);
+        };
+        if let Some(sandbox) = sandbox {
+            p["sandbox"] = json!(sandbox);
         }
-        if let Some(a) = &self.config.approval_policy {
-            p["approvalPolicy"] = json!(a);
+        if let Some(policy) = &self.config.approval_policy {
+            if policy == "on-failure" {
+                return Err("Codex app-server does not support on-failure approvals. Relaunch with --codex-runtime exec or select another approval policy.".into());
+            }
+            p["approvalPolicy"] = json!(policy);
         }
         let method = if let Some(thread) = self.resume {
             p["threadId"] = json!(thread);
@@ -286,6 +310,24 @@ impl Task<'_> {
             "thread/start"
         };
         let result = rpc.request(2, method, p, stop)?;
+        if let Some(mode) = sandbox {
+            let expected = match mode {
+                "read-only" => "readOnly",
+                "workspace-write" => "workspaceWrite",
+                "danger-full-access" => "dangerFullAccess",
+                _ => return Err(format!("Unsupported Codex sandbox {mode}")),
+            };
+            if result.pointer("/sandbox/type").and_then(Value::as_str) != Some(expected) {
+                return Err(format!(
+                    "Codex did not confirm the requested {mode} sandbox; no turn started."
+                ));
+            }
+        }
+        if let Some(policy) = &self.config.approval_policy {
+            if result["approvalPolicy"].as_str() != Some(policy) {
+                return Err(format!("Codex did not confirm the requested {policy} approval policy; no turn started."));
+            }
+        }
         let thread = result
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -379,6 +421,28 @@ impl Pending {
         true
     }
 }
+/// A moved or deleted file may no longer exist. Resolve the nearest existing
+/// ancestor so a symlink cannot attribute another workspace's file to this one.
+fn workspace_change(cwd: &Path, raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() || raw.chars().any(char::is_control) {
+        return None;
+    }
+    let path = cwd.join(raw);
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    let root = cwd.canonicalize().ok()?;
+    let ancestor = path.ancestors().find(|p| p.symlink_metadata().is_ok())?;
+    let mut resolved = ancestor.canonicalize().ok()?;
+    let suffix = path.strip_prefix(ancestor).ok()?;
+    if !suffix.as_os_str().is_empty() {
+        resolved.push(suffix);
+    }
+    (resolved != root && resolved.starts_with(&root)).then_some(resolved)
+}
 struct Session<'a> {
     target: &'a CodexLiveTurn,
     events: &'a Sender<AgentBusEvent>,
@@ -386,15 +450,47 @@ struct Session<'a> {
     incoming: Receiver<Request>,
     tokens: Option<AgentTokenCount>,
     text: Option<String>,
+    written: HashSet<PathBuf>,
+    final_answer_seen: bool,
 }
 impl Session<'_> {
     fn observe_item(&mut self, item: &Value) {
+        // Older servers omit phase. Their terminal fallback must be the last
+        // completed item, never an intermediate answer before a later tool.
+        if !self.final_answer_seen {
+            self.text = None;
+        }
+        if item["type"] == "fileChange" && item["status"] == "completed" {
+            if let Some(changes) = item["changes"].as_array() {
+                for change in changes {
+                    for candidate in [
+                        change["path"].as_str(),
+                        change.pointer("/kind/move_path").and_then(Value::as_str),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if let Some(path) = workspace_change(&self.target.cwd, candidate) {
+                            if self.written.insert(path.clone()) {
+                                let _ = self.events.send(AgentBusEvent::FileWrite {
+                                    agent_id: self.target.agent_id.clone(),
+                                    mission_id: self.target.mission_id.clone(),
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if item["type"] == "agentMessage"
             && item
                 .get("phase")
                 .and_then(Value::as_str)
                 .is_none_or(|p| p == "final_answer")
         {
+            self.final_answer_seen = item["phase"].as_str() == Some("final_answer");
             self.text = item["text"]
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
@@ -546,6 +642,7 @@ pub(super) fn run(
     cancel: Arc<ExecStop>,
     routes: LiveRoutes,
 ) {
+    let mut connected = false;
     let mut thread_id = resume.clone();
     let mut token_count = None;
     let run = (|| {
@@ -562,7 +659,8 @@ pub(super) fn run(
             config: &config,
         };
         let target = task.open(&mut rpc, &cancel)?;
-        thread_id = Some(target.thread_id.clone());
+        connected = true;
+        thread_id = (persist || resume.is_some()).then(|| target.thread_id.clone());
         crate::swarm::report_provider_followup_input(events, &agent, mission.as_deref(), &prompt);
         let (tx, rx) = mpsc::sync_channel(8);
         routes
@@ -585,6 +683,8 @@ pub(super) fn run(
             incoming: rx,
             tokens: None,
             text: None,
+            written: Default::default(),
+            final_answer_seen: false,
         };
         let result = session.drive(&mut rpc);
         routes.0.lock().expect("Codex routes").remove(&agent);
@@ -594,6 +694,23 @@ pub(super) fn run(
         token_count = session.tokens.take();
         result
     })();
+    if !connected {
+        if let Err(message) = &run {
+            let aborted = message == nit_core::OPERATOR_CANCEL_TURN_MESSAGE;
+            let _ = events.send(AgentBusEvent::McpStatus {
+                status: nit_core::McpStatus {
+                    state: if aborted {
+                        nit_core::McpConnectionState::Disconnected
+                    } else {
+                        nit_core::McpConnectionState::Error
+                    },
+                    endpoint: "codex app-server (stdio)".into(),
+                    latency_ms: None,
+                    last_error: (!aborted).then(|| message.to_owned()),
+                },
+            });
+        }
+    }
     let event = match run {
         Ok(message) => AgentBusEvent::TurnCompleted {
             agent_id: agent,
@@ -607,7 +724,7 @@ pub(super) fn run(
             mission_id: mission,
             thread_id,
             token_count,
-            message,
+            message: provider_failure(message),
         },
     };
     let _ = events.send(event);
