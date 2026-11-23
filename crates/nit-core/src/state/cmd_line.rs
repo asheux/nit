@@ -247,6 +247,8 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     if tokens.as_slice() == ["skills"] && state.app_kind == AppKind::Gol {
         state.gate_monitor_sub_view = crate::GateMonitorSubView::Skills;
         state.skill_reader_open = false;
+        state.skill_filter.clear();
+        state.skill_filter_editing = false;
         state.selected_skill = 0;
         state.ui_selection = None;
         state.gate_monitor_scroll = 0;

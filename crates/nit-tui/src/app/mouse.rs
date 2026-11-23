@@ -248,6 +248,9 @@ fn scroll_main_layout_panes(
         return true;
     }
     if point_in_rect(mouse.column, mouse.row, layout.gate) {
+        if gate_monitor_view::skills::wheel(state, layout.gate, point, delta) {
+            return true;
+        }
         // Prefer the cached max_scroll populated during render. Fall back to
         // rebuilding the full genome report only when no render has run since
         // the panel became visible.

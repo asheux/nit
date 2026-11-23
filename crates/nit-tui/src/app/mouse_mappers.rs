@@ -783,6 +783,14 @@ pub(super) fn map_visualizer_side_mouse(
     Some((line_idx, col, text_lines))
 }
 
+fn gate_document_rect(state: &AppState, gate: Rect) -> Rect {
+    if gate_monitor_view::skills::active(state) {
+        gate_monitor_view::skills::document_area(state, gate)
+    } else {
+        Block::default().borders(Borders::ALL).inner(gate)
+    }
+}
+
 pub(super) fn map_gate_monitor_mouse(
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
@@ -791,7 +799,7 @@ pub(super) fn map_gate_monitor_mouse(
     clamp: bool,
 ) -> Option<(usize, usize, Vec<String>)> {
     let layout = layout::split(screen);
-    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+    let inner = gate_document_rect(state, layout.gate);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
@@ -834,7 +842,7 @@ pub(crate) fn auto_scroll_gate_monitor_for_drag(
     state: &mut AppState,
 ) {
     let layout = layout::split(screen);
-    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+    let inner = gate_document_rect(state, layout.gate);
     if inner.height == 0 {
         return;
     }

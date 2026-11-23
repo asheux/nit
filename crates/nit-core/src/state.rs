@@ -422,6 +422,10 @@ pub struct AppState {
     pub selected_skill: usize,
     #[serde(skip)]
     pub skill_reader_open: bool,
+    #[serde(skip)]
+    pub skill_filter: String,
+    #[serde(skip)]
+    pub skill_filter_editing: bool,
     /// Active tab in the structural quality pane.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
@@ -850,6 +854,8 @@ impl AppState {
             gate_monitor_scroll: 0,
             selected_skill: 0,
             skill_reader_open: false,
+            skill_filter: String::new(),
+            skill_filter_editing: false,
             gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
             show_substrate_overlay: false,

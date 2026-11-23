@@ -159,6 +159,7 @@ pub fn render(
         .and_then(|p| state.genome_reports.get(p));
 
     let title_prefix = match genome_report {
+        _ if state.gate_monitor_sub_view == GateMonitorSubView::Skills => " NITSKILLS ".to_owned(),
         Some(report) => format!(
             " CODE STRUCTURAL QUALITY [{}x{}] ",
             report.grid_size, report.grid_size,
@@ -173,7 +174,7 @@ pub fn render(
         .fg(theme.background)
         .bg(title_color)
         .add_modifier(Modifier::BOLD);
-    let btn_inactive = Style::default().fg(title_color).add_modifier(Modifier::DIM);
+    let btn_inactive = theme.status_idle_style();
     let sub_view = state.gate_monitor_sub_view;
     let eval_label = footer_eval_label(state, area.width);
     let scanning = state.agents.workspace_scan_progress.is_some();
@@ -183,7 +184,7 @@ pub fn render(
     // genome scan of every file in the workspace — rather than just
     // switching sub-views.
     //   - amber (warning): scan in flight; "working, leave me alone"
-    //   - muted border-on-bg + DIM: cache is clean; clicking re-verifies
+    //   - muted text: cache is clean; clicking re-verifies
     //     but probably finds nothing
     //   - green (success): ready to evaluate; "click me to scan"
     let eval_style = if scanning {
@@ -192,10 +193,7 @@ pub fn render(
             .bg(theme.warning)
             .add_modifier(Modifier::BOLD)
     } else if clean {
-        Style::default()
-            .fg(theme.border)
-            .bg(theme.background)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style().bg(theme.background)
     } else {
         Style::default()
             .fg(theme.background)
@@ -239,7 +237,7 @@ pub fn render(
     }
 
     let lines = match state.gate_monitor_sub_view {
-        GateMonitorSubView::Skills => skills::lines(state, theme, inner.width as usize),
+        GateMonitorSubView::Skills => return skills::render(frame, inner, state, theme),
         GateMonitorSubView::Stats => {
             build_lines_genome(state, genome_report, theme, inner.width as usize)
         }
@@ -315,10 +313,8 @@ fn build_lines_genome(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
+    let dim_style = theme.status_idle_style();
     let Some(report) = report else {
         return vec![
             Line::from(""),
@@ -619,12 +615,7 @@ fn build_tier_bar(tier: nit_core::GenomeTier, width: usize, theme: &Theme) -> Li
 
     Line::from(vec![
         Span::styled("━".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled(
-            "╌".repeat(empty),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("╌".repeat(empty), theme.status_idle_style()),
     ])
 }
 
@@ -649,15 +640,10 @@ fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Lin
     Line::from(vec![
         Span::styled(
             pad_to_width(label, STATS_GAUGE_LABEL_WIDTH),
-            Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            theme.status_idle_style(),
         ),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled(
-            "░".repeat(empty),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("░".repeat(empty), theme.status_idle_style()),
         Span::styled(format!(" {num_str}"), Style::default().fg(theme.foreground)),
     ])
 }
@@ -686,18 +672,13 @@ fn build_encoder_line(
     let name_style = if is_ast {
         Style::default().fg(theme.title_focused)
     } else {
-        Style::default().fg(theme.title).add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     };
 
     Line::from(vec![
         Span::styled(pad_to_width(name, STATS_LABEL_WIDTH), name_style),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled(
-            "░".repeat(empty),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("░".repeat(empty), theme.status_idle_style()),
         Span::styled(
             format!(" {gen_str}"),
             Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
@@ -732,15 +713,10 @@ fn build_density_line(
     let mut spans = vec![
         Span::styled(
             pad_to_width(name, STATS_LABEL_WIDTH),
-            Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            theme.status_idle_style(),
         ),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled(
-            "░".repeat(empty),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("░".repeat(empty), theme.status_idle_style()),
         Span::styled(
             format!(" {val_str}"),
             Style::default().fg(if over_threshold {
@@ -768,9 +744,7 @@ fn build_sim_detail_line(
 ) -> Line<'static> {
     let name = encoder_short_name(score.encoder);
     let gen_color = gen_color(score.generations_survived, theme);
-    let dim = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim = theme.status_idle_style();
 
     let cycle_str = match score.cycle_period {
         Some(p) => format!("period={p}"),
@@ -787,7 +761,7 @@ fn build_sim_detail_line(
     Line::from(vec![
         Span::styled(
             pad_to_width(name, STATS_LABEL_WIDTH),
-            Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            theme.status_idle_style(),
         ),
         Span::styled(
             format!("generations={:<5}", score.generations_survived),
@@ -836,9 +810,7 @@ fn draw_no_file_placeholder(frame: &mut Frame, area: ratatui::layout::Rect, them
     }
     let text_x = area.x + area.width.saturating_sub(msg_len) / 2;
     let text_y = area.y + area.height / 2;
-    let style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let style = theme.status_idle_style();
 
     let buf = frame.buffer_mut();
     for (i, ch) in msg.chars().enumerate() {
@@ -1034,11 +1006,9 @@ fn render_games(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState
 
 fn build_lines_games(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let (ln, col) = state.line_col();
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = theme.status_idle_style();
 
     let syntax_status = state.syntax_status.as_str();
     let mut rows: Vec<GateLine> = Vec::new();
@@ -1207,9 +1177,7 @@ fn mode_style(mode: nit_core::Mode, theme: &Theme) -> Style {
 
 fn games_status_style(status: GamesStatus, theme: &Theme) -> Style {
     match status {
-        GamesStatus::Idle => Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
+        GamesStatus::Idle => theme.status_idle_style(),
         GamesStatus::Running => Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -1245,10 +1213,8 @@ fn syntax_style(status: &str, theme: &Theme, dim_style: Style) -> Style {
 // ---------------------------------------------------------------------------
 
 fn build_lines_filescores(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
+    let dim_style = theme.status_idle_style();
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
@@ -1614,10 +1580,8 @@ fn build_lines_live(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
+    let dim_style = theme.status_idle_style();
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
@@ -1798,9 +1762,7 @@ fn build_lines_live(
         // Dim the whole row for completed entries so the eye finds active
         // work first.
         let name_style = if matches!(kind, LiveItemKind::Done) {
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::DIM)
+            theme.status_idle_style()
         } else {
             Style::default().fg(theme.foreground)
         };

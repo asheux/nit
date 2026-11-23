@@ -771,6 +771,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::GateMonitorSetSubView(target) => {
             if target == GateMonitorSubView::Skills {
                 state.skill_reader_open = false;
+                state.skill_filter.clear();
+                state.skill_filter_editing = false;
                 state.gate_monitor_scroll = 0;
                 state.selected_skill = 0;
                 state.ui_selection = None;

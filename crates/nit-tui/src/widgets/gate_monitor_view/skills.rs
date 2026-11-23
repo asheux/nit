@@ -1,101 +1,368 @@
+use std::{cell::RefCell, rc::Rc};
+
 use crossterm::event::{KeyCode, KeyEvent};
-use nit_core::{skills, AppKind, AppState, GateMonitorSubView, PaneId};
+use nit_core::{skills, AppKind, AppState, GateMonitorSubView, PaneId, UiSelectionPane};
 use ratatui::{
     layout::{Position, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Paragraph},
+    Frame,
 };
 
-use crate::{theme::Theme, widgets::picker_utils::wrap_text};
+use crate::{theme::Theme, widgets::text_selection::apply_ui_selection};
 
-fn active(state: &AppState) -> bool {
+mod attach;
+mod catalog;
+mod document;
+
+pub(crate) fn active(state: &AppState) -> bool {
     state.app_kind == AppKind::Gol && state.gate_monitor_sub_view == GateMonitorSubView::Skills
 }
 
 pub(crate) fn focused(state: &AppState) -> bool {
-    active(state) && state.focus == PaneId::GateMonitor
+    active(state)
+        && state.focus == PaneId::GateMonitor
+        && state.command_line.is_none()
+        && state.prompt.is_none()
+        && state.search_prompt.is_none()
+        && !state.show_help
+        && !state.fuzzy_search.open
+        && !state.rule_picker.open
+        && !state.protocol_picker.open
+        && state.definition_popup.is_none()
+        && !state.agents.artifacts_popup_open
+        && !state.agents.global_archive_open
+        && !state.agents.show_multiway_popup
+        && !state.show_substrate_overlay
+}
+
+struct Regions {
+    catalog: Rect,
+    header: Rect,
+    body: Rect,
+    help: Rect,
+    divider: Rect,
+    filter: Rect,
+}
+
+fn regions(inner: Rect, state: &AppState) -> Regions {
+    let reader = state.skill_reader_open;
+    let show_filter = !reader && (state.skill_filter_editing || !state.skill_filter.is_empty());
+    let filter = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        u16::from(show_filter && inner.height > 0),
+    );
+    let inner = Rect::new(
+        inner.x,
+        filter.bottom(),
+        inner.width,
+        inner.height - filter.height,
+    );
+    let help_height = u16::from(inner.height >= 4);
+    let content = Rect::new(inner.x, inner.y, inner.width, inner.height - help_height);
+    let help = Rect::new(inner.x, content.bottom(), inner.width, help_height);
+    let (catalog, preview, divider) = if reader {
+        (Rect::default(), content, Rect::default())
+    } else if inner.width >= 60 && inner.height >= 8 {
+        let width = (inner.width / 3).clamp(19, 32);
+        (
+            Rect::new(inner.x, inner.y, width, content.height),
+            Rect::new(
+                inner.x + width + 1,
+                inner.y,
+                inner.width - width - 1,
+                content.height,
+            ),
+            Rect::new(inner.x + width, inner.y, 1, content.height),
+        )
+    } else {
+        let height = if content.height >= 5 {
+            (content.height / 2).clamp(3, 8)
+        } else {
+            content.height
+        };
+        (
+            Rect::new(inner.x, inner.y, inner.width, height),
+            Rect::new(
+                inner.x,
+                inner.y + height,
+                inner.width,
+                content.height - height,
+            ),
+            Rect::default(),
+        )
+    };
+    let header = Rect::new(preview.x, preview.y, preview.width, preview.height.min(1));
+    let body = Rect::new(
+        preview.x,
+        header.bottom(),
+        preview.width,
+        preview.height - header.height,
+    );
+    Regions {
+        catalog,
+        header,
+        body,
+        help,
+        divider,
+        filter,
+    }
+}
+
+fn inner(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+pub(crate) fn document_area(state: &AppState, area: Rect) -> Rect {
+    regions(inner(area), state).body
+}
+
+fn entry(state: &AppState) -> &'static skills::Skill {
+    let entries = skills::definitions();
+    &entries[state.selected_skill.min(entries.len() - 1)]
+}
+
+struct DocumentCache {
+    id: &'static str,
+    width: usize,
+    colors: [Color; 3],
+    rows: Rc<[Line<'static>]>,
+}
+
+thread_local! {
+    static DOCUMENT: RefCell<Option<DocumentCache>> = const { RefCell::new(None) };
+}
+
+fn document_rows(state: &AppState, theme: &Theme, width: usize) -> Rc<[Line<'static>]> {
+    let skill = entry(state);
+    let width = width.max(1);
+    let colors = [theme.title, theme.foreground, theme.accent];
+    DOCUMENT.with_borrow_mut(|cache| {
+        if let Some(hit) = cache
+            .as_ref()
+            .filter(|c| c.id == skill.name && c.width == width && c.colors == colors)
+        {
+            return Rc::clone(&hit.rows);
+        }
+        let mut rows: Vec<_> =
+            crate::widgets::picker_utils::wrap_text(&format!("nit skills {}", skill.name), width)
+                .into_iter()
+                .map(|line| Line::styled(line, Style::default().fg(theme.accent)))
+                .collect();
+        rows.extend(document::lines(skill.body, width, theme));
+        let rows = Rc::from(rows);
+        *cache = Some(DocumentCache {
+            id: skill.name,
+            width,
+            colors,
+            rows: Rc::clone(&rows),
+        });
+        rows
+    })
 }
 
 pub(super) fn lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let hint = Style::default().fg(theme.accent);
-    if state.skill_reader_open {
-        let mut out = vec![Line::styled("‹ Back  ·  Esc", hint)];
-        if let Some(body) = skills::entries()
-            .nth(state.selected_skill)
-            .and_then(|(name, _)| skills::read(name))
-        {
-            for line in body.lines() {
-                let heading = line.starts_with('#');
-                let line = if heading {
-                    line.trim_start_matches('#').trim()
-                } else {
-                    line
-                };
-                let style = if heading {
-                    hint.add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                // Wrap tables as text so every cell remains accessible on a narrow console.
-                if line.starts_with('|') && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-                {
-                    continue;
-                }
-                out.extend(
-                    wrap_text(line, width)
-                        .into_iter()
-                        .map(|row| Line::styled(row, style)),
-                );
-            }
-        }
-        return out;
+    if catalog::matches(state).is_empty() {
+        Vec::new()
+    } else {
+        document_rows(state, theme, width).to_vec()
     }
-
-    let mut out = vec![Line::styled("↑↓ choose · Enter read", hint)];
-    for (i, (name, _)) in skills::entries().enumerate() {
-        if i == state.selected_skill {
-            out.push(Line::styled(
-                format!("› {name}"),
-                Style::default()
-                    .fg(theme.foreground)
-                    .bg(theme.selection_bg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            out.push(Line::from(format!("  {name}")));
-        }
-    }
-    if let Some((_, summary)) = skills::entries().nth(state.selected_skill) {
-        out.push(Line::from(""));
-        out.extend(wrap_text(summary, width).into_iter().map(Line::from));
-    }
-    out
 }
 
-fn switch_reader(state: &mut AppState, open: bool, height: usize) {
-    state.skill_reader_open = open;
+fn top(state: &AppState, area: Rect, indices: &[usize]) -> usize {
+    let row = catalog::rows(indices)
+        .position(|(i, _)| i == Some(state.selected_skill))
+        .unwrap_or(0);
+    (row + 1).saturating_sub(usize::from(area.height))
+}
+
+fn select(state: &mut AppState, index: usize) {
+    state.selected_skill = index.min(skills::definitions().len() - 1);
+    state.gate_monitor_scroll = 0;
     state.ui_selection = None;
-    state.gate_monitor_scroll = if open {
-        0
+}
+
+pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) {
+    let r = regions(inner, state);
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let regular = Style::default().fg(theme.foreground);
+    let muted = Style::default().fg(theme.muted);
+    let selected = regular.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
+    let indices = catalog::matches(state);
+    if r.filter.height > 0 {
+        let mark = if state.skill_filter_editing {
+            "▏"
+        } else {
+            ""
+        };
+        let count = format!("{} found", indices.len());
+        let room = r.filter.width.saturating_sub(count.len() as u16 + 1);
+        let label = crate::widgets::text_utils::truncate_with_ellipsis(
+            &format!("/ {}{mark}", state.skill_filter),
+            usize::from(room),
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{label:<width$} {count}",
+                width = usize::from(room)
+            ))
+            .style(accent),
+            r.filter,
+        );
+    }
+    if indices.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching skills").style(regular),
+            r.catalog,
+        );
+        frame.render_widget(Paragraph::new("Esc clear filter").style(muted), r.help);
+        state.gate_monitor_last_max_scroll = 0;
+        return;
+    }
+    let mut rows = Vec::new();
+    for (index, name) in catalog::rows(&indices) {
+        if let Some(i) = index {
+            let (marker, style) = if i == state.selected_skill {
+                ("›", selected)
+            } else {
+                (" ", regular)
+            };
+            let name = crate::widgets::text_utils::truncate_with_ellipsis(
+                name,
+                usize::from(r.catalog.width.saturating_sub(2)),
+            );
+            rows.push(Line::styled(
+                format!(
+                    "{marker} {name:<width$}",
+                    width = usize::from(r.catalog.width.saturating_sub(2))
+                ),
+                style,
+            ));
+        } else {
+            rows.push(Line::styled(name, accent));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows).scroll((top(state, r.catalog, &indices) as u16, 0)),
+        r.catalog,
+    );
+    if r.divider.width > 0 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("│", muted);
+                usize::from(r.divider.height)
+            ]),
+            r.divider,
+        );
+    }
+    let name = entry(state).title;
+    let header = if state.skill_reader_open {
+        format!("‹ Back   {name}")
     } else {
-        (state.selected_skill + 2).saturating_sub(height)
+        format!("{name}  ↗ Open")
     };
-    state.gate_monitor_last_max_scroll = usize::MAX;
+    frame.render_widget(Paragraph::new(header).style(accent), r.header);
+    if !r.body.is_empty() {
+        let body = document_rows(state, theme, usize::from(r.body.width));
+        state.gate_monitor_last_max_scroll = body.len().saturating_sub(usize::from(r.body.height));
+        state.gate_monitor_scroll = state
+            .gate_monitor_scroll
+            .min(state.gate_monitor_last_max_scroll);
+        let body = apply_ui_selection(
+            body[state.gate_monitor_scroll..]
+                .iter()
+                .take(usize::from(r.body.height))
+                .cloned()
+                .collect(),
+            state.ui_selection.as_ref(),
+            UiSelectionPane::GateMonitor,
+            theme.selection_bg,
+            state.gate_monitor_scroll,
+        );
+        frame.render_widget(Paragraph::new(body).style(regular), r.body);
+    } else {
+        state.gate_monitor_last_max_scroll = 0;
+    }
+    let help = footer(state, r.help.width);
+    frame.render_widget(Paragraph::new(help).style(muted), r.help);
+}
+
+fn footer(state: &AppState, width: u16) -> &'static str {
+    if state.skill_reader_open {
+        "Esc back · ↑↓ scroll · a attach"
+    } else if state.skill_filter_editing {
+        "Type to filter · Enter done · Esc clear"
+    } else if width >= 49 {
+        "↑↓ choose · / filter · Enter read · a attach"
+    } else if width >= 32 {
+        "/ filter · Enter read · a attach"
+    } else {
+        "/ find  ↵ read  a attach"
+    }
+}
+
+fn switch_reader(state: &mut AppState, open: bool) {
+    state.skill_reader_open = open;
+    select(state, state.selected_skill);
+}
+
+pub(crate) fn paste(state: &mut AppState, text: &str) -> bool {
+    if !focused(state) || !state.skill_filter_editing {
+        return false;
+    }
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !state.skill_filter.ends_with(' ') {
+                state.skill_filter.push(' ');
+            }
+        } else if !ch.is_control() {
+            state.skill_filter.push(ch);
+        }
+    }
+    catalog::reconcile(state);
+    true
 }
 
 pub(crate) fn handle_key(state: &mut AppState, key: KeyEvent, area: Rect) -> bool {
-    if !focused(state) || !key.modifiers.is_empty() {
+    if !focused(state) || !(key.modifiers - crossterm::event::KeyModifiers::SHIFT).is_empty() {
         return false;
     }
-    let height = area.height.saturating_sub(2).max(1) as usize;
-    let last = skills::entries().len().saturating_sub(1);
+    let page = usize::from(document_area(state, area).height.max(1));
+    if state.skill_filter_editing {
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => state.skill_filter.push(ch),
+            KeyCode::Backspace => {
+                state.skill_filter.pop();
+            }
+            KeyCode::Esc => {
+                state.skill_filter.clear();
+                state.skill_filter_editing = false;
+            }
+            KeyCode::Enter => state.skill_filter_editing = false,
+            KeyCode::Up | KeyCode::Down => {
+                state.skill_filter_editing = false;
+                catalog::step(state, if key.code == KeyCode::Down { 1 } else { -1 });
+            }
+            _ => return false,
+        }
+        catalog::reconcile(state);
+        return true;
+    }
+    if key.code == KeyCode::Char('a') {
+        if catalog::matches(state).contains(&state.selected_skill) {
+            attach::attach(state, entry(state).name);
+        }
+        return true;
+    }
     if state.skill_reader_open {
         let scroll = state.gate_monitor_scroll;
         match key.code {
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
-                switch_reader(state, false, height)
-            }
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => switch_reader(state, false),
             KeyCode::Up | KeyCode::Char('k') => {
                 state.gate_monitor_scroll = scroll.saturating_sub(1)
             }
@@ -106,104 +373,96 @@ pub(crate) fn handle_key(state: &mut AppState, key: KeyEvent, area: Rect) -> boo
             }
             KeyCode::PageDown => {
                 state.gate_monitor_scroll = scroll
-                    .saturating_add(height)
+                    .saturating_add(page)
                     .min(state.gate_monitor_last_max_scroll)
             }
-            KeyCode::PageUp => state.gate_monitor_scroll = scroll.saturating_sub(height),
+            KeyCode::PageUp => state.gate_monitor_scroll = scroll.saturating_sub(page),
             KeyCode::Home => state.gate_monitor_scroll = 0,
             KeyCode::End => state.gate_monitor_scroll = state.gate_monitor_last_max_scroll,
             _ => return false,
         }
     } else {
         match key.code {
-            KeyCode::Enter => switch_reader(state, true, height),
-            KeyCode::Up
-            | KeyCode::Char('k')
-            | KeyCode::Down
-            | KeyCode::Char('j')
-            | KeyCode::Home
-            | KeyCode::End => {
-                state.selected_skill = match key.code {
-                    KeyCode::Home => 0,
-                    KeyCode::End => last,
-                    KeyCode::Up | KeyCode::Char('k') => state.selected_skill.saturating_sub(1),
-                    _ => (state.selected_skill + 1).min(last),
-                };
-                let row = state.selected_skill + 1;
-                state.gate_monitor_scroll = state
-                    .gate_monitor_scroll
-                    .clamp((row + 1).saturating_sub(height), row);
-                state.ui_selection = None;
+            KeyCode::Char('/') => state.skill_filter_editing = true,
+            KeyCode::Esc if !state.skill_filter.is_empty() => {
+                state.skill_filter.clear();
+                catalog::reconcile(state);
             }
+            KeyCode::Enter => {
+                if !catalog::matches(state).is_empty() {
+                    switch_reader(state, true);
+                }
+            }
+            KeyCode::Home => catalog::step(state, isize::MIN),
+            KeyCode::End => catalog::step(state, isize::MAX),
+            KeyCode::Up | KeyCode::Char('k') => catalog::step(state, -1),
+            KeyCode::Down | KeyCode::Char('j') => catalog::step(state, 1),
             _ => return false,
         }
     }
     true
 }
 
-pub(crate) fn click(state: &mut AppState, area: Rect, point: Position) -> bool {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if !active(state) || !inner.contains(point) {
+pub(crate) fn wheel(state: &mut AppState, area: Rect, point: Position, delta: i32) -> bool {
+    if !active(state) {
         return false;
     }
-    let row = state
-        .gate_monitor_scroll
-        .saturating_add(usize::from(point.y - inner.y));
-    if state.skill_reader_open {
-        if row != 0 {
-            return false;
+    let r = regions(inner(area), state);
+    if r.catalog.contains(point) {
+        catalog::step(state, delta.signum() as isize);
+    } else if r.body.contains(point) || r.header.contains(point) {
+        state.gate_monitor_scroll = state
+            .gate_monitor_scroll
+            .saturating_add_signed(delta as isize)
+            .min(state.gate_monitor_last_max_scroll);
+    }
+    true
+}
+
+pub(crate) fn click(state: &mut AppState, area: Rect, point: Position) -> bool {
+    if !active(state) {
+        return false;
+    }
+    let r = regions(inner(area), state);
+    let indices = catalog::matches(state);
+    if r.help.contains(point) && !indices.is_empty() && !state.skill_filter_editing {
+        let help = footer(state, r.help.width);
+        let col = usize::from(point.x - r.help.x);
+        let hit = |text: &str| {
+            help.find(text).is_some_and(|byte| {
+                let start = help[..byte].chars().count();
+                (start..start + text.chars().count()).contains(&col)
+            })
+        };
+        state.focus = PaneId::GateMonitor;
+        if hit("a attach") {
+            attach::attach(state, entry(state).name);
+        } else if hit("/ filter") || hit("/ find") {
+            state.skill_filter_editing = true;
+        } else if hit("Enter read") || hit("↵ read") {
+            switch_reader(state, true);
+        } else if hit("Esc back") {
+            switch_reader(state, false);
         }
-    } else if (1..=skills::entries().len()).contains(&row) {
-        state.selected_skill = row - 1;
+        return true;
+    }
+    if r.filter.contains(point) {
+        state.skill_filter_editing = true;
+    } else if r.header.contains(point) && !indices.is_empty() {
+        state.skill_filter_editing = false;
+        switch_reader(state, !state.skill_reader_open);
+    } else if r.catalog.contains(point) {
+        let row = top(state, r.catalog, &indices) + usize::from(point.y - r.catalog.y);
+        if let Some((Some(index), _)) = catalog::rows(&indices).nth(row) {
+            state.skill_filter_editing = false;
+            select(state, index);
+        }
     } else {
         return false;
     }
     state.focus = PaneId::GateMonitor;
-    switch_reader(state, !state.skill_reader_open, usize::from(inner.height));
     true
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyModifiers;
-    use nit_core::Buffer;
-
-    #[test]
-    fn skill_browser_keeps_selection_visible_and_reads_only_when_focused() {
-        let mut state = AppState::new(
-            ".".into(),
-            Buffer::empty("file", None),
-            Buffer::empty("notes", None),
-        );
-        state.gate_monitor_sub_view = GateMonitorSubView::Skills;
-        let area = Rect::new(5, 6, 26, 5);
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        state.focus = PaneId::Editor;
-        assert!(!handle_key(&mut state, key(KeyCode::Char('j')), area));
-        state.focus = PaneId::GateMonitor;
-        assert!(handle_key(&mut state, key(KeyCode::End), area));
-        let index = skills::entries().len() - 1;
-        assert_eq!(state.selected_skill, index);
-        let last_visible = Position::new(area.x + 2, area.bottom() - 2);
-        assert!(click(&mut state, area, last_visible));
-        assert!(state.skill_reader_open);
-        let body = lines(&state, &Theme::default(), 24);
-        assert!(body.len() > 4);
-        assert!(body.iter().all(|line| line.width() <= 24));
-        state.gate_monitor_last_max_scroll = body.len() - 3;
-        assert!(handle_key(&mut state, key(KeyCode::PageDown), area));
-        assert_eq!(state.gate_monitor_scroll, 3);
-        assert!(handle_key(&mut state, key(KeyCode::Esc), area));
-        assert!(!state.skill_reader_open);
-        assert_eq!(state.selected_skill, index);
-        assert!(state.gate_monitor_scroll > 0);
-        assert!(handle_key(&mut state, key(KeyCode::Enter), area));
-        assert!(click(
-            &mut state,
-            area,
-            Position::new(area.x + 1, area.y + 1)
-        ));
-        assert!(!state.skill_reader_open);
-    }
-}
+mod tests;

@@ -67,7 +67,7 @@ Use **:changes** to focus Git change review. Each row shows two Git status chara
 
 ## Read a built-in reference
 
-Opening a file or directory with `nit` shows the Skills catalog in **Code Structural Quality**. Focus starts in the editor or file tree. Type `:skills` to focus the catalog. Choose a reference with Up/Down or `k`/`j` and press `Enter`, or click its name. Use the arrows, `PageUp`/`PageDown`, or the wheel to scroll. `Esc`, Left, or Backspace returns to your selection. Click the **Skills** tab to reopen the catalog.
+Opening a file or directory with `nit` shows **NITSKILLS**. Focus starts in the editor or file tree. Type `:skills` to focus the catalog. Choose a reference with Up/Down, `k`/`j`, a click, or the wheel over the list. Press `/` to filter by title, skill ID, group, or description. `Enter` keeps the results, and `Esc` clears the filter. The selected preview appears beside or below the list when space permits. Press `Enter` or click **Open** to read it in the full pane. Scroll the document with the wheel or, in the full reader, the arrows and `PageUp`/`PageDown`. Press `Esc`, Left, or Backspace, or click **Back**, to return to the catalog. Press `a` to attach the selected reference to an unsent Agent Chat draft. The command at the top of each document prints the reference in your shell.
 
 ## Work with agents
 

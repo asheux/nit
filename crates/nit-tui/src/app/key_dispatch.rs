@@ -469,6 +469,10 @@ pub(super) fn handle_paste_event(
         return changed;
     }
 
+    if crate::widgets::gate_monitor_view::skills::paste(state, text) {
+        return true;
+    }
+
     if state.focus == PaneId::Notes {
         let changed = insert_chat_input_text(state, text);
         if changed {
