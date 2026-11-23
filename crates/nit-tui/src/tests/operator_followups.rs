@@ -349,3 +349,24 @@ fn writer_ownership_resolves_workspace_aliases_and_excludes_external_symlinks() 
         .is_err());
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn explicit_queue_and_task_survive_the_shared_chat_submit_path() {
+    let (mut rt, mut state, dir) = fixture();
+    state.agents.selected_mission = Some(MID.into());
+    state.agents.chat_input = "@queue @task task-00 Retain the queued order".into();
+    assert!(crate::app::submit_chat_input_and_dispatch(
+        &mut state,
+        &mut crate::vitals::VitalsState::default(),
+        None,
+        None,
+        &mut rt,
+        &mut crate::shadow::ShadowRuntime::default()
+    ));
+    let r = receipt(&dir);
+    assert_eq!(r.status, Status::Pending);
+    assert_eq!(r.task_id, "task-00");
+    assert_eq!(r.text, "Retain the queued order");
+    assert!(state.agents.chat_input.is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}

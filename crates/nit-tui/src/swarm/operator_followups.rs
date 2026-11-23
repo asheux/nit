@@ -19,7 +19,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn unique_id() -> String {
+pub(super) fn unique_id() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -34,13 +34,13 @@ fn unique_id() -> String {
 
 pub(super) struct Inbox {
     id: String,
-    root: PathBuf,
-    entries: Vec<Receipt>,
+    pub(super) root: PathBuf,
+    pub(super) entries: Vec<Receipt>,
     confirmed_input: BTreeSet<String>,
     pub(super) deferred_writers: Vec<String>,
 }
 
-fn save(root: &Path, receipt: &Receipt) -> io::Result<()> {
+pub(super) fn save(root: &Path, receipt: &Receipt) -> io::Result<()> {
     let dir = nit_core::followups::ensure_directory(
         root,
         &[".nit", "swarm", &receipt.mission_id, "followups"],
@@ -50,7 +50,7 @@ fn save(root: &Path, receipt: &Receipt) -> io::Result<()> {
     })
 }
 
-fn transition(
+pub(super) fn transition(
     dir: &Path,
     receipt: &mut Receipt,
     status: Status,
@@ -329,7 +329,7 @@ impl SwarmRuntime {
 
     pub(super) fn attach_followups(&mut self, state: &mut AppState, dispatch: &mut SwarmDispatch) {
         let mid = &dispatch.mission_id;
-        let (Some(inbox), Some(run)) = (self.followups.get_mut(mid), self.runs.get(mid)) else {
+        let Some(run) = self.runs.get(mid) else {
             return;
         };
         if run.stage != SwarmStage::Executing {
@@ -340,6 +340,17 @@ impl SwarmRuntime {
             .iter()
             .find(|t| t.agent_id == dispatch.agent_id && t.state == SwarmTaskState::Dispatched)
         else {
+            return;
+        };
+        // The runner must see this exact final line in its original prompt.
+        // Add it after any note payload so nested prior prompts cannot win.
+        let nonce = unique_id();
+        self.live_followups
+            .bind(mid, &task.id, &task.agent_id, nonce.clone());
+        let Some(inbox) = self.followups.get_mut(mid) else {
+            dispatch
+                .prompt
+                .push_str(&format!("\n[nit-task-turn {nonce}]"));
             return;
         };
         for receipt in inbox.entries.iter_mut().filter(|r| {
@@ -373,6 +384,9 @@ impl SwarmRuntime {
                 state,
             );
         }
+        dispatch
+            .prompt
+            .push_str(&format!("\n[nit-task-turn {nonce}]"));
     }
 
     pub(super) fn provider_input(&mut self, mid: &str, agent: &str, ids: &[String]) {
@@ -425,7 +439,7 @@ impl SwarmRuntime {
             .iter_mut()
             .filter(|r| r.task_id == task.id && r.agent_id == agent)
         {
-            if r.status == Status::Submitted {
+            if matches!(r.status, Status::Submitted | Status::Accepted) {
                 if success {
                     transition(
                         &inbox.root,
@@ -477,22 +491,29 @@ impl SwarmRuntime {
             .get(mid)
             .filter(|run| run.stage == SwarmStage::Executing);
         if active.is_none() {
+            self.live_followups.close(mid);
             self.task_writes.remove(mid);
         }
         let Some(inbox) = self.followups.get_mut(mid) else {
             return;
         };
-        for r in inbox
-            .entries
-            .iter_mut()
-            .filter(|r| matches!(r.status, Status::Pending | Status::Submitted))
-        {
+        for r in inbox.entries.iter_mut().filter(|r| {
+            matches!(
+                r.status,
+                Status::Pending | Status::Submitted | Status::Steering | Status::Accepted
+            )
+        }) {
             if !active.is_some_and(|run| {
                 run.tasks.iter().any(|t| {
                     t.id == r.task_id && t.agent_id == r.agent_id && !t.state.is_terminal()
                 })
             }) {
-                transition(&inbox.root,r,Status::Failed,"Target task ended before delivery was confirmed; recover the receipt to resend",state);
+                let status = if r.status == Status::Steering {
+                    Status::Unknown
+                } else {
+                    Status::Failed
+                };
+                transition(&inbox.root,r,status,"Target task ended before delivery was confirmed; recover the receipt to resend",state);
                 push_system_message_to_mission(
                     state,
                     mid,

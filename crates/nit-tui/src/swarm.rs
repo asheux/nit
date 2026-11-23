@@ -20,6 +20,7 @@ mod graph_exec;
 pub mod intent;
 mod json;
 pub(crate) mod limits;
+mod live_followups;
 mod mission;
 mod multiway;
 mod operator_followups;
@@ -56,6 +57,8 @@ mod swarm_budgets_tests;
 mod followup_context_tests;
 
 pub struct SwarmRuntime {
+    pub(crate) chat_steers: crate::app::live_followup::PendingSteers,
+    live_followups: live_followups::LiveFollowups,
     followups: HashMap<String, operator_followups::Inbox>,
     task_writes: HashMap<String, finished_followup::TaskWrites>,
     runs: HashMap<String, SwarmRun>,
@@ -76,6 +79,8 @@ pub struct SwarmRuntime {
 impl Default for SwarmRuntime {
     fn default() -> Self {
         Self {
+            chat_steers: Default::default(),
+            live_followups: Default::default(),
             followups: HashMap::new(),
             task_writes: HashMap::new(),
             runs: HashMap::new(),
