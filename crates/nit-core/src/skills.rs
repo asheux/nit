@@ -78,13 +78,21 @@ pub fn chat_reply(input: &str) -> Option<String> {
 pub fn write_references(dir: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    for (name, _, body) in SKILLS {
+    let references = SKILLS
+        .iter()
+        .map(|(name, _, body)| (*name, *body))
+        .chain(std::iter::once(("INDEX", catalog())));
+    for (name, body) in references {
         let path = dir.join(format!("{name}.md"));
+        if std::fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_file() && meta.len() == body.len() as u64)
+            && std::fs::read(&path).is_ok_and(|existing| existing == body.as_bytes())
+        {
+            continue;
+        }
         nit_utils::write_atomic(&path, |file| file.write_all(body.as_bytes()))?;
     }
-    nit_utils::write_atomic(&dir.join("INDEX.md"), |file| {
-        file.write_all(catalog().as_bytes())
-    })
+    Ok(())
 }
 
 /// Share one directory across backends, including sessions without a shell or PATH entry.
@@ -110,5 +118,33 @@ pub fn reference_hint() -> String {
             path.display()
         ),
         Err(_) => "NitSkills: use nit_skill or run nit skills [NAME].".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn reference_install_reuses_matching_files_and_repairs_stale_content() {
+        let dir = crate::test_helpers::temp_dir("skill-cache");
+        write_references(&dir).unwrap();
+        let index = dir.join("INDEX.md");
+        fs::File::options()
+            .write(true)
+            .open(&index)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let before = fs::metadata(&index).unwrap().modified().unwrap();
+        let body = read("swarm-judge").unwrap();
+        let judge = dir.join("swarm-judge.md");
+        fs::write(&judge, vec![b' '; body.len()]).unwrap();
+
+        write_references(&dir).unwrap();
+        assert_eq!(fs::metadata(index).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read_to_string(judge).unwrap(), body);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
