@@ -516,11 +516,7 @@ pub(super) fn revert_focused_pane_to_roster(state: &mut AppState) {
         let pane_idx = pane.pane_id;
         pane.selected_agent_id = None;
         pane.agent_id.clear();
-        pane.chat_input.clear();
         pane.swarm_draft_target = None;
-        pane.chat_input_cursor = 0;
-        pane.chat_input_selection_anchor = None;
-        pane.chat_input_scroll = 0;
         pane.mission_id = None;
         pane.mission_ids.clear();
         // Re-derive the synthetic chat id so subsequent default-chat

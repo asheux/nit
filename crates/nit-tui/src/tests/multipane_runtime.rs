@@ -95,18 +95,22 @@ fn move_roster_cursor_clamps_to_visible_lanes() {
 }
 
 #[test]
-fn revert_focused_pane_to_roster_clears_selection() {
+fn choosing_another_agent_keeps_the_unsent_draft() {
     let mut state = fixture_state_no_backend();
     if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
         pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
         pane.agent_id = "claude-haiku-4-5#mp-pane-00".into();
-        pane.chat_input = "buffered".into();
+        pane.chat_input = "first line\nsecond line".into();
+        pane.chat_input_cursor = 7;
+        pane.chat_input_selection_anchor = Some(2);
     }
     revert_focused_pane_to_roster(&mut state);
     let pane = &state.multipane.as_ref().unwrap().panes[0];
     assert!(pane.selected_agent_id.is_none());
     assert!(pane.agent_id.is_empty());
-    assert!(pane.chat_input.is_empty());
+    assert_eq!(pane.chat_input, "first line\nsecond line");
+    assert_eq!(pane.chat_input_cursor, 7);
+    assert_eq!(pane.chat_input_selection_anchor, Some(2));
 }
 
 #[test]

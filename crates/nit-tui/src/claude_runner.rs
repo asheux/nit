@@ -91,6 +91,21 @@ pub struct ClaudeRunner {
 }
 
 impl ClaudeRunner {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, Receiver<ClaudeCommand>) {
+        let (cmd_tx, commands) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        (
+            Self {
+                cmd_tx,
+                events,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                handle: None,
+            },
+            commands,
+        )
+    }
+
     pub fn spawn(config: ClaudeRunnerConfig) -> Self {
         let pool = if pool_enabled_from_env() {
             let cap = pool_size_from_env();
