@@ -228,6 +228,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-001".into()),
         text: "hello".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -237,6 +238,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-001".into()),
         text: "world".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -246,6 +248,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-999".into()),
         text: "other mission".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -301,6 +304,7 @@ fn reset_context_persists_mission_artifacts_before_clearing_live_thread() {
         mission_id: Some("mis-401".into()),
         text: "persist me".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -339,6 +343,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         mission_id: None,
         text: "keep this prompt".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -348,6 +353,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         mission_id: None,
         text: "keep this reply".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state
@@ -401,6 +407,7 @@ fn reset_context_archives_saved_run_history_snapshot() {
         mission_id: Some("mis-777".into()),
         text: "archive me".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -782,4 +789,57 @@ fn turn_completed_stores_mission_scoped_session_for_claude() {
             .map(|s| s.as_str()),
         Some("session-mis-001"),
     );
+}
+
+#[test]
+fn terminal_receipts_are_flushed_after_the_prompt_was_persisted() {
+    for (outcome, message) in [
+        ("completed", "Answer"),
+        ("failed", "Provider unavailable"),
+        ("aborted", nit_core::OPERATOR_CANCEL_TURN_MESSAGE),
+    ] {
+        let mut state = state_for_test_in_workspace(&format!("terminal-receipt-{outcome}"));
+        let swarm = SwarmRuntime::default();
+        let agent = "test-agent";
+        state.agents.messages.push(AgentMessage {
+            at: "t+0".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "Question".into(),
+            prompt_msg_idx: None,
+            turn: None,
+            kind: None,
+        });
+        let prompt = state.agents.messages.len() - 1;
+        state.agents.pending_provenance_agent_ids.push(agent.into());
+        super::super::provenance::flush_agent_run_provenance(&mut state, &swarm).unwrap();
+        let event = if outcome == "completed" {
+            AgentBusEvent::TurnCompleted {
+                agent_id: agent.into(),
+                mission_id: None,
+                thread_id: None,
+                token_count: None,
+                message: message.into(),
+            }
+        } else {
+            AgentBusEvent::TurnFailed {
+                agent_id: agent.into(),
+                mission_id: None,
+                thread_id: None,
+                token_count: None,
+                message: message.into(),
+            }
+        };
+        event.apply(&mut state);
+        super::super::provenance::flush_agent_run_provenance(&mut state, &swarm).unwrap();
+        let path = state
+            .workspace_root
+            .join(".nit/agents/ad-hoc/test-agent/run.json");
+        let run: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let reply = run["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(reply["turn"]["outcome"], outcome);
+        assert_eq!(reply["text"], message);
+        assert_eq!(reply["prompt_msg_idx"], prompt);
+    }
 }

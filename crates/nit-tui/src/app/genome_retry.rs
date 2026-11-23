@@ -156,6 +156,7 @@ pub(super) fn push_genome_retry_message(
         mission_id: None,
         text: msg,
         prompt_msg_idx: None,
+        turn: None,
         kind: Some("genome-retry".into()),
     });
     state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;

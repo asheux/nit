@@ -105,6 +105,10 @@ fn turn_completed_stores_thread_id_in_codex_maps() {
         message: "Done.".into(),
     }
     .apply(&mut state);
+    let receipt = state.agents.messages.last().unwrap().turn.unwrap();
+    assert_eq!(receipt.outcome, crate::state::TurnOutcome::Completed);
+    assert!(receipt.elapsed_ms.is_some());
+    assert!(!state.agents.pending_provenance_agent_ids.is_empty());
 
     assert_eq!(
         state
@@ -155,6 +159,10 @@ fn turn_failed_source_label_matches_backend() {
         message: "rate limited".into(),
     }
     .apply(&mut state);
+    let receipt = state.agents.messages.last().unwrap().turn.unwrap();
+    assert_eq!(receipt.outcome, crate::state::TurnOutcome::Failed);
+    assert!(receipt.elapsed_ms.is_some());
+    assert!(!state.agents.pending_provenance_agent_ids.is_empty());
 
     let alert = state.agents.alerts.last().unwrap();
     assert_eq!(alert.source, "claude");
@@ -191,6 +199,10 @@ fn turn_failed_with_operator_cancel_routes_soft_path() {
         message: OPERATOR_CANCEL_TURN_MESSAGE.into(),
     }
     .apply(&mut state);
+    let receipt = state.agents.messages.last().unwrap().turn.unwrap();
+    assert_eq!(receipt.outcome, crate::state::TurnOutcome::Aborted);
+    assert!(receipt.elapsed_ms.is_some());
+    assert!(!state.agents.pending_provenance_mission_ids.is_empty());
 
     let agent = state
         .agents
@@ -407,6 +419,7 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
         mission_id: None,
         text: "user prompt".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 

@@ -1,6 +1,6 @@
 use crate::state::{
-    AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus, AppState,
-    CONSOLE_SCROLL_BOTTOM,
+    AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus,
+    AgentTurnReceipt, AppState, TurnOutcome, CONSOLE_SCROLL_BOTTOM,
 };
 
 use super::helpers::{backend_source_for_agent, estimate_codex_context_tokens, timestamp_label};
@@ -17,7 +17,11 @@ pub(super) fn handle_turn_completed(
     message: &str,
 ) {
     let source = backend_source_for_agent(state, agent_id);
-    state.agents.active_turns.remove(agent_id);
+    let elapsed = state
+        .agents
+        .active_turns
+        .remove(agent_id)
+        .map(|turn| turn.started_at.elapsed());
     if let Some(token_count) = token_count.as_ref() {
         apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
     }
@@ -41,7 +45,15 @@ pub(super) fn handle_turn_completed(
         &at,
     );
     bump_mission_token_estimate(state, mission_id.as_deref(), message);
-    push_completion_message(state, agent_id, mission_id, message, &at);
+    push_terminal_message(
+        state,
+        agent_id,
+        mission_id,
+        message,
+        &at,
+        TurnOutcome::Completed,
+        elapsed,
+    );
 
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Info,
@@ -71,7 +83,6 @@ fn update_provenance_and_threads(
     at: &str,
 ) {
     if let Some(mission_id) = mission_id {
-        mark_mission_provenance_dirty(state, mission_id);
         if let Some(thread_id) = thread_id {
             state
                 .agents
@@ -97,7 +108,6 @@ fn update_provenance_and_threads(
             .codex_thread_ids
             .insert(agent_id.to_string(), thread_id.to_string());
     }
-    mark_ad_hoc_provenance_dirty(state, agent_id);
 }
 
 fn bump_mission_token_estimate(state: &mut AppState, mission_id: Option<&str>, message: &str) {
@@ -113,13 +123,20 @@ fn bump_mission_token_estimate(state: &mut AppState, mission_id: Option<&str>, m
     *entry = entry.saturating_add(delta);
 }
 
-fn push_completion_message(
+pub(super) fn push_terminal_message(
     state: &mut AppState,
     agent_id: &str,
     mission_id: &Option<String>,
     message: &str,
     at: &str,
+    outcome: TurnOutcome,
+    elapsed: Option<std::time::Duration>,
 ) {
+    if let Some(mission) = mission_id {
+        mark_mission_provenance_dirty(state, mission);
+    } else {
+        mark_ad_hoc_provenance_dirty(state, agent_id);
+    }
     // Use the dispatch-time prompt index if available; check both Codex and
     // Claude prompt-index maps. Fall back to scanning recent messages for an
     // operator prompt that targets this mission.
@@ -145,6 +162,10 @@ fn push_completion_message(
         mission_id: mission_id.clone(),
         text: message.to_string(),
         prompt_msg_idx: parent_prompt_idx,
+        turn: Some(AgentTurnReceipt {
+            outcome,
+            elapsed_ms: elapsed.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        }),
         kind: None,
     });
     state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;

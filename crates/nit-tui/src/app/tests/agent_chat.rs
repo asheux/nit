@@ -452,6 +452,7 @@ fn chat_thread_selection_starts_at_clicked_column() {
         mission_id: None,
         text: "selection precision".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let mut input_state = InputState::new();

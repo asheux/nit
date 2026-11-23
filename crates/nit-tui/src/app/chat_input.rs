@@ -1435,6 +1435,7 @@ pub(crate) fn submit_chat_input_and_dispatch(
             mission_id: state.agents.selected_context_mission().map(str::to_owned),
             text: reply,
             prompt_msg_idx: None,
+            turn: None,
             kind: Some("nit-skills".into()),
         };
         chat_history_remember(state, &raw);
@@ -1829,6 +1830,7 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
             .map(ToString::to_string),
         text: text.clone(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     };
     if let Some(mission_id) = message.mission_id.as_deref() {

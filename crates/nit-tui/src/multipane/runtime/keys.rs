@@ -606,6 +606,7 @@ fn push_focused_pane_message(state: &mut AppState, text: String, kind: &str) {
         mission_id: pane.mission_id.clone(),
         text,
         prompt_msg_idx: None,
+        turn: None,
         kind: Some(kind.into()),
     });
 }

@@ -89,6 +89,7 @@ fn map_agent_console_mouse_maps_chat_thread_lines() {
         mission_id: None,
         text: "hello world".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let screen = ratatui::layout::Rect {
@@ -139,6 +140,7 @@ fn clicking_agent_console_artifact_row_opens_matching_artifact_popup() {
         mission_id: None,
         text: "hello world".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -282,6 +284,7 @@ fn click_in_chat_header_does_not_start_thread_selection() {
         mission_id: None,
         text: "select me".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let mut input_state = InputState::new();
@@ -508,6 +511,7 @@ fn mouse_wheel_in_chat_thread_clamps_at_bottom_without_wrap() {
             mission_id: None,
             text: format!("message-{i}"),
             prompt_msg_idx: None,
+            turn: None,
             kind: None,
         });
     }
@@ -576,6 +580,7 @@ fn user_bubble_selection_can_span_multiple_messages() {
         mission_id: None,
         text: "alpha prompt".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -585,6 +590,7 @@ fn user_bubble_selection_can_span_multiple_messages() {
         mission_id: None,
         text: "omega prompt".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let mut input_state = InputState::new();
@@ -659,6 +665,7 @@ fn agent_console_mouse_drag_copies_selected_chat_text() {
         mission_id: None,
         text: "selection copy works".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let mut input_state = InputState::new();
@@ -795,6 +802,7 @@ fn station_artifacts_button_pins_original_reply_after_scrolling_and_new_completi
             mission_id: Some("mission".into()),
             text,
             prompt_msg_idx: None,
+            turn: None,
             kind: Some("turn-completed".into()),
         });
     };

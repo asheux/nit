@@ -92,6 +92,7 @@ fn agent_message(
         mission_id: Some(mission_id.into()),
         text: text.into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     }
 }
