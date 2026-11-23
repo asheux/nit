@@ -18,6 +18,10 @@ pub struct Source {
 pub enum Status {
     Pending,
     Submitted,
+    Steering,
+    Accepted,
+    Received,
+    Unknown,
     Delivered,
     Failed,
 }
@@ -27,6 +31,10 @@ impl Status {
         match self {
             Self::Pending => "pending",
             Self::Submitted => "submitted",
+            Self::Steering => "steering",
+            Self::Accepted => "accepted",
+            Self::Received => "received",
+            Self::Unknown => "unknown",
             Self::Delivered => "delivered",
             Self::Failed => "failed",
         }

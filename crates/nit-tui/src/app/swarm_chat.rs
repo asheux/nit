@@ -189,13 +189,24 @@ pub(crate) fn submit_active_followup(
     state: &mut AppState,
     swarm: &mut SwarmRuntime,
     raw: &str,
+    codex: Option<&crate::codex_runner::CodexRunner>,
+    claude: Option<&crate::claude_runner::ClaudeRunner>,
 ) -> Option<bool> {
     if let Some(result) = drafts::command(state, raw) {
         return Some(result);
     }
-    let command = raw.split_whitespace().next()?;
+    let mut body = raw.trim();
+    let mut command = body.split_whitespace().next()?;
+    let queued = matches!(command, "@queue" | "@q");
+    if queued {
+        body = body[command.len()..].trim_start();
+        if body.is_empty() {
+            return None;
+        }
+        command = body.split_whitespace().next()?;
+    }
     let addressed = matches!(command, "@task" | "@agent");
-    if !follows_selection(raw) {
+    if !queued && !follows_selection(raw) {
         return None;
     }
     let Some(mission) = followup_mission(state, swarm).map(str::to_owned) else {
@@ -232,7 +243,6 @@ pub(crate) fn submit_active_followup(
     }
     let mut target = pinned.as_ref().and_then(|p| p.task_id.as_deref());
     let mut agent = pinned.as_ref().and_then(|p| p.agent_id.as_deref());
-    let mut body = raw.trim();
     if addressed {
         let tail = body[command.len()..].trim_start();
         let Some((id, msg)) = tail
@@ -279,7 +289,16 @@ pub(crate) fn submit_active_followup(
             }
         }
     }
-    match swarm.queue_operator_followup(state, &mission, resolved_target.as_deref(), body, source) {
+    match swarm.submit_operator_followup(
+        state,
+        &mission,
+        resolved_target.as_deref(),
+        body,
+        source,
+        queued,
+        codex,
+        claude,
+    ) {
         Ok(receipt) => {
             let at = timestamp_label(state);
             state.agents.messages.push(AgentMessage {
