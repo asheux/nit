@@ -2,6 +2,7 @@ use clap::ValueEnum;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub(crate) enum CodexRuntimeArg {
+    Auto,
     Exec,
     Mcp,
 }
@@ -9,6 +10,7 @@ pub(crate) enum CodexRuntimeArg {
 impl From<CodexRuntimeArg> for nit_tui::codex_runner::CodexRuntimeMode {
     fn from(value: CodexRuntimeArg) -> Self {
         match value {
+            CodexRuntimeArg::Auto => Self::Auto,
             CodexRuntimeArg::Exec => Self::Exec,
             CodexRuntimeArg::Mcp => Self::Mcp,
         }

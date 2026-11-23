@@ -126,7 +126,7 @@ The full key map is in `docs/KEYBINDINGS.md`. Use `:skills` to open the NitSkill
 The agent station is two panes: Agent Ops (roster, missions, DAG, artifacts, MCP,
 alerts, diagnostics, scratchpad) and Agent Chat. It supports these backends:
 
-- **Codex**, through a persistent `codex mcp-server` (default) or one `codex exec` per turn.
+- **Codex**, through a persistent `codex mcp-server` when supported, or one `codex exec` per turn.
 - **Claude**, through one `claude -p` subprocess per turn, with an optional warm worker
   pool (`NIT_CLAUDE_POOL=1`).
 - **Local**, a mock lane for trying the UI without any agent.
@@ -144,7 +144,7 @@ nit --agents all          # same as the default
 
 Codex options:
 
-- `--codex-runtime <mcp|exec>` (default `mcp`).
+- `--codex-runtime <auto|mcp|exec>` (default `auto`).
 - `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: your Codex config).
 - `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default `never`).
 - `--codex-max-parallel-turns <N>` (alias `--codex-parallel`, default `8`, range `1..=16`).

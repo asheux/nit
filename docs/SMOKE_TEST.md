@@ -65,7 +65,7 @@ full key list is in `docs/KEYBINDINGS.md`.
   - `claude` installed and on `$PATH` (for `--agents claude`)
 - Launch with Codex lanes: `cargo run -- --agents codex`
   - Expect: the Agent Ops roster lists Codex models.
-- MCP transport (default runtime):
+- MCP transport (on Codex versions with the `mcp-server` subcommand):
   - In Agent Ops, switch to the MCP tab.
   - Expect: status becomes CONNECTED and the endpoint shows `stdio://...`, backed by `codex mcp-server`.
   - Press `x` (stop), `s` (start), `r` (reconnect). Expect: the status follows each press.

@@ -33,8 +33,8 @@ pub(crate) struct Cli {
     #[arg(long, value_enum)]
     pub agents: Option<AgentsArg>,
 
-    /// Codex automation runtime (exec spawns per-turn; mcp keeps a persistent server)
-    #[arg(long, value_enum, default_value_t = CodexRuntimeArg::Mcp)]
+    /// Codex automation runtime (auto uses mcp when supported and otherwise uses exec)
+    #[arg(long, value_enum, default_value_t = CodexRuntimeArg::Auto)]
     pub codex_runtime: CodexRuntimeArg,
 
     /// Codex sandbox mode (forwarded to Codex runs; default is Codex's own config)

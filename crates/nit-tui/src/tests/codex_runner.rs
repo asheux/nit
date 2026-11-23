@@ -567,3 +567,22 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
          not emit TurnFailed for runner-queued turns"
     );
 }
+
+#[test]
+fn mcp_tool_error_is_distinct_from_a_model_reply() {
+    let provider_error = r#"{"type":"error","status":400,"error":{"message":"Unsupported model"}}"#;
+    let mut response = json!({"result": {"isError": true, "structuredContent": {"threadId":"abc", "content": provider_error}}});
+    assert_eq!(
+        super::mcp_tool_failure(&response).as_deref(),
+        Some("Unsupported model")
+    );
+    response["result"]["isError"] = json!(false);
+    assert!(super::mcp_tool_failure(&response).is_none());
+    assert_eq!(
+        super::mcp_tool_failure(
+            &json!({"result":{"isError":true,"content":[{"type":"text","text":"No credentials"}]}})
+        )
+        .as_deref(),
+        Some("No credentials")
+    );
+}

@@ -194,7 +194,7 @@ emits `AgentBusEvent` updates into the main loop.
 
 - Exec runtime (`--codex-runtime exec`): spawns `codex exec` per turn and
   parses its JSONL stdout for stage updates and token counts.
-- MCP runtime (`--codex-runtime mcp`, the default): spawns one persistent
+- MCP runtime (`--codex-runtime mcp`, selected by `auto` when the CLI supports it): spawns one persistent
   `codex mcp-server` child and speaks JSON-RPC 2.0 over stdio with MCP
   protocol `2024-11-05`.
 

@@ -56,6 +56,8 @@ impl Default for CodexRunnerConfig {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CodexRuntimeMode {
+    /// Use MCP when the installed CLI provides its server subcommand.
+    Auto,
     /// Spawn a fresh `codex exec` child process per turn.
     Exec,
     /// Keep a persistent `codex mcp-server` process and multiplex turns as `tools/call` requests.
@@ -173,9 +175,90 @@ fn runner_loop(
     cmd_rx: Receiver<CodexCommand>,
     event_tx: Sender<AgentBusEvent>,
 ) {
-    match mode {
-        CodexRuntimeMode::Exec => runner_loop_exec(cmd_rx, event_tx, config),
-        CodexRuntimeMode::Mcp => runner_loop_mcp(cmd_rx, event_tx, config, shutdown),
+    if mode == CodexRuntimeMode::Exec {
+        runner_loop_exec(cmd_rx, event_tx, config);
+        return;
+    }
+    let Some(reason) = mcp_unavailable_reason() else {
+        runner_loop_mcp(cmd_rx, event_tx, config, shutdown);
+        return;
+    };
+    if mode == CodexRuntimeMode::Auto {
+        let _ = event_tx.send(AgentBusEvent::DiagnosticAppend {
+            event: nit_core::AgentDiagnosticEvent {
+                severity: nit_core::AgentAlertSeverity::Info,
+                source: "codex".into(),
+                message: format!("Using codex exec. {reason}"),
+                at: "t+0".into(),
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Disconnected,
+                endpoint: format!("codex exec ({reason})"),
+                latency_ms: None,
+                last_error: None,
+            },
+        });
+        runner_loop_exec(cmd_rx, event_tx, config);
+        return;
+    }
+
+    let message = format!("{reason} Restart with --codex-runtime auto or exec.");
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Error,
+            endpoint: "codex mcp-server".into(),
+            latency_ms: None,
+            last_error: Some(message.clone()),
+        },
+    });
+    while let Ok(command) = cmd_rx.recv() {
+        match command {
+            CodexCommand::RunTurn {
+                model,
+                mission_id,
+                resume_thread_id,
+                ..
+            } => {
+                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                    agent_id: model,
+                    mission_id,
+                    thread_id: resume_thread_id,
+                    token_count: None,
+                    message: message.clone(),
+                });
+            }
+            CodexCommand::Shutdown => break,
+            _ => {}
+        }
+    }
+}
+
+// `codex mcp-server --help` can print root help and exit successfully
+// when mcp-server is absent. Clap's help subcommand validates its target.
+fn mcp_unavailable_reason() -> Option<String> {
+    let mut child = std::process::Command::new("codex")
+        .args(["help", "mcp-server"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return (status.code() == Some(2))
+                    .then(|| "The installed Codex CLI has no mcp-server subcommand.".into())
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -966,8 +1049,7 @@ fn runner_loop_mcp(
                             };
                             in_flight_by_agent.remove(&turn.agent_id);
 
-                            if let Some(err) = value.get("error") {
-                                let msg = format!("MCP tool call failed: {err}");
+                            if let Some(msg) = mcp_tool_failure(&value) {
                                 let _ = event_tx.send(AgentBusEvent::McpStatus {
                                     status: McpStatus {
                                         state: McpConnectionState::Error,
@@ -1477,6 +1559,31 @@ fn codex_mcp_stage_label(kind: &str, msg: &serde_json::Value) -> String {
         }
     }
     kind.to_string()
+}
+
+// Tool failures use an ordinary JSON-RPC response with result.isError=true.
+fn mcp_tool_failure(response: &serde_json::Value) -> Option<String> {
+    if let Some(error) = response.get("error") {
+        return Some(format!("MCP tool call failed: {error}"));
+    }
+    let result = response.get("result")?;
+    if result["isError"].as_bool() != Some(true) {
+        return None;
+    }
+    let message = result["structuredContent"]["content"]
+        .as_str()
+        .or_else(|| result["content"].as_str())
+        .or_else(|| {
+            result["content"]
+                .as_array()?
+                .iter()
+                .find_map(|item| item["text"].as_str())
+        })
+        .unwrap_or("MCP tool call failed.");
+    let provider_message = serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|details| details["error"]["message"].as_str().map(str::to_owned));
+    Some(provider_message.unwrap_or_else(|| message.to_string()))
 }
 
 fn extract_codex_mcp_output(result: &serde_json::Value) -> Option<(String, String)> {
