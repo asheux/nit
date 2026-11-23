@@ -127,8 +127,6 @@ pub fn roster_multiway_buttons_line_idx(state: &AppState) -> Option<usize> {
 }
 
 const ROSTER_BACKEND_NAME_W: usize = 7;
-const ROSTER_SWARM_TEMPLATE_LINE: &str = " Template:  lab   parallel   bulk ";
-const ROSTER_SWARM_MISSION_LINE: &str = " Mission:   auto   general   research   computational ";
 // Phase 9 multiway selector rows + action buttons, rendered only under
 // `multiway_enabled`. Each constant is byte-for-byte the styled line emitted by
 // `roster_multiway_selector_line` / `roster_multiway_buttons_line`, so the
@@ -166,19 +164,137 @@ fn roster_line_word_hit<T: Copy>(
     None
 }
 
-pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
-    const WORDS: &[(&str, &str)] = &[("lab", "lab"), ("parallel", "parallel"), ("bulk", "bulk")];
-    roster_line_word_hit(ROSTER_SWARM_TEMPLATE_LINE, col, WORDS)
+#[derive(Clone, Copy)]
+pub(crate) enum RosterChoice {
+    Template,
+    Mission,
 }
 
-pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
-    const WORDS: &[(&str, &str)] = &[
-        ("auto", "auto"),
-        ("general", "general"),
-        ("research", "research"),
-        ("computational", "computational-research"),
-    ];
-    roster_line_word_hit(ROSTER_SWARM_MISSION_LINE, col, WORDS)
+#[derive(Clone, Copy)]
+struct ChoicePart {
+    text: &'static str,
+    value: Option<&'static str>,
+}
+
+impl RosterChoice {
+    fn current(self, state: &AppState) -> &str {
+        match self {
+            Self::Template => &state.agents.swarm_default_template,
+            Self::Mission => &state.agents.swarm_default_mission,
+        }
+    }
+
+    fn parts(self, state: &AppState, width: usize) -> Vec<ChoicePart> {
+        let (prefix, compact_prefix, choices): (_, _, &[(&str, &str, &str)]) = match self {
+            Self::Template => (
+                " Template: ",
+                "Template ",
+                &[
+                    (" lab ", "lab", "lab"),
+                    (" parallel ", "par", "parallel"),
+                    (" bulk ", "bulk", "bulk"),
+                ],
+            ),
+            Self::Mission => (
+                " Mission:  ",
+                "Mission ",
+                &[
+                    (" auto ", "auto", "auto"),
+                    (" general ", "gen", "general"),
+                    (" research ", "res", "research"),
+                    (" computational ", "comp", "computational-research"),
+                ],
+            ),
+        };
+        let full = prefix.len() + choices.iter().map(|v| v.0.len()).sum::<usize>() + choices.len()
+            - 1
+            <= width;
+        let labels_width = choices.iter().map(|v| v.1.len()).sum::<usize>() + choices.len() - 1;
+        let prefix = if full {
+            prefix
+        } else if compact_prefix.len() + labels_width <= width {
+            compact_prefix
+        } else {
+            ""
+        };
+        let mut parts = vec![ChoicePart {
+            text: prefix,
+            value: None,
+        }];
+        if !full && labels_width > width {
+            // With fewer cells than the compact choices, the selected chip cycles on click.
+            let i = choices
+                .iter()
+                .position(|v| v.2.eq_ignore_ascii_case(self.current(state)))
+                .unwrap_or(0);
+            let text = if choices[i].1.len() <= width {
+                choices[i].1
+            } else {
+                ""
+            };
+            parts.push(ChoicePart {
+                text,
+                value: Some(choices[(i + 1) % choices.len()].2),
+            });
+        } else {
+            for (i, &(label, short, value)) in choices.iter().enumerate() {
+                if i > 0 {
+                    parts.push(ChoicePart {
+                        text: " ",
+                        value: None,
+                    });
+                }
+                parts.push(ChoicePart {
+                    text: if full { label } else { short },
+                    value: Some(value),
+                });
+            }
+        }
+        parts
+    }
+
+    pub(crate) fn hit(self, state: &AppState, col: usize, width: usize) -> Option<&'static str> {
+        let mut end = 0;
+        for part in self.parts(state, width) {
+            end += part.text.len();
+            if col < end {
+                return part.value;
+            }
+        }
+        None
+    }
+
+    fn plain(self, state: &AppState, width: usize) -> String {
+        self.parts(state, width).iter().map(|p| p.text).collect()
+    }
+
+    fn styled(self, state: &AppState, width: usize, theme: &Theme) -> Line<'static> {
+        let parts = self.parts(state, width);
+        let compact_cycle = parts.len() == 2;
+        let spans = parts
+            .into_iter()
+            .map(|part| {
+                let style = match part.value {
+                    Some(value)
+                        if compact_cycle || self.current(state).eq_ignore_ascii_case(value) =>
+                    {
+                        Style::default()
+                            .fg(theme.background)
+                            .bg(theme.border_focused)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                    Some(_) => Style::default().fg(theme.foreground).bg(dim_bg_towards(
+                        theme.cursor_line_bg,
+                        theme.background,
+                        45,
+                    )),
+                    None => theme.status_idle_style(),
+                };
+                Span::styled(part.text, style)
+            })
+            .collect::<Vec<_>>();
+        Line::from(spans)
+    }
 }
 
 /// One of the two clickable action buttons on the Phase 9 multiway roster row.
@@ -792,15 +908,40 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
     if area.width < 2 || area.height == 0 {
         return;
     }
-    let line = footer_line(state, theme);
+    let line = footer_line(state, area.width as usize, theme);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
+fn footer_line(state: &AppState, width: usize, theme: &Theme) -> Line<'static> {
     let label_style = theme.status_idle_style();
     let key_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
+    if state.agents.dock_tab == AgentOpsTab::Roster {
+        let mut spans = Vec::new();
+        let mut used = 0;
+        for (key, label) in [
+            ("j/k", " move"),
+            ("Space", " set"),
+            ("Enter", " chat"),
+            ("Tab", " tabs"),
+            ("h/l", " size"),
+            ("c", " reset"),
+        ] {
+            let gap = if used == 0 { 0 } else { 2 };
+            let cells = gap + key.len() + label.len();
+            if used + cells > width {
+                continue;
+            }
+            if gap > 0 {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(key, key_style));
+            spans.push(Span::styled(label, label_style));
+            used += cells;
+        }
+        return Line::from(spans);
+    }
     let sep_style = label_style;
 
     let mut spans: Vec<Span<'static>> = vec![Span::styled("Keys: ", label_style)];
@@ -814,19 +955,7 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
     spans.push(Span::styled("  ", sep_style));
 
     match state.agents.dock_tab {
-        AgentOpsTab::Roster => {
-            spans.push(Span::styled("h/l", key_style));
-            spans.push(Span::styled(" size", label_style));
-            spans.push(Span::styled("  ", sep_style));
-            spans.push(Span::styled("Space", key_style));
-            spans.push(Span::styled(" set", label_style));
-            spans.push(Span::styled("  ", sep_style));
-            spans.push(Span::styled("c", key_style));
-            spans.push(Span::styled(" reset", label_style));
-            spans.push(Span::styled("  ", sep_style));
-            spans.push(Span::styled("Enter", key_style));
-            spans.push(Span::styled(" chat", label_style));
-        }
+        AgentOpsTab::Roster => unreachable!(),
         AgentOpsTab::Missions => {
             spans.push(Span::styled("n", key_style));
             spans.push(Span::styled(" new", label_style));
@@ -1010,7 +1139,7 @@ pub fn current_lines_for_width_with_swarm(
 ) -> Vec<String> {
     let usable = width.max(32);
     match state.agents.dock_tab {
-        AgentOpsTab::Roster => roster_lines(state, swarm, usable),
+        AgentOpsTab::Roster => roster_lines(state, swarm, width),
         AgentOpsTab::Missions => mission_lines(state, usable),
         AgentOpsTab::Dag => dag_lines(state, swarm, usable),
         AgentOpsTab::Evidence => artifacts_lines(state, swarm, usable),
@@ -1304,7 +1433,7 @@ fn roster_backend_is_expanded(state: &AppState, backend: AgentLaneKind) -> bool 
 }
 
 fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
-    let widths = roster_column_widths(width);
+    let widths = roster_column_widths(width.max(32));
     let selected_row = roster_selected_row(state);
     let mut out = vec![" Backends".into()];
     for row in roster_backend_inventory_rows(state) {
@@ -1317,6 +1446,7 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                     "not found"
                 },
                 if row.active { "active" } else { "idle" },
+                width,
             )),
             BackendInventoryBackend::Claude => out.push(roster_backend_line(
                 "Claude",
@@ -1326,6 +1456,7 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                     "not found"
                 },
                 if row.active { "active" } else { "idle" },
+                width,
             )),
             BackendInventoryBackend::Gemini => out.push(roster_backend_line(
                 "Gemini",
@@ -1335,18 +1466,20 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                     "not found"
                 },
                 if row.active { "active" } else { "idle" },
+                width,
             )),
             BackendInventoryBackend::Local => out.push(roster_backend_line(
                 "Local",
                 "built-in",
                 if row.active { "active" } else { "idle" },
+                width,
             )),
         }
     }
 
     out.push(String::new());
-    out.push(ROSTER_SWARM_TEMPLATE_LINE.into());
-    out.push(ROSTER_SWARM_MISSION_LINE.into());
+    out.push(RosterChoice::Template.plain(state, width));
+    out.push(RosterChoice::Mission.plain(state, width));
     if state.agents.multiway_enabled {
         out.push(ROSTER_MULTIWAY_MOOD_LINE.into());
         out.push(ROSTER_MULTIWAY_MODE_LINE.into());
@@ -1724,8 +1857,36 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
     out
 }
 
-fn roster_backend_line(name: &str, primary: &str, secondary: &str) -> String {
-    format!("  {name:<ROSTER_BACKEND_NAME_W$}  {primary}  {secondary}")
+fn backend_fields<'a>(
+    name: &str,
+    primary: &'a str,
+    secondary: &'a str,
+    width: usize,
+) -> (String, &'a str, &'a str) {
+    let prefix = format!("  {name:<ROSTER_BACKEND_NAME_W$}  ");
+    if prefix.len() + primary.len() + 2 + secondary.len() <= width {
+        return (prefix, primary, secondary);
+    }
+    let primary = match primary {
+        "available" => "ready",
+        "not found" => "missing",
+        other => other,
+    };
+    let prefix = format!(" {name:<6} ");
+    (
+        prefix,
+        primary,
+        if secondary == "active" {
+            "on"
+        } else {
+            secondary
+        },
+    )
+}
+
+fn roster_backend_line(name: &str, primary: &str, secondary: &str, width: usize) -> String {
+    let (prefix, primary, secondary) = backend_fields(name, primary, secondary, width);
+    format!("{prefix}{primary}  {secondary}")
 }
 
 fn agent_pane_inner_width(col_width: usize) -> usize {
@@ -6171,7 +6332,7 @@ fn ops_styled_line(
 
     let usable = width.max(32);
     match state.agents.dock_tab {
-        AgentOpsTab::Roster => roster_styled_line(state, line_idx, line, usable, theme),
+        AgentOpsTab::Roster => roster_styled_line(state, line_idx, line, width, theme),
         AgentOpsTab::Missions => mission_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Mcp => mcp_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Alerts => alert_styled_line(state, line_idx, line, usable, theme),
@@ -6936,6 +7097,7 @@ fn roster_backend_styled_line(
     accent: Color,
     available: bool,
     active: bool,
+    width: usize,
     theme: &Theme,
 ) -> Line<'static> {
     let name_style = if available {
@@ -6954,10 +7116,17 @@ fn roster_backend_styled_line(
         theme.status_idle_style()
     };
 
+    let (prefix, primary, secondary) = backend_fields(name, primary, secondary, width);
     Line::from(vec![
-        Span::styled("  ", Style::default().fg(theme.foreground)),
-        Span::styled(format!("{name:<ROSTER_BACKEND_NAME_W$}"), name_style),
-        Span::styled("  ", Style::default().fg(theme.foreground)),
+        Span::styled(
+            " ".repeat(prefix.len() - prefix.trim_start().len()),
+            Style::default().fg(theme.foreground),
+        ),
+        Span::styled(name.to_owned(), name_style),
+        Span::styled(
+            " ".repeat(prefix.len() - prefix.trim_end().len()),
+            Style::default().fg(theme.foreground),
+        ),
         Span::styled(primary.to_string(), primary_style),
         Span::styled("  ", Style::default().fg(theme.foreground)),
         Span::styled(secondary.to_string(), secondary_style),
@@ -7002,6 +7171,7 @@ fn roster_styled_line(
                     roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
+                    usable,
                     theme,
                 );
             }
@@ -7017,6 +7187,7 @@ fn roster_styled_line(
                     roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
+                    usable,
                     theme,
                 );
             }
@@ -7032,6 +7203,7 @@ fn roster_styled_line(
                     roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
+                    usable,
                     theme,
                 );
             }
@@ -7043,6 +7215,7 @@ fn roster_styled_line(
                     roster_inventory_backend_accent(row.backend, theme),
                     true,
                     row.active,
+                    usable,
                     theme,
                 );
             }
@@ -7056,74 +7229,10 @@ fn roster_styled_line(
         ));
     }
     if line_idx == offsets.template_line {
-        let label_style = theme.status_idle_style();
-        let selected_style = Style::default()
-            .fg(theme.background)
-            .bg(theme.border_focused)
-            .add_modifier(Modifier::BOLD);
-        let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
-            theme.cursor_line_bg,
-            theme.background,
-            45,
-        ));
-
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-        spans.push(Span::styled(" Template: ", label_style));
-        for (idx, tmpl) in ["lab", "parallel", "bulk"].iter().enumerate() {
-            let selected = state
-                .agents
-                .swarm_default_template
-                .eq_ignore_ascii_case(tmpl);
-            let style = if selected {
-                selected_style
-            } else {
-                unselected_style
-            };
-            spans.push(Span::styled(format!(" {tmpl} "), style));
-            if idx + 1 < 3 {
-                spans.push(Span::styled(" ", label_style));
-            }
-        }
-        return Line::from(spans);
+        return RosterChoice::Template.styled(state, usable, theme);
     }
     if line_idx == offsets.mission_line {
-        let label_style = theme.status_idle_style();
-        let selected_style = Style::default()
-            .fg(theme.background)
-            .bg(theme.border_focused)
-            .add_modifier(Modifier::BOLD);
-        let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
-            theme.cursor_line_bg,
-            theme.background,
-            45,
-        ));
-
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
-        spans.push(Span::styled(" Mission: ", label_style));
-        for (idx, (display, value)) in [
-            ("auto", "auto"),
-            ("general", "general"),
-            ("research", "research"),
-            ("computational", "computational-research"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let selected = state
-                .agents
-                .swarm_default_mission
-                .eq_ignore_ascii_case(value);
-            let style = if selected {
-                selected_style
-            } else {
-                unselected_style
-            };
-            spans.push(Span::styled(format!(" {display} "), style));
-            if idx + 1 < 4 {
-                spans.push(Span::styled(" ", label_style));
-            }
-        }
-        return Line::from(spans);
+        return RosterChoice::Mission.styled(state, usable, theme);
     }
     if offsets.mood_line == Some(line_idx) {
         let mood = state.agents.multiway_default_mood;

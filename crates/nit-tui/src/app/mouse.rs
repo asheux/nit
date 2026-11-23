@@ -1547,7 +1547,7 @@ pub(super) fn apply_agent_ops_click_selection(
     if state.agents.dock_tab == AgentOpsTab::Roster
         && line_idx == agent_ops_view::roster_swarm_template_line_idx(state)
     {
-        if let Some(template) = agent_ops_view::roster_swarm_template_hit(col) {
+        if let Some(template) = agent_ops_view::RosterChoice::Template.hit(state, col, text_width) {
             state.agents.swarm_default_template = template.to_string();
             state.agents.roster_tree_selected = None;
         }
@@ -1556,7 +1556,7 @@ pub(super) fn apply_agent_ops_click_selection(
     if state.agents.dock_tab == AgentOpsTab::Roster
         && line_idx == agent_ops_view::roster_swarm_mission_line_idx(state)
     {
-        if let Some(mission) = agent_ops_view::roster_swarm_mission_hit(col) {
+        if let Some(mission) = agent_ops_view::RosterChoice::Mission.hit(state, col, text_width) {
             state.agents.swarm_default_mission = mission.to_string();
             state.agents.roster_tree_selected = None;
         }

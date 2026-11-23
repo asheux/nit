@@ -12,11 +12,10 @@ use super::{
     roster_grouped_agent_indices, roster_inventory_backend_accent, roster_lane_backend_accent,
     roster_multiway_button_hit, roster_multiway_buttons_line_idx, roster_multiway_mode_hit,
     roster_multiway_mode_line_idx, roster_multiway_mood_hit, roster_multiway_mood_line_idx,
-    roster_running_priority, roster_styled_line, roster_swarm_mission_hit,
-    roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
-    saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
-    tree_open_glyph, BackendInventoryBackend, RosterMultiwayButton, MISSION_VISIBLE_AGENTS_MAX,
-    ROSTER_VISIBLE_AGENTS_PER_BACKEND,
+    roster_running_priority, roster_styled_line, roster_swarm_mission_line_idx,
+    roster_swarm_template_line_idx, saved_run_detail_label, swarm_clone_display_label,
+    table_role_label, tree_closed_glyph, tree_open_glyph, BackendInventoryBackend,
+    RosterMultiwayButton, MISSION_VISIBLE_AGENTS_MAX, ROSTER_VISIBLE_AGENTS_PER_BACKEND,
 };
 use crate::swarm::{
     GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow, SwarmPersistenceView,
@@ -852,37 +851,57 @@ fn diagnostics_view_summarizes_state_and_dedupes_runtime_info_noise() {
 }
 
 #[test]
-fn template_hit_targets_all_buttons() {
-    for label in ["lab", "parallel", "bulk"] {
-        let needle = format!(" {label} ");
-        let start = super::ROSTER_SWARM_TEMPLATE_LINE
-            .find(needle.as_str())
-            .expect("template button");
-        assert_eq!(roster_swarm_template_hit(start), Some(label));
-        assert_eq!(
-            roster_swarm_template_hit(start + needle.len().saturating_sub(1)),
-            Some(label)
-        );
-    }
-}
-
-#[test]
-fn mission_hit_targets_all_buttons() {
-    for (label, value) in [
-        ("auto", "auto"),
-        ("general", "general"),
-        ("research", "research"),
-        ("computational", "computational-research"),
-    ] {
-        let needle = format!(" {label} ");
-        let start = super::ROSTER_SWARM_MISSION_LINE
-            .find(needle.as_str())
-            .expect("mission button");
-        assert_eq!(roster_swarm_mission_hit(start), Some(value));
-        assert_eq!(
-            roster_swarm_mission_hit(start + needle.len().saturating_sub(1)),
-            Some(value)
-        );
+fn roster_choices_fit_and_click_the_same_cells_at_each_width() {
+    use super::RosterChoice;
+    let mut state = roster_state(false);
+    for width in [25, 40, 65] {
+        for (kind, values) in [
+            (RosterChoice::Template, &["lab", "parallel", "bulk"][..]),
+            (
+                RosterChoice::Mission,
+                &["auto", "general", "research", "computational-research"][..],
+            ),
+        ] {
+            for &selected in values {
+                match kind {
+                    RosterChoice::Template => state.agents.swarm_default_template = selected.into(),
+                    RosterChoice::Mission => state.agents.swarm_default_mission = selected.into(),
+                }
+                let row = kind.styled(&state, width, &Theme::default());
+                assert_eq!(row.to_string(), kind.plain(&state, width));
+                assert!(row.width() <= width);
+                let mut x = 0;
+                let mut targets = Vec::new();
+                for span in row.spans {
+                    if span.width() == 0 {
+                        continue;
+                    }
+                    if let Some(hit) = kind.hit(&state, x, width) {
+                        assert_eq!(kind.hit(&state, x + span.width() - 1, width), Some(hit));
+                        assert_eq!(
+                            span.style.add_modifier.contains(Modifier::BOLD),
+                            hit == selected
+                        );
+                        targets.push(hit);
+                    }
+                    x += span.width();
+                }
+                assert_eq!(targets, values);
+            }
+        }
+        let footer = super::footer_line(&state, width, &Theme::default());
+        assert!(footer.width() <= width);
+        assert!(footer.to_string().split("  ").all(|hint| matches!(
+            hint,
+            "Tab tabs" | "j/k move" | "h/l size" | "Space set" | "c reset" | "Enter chat"
+        )));
+        let row = super::roster_backend_line("Claude", "available", "active", width);
+        assert!(row.len() <= width);
+        if width == 25 {
+            assert!(row.ends_with("ready  on"));
+        } else {
+            assert!(row.ends_with("available  active"));
+        }
     }
 }
 
