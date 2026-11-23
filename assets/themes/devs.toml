@@ -1,4 +1,5 @@
 background = "#0a151e"
+panel_background = "#101f2a"
 foreground = "#deeaef"
 muted = "#abbfc7"
 border = "#607986"

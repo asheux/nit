@@ -147,6 +147,10 @@ pub(super) fn run_loop(
     codex_config: CodexRunnerConfig,
     claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
+    let panel_theme = Theme {
+        background: theme.panel_background,
+        ..theme.clone()
+    };
     let frame_interval = frame_interval();
     let mut last_tick = Instant::now();
     // Underflow-safe init that also lets the very first redraw fire
@@ -1420,6 +1424,7 @@ pub(super) fn run_loop(
                 &swarm,
                 &workspace_scan,
                 theme,
+                &panel_theme,
                 syntax,
                 &system_stats,
                 &mut seed_runtime,

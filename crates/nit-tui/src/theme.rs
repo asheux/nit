@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 struct ThemeFile {
     background: Option<String>,
+    panel_background: Option<String>,
     foreground: Option<String>,
     muted: Option<String>,
     border: Option<String>,
@@ -94,6 +95,7 @@ struct SeedThemeFile {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub background: Color,
+    pub panel_background: Color,
     pub foreground: Color,
     pub muted: Color,
     pub border: Color,
@@ -192,6 +194,12 @@ impl Theme {
         };
         let mut theme = Theme::default();
         overlay(&mut theme.background, cfg.background.as_deref());
+        overlay(
+            &mut theme.panel_background,
+            cfg.panel_background
+                .as_deref()
+                .or(cfg.background.as_deref()),
+        );
         overlay(&mut theme.foreground, cfg.foreground.as_deref());
         overlay(&mut theme.border, cfg.border.as_deref());
         overlay(
@@ -303,6 +311,7 @@ impl Default for Theme {
     fn default() -> Self {
         Theme {
             background: Color::Rgb(10, 21, 30),
+            panel_background: Color::Rgb(16, 31, 42),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),
             border: Color::Rgb(96, 121, 134),

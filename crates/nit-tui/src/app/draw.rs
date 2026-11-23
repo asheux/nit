@@ -44,6 +44,7 @@ pub(super) fn draw(
     swarm: &SwarmRuntime,
     workspace_scan: &crate::workspace_scan::WorkspaceScanRuntime,
     theme: &Theme,
+    panel_theme: &Theme,
     syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
     seed_runtime: &mut Option<SeedRuntime>,
@@ -88,7 +89,7 @@ pub(super) fn draw(
         }
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
-        top_bar::render(f, layout.top, state, theme, vitals);
+        top_bar::render(f, layout.top, state, panel_theme, vitals);
         let editor_cursor = if state.file_tree.open {
             adjust_file_tree_scroll(state, layout.editor);
             file_tree_view::render(f, layout.editor, state, theme);
@@ -180,7 +181,7 @@ pub(super) fn draw(
                 terminal_cursor = terminal_view::cursor_position(inner, session);
                 None
             }
-            _ => agent_console_view::render(f, layout.notes, state, swarm, theme),
+            _ => agent_console_view::render(f, layout.notes, state, swarm, panel_theme),
         };
         {
             let text_area = job_output_text_area(layout.job);
@@ -204,7 +205,7 @@ pub(super) fn draw(
                 .title("AGENT OPS")
                 .border_style(border_style)
                 .border_type(border_type)
-                .style(Style::default().bg(theme.background));
+                .style(Style::default().bg(panel_theme.background));
             f.render_widget(block.clone(), layout.job);
             let outer_inner = block.inner(layout.job);
             if outer_inner.width >= 4 && outer_inner.height >= 3 {
@@ -215,7 +216,7 @@ pub(super) fn draw(
                         ratatui::layout::Constraint::Min(1),
                     ])
                     .split(outer_inner);
-                agent_ops_view::render_tab_bar(f, outer_chunks[0], state, theme);
+                agent_ops_view::render_tab_bar(f, outer_chunks[0], state, panel_theme);
                 let scratchpad_area = outer_chunks[1];
 
                 let notes_total = state.notes_buffer().lines_len().max(1);
@@ -246,7 +247,7 @@ pub(super) fn draw(
                     PaneId::JobOutput,
                     state.focus,
                     "SCRATCHPAD",
-                    theme,
+                    panel_theme,
                     state.settings.editor.tab_width as usize,
                     true,
                     state.mode,
@@ -256,12 +257,17 @@ pub(super) fn draw(
                 None
             }
         } else {
-            agent_ops_view::render(f, layout.job, state, swarm, theme);
+            agent_ops_view::render(f, layout.job, state, swarm, panel_theme);
             None
         };
         match state.app_kind {
             AppKind::Gol if state.change_review_active() => {
-                crate::widgets::change_review_view::render(f, layout.visualizer, state, theme);
+                crate::widgets::change_review_view::render(
+                    f,
+                    layout.visualizer,
+                    state,
+                    panel_theme,
+                );
             }
             AppKind::Gol => {
                 let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
@@ -300,8 +306,13 @@ pub(super) fn draw(
         };
         state.syntax_status = syntax_status.clone();
         state.syntax_debug = Some(syntax_debug.clone());
-        gate_monitor_view::render(f, layout.gate, state, workspace_scan, theme);
-        bottom_bar::render(f, layout.bottom, state, theme, system_stats);
+        let gate_theme = if state.app_kind == AppKind::Games {
+            theme
+        } else {
+            panel_theme
+        };
+        gate_monitor_view::render(f, layout.gate, state, workspace_scan, gate_theme);
+        bottom_bar::render(f, layout.bottom, state, panel_theme, system_stats);
 
         match state.app_kind {
             AppKind::Gol => {

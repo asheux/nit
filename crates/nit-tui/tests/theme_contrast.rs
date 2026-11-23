@@ -34,10 +34,33 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
             theme.hl.comment,
             theme.hl.punctuation,
         ] {
-            for bg in [theme.background, theme.cursor_line_bg, theme.selection_bg] {
+            for bg in [
+                theme.background,
+                theme.panel_background,
+                theme.cursor_line_bg,
+                theme.selection_bg,
+            ] {
                 let ratio = (luminance(fg) + 0.05) / (luminance(bg) + 0.05);
                 assert!(ratio >= 4.5, "{fg:?} on {bg:?} has contrast {ratio:.2}");
             }
         }
     }
+}
+
+#[test]
+fn custom_panels_inherit_the_configured_canvas_until_overridden() {
+    let path = std::env::temp_dir().join(format!("nit-panel-theme-{}.toml", std::process::id()));
+    std::fs::write(&path, "background = '#273849'").unwrap();
+    let legacy = Theme::load(Some(&path));
+    std::fs::write(
+        &path,
+        "background = '#273849'\npanel_background = '#364758'",
+    )
+    .unwrap();
+    let custom = Theme::load(Some(&path));
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(legacy.background, Color::Rgb(39, 56, 73));
+    assert_eq!(legacy.panel_background, legacy.background);
+    assert_eq!(custom.background, legacy.background);
+    assert_eq!(custom.panel_background, Color::Rgb(54, 71, 88));
 }
