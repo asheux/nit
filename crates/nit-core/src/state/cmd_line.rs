@@ -277,7 +277,7 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.show_change_review = true;
             state.change_review.refresh = true;
             state.focus = PaneId::Visualizer;
-            state.status = Some("Reviewing working tree changes".into());
+            state.status = Some("Git review".into());
             false
         }
         ["gol"] | ["gol", "view"] => {
