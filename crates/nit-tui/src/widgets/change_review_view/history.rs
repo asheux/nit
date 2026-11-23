@@ -250,7 +250,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
             ),
         ]);
         frame.render_widget(
-            Paragraph::new(info).style(Style::default().bg(theme.editor_background)),
+            Paragraph::new(info).style(Style::default().bg(theme.background)),
             r.detail,
         );
         if review.preview_commit.as_deref() != Some(commit.id.as_str()) || review.message.is_some()
@@ -259,7 +259,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
                 Paragraph::new(visible(
                     review.message.as_deref().unwrap_or("Loading commit…"),
                 ))
-                .style(muted.bg(theme.editor_background)),
+                .style(muted.bg(theme.background)),
                 r.patch,
             );
         } else {

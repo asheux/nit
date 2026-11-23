@@ -171,9 +171,13 @@ fn git_colors_keep_patch_headers_distinct_from_source_and_indices() {
 }
 
 #[test]
-fn history_rows_share_the_roster_surface_while_patch_and_footer_keep_their_own() {
+fn history_list_uses_roster_surface_and_patch_uses_main_canvas() {
     let state = fixture();
-    let theme = Theme::default();
+    let theme = Theme {
+        background: Color::Rgb(9, 19, 29),
+        editor_background: Color::Rgb(70, 81, 92),
+        ..Theme::default()
+    };
     let mut term = Terminal::new(TestBackend::new(70, 17)).unwrap();
     term.draw(|f| super::super::render(f, f.size(), &state, &theme))
         .unwrap();
@@ -186,6 +190,12 @@ fn history_rows_share_the_roster_surface_while_patch_and_footer_keep_their_own()
         );
     }
     assert_eq!(buf.get(r.commits.x, r.commits.y).bg, theme.selection_bg);
-    assert_eq!(buf.get(r.patch.x, r.patch.y).bg, theme.editor_background);
+    for area in [r.detail, r.patch] {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                assert_eq!(buf.get(x, y).bg, theme.background);
+            }
+        }
+    }
     assert_eq!(buf.get(r.footer.x, r.footer.y).bg, theme.background);
 }

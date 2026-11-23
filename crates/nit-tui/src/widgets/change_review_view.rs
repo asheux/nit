@@ -227,12 +227,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .is_some_and(|file| Some(&file.path) == review.preview_path.as_ref());
     if let Some(message) = &review.message {
         frame.render_widget(
-            Paragraph::new(visible(message)).style(muted.bg(theme.editor_background)),
+            Paragraph::new(visible(message)).style(muted.bg(theme.background)),
             r.patch,
         );
     } else if !current {
         frame.render_widget(
-            Paragraph::new("Loading diff…").style(muted.bg(theme.editor_background)),
+            Paragraph::new("Loading diff…").style(muted.bg(theme.background)),
             r.patch,
         );
     } else {
@@ -332,7 +332,7 @@ fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Th
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.editor_background)),
+        Paragraph::new(lines).style(Style::default().bg(theme.background)),
         patch,
     );
 }
@@ -459,7 +459,11 @@ mod tests {
 
     #[test]
     fn review_paints_the_theme_on_empty_and_populated_worktrees() {
-        let theme = Theme::default();
+        let theme = Theme {
+            background: Color::Rgb(9, 19, 29),
+            editor_background: Color::Rgb(70, 81, 92),
+            ..Theme::default()
+        };
         let mut state = state();
         let mut terminal = Terminal::new(TestBackend::new(64, 15)).unwrap();
         for empty in [false, true] {
@@ -479,9 +483,7 @@ mod tests {
             for y in 0..buffer.area.height {
                 for x in 0..buffer.area.width {
                     let point = Position::new(x, y);
-                    let expected = if !empty && r.patch.contains(point) {
-                        theme.editor_background
-                    } else if !empty && r.files.contains(point) && y == r.files.y {
+                    let expected = if !empty && r.files.contains(point) && y == r.files.y {
                         theme.selection_bg
                     } else if list_area.contains(point) {
                         theme.list_background()
