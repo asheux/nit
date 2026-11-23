@@ -9,7 +9,7 @@ use super::{HighlightRequest, SyntaxEngine};
 
 #[derive(Default)]
 pub struct PlainTextEngine {
-    snapshots: HashMap<usize, HighlightSnapshot>,
+    pub(super) snapshots: HashMap<usize, HighlightSnapshot>,
 }
 
 impl PlainTextEngine {

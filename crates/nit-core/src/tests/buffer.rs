@@ -743,6 +743,29 @@ fn word_at_cursor_none_on_blank_line() {
 }
 
 #[test]
+fn search_expanding_lowercase_preserves_source_columns() {
+    let mut buf = Buffer::from_str("search", "İİ İx i\u{307} İ", None);
+    let term = "i\u{307}";
+    assert_eq!(
+        buf.search_line_matches_opt(0, term, true, true),
+        vec![(6, 8), (9, 10)]
+    );
+    assert!(buf.search_next_match_opt(term, true, true));
+    assert_eq!(buf.cursor.col, 6);
+    assert!(buf.search_next_match_opt(term, true, true));
+    assert_eq!(buf.cursor.col, 9);
+
+    let single = Buffer::from_str("single", "İ", None);
+    assert_eq!(
+        single.search_line_matches_opt(0, term, true, true),
+        [(0, 1)]
+    );
+    assert!(single
+        .search_line_matches_opt(0, "i", false, true)
+        .is_empty());
+}
+
+#[test]
 fn search_line_matches_plain_substring() {
     let buf = Buffer::from_str("t", "foo foobar foo\n", None);
     let matches = buf.search_line_matches(0, "foo", false);
@@ -1501,4 +1524,28 @@ fn delete_forward_at_end_of_last_line_is_noop() {
     assert_eq!(buf.content_as_string(), "foo");
     // No edit recorded — version stays put, no spam events.
     assert_eq!(buf.version(), before_version);
+}
+
+#[test]
+fn watcher_reload_preserves_edits_and_clamps_cursor_after_shrink() {
+    let dir = crate::test_helpers::temp_dir("watcher-reload");
+    let path = dir.join("example");
+    let initial = "first\nsecond";
+    std::fs::write(&path, initial).unwrap();
+    let mut buf = Buffer::from_str("example", initial, Some(path.clone()));
+    buf.cursor.line = 1;
+    buf.cursor.col = 6;
+    buf.insert_char('!');
+    assert_eq!(buf.reload_if_clean(), ReloadOutcome::Unchanged);
+    std::fs::write(&path, "x").unwrap();
+    assert_eq!(buf.reload_if_clean(), ReloadOutcome::Conflict);
+    assert_eq!(buf.content_as_string(), "first\nsecond!");
+    assert!(buf.undo());
+    buf.set_selection_anchor();
+    assert_eq!(buf.reload_if_clean(), ReloadOutcome::Reloaded);
+    assert_eq!((buf.cursor.line, buf.cursor.col), (0, 1));
+    assert!(buf.selection_range().is_none());
+    buf.insert_char('!');
+    assert_eq!(buf.content_as_string(), "x!");
+    std::fs::remove_dir_all(dir).unwrap();
 }

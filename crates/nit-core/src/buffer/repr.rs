@@ -16,6 +16,8 @@ pub struct Buffer {
     #[serde(skip)]
     pub(super) rope: Rope,
     #[serde(skip)]
+    pub(super) saved_rope: Rope,
+    #[serde(skip)]
     pub(super) undo_log: UndoLog,
     #[serde(skip)]
     pub(super) pending_edits: Vec<BufferEdit>,
@@ -51,6 +53,7 @@ impl Buffer {
         Self {
             name: name.into(),
             path,
+            saved_rope: content.clone(),
             rope: content,
             undo_log: UndoLog::new(),
             pending_edits: Vec::new(),
@@ -135,7 +138,7 @@ impl Buffer {
             let mut len = slice.len_chars();
             // Strip the trailing newline so col == 0..line_char_len reflects
             // visible character width (vim semantics).
-            if len > 0 && slice.chars().last() == Some('\n') {
+            if len > 0 && slice.char(len - 1) == '\n' {
                 len = len.saturating_sub(1);
             }
             len

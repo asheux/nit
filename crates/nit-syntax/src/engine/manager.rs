@@ -56,6 +56,25 @@ impl SyntaxManager {
             .map(|m| m.status.clone())
             .unwrap_or_else(|| SyntaxStatus::Ok(self.config.engine))
     }
+
+    /// Transfer a completed snapshot to a renderer that keeps its own copy.
+    /// Progressive fills may publish another snapshot for the same version.
+    pub fn take_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
+        let meta = self.buffers.get_mut(&buffer_id)?;
+        let cache = match meta.engine {
+            EngineKind::TreeSitter => self.tree_engine.snapshots(),
+            EngineKind::Plain => &mut self.plain_engine.snapshots,
+        };
+        let std::collections::hash_map::Entry::Occupied(entry) = cache.entry(buffer_id) else {
+            return None;
+        };
+        if entry.get().version != version {
+            return None;
+        }
+        let snapshot = entry.remove();
+        meta.status = snapshot.status.clone();
+        Some(snapshot)
+    }
 }
 
 impl SyntaxEngine for SyntaxManager {

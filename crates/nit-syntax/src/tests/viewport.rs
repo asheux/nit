@@ -4,6 +4,35 @@ use crate::{EngineKind, LanguageId, SyntaxEngine, SyntaxStatus, ViewportRange};
 use super::{make_viewport_request, poll_until, wait_for, wait_for_long, LONG_TIMEOUT};
 
 #[test]
+fn viewport_refresh_after_skipped_edit_uses_current_text() {
+    let mut engine = TreeSitterEngine::new();
+    let viewport = ViewportRange {
+        first_line: 0,
+        last_line: 1,
+        total_lines: 2,
+    };
+    engine.schedule_rehighlight(make_viewport_request(
+        9,
+        1,
+        LanguageId::Rust,
+        "// comment\n",
+        viewport.clone(),
+    ));
+    let first = wait_for(&mut engine, 9, 1);
+    assert!(super::has_group(&first, 0, crate::HighlightGroup::Comment));
+
+    let mut scroll = make_viewport_request(9, 2, LanguageId::Rust, "fn main() {}\n", viewport);
+    scroll.full_reparse = false;
+    engine.schedule_rehighlight(scroll);
+    let current = wait_for(&mut engine, 9, 2);
+    assert!(super::has_group(
+        &current,
+        0,
+        crate::HighlightGroup::Keyword
+    ));
+}
+
+#[test]
 fn viewport_scoped_highlight_produces_spans_for_visible_range() {
     let mut engine = TreeSitterEngine::new();
     let lines: Vec<String> = (0..500).map(|i| format!("let x{i} = {i};\n")).collect();

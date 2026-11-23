@@ -40,6 +40,13 @@ impl TreeSitterEngine {
     pub fn prewarm_language(&self, lang: LanguageId) {
         let _ = self.req_tx.send(HighlightRequest::prewarm(lang));
     }
+
+    pub(super) fn snapshots(&mut self) -> &mut HashMap<usize, HighlightSnapshot> {
+        while let Ok(r) = self.res_rx.try_recv() {
+            self.cache.insert(r.buffer_id, r.snapshot);
+        }
+        &mut self.cache
+    }
 }
 
 impl SyntaxEngine for TreeSitterEngine {
@@ -48,10 +55,7 @@ impl SyntaxEngine for TreeSitterEngine {
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        while let Ok(r) = self.res_rx.try_recv() {
-            self.cache.insert(r.buffer_id, r.snapshot);
-        }
-        self.cache
+        self.snapshots()
             .get(&buffer_id)
             .filter(|s| s.version == version)
             .cloned()

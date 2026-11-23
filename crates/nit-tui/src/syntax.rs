@@ -180,8 +180,7 @@ impl SyntaxRuntime {
         if warmup {
             let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
             loop {
-                if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, buffer.version())
-                {
+                if let Some(snapshot) = self.manager.take_highlights(buffer_id, buffer.version()) {
                     self.snapshots.insert(buffer_id, snapshot);
                     self.trim_edits_since_snapshot(buffer_id);
                     self.render_cache.remove(&buffer_id);
@@ -384,7 +383,7 @@ impl SyntaxRuntime {
     }
 
     pub fn poll_results(&mut self, buffer_id: usize, version: u64) {
-        if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, version) {
+        if let Some(snapshot) = self.manager.take_highlights(buffer_id, version) {
             self.snapshots.insert(buffer_id, snapshot);
             self.trim_edits_since_snapshot(buffer_id);
             self.render_cache.remove(&buffer_id);
@@ -392,7 +391,7 @@ impl SyntaxRuntime {
         }
         if let Some(last_sent) = self.last_sent.get(&buffer_id).copied() {
             if last_sent != version {
-                if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, last_sent) {
+                if let Some(snapshot) = self.manager.take_highlights(buffer_id, last_sent) {
                     self.snapshots.insert(buffer_id, snapshot);
                     self.trim_edits_since_snapshot(buffer_id);
                     self.render_cache.remove(&buffer_id);

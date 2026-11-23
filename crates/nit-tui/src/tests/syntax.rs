@@ -94,3 +94,15 @@ fn render_snapshot_reuses_shifted_lines_on_full_reparse() {
     assert_eq!(map[3], Some(2));
     assert_eq!(map[4], None);
 }
+
+#[test]
+fn idle_poll_preserves_cached_line_map_while_edit_is_pending() {
+    let mut buffer = Buffer::from_str("test", "a\nb\nc\n", None);
+    let mut runtime = SyntaxRuntime::new(default_config());
+    runtime.prime_buffer(1, &buffer, true);
+    buffer.insert_char('x');
+    runtime.note_buffer_change(1, &mut buffer);
+    assert!(runtime.render_snapshot_for(1, &buffer).line_map.is_some());
+    runtime.poll_results(1, buffer.version());
+    assert!(runtime.render_cache.contains_key(&1));
+}

@@ -100,81 +100,58 @@ impl Buffer {
         } else {
             term.chars().collect()
         };
-        let term_len = term_chars.len();
-        if term_len == 0 || term_len > line_len {
+        let raw: Vec<char> = self
+            .rope
+            .slice(line_start..line_start + line_len)
+            .chars()
+            .collect();
+        let folded: Vec<char>;
+        let chars = if case_insensitive {
+            folded = raw.iter().flat_map(|c| c.to_lowercase()).collect();
+            &folded
+        } else {
+            &raw
+        };
+        if term_chars.len() > chars.len() {
             return hits;
         }
-        let raw_line_chars: Vec<char> = self
-            .rope
-            .slice(line_start..line_start + line_len)
-            .chars()
-            .collect();
-        let line_chars: Vec<char> = if case_insensitive {
-            raw_line_chars
-                .iter()
-                .flat_map(|c| c.to_lowercase())
-                .collect()
-        } else {
-            raw_line_chars.clone()
-        };
-        if line_chars.len() != raw_line_chars.len() {
-            return self.fallback_case_fold_matches(line, term, whole_word);
-        }
-        let mut at = 0;
-        while at + term_len <= line_len {
-            let end = at + term_len;
-            let chars_match = line_chars[at..end] == term_chars[..];
-            let boundary_ok = !whole_word
-                || ((at == 0 || !is_word_char(raw_line_chars[at - 1]))
-                    && (end >= line_len || !is_word_char(raw_line_chars[end])));
-            let stride = if chars_match && boundary_ok {
-                hits.push((at, end));
-                term_len
-            } else {
-                1
-            };
-            at += stride;
-        }
-        hits
-    }
 
-    /// Conservative O(n*m) scan used when Unicode case folding expands chars
-    /// (Turkish `İ` → `i̇`, etc.) and the column indices would otherwise
-    /// drift. Rare path; keeps highlight correctness without a Unicode-aware
-    /// indexing layer.
-    fn fallback_case_fold_matches(
-        &self,
-        line: usize,
-        term: &str,
-        whole_word: bool,
-    ) -> Vec<(usize, usize)> {
-        let line_start = self.rope.line_to_char(line);
-        let line_len = self.line_char_len(line);
-        let raw_line_chars: Vec<char> = self
-            .rope
-            .slice(line_start..line_start + line_len)
-            .chars()
-            .collect();
-        let term_lower: String = term.chars().flat_map(char::to_lowercase).collect();
-        let term_count = term.chars().count();
-        let mut hits = Vec::new();
-        let mut at = 0;
-        while at + term_count <= raw_line_chars.len() {
-            let candidate: String = raw_line_chars[at..at + term_count]
-                .iter()
-                .flat_map(|c| c.to_lowercase())
-                .collect();
-            let chars_match = candidate == term_lower;
-            let end = at + term_count;
-            let boundary_ok = !whole_word
-                || ((at == 0 || !is_word_char(raw_line_chars[at - 1]))
-                    && (end >= raw_line_chars.len() || !is_word_char(raw_line_chars[end])));
-            if chars_match && boundary_ok {
-                hits.push((at, end));
-                at = end;
-            } else {
-                at += 1;
+        // A lowercase expansion such as İ → i + combining dot must still
+        // occupy exactly one source column for highlighting and navigation.
+        let offsets = (chars.len() != raw.len()).then(|| {
+            let mut offsets = Vec::with_capacity(raw.len() + 1);
+            offsets.push(0);
+            let mut offset = 0;
+            for c in &raw {
+                offset += c.to_lowercase().count();
+                offsets.push(offset);
             }
+            offsets
+        });
+        let mut at = 0;
+        while at < raw.len() {
+            let start = offsets.as_ref().map_or(at, |o| o[at]);
+            let end = start + term_chars.len();
+            if end > chars.len() {
+                break;
+            }
+            if chars[start..end] == term_chars[..] {
+                let source_end = match &offsets {
+                    Some(o) => o.binary_search(&end).ok(),
+                    None => Some(end),
+                };
+                if let Some(col) = source_end {
+                    if !whole_word
+                        || ((at == 0 || !is_word_char(raw[at - 1]))
+                            && (col == raw.len() || !is_word_char(raw[col])))
+                    {
+                        hits.push((at, col));
+                        at = col;
+                        continue;
+                    }
+                }
+            }
+            at += 1;
         }
         hits
     }

@@ -5,6 +5,13 @@ use super::Buffer;
 
 mod patience;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReloadOutcome {
+    Unchanged,
+    Reloaded,
+    Conflict,
+}
+
 // FNV-1a tuned to match nit_syntax::hash_line_bytes: skip '\n' and '\r' so the
 // hash is whitespace-stable across CRLF/LF and trailing-newline differences.
 const FNV_OFFSET: u64 = 14695981039346656037;
@@ -61,6 +68,7 @@ impl Buffer {
 
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+        self.saved_rope = self.rope.clone();
         // After save, current content becomes the new base for diff.
         self.base_line_hashes = rope_line_hashes(&self.rope);
         self.invalidate_diff_cache();
@@ -73,25 +81,47 @@ impl Buffer {
     /// history and any pending edits — the new content is treated as a fresh
     /// load. Returns `true` if the buffer was updated.
     pub fn reload_from_disk(&mut self) -> bool {
+        self.reload_if_clean() == ReloadOutcome::Reloaded
+    }
+
+    pub fn reload_if_clean(&mut self) -> ReloadOutcome {
         let Some(path) = self.path.as_ref() else {
-            return false;
+            return ReloadOutcome::Unchanged;
         };
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return false;
+        let content = match crate::load_to_string(path) {
+            Ok(content) => content,
+            Err(crate::io::IoError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound && self.rope != self.saved_rope =>
+            {
+                return ReloadOutcome::Conflict;
+            }
+            Err(_) => return ReloadOutcome::Unchanged,
         };
-        let new_rope = Rope::from_str(&content);
-        if self.rope == new_rope {
-            return false;
+        // Save notifications can arrive after typing resumes. Compare against
+        // the saved rope (a cheap shared snapshot) before declaring a conflict.
+        if self.saved_rope == content.as_str() {
+            return ReloadOutcome::Unchanged;
         }
-        self.rope = new_rope;
-        self.version = self.version.wrapping_add(1);
-        self.full_reparse = true;
-        self.pending_edits.clear();
+        if self.rope != self.saved_rope {
+            if self.rope == content.as_str() {
+                self.mark_clean();
+                return ReloadOutcome::Unchanged;
+            }
+            return ReloadOutcome::Conflict;
+        }
+        self.rope = Rope::from_str(&content);
+        self.saved_rope = self.rope.clone();
+        self.cursor.line = self.clamped_cursor_line();
+        self.clamp_col();
+        self.cursor.desired_col = None;
+        self.clear_selection();
+        self.ensure_visible();
+        self.record_full_reparse();
         self.undo_log = super::undo_log::UndoLog::new();
         self.dirty = false;
         self.base_line_hashes = rope_line_hashes(&self.rope);
         self.invalidate_diff_cache();
-        true
+        ReloadOutcome::Reloaded
     }
 
     pub(super) fn ensure_diff_computed(&mut self) {

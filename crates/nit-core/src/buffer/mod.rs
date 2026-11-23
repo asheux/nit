@@ -14,6 +14,7 @@ mod undo;
 mod undo_log;
 
 pub use brackets::{find_matching_bracket, BracketMatch};
+pub use diff::ReloadOutcome;
 pub use jumplist::{JumpEntry, JumpList, JUMPLIST_CAPACITY};
 pub use repr::Buffer;
 pub use types::{BufferEdit, BufferPoint, LineDiffStatus};

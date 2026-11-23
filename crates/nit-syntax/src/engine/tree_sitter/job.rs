@@ -225,7 +225,11 @@ fn highlight_job(
 ///   and return both the new tree and the pre-parse edited tree for the
 ///   incremental highlight phase's `changed_ranges` computation.
 fn parse_job_tree(state: &mut BufferState, job: &HighlightRequest) -> (Option<Tree>, Option<Tree>) {
-    if job.full_reparse || state.tree.is_none() {
+    // The worker coalesces queued requests. Their edit lists describe only
+    // the immediately preceding versions, so a gap invalidates the tree.
+    let expected_base = job.version.checked_sub(job.edits.len() as u64);
+    let cached_version = state.snapshot.as_ref().map(|s| s.version);
+    if job.full_reparse || state.tree.is_none() || cached_version != expected_base {
         return (state.parser.parse(job.text.as_bytes(), None), None);
     }
     if job.edits.is_empty() {

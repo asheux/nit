@@ -945,8 +945,19 @@ pub(super) fn drain_file_watcher(
                 .path()
                 .map(|p| *p == changed_path)
                 .unwrap_or(false);
-            if matches && state.buffers[buf_idx].reload_from_disk() {
-                syntax.note_buffer_change(buf_idx, &mut state.buffers[buf_idx]);
+            if matches {
+                match state.buffers[buf_idx].reload_if_clean() {
+                    nit_core::buffer::ReloadOutcome::Reloaded => {
+                        syntax.note_buffer_change(buf_idx, &mut state.buffers[buf_idx]);
+                    }
+                    nit_core::buffer::ReloadOutcome::Conflict => {
+                        state.status = Some(format!(
+                            "{} changed on disk. Kept your unsaved edits.",
+                            changed_path.display()
+                        ));
+                    }
+                    nit_core::buffer::ReloadOutcome::Unchanged => {}
+                }
             }
         }
 
