@@ -65,7 +65,8 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             &[
                 ("Ctrl+Q", " quit (confirm if dirty)"),
                 ("Ctrl+S", " save"),
-                ("Ctrl+T", " toggle NITTree (file tree)"),
+                ("Ctrl+T", " focus NITTree or return to center (lab: toggle tree)"),
+                ("F6", " switch Chat / Editor in station; pause / resume in GoL or Games"),
                 ("Ctrl+P", " fuzzy file search"),
                 ("Ctrl+F", " content search"),
                 ("F4 / Ctrl+Shift+T", " open / close terminal popup"),
@@ -96,14 +97,15 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             ],
         ),
         (
-            "NITTREE (EDITOR OVERLAY)",
+            "NITTREE",
             &[
-                ("Esc / q", " close tree"),
+                ("Esc / q", " return to center (lab: close tree)"),
                 ("j/k / Up/Down", " move selection"),
                 ("PageUp/PageDown", " jump by page"),
                 ("Home/End", " jump to top/bottom"),
-                ("Enter", " open file (closes tree)"),
-                ("r", " refresh tree"),
+                ("Enter / click", " open a file in Editor or expand / collapse a directory in the station"),
+                ("R", " refresh tree"),
+                ("r", " rename selected entry"),
                 (".", " toggle hidden files"),
                 ("i", " toggle ignored files"),
             ],
@@ -121,7 +123,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 (":<N>", " jump to line N (e.g. `:56` jumps to line 56)"),
                 (":help / :commands", " open this help overlay"),
                 (":run", " run active app"),
-                (":tree / :nittree / :explore", " toggle NITTree"),
+                (":tree / :nittree / :explore", " focus NITTree or return to center (lab: toggle tree)"),
                 (":find / :ff", " open fuzzy file search"),
                 (":grep / :rg / :search", " open content search"),
                 (
@@ -370,4 +372,32 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         Paragraph::new(with_selection).style(panel_style),
         content_area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_distinguishes_station_navigation_and_lab_controls() {
+        let rows: Vec<_> = build_lines(&Theme::default())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect();
+        for (key, words) in [
+            (
+                "F6",
+                &["Chat / Editor", "pause / resume", "GoL or Games"][..],
+            ),
+            ("Ctrl+T", &["focus NITTree", "return to center"][..]),
+            ("Enter / click", &["open a file", "directory"][..]),
+            ("R", &["refresh tree"][..]),
+        ] {
+            assert!(
+                rows.iter().any(|row| row.trim_start().starts_with(key)
+                    && words.iter().all(|word| row.contains(word))),
+                "missing {key} station help"
+            );
+        }
+    }
 }

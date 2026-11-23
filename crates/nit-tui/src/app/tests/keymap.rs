@@ -2279,3 +2279,42 @@ fn station_terminal_exit_keeps_other_pane_focus_and_restores_chat() {
     state.toggle_file_tree();
     assert_eq!(state.focus, PaneId::Notes);
 }
+
+#[test]
+fn idle_empty_station_tree_lists_once_until_manual_refresh() {
+    use crate::file_tree_runner::{FileTreeEvent, FileTreeRunner};
+    let mut state = state_for_test_in_workspace("idle-empty-tree");
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    let mut runner = FileTreeRunner::spawn();
+    assert!(file_tree_tick(&mut state, &runner));
+    let list = || match runner
+        .events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+    {
+        FileTreeEvent::DirListed { dir, entries } => (dir, entries),
+        FileTreeEvent::Error { message, .. } => panic!("{message}"),
+    };
+    let (dir, entries) = list();
+    assert!(entries.is_empty());
+    state.file_tree.loading_dirs.remove(&dir);
+    state.file_tree.cache.insert(dir, entries);
+    crate::file_tree::rebuild_view(&mut state, None);
+    assert!(!file_tree_tick(&mut state, &runner));
+
+    fs::write(state.workspace_root.join("new-file"), "").unwrap();
+    state.focus_file_tree();
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    assert!(handle_file_tree_key(
+        &KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        &mut state,
+        &mut syntax,
+        ratatui::layout::Rect::new(0, 0, 32, 20)
+    ));
+    assert!(file_tree_tick(&mut state, &runner));
+    let (_, entries) = list();
+    assert_eq!(entries.len(), 1);
+    assert!(!file_tree_tick(&mut state, &runner));
+    runner.shutdown();
+    fs::remove_dir_all(&state.workspace_root).unwrap();
+}
