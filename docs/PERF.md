@@ -30,6 +30,8 @@ Nit puts required instructions in each request and lets agents fetch detailed re
 
 One of each totals 11,623 and 4,858 estimated input tokens respectively, a 58.2% reduction in this sample. A real mission can have different numbers of each role. Provider framing, tool definitions, replies, later skill reads and provider caching affect usage and billing. For a cost comparison, keep the model, task and verification requirements fixed and compare provider-reported usage across completed runs. [How to use NitSkills](../README.md#give-agents-only-the-guidance-they-need)
 
+For the 16-playbook catalog at `5c97c1c`, the `nit skills` listing is 247 tokens with the same tokenizer. A single playbook ranges from 188 to 520 tokens, with a median of 266. These counts cover the listing or the Markdown body an agent chooses to read. Attaching a skill in chat inserts a reference, so the agent can decide whether to fetch the full text.
+
 ## Compare game throughput
 
 From a source checkout, `cargo bench -p nit-games` runs the tournament benchmarks. To compare settings, keep the strategy list, seed, number of matches, and rounds fixed. Record whether history, event logging and acceleration are enabled. Check that scores agree before interpreting elapsed time. [Tournament guide](GAMES.md)
