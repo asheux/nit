@@ -822,3 +822,59 @@ fn offline_or_disconnected_runner_leaves_first_send_editable() {
         assert_eq!(state.agents.chat_input_cursor, 6);
     }
 }
+
+#[test]
+fn busy_chat_shows_the_accepted_followup_until_its_fifo_turn_starts() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut state = state_for_test();
+    let (runner, commands) = select_test_recipient(&mut state);
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    let mut vitals = VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    let render = |state: &mut AppState, swarm: &SwarmRuntime| {
+        let mut t = Terminal::new(TestBackend::new(70, 16)).unwrap();
+        t.draw(|f| {
+            agent_console_view::render(f, Rect::new(0, 0, 70, 16), state, swarm, &Theme::default());
+        })
+        .unwrap();
+        let buf = t.backend().buffer();
+        (0..16)
+            .map(|y| (0..70).map(|x| buf.get(x, y).symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for prompt in ["initial", "first followup", "second followup"] {
+        state.agents.chat_input = prompt.into();
+        assert!(submit_chat_input_and_dispatch(
+            &mut state,
+            &mut vitals,
+            Some(&runner),
+            None,
+            &mut swarm,
+            &mut shadow
+        ));
+        let screen = render(&mut state, &swarm);
+        match prompt {
+            "initial" => assert!(!screen.contains("Queued for codex-test")),
+            "first followup" => assert!(
+                screen.contains("Queued for codex-test · first followup"),
+                "{screen}"
+            ),
+            _ => assert!(
+                screen.contains("Queued for codex-test · 2 waiting · second followup"),
+                "{screen}"
+            ),
+        }
+    }
+    assert_eq!(state.agents.messages.len(), 3);
+    for expected in ["initial", "first followup", "second followup"] {
+        assert!(
+            matches!(commands.try_recv(),Ok(crate::codex_runner::CodexCommand::RunTurn{prompt,..}) if prompt.lines().any(|line|line==expected))
+        );
+        assert!(commands.try_recv().is_err());
+        state.agents.active_turns.remove("codex-test");
+        maybe_dispatch_next_queued_codex_turn(&mut state, &mut vitals, Some(&runner));
+    }
+    assert!(!render(&mut state, &swarm).contains("Queued for codex-test"));
+}

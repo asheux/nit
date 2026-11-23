@@ -293,6 +293,57 @@ fn composer_title(
     agent.map_or_else(|| "CHAT BOX".into(), |id| format!("To {id}"))
 }
 
+/// An accepted chat prompt remains in its provider's FIFO until dispatch.
+fn queued_prompt_receipt(state: &AppState, width: usize) -> Option<String> {
+    let id = crate::app::chat_recipient(state)?;
+    let mission = state.agents.selected_context_mission();
+    let codex = state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .map(|q| (&q.agent_id, q.mission_id.as_deref(), q.prompt_msg_idx));
+    let claude = state
+        .agents
+        .queued_claude_turns
+        .iter()
+        .map(|q| (&q.agent_id, q.mission_id.as_deref(), q.prompt_msg_idx));
+    let mut count = 0;
+    let mut latest = None;
+    for (_, _, idx) in codex
+        .chain(claude)
+        .filter(|(agent, mid, _)| agent.as_str() == id && *mid == mission)
+    {
+        let Some(msg) = idx.and_then(|idx| state.agents.messages.get(idx)) else {
+            continue;
+        };
+        if msg.agent_id.is_none() && msg.channel == nit_core::AgentChannel::Agent {
+            count += 1;
+            latest = Some(msg);
+        }
+    }
+    let message = latest?;
+    let mut label = format!("Queued for {id}");
+    if count > 1 {
+        label.push_str(&format!(" · {count} waiting"));
+    }
+    let available = width.saturating_sub(label.width() + 3);
+    if available >= 4 {
+        // Only read as many characters from a potentially large paste as can be displayed.
+        let preview: String = message
+            .text
+            .trim_start()
+            .chars()
+            .take_while(|ch| !ch.is_control())
+            .take(available)
+            .collect();
+        if !preview.is_empty() {
+            label.push_str(" · ");
+            label.push_str(&preview);
+        }
+    }
+    Some(label)
+}
+
 /// Composer border action, using the same label and available cells for painting and hit-testing.
 fn recipient_action(
     state: &AppState,
@@ -726,6 +777,17 @@ pub fn render(
                 agent.queue_len.saturating_sub(usize::from(running))
             })
             .unwrap_or(0);
+        let queued_receipt = if queued_count > 0
+            && state.station_chat_center()
+            && crate::app::followup_mission(state, swarm).is_none()
+        {
+            queued_prompt_receipt(
+                state,
+                usize::from(layout.input_chunk.width.saturating_sub(2)),
+            )
+        } else {
+            None
+        };
         let mut title_spans = Vec::new();
         let recipient = recipient_action(state, swarm, layout.input_chunk.width.saturating_sub(2));
         if let Some((label, hint)) = recipient {
@@ -780,7 +842,7 @@ pub fn render(
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        if queued_count > 0 {
+        if queued_count > 0 && queued_receipt.is_none() {
             title_spans.push(Span::raw("  "));
             let label = if queued_count > 1 {
                 format!(" Queued {queued_count} ")
@@ -824,6 +886,8 @@ pub fn render(
                 " Set up CLI "
             };
             input_block.title_bottom(Line::styled(setup, Style::default().fg(theme.muted)))
+        } else if let Some(receipt) = queued_receipt {
+            input_block.title_bottom(Line::styled(receipt, Style::default().fg(theme.accent)))
         } else {
             input_block
         };
