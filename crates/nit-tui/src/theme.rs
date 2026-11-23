@@ -211,11 +211,10 @@ impl Theme {
                 .as_deref()
                 .or(cfg.background.as_deref()),
         );
+        theme.editor_background = theme.panel_background;
         overlay(
             &mut theme.editor_background,
-            cfg.editor_background
-                .as_deref()
-                .or(cfg.background.as_deref()),
+            cfg.editor_background.as_deref(),
         );
         overlay(
             &mut theme.popup_background,
@@ -333,10 +332,11 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
+        let panel_background = Color::Rgb(16, 31, 42);
         Theme {
             background: Color::Rgb(10, 21, 30),
-            panel_background: Color::Rgb(16, 31, 42),
-            editor_background: Color::Rgb(32, 61, 89),
+            panel_background,
+            editor_background: panel_background,
             popup_background: Color::Rgb(25, 46, 59),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),

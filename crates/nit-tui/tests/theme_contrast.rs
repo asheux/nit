@@ -22,6 +22,7 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
     let preset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/devs.toml");
     assert!(preset.is_file());
     for theme in [Theme::default(), Theme::load(Some(&preset))] {
+        assert_eq!(theme.editor_background, theme.panel_background);
         for fg in [
             theme.foreground,
             theme.muted,
