@@ -384,11 +384,6 @@ pub fn render(
     } else {
         Style::default().fg(theme.border)
     };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
     // Two-tab title bar — mirrors the visualizer pane's ROSTER /
     // MISSIONS / DAG / … tab styling. AGENT CHAT is the active tab on
     // this surface because the chat console is only rendered when the
@@ -404,7 +399,6 @@ pub fn render(
         .borders(Borders::ALL)
         .title(title_line)
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(theme.background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -757,7 +751,7 @@ pub fn render(
                 ),
                 Style::default()
                     .fg(if focused {
-                        theme.border_focused
+                        theme.title_focused
                     } else {
                         theme.muted
                     })
@@ -771,7 +765,7 @@ pub fn render(
                 format!(" t={swarm_template} "),
                 Style::default()
                     .fg(theme.background)
-                    .bg(theme.border_focused)
+                    .bg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
         }

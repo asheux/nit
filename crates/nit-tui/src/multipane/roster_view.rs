@@ -329,7 +329,7 @@ fn word_toggle_line(
         .add_modifier(Modifier::DIM);
     let selected_style = Style::default()
         .fg(theme.background)
-        .bg(theme.border_focused)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(theme.foreground);
     let sep_style = label_style;

@@ -404,7 +404,7 @@ pub fn render(
             Span::styled(
                 "CHAT BOX",
                 Style::default()
-                    .fg(theme.border_focused)
+                    .fg(theme.title_focused)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(

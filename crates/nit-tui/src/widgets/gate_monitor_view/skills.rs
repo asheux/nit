@@ -266,7 +266,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 usize::from(r.catalog.width.saturating_sub(2)),
             );
             let marker_style = if i == state.selected_skill && has_focus {
-                style.fg(theme.border_focused)
+                style.fg(theme.accent)
             } else {
                 style
             };

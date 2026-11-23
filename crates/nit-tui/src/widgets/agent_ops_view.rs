@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use std::collections::BTreeMap;
@@ -280,7 +280,7 @@ impl RosterChoice {
                     {
                         Style::default()
                             .fg(theme.background)
-                            .bg(theme.border_focused)
+                            .bg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     }
                     Some(_) => Style::default().fg(theme.foreground).bg(dim_bg_towards(
@@ -391,7 +391,7 @@ impl BackendInventoryRow {
 fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &Theme) -> Color {
     match backend {
         BackendInventoryBackend::Codex => theme.title,
-        BackendInventoryBackend::Claude => theme.border_focused,
+        BackendInventoryBackend::Claude => theme.accent,
         BackendInventoryBackend::Gemini => theme.accent,
         BackendInventoryBackend::Local => theme.border,
     }
@@ -400,7 +400,7 @@ fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &The
 fn roster_lane_backend_accent(backend: AgentLaneKind, theme: &Theme) -> Color {
     match backend {
         AgentLaneKind::Codex => theme.title,
-        AgentLaneKind::Claude => theme.border_focused,
+        AgentLaneKind::Claude => theme.accent,
         AgentLaneKind::Gemini => theme.accent,
         AgentLaneKind::Mock => theme.border,
         AgentLaneKind::Unknown => theme.title,
@@ -872,11 +872,6 @@ pub fn render(
     } else {
         Style::default().fg(theme.border)
     };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
     let title_color = if focused {
         theme.title_focused
     } else {
@@ -892,7 +887,6 @@ pub fn render(
                 .add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(theme.background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -7005,7 +6999,7 @@ fn roster_multiway_selector_line(
     let label_style = theme.status_idle_style();
     let selected_style = Style::default()
         .fg(theme.background)
-        .bg(theme.border_focused)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
         theme.cursor_line_bg,
@@ -7036,7 +7030,7 @@ fn roster_multiway_buttons_line(state: &AppState, theme: &Theme) -> Line<'static
     let gap_style = theme.status_idle_style();
     let button_style = Style::default()
         .fg(theme.background)
-        .bg(theme.border_focused)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let graph_style = if state.agents.multiway_view.is_some() {
         button_style

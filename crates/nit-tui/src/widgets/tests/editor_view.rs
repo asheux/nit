@@ -77,8 +77,28 @@ fn source_title_keeps_filename_dirty_mark_and_save_hint_on_one_border() {
     };
     let wide = render(70, true);
     assert!(wide.contains("src/very/long/module/解") && wide.contains(".rs ●"));
-    assert!(wide.ends_with("Ctrl+S SAVE ┓"));
+    assert!(wide.ends_with("Ctrl+S SAVE ┐"));
     let narrow = render(19, true);
     assert!(narrow.contains('…') && narrow.contains(".rs ●"));
     assert!(!render(70, false).contains('●'));
+}
+
+#[test]
+fn pane_focus_changes_border_color_and_keeps_single_line_edges() {
+    use ratatui::{buffer::Buffer as Screen, style::Color, widgets::Widget};
+    let theme = Theme {
+        border: Color::Green,
+        border_focused: Color::Magenta,
+        ..Theme::default()
+    };
+    let area = Rect::new(0, 0, 18, 4);
+    for (focused, color) in [(true, theme.border_focused), (false, theme.border)] {
+        let mut screen = Screen::empty(area);
+        editor_border(&theme, focused).render(area, &mut screen);
+        for (x, y, glyph) in [(0, 0, "┌"), (17, 3, "┘"), (0, 1, "│"), (8, 3, "─")] {
+            let cell = screen.get(x, y);
+            assert_eq!(cell.symbol(), glyph);
+            assert_eq!(cell.fg, color);
+        }
+    }
 }

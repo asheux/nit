@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph},
     Frame,
 };
 
@@ -32,16 +32,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 }
 
 fn build_block(focused: bool, theme: &Theme) -> Block<'static> {
-    let (border_style, border_type, title_color) = if focused {
+    let (border_style, title_color) = if focused {
         (
             Style::default().fg(theme.border_focused),
-            BorderType::Thick,
             theme.title_focused,
         )
     } else {
         (
             Style::default().fg(theme.border),
-            BorderType::Plain,
             theme.title,
         )
     };
@@ -54,7 +52,6 @@ fn build_block(focused: bool, theme: &Theme) -> Block<'static> {
                 .add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(theme.background))
 }
 

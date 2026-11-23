@@ -10,7 +10,7 @@ use nit_core::{
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -171,11 +171,6 @@ pub fn render(
     } else {
         Style::default().fg(theme.border)
     };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
     let title_color = if focused {
         theme.title_focused
     } else {
@@ -244,7 +239,6 @@ pub fn render(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(theme.background))
         .title(Span::styled(title_prefix, title_style))
         .title_bottom(Line::from(buttons));
@@ -991,11 +985,6 @@ fn render_games(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState
     } else {
         Style::default().fg(theme.border)
     };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
     let title_color = if focused {
         theme.title_focused
     } else {
@@ -1005,7 +994,6 @@ fn render_games(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(theme.background))
         .title(Span::styled(
             "GATE MONITOR",

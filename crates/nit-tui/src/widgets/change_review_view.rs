@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -100,11 +100,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         Block::default()
             .borders(Borders::ALL)
             .style(Style::default().bg(theme.background).fg(theme.foreground))
-            .border_type(if focused {
-                BorderType::Thick
-            } else {
-                BorderType::Plain
-            })
             .border_style(Style::default().fg(if focused {
                 theme.border_focused
             } else {

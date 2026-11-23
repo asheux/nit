@@ -11,7 +11,7 @@ use ratatui::{
     backend::CrosstermBackend,
     style::{Modifier, Style},
     text::Span,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 
@@ -169,9 +169,12 @@ pub(super) fn draw(
                 };
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Thick)
                     .title(title_line)
-                    .border_style(Style::default().fg(theme.border_focused))
+                    .border_style(Style::default().fg(if focused {
+                        theme.border_focused
+                    } else {
+                        theme.border
+                    }))
                     .style(Style::default().bg(theme.background));
                 let inner = block.inner(layout.notes);
                 f.render_widget(block, layout.notes);
@@ -210,16 +213,10 @@ pub(super) fn draw(
             } else {
                 Style::default().fg(theme.border)
             };
-            let border_type = if focused {
-                BorderType::Thick
-            } else {
-                BorderType::Plain
-            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title("AGENT OPS")
                 .border_style(border_style)
-                .border_type(border_type)
                 .style(Style::default().bg(panel_theme.background));
             f.render_widget(block.clone(), layout.job);
             let outer_inner = block.inner(layout.job);

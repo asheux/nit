@@ -2,6 +2,8 @@
 
 Run `nit .` to open Agent Chat with NITTree on the left. Click a file to open it in the center and move keyboard focus to its source. Click **Agent Chat** or press **F6** to return to your draft. Launching `nit path/to/file` opens that file directly in Editor. In the editor, press **i** to type, **Esc** to return to Normal mode, and **Ctrl+S** to save. Press **F1** for help. Letter case matters in the tables below. A sequence such as `gg` means two lowercase keypresses.
 
+The thin blue-gray outline marks the focused pane. The bottom bar also names it after **FOCUS**.
+
 ## Find and open a file
 
 | Task | Control |

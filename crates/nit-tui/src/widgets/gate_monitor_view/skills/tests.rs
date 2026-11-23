@@ -248,7 +248,7 @@ fn catalog_uses_list_background_and_reader_keeps_its_category_color() {
         assert_eq!(buf.get(x, y).fg, theme.foreground);
         assert_eq!(buf.get(x, y).bg, theme.list_background());
         let (x, y) = locate(buf, "› ");
-        assert_eq!(buf.get(x, y).fg, theme.border_focused);
+        assert_eq!(buf.get(x, y).fg, theme.accent);
         assert_eq!(buf.get(x + 2, y).fg, theme.foreground);
         state.skill_reader_open = true;
         term.draw(|f| render(f, inner(area), &mut state, &theme))

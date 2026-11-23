@@ -10,7 +10,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
     style::Style,
-    widgets::{Block, BorderType, Borders, Clear},
+    widgets::{Block, Borders, Clear},
     Terminal,
 };
 
@@ -1073,11 +1073,6 @@ fn overlay_pane_terminals(
         );
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(if is_focused {
-                BorderType::Thick
-            } else {
-                BorderType::Plain
-            })
             .border_style(Style::default().fg(if is_focused {
                 theme.border_focused
             } else {

@@ -226,7 +226,7 @@ pub fn render_pane(
             ),
             Style::default()
                 .fg(if focused {
-                    theme.border_focused
+                    theme.title_focused
                 } else {
                     theme.border
                 })
@@ -234,14 +234,14 @@ pub fn render_pane(
         ));
         // Match the single-pane chat-box badge colors so the operator
         // gets the same visual cue regardless of which UI surface
-        // they're using. Single-pane uses `border_focused` for the
+        // they're using. Single-pane uses `accent` for the
         // template badge and `hl.operator` for the mission badge.
         title_spans.push(Span::raw("  "));
         title_spans.push(Span::styled(
             format!(" t={} ", pane.swarm_template),
             Style::default()
                 .fg(theme.background)
-                .bg(theme.border_focused)
+                .bg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
         title_spans.push(Span::raw(" "));

@@ -259,7 +259,7 @@ impl Widget for CircuitWidget<'_> {
         // Nodes on top.
         for node in &self.cached.nodes {
             let border = if node.is_start {
-                self.theme.border_focused
+                self.theme.accent
             } else if node.is_halt {
                 self.theme.warning
             } else if node.output == Some('C') {
@@ -1129,7 +1129,7 @@ fn wire_color_from_kind(kind: u8, theme: &Theme) -> Color {
         COLOR_WIRE3 => Color::Magenta,
         COLOR_JUNCTION => theme.border,
         COLOR_ACCENT => theme.accent,
-        _ => theme.border_focused,
+        _ => theme.accent,
     }
 }
 

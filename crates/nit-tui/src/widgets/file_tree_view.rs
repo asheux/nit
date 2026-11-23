@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -43,7 +43,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let marker = if selected && focused { "▸ " } else { "  " };
         line.spans.insert(
             0,
-            Span::styled(marker, Style::default().fg(theme.border_focused)),
+            Span::styled(marker, Style::default().fg(theme.accent)),
         );
         let mut style = Style::default().bg(bg);
         if selected && focused {
@@ -122,10 +122,10 @@ fn on_off(flag: bool) -> &'static str {
 }
 
 fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a> {
-    let (border_color, border_type, title_color) = if focused {
-        (theme.border_focused, BorderType::Thick, theme.title_focused)
+    let (border_color, title_color) = if focused {
+        (theme.border_focused, theme.title_focused)
     } else {
-        (theme.border, BorderType::Plain, theme.title)
+        (theme.border, theme.title)
     };
     let title = Line::from(vec![
         Span::styled(
@@ -142,7 +142,6 @@ fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a>
         .borders(Borders::ALL)
         .style(Style::default().bg(theme.background))
         .border_style(Style::default().fg(border_color))
-        .border_type(border_type)
         .title(title)
 }
 
