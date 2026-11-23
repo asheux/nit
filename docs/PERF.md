@@ -53,3 +53,9 @@ For the 16-playbook catalog at `5c97c1c`, the `nit skills` listing is 247 tokens
 ## Compare game throughput
 
 From a source checkout, `cargo bench -p nit-games` runs the tournament benchmarks. To compare settings, keep the strategy list, seed, number of matches, and rounds fixed. Record whether history, event logging and acceleration are enabled. Check that scores agree before interpreting elapsed time. [Tournament guide](GAMES.md)
+
+## Agent reply latency
+
+A background process launched by a tool can keep the CLI’s output handles open after the provider finishes its reply. In a macOS release-build terminal fixture, a cold Claude worker emitted its final result while a child kept those handles open for another 1.5 seconds. The next task received its prompt **59–61 ms** after the result across three runs, compared with 1,549 ms before the fix. Without the extra child, the same fixture took 58–60 ms across two runs. These measurements include station dispatch and fixture process startup. They exclude model generation and network time.
+
+Nit reads the Claude result, reported session ID and available token usage from the provider’s stream. Provider errors and operator cancellations remain distinct from successful replies. These changes apply to cold CLI turns; pooled Claude workers already read their results directly from the stream.
