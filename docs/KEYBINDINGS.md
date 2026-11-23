@@ -26,6 +26,8 @@ In the search popup, `Tab` switches between filenames and contents. Up/Down or `
 
 The center pane shows the open file's path. A `●` beside it means the buffer has unsaved edits. The gutter marks additions with `+`, modifications with `~`, and a deletion above a line with `▔`. Saving clears the dot and resets the gutter. Use `:changes` to review the saved patch against Git.
 
+When reading unfamiliar code in the default theme, look for gold function and method names, blue types, lavender keywords, green strings and peach numbers. The current line has a shaded background. A Markdown code fence with a recognized language tag uses that language’s colors.
+
 | Task | Keys |
 |---|---|
 | Start typing | From Normal mode, `i` inserts at the cursor, `a` appends, and `o`/`O` opens a line below/above. `Enter` keeps indentation and `Tab` indents while typing. |
@@ -75,7 +77,7 @@ Opening a file or directory with `nit` shows **NITSKILLS**. Focus starts in the 
 
 ## Work with agents
 
-In **Agent Ops**, use Left/Right to change tabs and Up/Down or `k`/`j` to select a row. In **Roster**, expand a model with `l`, collapse with `h`, and choose a reasoning effort or role with `Space` or `Enter`. On a model row, `Space` toggles priority. Keys `1–3` select the lab, parallel, and bulk swarm templates. Keys `4–7` select auto, general, research, and computational research. Press `Enter` on a model to focus its chat.
+In **Agent Ops**, use Left/Right to change tabs and Up/Down or `k`/`j` to select a row. The Codex group starts expanded on a standard launch so you can select a model immediately. In **Roster**, expand a model with `l`, collapse with `h`, and choose a reasoning effort or role with `Space` or `Enter`. On a model row, `Space` toggles priority. Keys `1–3` select the lab, parallel, and bulk swarm templates. Keys `4–7` select auto, general, research, and computational research. Press `Enter` on a model to focus its chat.
 
 - **Send and revisit prompts.** `Enter` sends and `Shift+Enter` starts another line. Up/Down moves through multiline input, then through prompt history at its ends. `Ctrl+Up`/`Ctrl+Down` scrolls the conversation. A new prompt queues while the agent is busy.
 - **Choose how a prompt runs.** `@new <prompt>` starts a fresh conversation, `@queue <prompt>` queues explicitly, and `@all <prompt>` sends to several agents. For delegated tasks and review, see [Swarm](SWARM.md) and [Shadow](SHADOWS.md).
