@@ -488,6 +488,9 @@ pub(super) fn handle_agent_ops_key(
                 select_roster_backend(state, backend);
                 changed = toggle_roster_backend_expanded(state, backend);
             } else {
+                if confirm_chat_recipient(state) {
+                    return true;
+                }
                 // An explicit roster selection addresses that lane. Preserve the
                 // destination of an existing draft when visiting other agents.
                 if state.agents.chat_input.is_empty() {
@@ -642,12 +645,103 @@ pub(super) fn reset_codex_mcp_sessions(state: &mut AppState, status: &str) {
     state.status = Some(status.to_string());
 }
 
+pub(crate) fn choose_chat_recipient(state: &mut AppState) {
+    if state.multipane.is_some() {
+        state.status = Some("Choose a chat agent with Ctrl+R. Your draft is still here".into());
+        return;
+    }
+    state.agents.chat_needs_recipient = true;
+    state.agents.dock_tab = AgentOpsTab::Roster;
+    state.focus = PaneId::JobOutput;
+    state.mode = Mode::Normal;
+    if let Some((idx, kind)) = state
+        .agents
+        .agents
+        .iter()
+        .enumerate()
+        .find(|(_, lane)| super::chat_lane_runnable(state, lane))
+        .map(|(idx, lane)| {
+            (
+                idx,
+                if lane.is_codex() {
+                    nit_core::AgentLaneKind::Codex
+                } else {
+                    lane.kind
+                },
+            )
+        })
+    {
+        state.agents.roster_expanded_backend_kinds.insert(kind);
+        state.agents.roster_selected = idx;
+        state.agents.roster_selected_backend = None;
+        state.agents.roster_tree_selected = None;
+        scroll_to_recipient(state);
+        state.status = Some("Select a model and press Enter to return to your draft".into());
+    } else {
+        state.status =
+            Some("No chat models. Set up Codex or Claude CLI and launch nit --agents all .".into());
+    }
+}
+
+fn scroll_to_recipient(state: &mut AppState) {
+    let height = state.agents.ops_viewport_height.max(1);
+    let mut line = 0;
+    while let Some(meta) = agent_ops_view::roster_meta_for_body_line(state, line) {
+        if meta.agent_idx == Some(state.agents.roster_selected)
+            && meta.node == agent_ops_view::RosterBodyNode::Agent
+        {
+            let selected = agent_ops_view::roster_body_offset(state) + line;
+            state.agents.ops_scroll = state
+                .agents
+                .ops_scroll
+                .clamp(selected.saturating_sub(height - 1), selected);
+            break;
+        }
+        line += 1;
+    }
+}
+
+pub(super) fn confirm_chat_recipient(state: &mut AppState) -> bool {
+    if !state.agents.chat_needs_recipient {
+        return false;
+    }
+    let idx = state.agents.roster_selected;
+    if !state
+        .agents
+        .agents
+        .get(idx)
+        .is_some_and(|lane| super::chat_lane_runnable(state, lane))
+    {
+        state.status = Some("Choose a Codex or Claude model for this draft".into());
+        return true;
+    }
+    sync_roster_selected_agent(state, idx);
+    state.agents.chat_needs_recipient = false;
+    state.select_station_center(nit_core::StationCenterTab::Chat);
+    state.mode = Mode::Normal;
+    let mut words = state.agents.chat_input.split_whitespace();
+    state.status = Some(
+        if words.next() == Some("@agent") && words.next() != state.agents.selected_agent.as_deref()
+        {
+            "Draft kept. Edit its @agent address before sending.".into()
+        } else {
+            "Recipient selected · Enter to send".into()
+        },
+    );
+    true
+}
+
 pub(super) fn sync_roster_selected_agent(state: &mut AppState, agent_idx: usize) {
     state.agents.roster_selected = agent_idx;
     state.agents.roster_selected_backend = None;
     state.agents.roster_tree_selected = None;
     if let Some(agent) = state.agents.agents.get(agent_idx) {
         state.agents.selected_agent = Some(agent.id.clone());
+        // Choosing a receiver for the current draft must preserve its mission,
+        // including when the highlighted lane is busy with another mission.
+        if state.agents.chat_needs_recipient {
+            return;
+        }
         if let Some(mission_id) = agent.current_mission.as_deref() {
             state.agents.selected_mission = Some(mission_id.to_string());
             if let Some(idx) = state
@@ -725,6 +819,9 @@ pub(super) fn move_roster_primary_selection(state: &mut AppState, delta: i32) ->
         }
         agent_ops_view::RosterSelectableRow::Agent { agent_idx } => {
             sync_roster_selected_agent(state, agent_idx);
+            if state.agents.chat_needs_recipient {
+                scroll_to_recipient(state);
+            }
         }
     }
     true
