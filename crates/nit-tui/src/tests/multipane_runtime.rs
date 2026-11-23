@@ -1257,3 +1257,50 @@ fn paint_bar_fills_full_rect_with_bg_style() {
         );
     }
 }
+
+#[test]
+fn help_owns_keys_above_a_live_terminal() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut state = fixture_state_no_backend();
+    state.multipane.as_mut().unwrap().panes[0].terminal_active = true;
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert!(keys::route_help_key(&mut state, &key(KeyCode::F(1))));
+    assert!(keys::route_help_key(&mut state, &key(KeyCode::Char('x'))));
+    assert!(state.multipane.as_ref().unwrap().help_open);
+    assert!(keys::route_help_key(&mut state, &key(KeyCode::Esc)));
+    assert!(!keys::route_help_key(&mut state, &key(KeyCode::Char('x'))));
+    assert!(state.multipane.as_ref().unwrap().panes[0].terminal_active);
+}
+
+#[test]
+fn frame_places_caret_in_visible_artifact_reply() {
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::Terminal;
+    let mut state = fixture_state_no_backend();
+    state.agents.artifacts_popup_open = true;
+    state.agents.artifacts_popup_chat_input = "review".into();
+    state.agents.artifacts_popup_chat_cursor = 3;
+    state.metrics.frame_count = 0;
+    let swarm = SwarmRuntime::default();
+    let theme = crate::theme::Theme::default();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let area = terminal.size().unwrap();
+    let popup =
+        event_loop::popup_rect_for(area, crate::widgets::artifacts_popup::preferred_size(area));
+    let input = crate::widgets::artifacts_popup::chat_input_rect(&state, &swarm, popup).unwrap();
+    terminal
+        .draw(|frame| {
+            event_loop::draw_grid_frame(
+                frame,
+                &mut state,
+                &swarm,
+                &theme,
+                &theme.for_popup(),
+                &Default::default(),
+                None,
+            )
+        })
+        .unwrap();
+    let (x, y) = terminal.backend_mut().get_cursor().unwrap();
+    assert_eq!((x, y), (input.x + 3, input.y));
+}

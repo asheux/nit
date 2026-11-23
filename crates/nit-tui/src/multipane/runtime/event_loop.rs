@@ -16,7 +16,7 @@ use ratatui::{
 
 use super::keys::handle_key;
 use super::mouse::handle_mouse;
-use super::render::render_grid;
+use super::render::{render_grid, render_help_overlay};
 use crate::app::{clear_chat_esc_state, is_global_quit_key};
 use crate::claude_runner::{ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
@@ -40,6 +40,7 @@ pub fn run_loop(
     codex_config: CodexRunnerConfig,
     claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
+    let popup_theme = theme.for_popup();
     state.agents.codex_max_parallel_turns = codex_config.max_parallel_turns;
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
     if state.gitignored_dirs.is_empty() {
@@ -266,55 +267,19 @@ pub fn run_loop(
             state.metrics.frame_count = state.metrics.frame_count.wrapping_add(1);
 
             terminal.draw(|frame| {
-                let area = frame.size();
-                // Rebuilt every frame: terminals register their on-screen region
-                // + visible text so the mouse handler can hit-test + copy.
-                state.terminal_select_regions.clear();
-                let cursor = render_grid(frame, area, state, &swarm, theme);
-                let term_cursor = overlay_pane_terminals(frame, area, state, &terminals, theme);
-                if state.agents.artifacts_popup_open {
-                    let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
-                    artifacts_popup::render(frame, popup_area, state, &swarm, theme);
-                }
-                // Modal terminal popup overlays the entire grid, topmost.
-                let popup_cursor = if state.terminal_popup.visible {
-                    terminal_popup.as_ref().and_then(|session| {
-                        let inner = crate::widgets::terminal_popup::popup_inner_rect(area);
-                        let lines =
-                            crate::widgets::terminal_view::visible_text_lines(inner, session);
-                        let selection = state.ui_selection;
-                        state
-                            .terminal_select_regions
-                            .push(nit_core::TerminalSelectRegion {
-                                pane: nit_core::UiSelectionPane::TerminalPopup,
-                                x: inner.x,
-                                y: inner.y,
-                                width: inner.width,
-                                height: inner.height,
-                                lines,
-                            });
-                        let cwd = state.terminal_popup.cwd.as_deref();
-                        crate::widgets::terminal_popup::render(
-                            frame,
-                            area,
-                            session,
-                            cwd,
-                            theme,
-                            selection.as_ref(),
-                        )
-                    })
-                } else {
-                    None
-                };
-                if let Some((x, y)) = popup_cursor {
-                    frame.set_cursor(x, y);
-                } else if let Some((x, y)) = term_cursor {
-                    frame.set_cursor(x, y);
-                } else if let Some(c) = cursor {
-                    frame.set_cursor(c.x, c.y);
-                }
+                draw_grid_frame(
+                    frame,
+                    state,
+                    &swarm,
+                    theme,
+                    &popup_theme,
+                    &terminals,
+                    terminal_popup.as_ref(),
+                );
             })?;
-            let cursor_style = if state.terminal_popup.visible || focused_terminal_active(state) {
+            let cursor_style = if state.terminal_popup.visible
+                || (!state.agents.artifacts_popup_open && focused_terminal_active(state))
+            {
                 crossterm::cursor::SetCursorStyle::SteadyBar
             } else {
                 crossterm::cursor::SetCursorStyle::BlinkingBar
@@ -419,6 +384,9 @@ fn scroll_terminal_mp(
         }
         return true;
     }
+    if state.agents.artifacts_popup_open {
+        return false;
+    }
     let Some(mp) = state.multipane.as_ref() else {
         return false;
     };
@@ -485,8 +453,26 @@ fn drain_input_burst(
                 }
                 // The modal popup is top-level: while visible it swallows every
                 // key, forwarding to its shell except the two close intercepts.
-                if state.terminal_popup.visible {
+                if super::keys::route_help_key(state, &key) {
+                    // Help owns the keyboard, including over a live shell.
+                } else if state.terminal_popup.visible {
                     forward_key_to_terminal_popup(state, terminal_popup, key, clipboard);
+                } else if state.agents.artifacts_popup_open {
+                    if is_global_quit_key(&key) {
+                        return Ok(true);
+                    }
+                    crate::app::handle_artifacts_popup_key(
+                        &key,
+                        state,
+                        swarm,
+                        shadow,
+                        vitals,
+                        Some(codex),
+                        Some(claude),
+                        clipboard,
+                        area,
+                        theme,
+                    );
                 } else if !forward_key_to_focused_terminal(state, terminals, key, clipboard)
                     && handle_key(
                         state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard,
@@ -506,10 +492,14 @@ fn drain_input_burst(
                 }
                 // A live terminal owns pasted text: the popup first, then the
                 // focused pane's terminal; otherwise the chat input.
-                if state.terminal_popup.visible {
+                if help_open(state) {
+                    // Read-only modal.
+                } else if state.terminal_popup.visible {
                     if let Some(session) = terminal_popup.as_ref() {
                         let _ = session.paste(&text);
                     }
+                } else if state.agents.artifacts_popup_open {
+                    handle_paste(state, &text);
                 } else if let Some(session) = focused_terminal(state, terminals) {
                     let _ = session.paste(&text);
                 } else {
@@ -519,7 +509,9 @@ fn drain_input_burst(
             Event::Mouse(mouse) => {
                 // Wheel over any terminal grid scrolls that session instead of
                 // the chat thread underneath (modal popup wins when open).
-                if scroll_terminal_mp(state, terminals, terminal_popup, area, &mouse) {
+                if help_open(state) {
+                    // Keep the covered panes and their selections fixed.
+                } else if scroll_terminal_mp(state, terminals, terminal_popup, area, &mouse) {
                     if let Some(drag) = pending_drag.take() {
                         handle_mouse(state, swarm, theme, clipboard, area, drag);
                     }
@@ -715,6 +707,70 @@ pub(super) fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent
     ds.view_offset = 0;
 }
 
+pub(super) fn draw_grid_frame(
+    frame: &mut ratatui::Frame,
+    state: &mut AppState,
+    swarm: &crate::swarm::SwarmRuntime,
+    theme: &Theme,
+    popup_theme: &Theme,
+    terminals: &HashMap<usize, crate::pty::PtySession>,
+    terminal_popup: Option<&crate::pty::PtySession>,
+) {
+    let area = frame.size();
+    // Rebuilt every frame: terminals register their on-screen region
+    // + visible text so the mouse handler can hit-test + copy.
+    state.terminal_select_regions.clear();
+    let cursor = render_grid(frame, area, state, swarm, theme);
+    let term_cursor = overlay_pane_terminals(frame, area, state, terminals, theme);
+    let reply_cursor = if state.agents.artifacts_popup_open {
+        let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
+        artifacts_popup::render(frame, popup_area, state, swarm, popup_theme)
+    } else {
+        None
+    };
+    let visible_cursor = if state.terminal_popup.visible {
+        terminal_popup.and_then(|session| {
+            let inner = crate::widgets::terminal_popup::popup_inner_rect(area);
+            let lines = crate::widgets::terminal_view::visible_text_lines(inner, session);
+            let selection = state.ui_selection;
+            state
+                .terminal_select_regions
+                .push(nit_core::TerminalSelectRegion {
+                    pane: nit_core::UiSelectionPane::TerminalPopup,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height,
+                    lines,
+                });
+            let cwd = state.terminal_popup.cwd.as_deref();
+            crate::widgets::terminal_popup::render(
+                frame,
+                area,
+                session,
+                cwd,
+                popup_theme,
+                selection.as_ref(),
+            )
+        })
+    } else if state.agents.artifacts_popup_open {
+        reply_cursor
+    } else if focused_terminal_active(state) {
+        term_cursor
+    } else {
+        cursor.map(|c| (c.x, c.y))
+    };
+    if help_open(state) {
+        render_help_overlay(frame, popup_rect_for(area, (60, 18)), theme);
+    } else if let Some((x, y)) = visible_cursor {
+        frame.set_cursor(x, y);
+    }
+}
+
+fn help_open(state: &AppState) -> bool {
+    state.multipane.as_ref().is_some_and(|mp| mp.help_open)
+}
+
 /// Whether the focused pane is showing its terminal.
 fn focused_terminal_active(state: &AppState) -> bool {
     let idx = super::keys::focused_pane_idx(state);
@@ -748,6 +804,7 @@ fn forward_key_to_focused_terminal(
 ) -> bool {
     if !focused_terminal_active(state)
         || crate::pty::is_terminal_toggle_key(&key)
+        || crate::app::popup_keys::is_terminal_popup_toggle_key(&key)
         || is_global_quit_key(&key)
     {
         return false;

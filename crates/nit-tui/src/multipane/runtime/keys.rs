@@ -83,12 +83,7 @@ fn consume_global_chrome_keys(state: &mut AppState, key: &KeyEvent) -> Option<bo
         return Some(false);
     }
 
-    if matches!(state.multipane.as_ref(), Some(mp) if mp.help_open) {
-        let close = matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?'));
-        if close {
-            set_help_open(state, false);
-            clear_chat_esc_state();
-        }
+    if route_help_key(state, key) {
         return Some(false);
     }
 
@@ -99,13 +94,27 @@ fn consume_global_chrome_keys(state: &mut AppState, key: &KeyEvent) -> Option<bo
     let chord = key.modifiers;
     let is_unmodified_question_mark = matches!(key.code, KeyCode::Char('?'))
         && !chord.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-    let opens_help = matches!(key.code, KeyCode::F(1))
-        || (is_unmodified_question_mark && focused_chat_input_is_empty(state));
+    let opens_help = is_unmodified_question_mark && focused_chat_input_is_empty(state);
     if opens_help {
         set_help_open(state, true);
         return Some(false);
     }
     None
+}
+
+pub(super) fn route_help_key(state: &mut AppState, key: &KeyEvent) -> bool {
+    if state.multipane.as_ref().is_some_and(|mp| mp.help_open) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
+            set_help_open(state, false);
+            clear_chat_esc_state();
+        }
+        return true;
+    }
+    if key.code == KeyCode::F(1) {
+        set_help_open(state, true);
+        return true;
+    }
+    false
 }
 
 fn set_help_open(state: &mut AppState, open: bool) {

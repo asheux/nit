@@ -8,7 +8,6 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-use super::event_loop::popup_rect_for;
 use crate::multipane::grid;
 use crate::multipane::roster_view;
 use crate::swarm::SwarmRuntime;
@@ -185,12 +184,6 @@ pub(in crate::multipane) fn render_grid(
         }
     }
 
-    let help_open = matches!(state.multipane.as_ref(), Some(mp) if mp.help_open);
-    if help_open {
-        render_help_overlay(frame, popup_rect_for(area, (60, 18)), theme);
-        // Hide the cursor while the overlay covers the input.
-        return None;
-    }
     cursor
 }
 
@@ -245,7 +238,7 @@ fn paint_top_strip(frame: &mut ratatui::Frame, rect: Rect, state: &AppState, the
     paint_bar(frame, rect, label, bottom_strip_style(theme));
 }
 
-fn render_help_overlay(frame: &mut ratatui::Frame, rect: Rect, theme: &Theme) {
+pub(super) fn render_help_overlay(frame: &mut ratatui::Frame, rect: Rect, theme: &Theme) {
     let lines = [
         "Multipane keymap",
         "",
@@ -277,7 +270,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame, rect: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_focused))
-        .style(Style::default().bg(theme.background))
+        .style(Style::default().bg(theme.popup_background))
         .title(Span::styled(
             " HELP — multipane (F1 / ? / Esc to close) ",
             Style::default()
@@ -317,6 +310,14 @@ fn render_one_pane(
         .and_then(|mp| mp.panes.get(idx))
         .cloned()?;
 
+    let search_cursor = pane.dir_search.as_ref().and_then(|ds| {
+        let (_, bar, _) = compute_dir_search_layout(inner, &pane)?;
+        let col = unicode_width::UnicodeWidthStr::width(ds.query.as_str()).saturating_add(9);
+        Some(ChatCursor {
+            x: bar.x + col.min(bar.width.saturating_sub(1) as usize) as u16,
+            y: bar.y,
+        })
+    });
     if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
         let backend_filter = state
             .multipane
@@ -339,7 +340,7 @@ fn render_one_pane(
             focused,
             theme,
         );
-        return None;
+        return search_cursor;
     }
 
     let body_rect = render_pane_dir_search_overlay(frame, inner, &pane, theme);
@@ -381,7 +382,11 @@ fn render_one_pane(
     state.agents.selected_agent = saved_agent;
     state.agents.selected_mission = saved_mission;
     state.agents.mission_selected = saved_mission_selected;
-    cursor
+    if pane.dir_search.is_some() {
+        search_cursor
+    } else {
+        cursor
+    }
 }
 
 /// Stash the current visible-row count on `DirSearchState.last_visible`
@@ -476,10 +481,8 @@ fn render_pane_dir_search_overlay(
         return inner;
     };
     let ds = pane.dir_search.as_ref().unwrap();
-    let bar_style = Style::default()
-        .fg(theme.title_focused)
-        .bg(theme.background)
-        .add_modifier(Modifier::BOLD);
+    let surface = Style::default().bg(theme.popup_background);
+    let bar_style = surface.fg(theme.title_focused).add_modifier(Modifier::BOLD);
     // Inline placeholder while the query is empty so the operator
     // discovers the `../<term>` (parent) and `./<term>` (current dir)
     // navigation tokens without having to read the keybindings strip
@@ -502,7 +505,7 @@ fn render_pane_dir_search_overlay(
         spans.push(Span::styled("  [hidden]", bar_style));
     }
     spans.push(Span::styled(" ", bar_style));
-    frame.render_widget(Paragraph::new(Line::from(spans)), bar_rect);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(surface), bar_rect);
     let visible_usize = visible_rows as usize;
     let end = ds
         .view_offset
@@ -532,7 +535,7 @@ fn render_pane_dir_search_overlay(
             Line::from(Span::styled(format!(" {indent}{label} "), style))
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), drop_rect);
+    frame.render_widget(Paragraph::new(lines).style(surface), drop_rect);
     dir_search_body_rect(inner, pane)
 }
 
