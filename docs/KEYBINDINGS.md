@@ -24,6 +24,8 @@ In the search popup, `Tab` switches between filenames and contents. Up/Down or `
 
 ## Edit and save
 
+The center pane shows the open file's path. A `●` beside it means the buffer has unsaved edits. When a Git baseline is available, the gutter marks additions with `+`, modifications with `~`, and a deletion above a line with `▔`. Saving clears the dot. The gutter still shows changes relative to Git.
+
 | Task | Keys |
 |---|---|
 | Start typing | From Normal mode, `i` inserts at the cursor, `a` appends, and `o`/`O` opens a line below/above. `Enter` keeps indentation and `Tab` indents while typing. |
