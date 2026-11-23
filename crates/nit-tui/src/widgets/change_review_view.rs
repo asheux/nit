@@ -220,9 +220,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .get(review.selected)
         .is_some_and(|file| Some(&file.path) == review.preview_path.as_ref());
     if let Some(message) = &review.message {
-        frame.render_widget(Paragraph::new(visible(message)).style(muted), r.patch);
+        frame.render_widget(
+            Paragraph::new(visible(message)).style(muted.bg(theme.editor_background)),
+            r.patch,
+        );
     } else if !current {
-        frame.render_widget(Paragraph::new("Loading diff…").style(muted), r.patch);
+        frame.render_widget(
+            Paragraph::new("Loading diff…").style(muted.bg(theme.editor_background)),
+            r.patch,
+        );
     } else {
         paint_patch(frame, review, r.patch, theme);
     }
@@ -319,7 +325,10 @@ fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Th
             patch_line(line, in_hunk, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), patch);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.editor_background)),
+        patch,
+    );
 }
 
 pub(crate) fn select(review: &mut ChangeReview, index: usize) {
@@ -455,9 +464,20 @@ mod tests {
                 .draw(|frame| render(frame, frame.size(), &state, &theme))
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            assert!(buffer.content.iter().all(|cell| {
-                cell.bg == theme.background || (!empty && cell.bg == theme.selection_bg)
-            }));
+            let r = regions(buffer.area, state.change_review.files.len());
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    let point = Position::new(x, y);
+                    let expected = if !empty && r.patch.contains(point) {
+                        theme.editor_background
+                    } else if !empty && r.files.contains(point) && y == r.files.y {
+                        theme.selection_bg
+                    } else {
+                        theme.background
+                    };
+                    assert_eq!(buffer.get(x, y).bg, expected, "{point:?}");
+                }
+            }
             let status = buffer.get(1, 1);
             assert_eq!(status.fg, theme.success);
             assert!(!status.modifier.contains(Modifier::DIM));
