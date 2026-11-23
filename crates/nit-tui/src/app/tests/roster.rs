@@ -41,3 +41,39 @@ fn state_for_test_starts_with_empty_agents() {
     let state = state_for_test();
     assert!(state.agents.agents.is_empty());
 }
+
+#[test]
+fn selecting_first_agent_preserves_skill_attached_to_empty_draft() {
+    let mut state = state_for_test();
+    state.focus = PaneId::GateMonitor;
+    state.gate_monitor_sub_view = nit_core::GateMonitorSubView::Skills;
+    assert!(state.agents.selected_context_agent().is_none());
+    let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert!(gate_monitor_view::skills::handle_key(
+        &mut state,
+        key,
+        Rect::new(0, 0, 60, 20)
+    ));
+    let draft = state.agents.chat_input.clone();
+    assert!(draft.contains("nit skills genome-quality"));
+    assert_eq!(state.focus, PaneId::Notes);
+    assert_eq!(state.agents.chat_input_cursor, 0);
+
+    state.agents.agents.push(nit_core::AgentLane {
+        id: "model".into(),
+        role: "agent".into(),
+        lane: "chat".into(),
+        kind: nit_core::AgentLaneKind::Codex,
+        status: AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    sync_roster_selected_agent(&mut state, 0);
+    assert_eq!(state.agents.selected_context_agent(), Some("model"));
+    assert_eq!(state.agents.chat_input, draft);
+    assert_eq!(state.agents.chat_input_cursor, 0);
+    assert!(state.agents.messages.is_empty() && state.agents.active_turns.is_empty());
+}
