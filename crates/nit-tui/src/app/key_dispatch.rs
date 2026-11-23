@@ -18,6 +18,14 @@ pub(super) fn handle_change_review_key(
     area: ratatui::layout::Rect,
 ) -> bool {
     use crate::widgets::change_review_view::{move_file, scroll_patch};
+    if key.modifiers == KeyModifiers::ALT && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        crate::widgets::change_review_view::interaction::horizontal(
+            &mut state.change_review,
+            area,
+            if key.code == KeyCode::Left { -8 } else { 8 },
+        );
+        return true;
+    }
     if !key.modifiers.is_empty() {
         return false;
     }
@@ -35,7 +43,15 @@ pub(super) fn handle_change_review_key(
         if expanded {
             scroll_patch(review, area, delta, false);
         } else {
+            let before = review.selected;
             move_file(review, delta);
+            if before != review.selected
+                && state
+                    .ui_selection
+                    .is_some_and(|s| s.pane == nit_core::UiSelectionPane::ChangesPatch)
+            {
+                state.ui_selection = None;
+            }
         }
         return true;
     }

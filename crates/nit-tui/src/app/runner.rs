@@ -694,6 +694,10 @@ pub(super) fn run_loop(
                     }
                     if state.change_review_active() && state.focus == PaneId::Visualizer {
                         let area = layout::split(terminal.size().unwrap_or_default()).visualizer;
+                        if change_followup::key(state, &swarm, key, &mut clipboard) {
+                            needs_redraw = true;
+                            continue;
+                        }
                         if handle_change_review_key(key, state, syntax, area) {
                             needs_redraw = true;
                             continue;
@@ -744,6 +748,11 @@ pub(super) fn run_loop(
                     } else if state.terminal_pane_active && state.focus == PaneId::Notes {
                         if let Some(session) = terminal_pane.as_ref() {
                             let _ = session.paste(&text);
+                        }
+                        needs_redraw = true;
+                    } else if change_followup::focused(state) && !games_modal_popup_open(state) {
+                        if !text.is_empty() {
+                            change_followup::draft(state, &swarm, Some(&text));
                         }
                         needs_redraw = true;
                     } else if handle_paste_event(
@@ -1115,7 +1124,15 @@ pub(super) fn run_loop(
             state.show_change_review = false;
         }
         if state.change_review_active() {
+            let generation = state.change_review.preview_generation;
             review_runtime.tick(&state.workspace_root, &mut state.change_review);
+            if generation != state.change_review.preview_generation
+                && state
+                    .ui_selection
+                    .is_some_and(|s| s.pane == nit_core::UiSelectionPane::ChangesPatch)
+            {
+                reset_ui_selection(state, &mut input_state);
+            }
         } else if state.app_kind == AppKind::Gol && seed_runtime.is_none() {
             seed_runtime = Some(SeedRuntime::new(state));
             gol_petri = Some(PetriDishRuntime::new(state));

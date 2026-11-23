@@ -63,6 +63,8 @@ Run `:changes` to focus Git review. With a clean working tree, the pane shows up
 
 When the working tree has changes, each file row shows two Git status characters. The first describes the staged copy, the second the working copy. `MM` means a file has both staged and unstaged edits, `??` marks an untracked file, and `UU` marks a conflict where both sides modified the file. Select with `j`/`k`, Up/Down, or a click. Use `PageUp`/`PageDown` to read the patch and `Enter` to open the selected path. The pane refreshes automatically. Press `r` to refresh immediately.
 
+Drag across a patch to select its text. Selection copies to the yank register and available system clipboard. Press `y` or Ctrl+C to copy again. Alt+←/→ pans long lines, and dragging past the edge scrolls the patch. Choose **f Follow up** or press `f` to open an unsent Agent Chat draft with the selected file or commit, hunk, and excerpt. Pasting into focused Changes adds the pasted question to that draft. The source file and Git index stay unchanged. In an active swarm, check the task shown in the composer before sending.
+
 | Task | Control |
 |---|---|
 | Move focus | Click a pane or cycle with `Tab` / `Shift+Tab` outside a local input or tab selector. Directional shortcuts are `Ctrl+H/J/K/L`. `Ctrl+1/2/3` selects Editor, Agent Ops, or Agent Chat on terminals that deliver those chords. |

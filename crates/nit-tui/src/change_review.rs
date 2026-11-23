@@ -82,8 +82,15 @@ impl ReviewRuntime {
                 if snapshot.preview_path == review.preview_path
                     && snapshot.preview_commit == review.preview_commit
                 {
+                    snapshot.horizontal_scroll = review.horizontal_scroll;
                     snapshot.scroll = review.scroll.min(snapshot.preview.len().saturating_sub(1));
                 }
+                snapshot.preview_generation = review.preview_generation.wrapping_add(u64::from(
+                    snapshot.preview_path != review.preview_path
+                        || snapshot.preview_commit != review.preview_commit
+                        || snapshot.root != review.root
+                        || snapshot.preview != review.preview,
+                ));
                 snapshot.refresh = review.refresh;
                 *review = snapshot;
                 let delay = if review.message.is_some() { 12 } else { 3 };

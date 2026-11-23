@@ -1391,6 +1391,29 @@ pub(super) fn handle_mouse_down_with_swarm(
         if state.change_review_active() && layout.visualizer.contains(point) {
             state.focus = PaneId::Visualizer;
             state.mode = Mode::Normal;
+            use crate::widgets::change_review_view::interaction;
+            if interaction::follow_hit(&state.change_review, layout.visualizer, point) {
+                change_followup::draft(state, swarm, None);
+                return true;
+            }
+            if let Some((line, col)) =
+                interaction::position(&state.change_review, layout.visualizer, point, false)
+            {
+                state.ui_selection = Some(UiSelection {
+                    pane: UiSelectionPane::ChangesPatch,
+                    start_line: line,
+                    start_col: col,
+                    end_line: line,
+                    end_col: col,
+                });
+                input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                    target: MouseSelectTarget::Ui(UiSelectionPane::ChangesPatch),
+                    line,
+                    col,
+                });
+                input_state.last_ui_selection = None;
+                return true;
+            }
             state.ui_selection = None;
             input_state.mouse_select_anchor = None;
             crate::widgets::change_review_view::mouse_select(
@@ -1862,6 +1885,35 @@ pub(super) fn handle_mouse_drag_with_swarm(
                 }
                 UiSelectionPane::VisualizerSide => {
                     map_visualizer_side_mouse(mouse, screen, state, theme, true)
+                }
+                UiSelectionPane::ChangesPatch => {
+                    use crate::widgets::change_review_view::interaction;
+                    let area = layout::split(screen).visualizer;
+                    let patch = interaction::patch_area(&state.change_review, area);
+                    if mouse.row < patch.y || mouse.row >= patch.bottom() {
+                        crate::widgets::change_review_view::scroll_patch(
+                            &mut state.change_review,
+                            area,
+                            if mouse.row < patch.y { -1 } else { 1 },
+                            false,
+                        );
+                    }
+                    if mouse.column < patch.x || mouse.column >= patch.right() {
+                        interaction::horizontal(
+                            &mut state.change_review,
+                            area,
+                            if mouse.column < patch.x { -4 } else { 4 },
+                        );
+                    }
+                    let Some((line, col)) = interaction::position(
+                        &state.change_review,
+                        area,
+                        (mouse.column, mouse.row).into(),
+                        true,
+                    ) else {
+                        return false;
+                    };
+                    Some((line, col, state.change_review.preview.clone()))
                 }
                 UiSelectionPane::GateMonitor => {
                     auto_scroll_gate_monitor_for_drag(mouse, screen, state);

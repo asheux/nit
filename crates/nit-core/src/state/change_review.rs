@@ -40,6 +40,8 @@ pub struct ChangeReview {
     pub files: Vec<ChangedFile>,
     pub selected: usize,
     pub scroll: usize,
+    pub horizontal_scroll: u16,
+    pub preview_generation: u64,
     pub preview: Vec<String>,
     pub preview_path: Option<PathBuf>,
     pub message: Option<String>,

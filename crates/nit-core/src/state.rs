@@ -91,6 +91,7 @@ const DEFAULT_LOG_CAPACITY: usize = 512;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
+    ChangesPatch,
     JobOutput,
     AgentConsole,
     VisualizerMain,

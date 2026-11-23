@@ -8,7 +8,7 @@ pub(super) struct Layout {
     pub(super) commits: Rect,
     detail: Rect,
     pub(super) patch: Rect,
-    footer: Rect,
+    pub(super) footer: Rect,
 }
 
 impl Layout {
@@ -111,7 +111,7 @@ fn clipped(text: &str, width: u16) -> String {
     value
 }
 
-fn action(review: &ChangeReview, width: u16) -> &'static str {
+pub(super) fn action(review: &ChangeReview, width: u16) -> &'static str {
     match (review.history_patch_open, width >= 30) {
         (true, true) => "‹ Back · Esc",
         (true, false) => "‹ Back",
@@ -134,7 +134,8 @@ pub(super) fn click(review: &mut ChangeReview, area: Rect, point: Position) -> b
     }
 }
 
-pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme: &Theme) {
+pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let review = &state.change_review;
     let r = layout(area, review);
     if !review.history_patch_open {
         frame.render_widget(
@@ -263,16 +264,26 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
                 r.patch,
             );
         } else {
-            paint_patch(frame, review, r.patch, theme);
+            paint_patch(frame, state, r.patch, theme);
         }
     }
     let label = action(review, r.footer.width);
     let mut hints = vec![Span::styled(label, Style::default().fg(theme.accent))];
     let mut used = label.width();
     let options = if review.history_patch_open {
-        ["  ↑↓ scroll", "  PgUp/PgDn page", "  r refresh"]
+        [
+            "  f Follow up",
+            "  ↑↓ scroll",
+            "  PgUp/PgDn page",
+            "  r refresh",
+        ]
     } else {
-        ["  ↑↓ commit", "  PgUp/PgDn patch", "  r refresh"]
+        [
+            "  f Follow up",
+            "  ↑↓ commit",
+            "  PgUp/PgDn patch",
+            "  r refresh",
+        ]
     };
     for hint in options {
         if used + hint.width() <= usize::from(r.footer.width) {

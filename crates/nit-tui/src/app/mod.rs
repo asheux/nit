@@ -81,6 +81,7 @@ mod dispatch;
 pub(crate) mod event_drain;
 
 mod agent_station;
+mod change_followup;
 mod chat_cursor;
 mod chords;
 mod draw;

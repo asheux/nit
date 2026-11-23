@@ -12,6 +12,7 @@ use ratatui::{
 use crate::theme::Theme;
 
 mod history;
+pub(crate) mod interaction;
 
 struct Regions {
     summary: Rect,
@@ -118,7 +119,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         area,
     );
     if review.files.is_empty() {
-        history::render(frame, area, review, theme);
+        history::render(frame, area, state, theme);
         return;
     }
     let r = regions(area, review.files.len());
@@ -236,14 +237,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             r.patch,
         );
     } else {
-        paint_patch(frame, review, r.patch, theme);
+        paint_patch(frame, state, r.patch, theme);
     }
-    let hint = if r.footer.width >= 41 {
-        "↑↓ file  PgUp/PgDn diff  Enter open  r sync"
-    } else {
-        "↑↓ file  Pg↓ diff  ↵ open  r sync"
-    };
-    frame.render_widget(Paragraph::new(hint).style(muted), r.footer);
+    frame.render_widget(
+        Paragraph::new("f Follow up  ↑↓ file  PgDn diff  ↵ open").style(muted),
+        r.footer,
+    );
 }
 
 fn status_color(code: char, staged: bool, conflict: bool, theme: &Theme) -> Color {
@@ -272,7 +271,7 @@ fn hunk_boundary(line: &str) -> Option<bool> {
     }
 }
 
-fn patch_line<'a>(text: &'a str, in_hunk: bool, theme: &Theme) -> Line<'a> {
+fn patch_line(text: &str, in_hunk: bool, theme: &Theme) -> Line<'static> {
     let plain = Style::default();
     let heading = plain.add_modifier(Modifier::BOLD);
     let style = match text {
@@ -287,7 +286,7 @@ fn patch_line<'a>(text: &'a str, in_hunk: bool, theme: &Theme) -> Line<'a> {
                         format!("{delimiter}{range}{delimiter}"),
                         heading.fg(theme.hl.number),
                     ),
-                    Span::styled(visible(context), plain.fg(theme.muted)),
+                    Span::styled(visible(context).into_owned(), plain.fg(theme.muted)),
                 ]);
             }
             heading.fg(theme.hl.number)
@@ -309,10 +308,11 @@ fn patch_line<'a>(text: &'a str, in_hunk: bool, theme: &Theme) -> Line<'a> {
         _ if text.starts_with(' ') => plain.fg(theme.foreground),
         _ => plain.fg(theme.muted),
     };
-    Line::styled(visible(text), style)
+    Line::styled(visible(text).into_owned(), style)
 }
 
-fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Theme) {
+fn paint_patch(frame: &mut Frame, state: &AppState, patch: Rect, theme: &Theme) {
+    let review = &state.change_review;
     let start = review
         .scroll
         .min(review.preview.len().saturating_sub(patch.height as usize));
@@ -332,7 +332,9 @@ fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Th
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.background)),
+        Paragraph::new(interaction::highlight(state, lines, start, theme))
+            .style(Style::default().bg(theme.background))
+            .scroll((0, review.horizontal_scroll)),
         patch,
     );
 }
@@ -347,6 +349,7 @@ pub(crate) fn select(review: &mut ChangeReview, index: usize) {
     if next != review.selected {
         review.selected = next;
         review.scroll = 0;
+        review.horizontal_scroll = 0;
         review.refresh = true;
     }
 }
