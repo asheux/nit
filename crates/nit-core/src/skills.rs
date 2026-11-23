@@ -33,11 +33,15 @@ const SKILLS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Catalog entries in display order, without allocating the reference bodies.
+pub fn entries() -> impl ExactSizeIterator<Item = (&'static str, &'static str)> {
+    SKILLS.iter().map(|&(name, summary, _)| (name, summary))
+}
+
 pub fn catalog() -> &'static str {
     static INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        SKILLS
-            .iter()
-            .map(|(name, summary, _)| format!("{name}  {summary}"))
+        entries()
+            .map(|(name, summary)| format!("{name}  {summary}"))
             .collect::<Vec<_>>()
             .join("\n")
     });

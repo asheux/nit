@@ -1020,7 +1020,9 @@ pub(super) fn drain_genome_results(
         // An editor evaluation may finish after the user has changed files.
         if result.editor_open {
             state.genome_computing = false;
-            if state.editor_buffer().path() == Some(&path) {
+            if state.editor_buffer().path() == Some(&path)
+                && state.gate_monitor_sub_view == nit_core::GateMonitorSubView::Stats
+            {
                 state.gate_monitor_scroll = 0;
             }
             state.genome_reports.entry(path).or_insert(report);

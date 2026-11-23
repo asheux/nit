@@ -65,6 +65,10 @@ Use **:changes** to focus Git change review. Each row shows two Git status chara
 | Close a file | After a directory launch, `:q` closes the current file, then returns to another open file or the tree. `:wq` saves first. |
 | Quit the station | `Ctrl+Q`, or `:q` after a file launch. Confirm with `Y` to discard unsaved changes or `N` to stay. `:wq` saves the active file and checks for other unsaved buffers. |
 
+## Read a built-in reference
+
+Type `:skills` to open the Skills catalog in **Code Structural Quality**. Choose a reference with Up/Down or `k`/`j` and press `Enter`, or click its name. Use the arrows, `PageUp`/`PageDown`, or the wheel to scroll. `Esc`, Left, or Backspace returns to your selection. Click the **Skills** tab to reopen the catalog.
+
 ## Work with agents
 
 In **Agent Ops**, use Left/Right to change tabs and Up/Down or `k`/`j` to select a row. In **Roster**, expand a model with `l`, collapse with `h`, and choose a reasoning effort or role with `Space` or `Enter`. On a model row, `Space` toggles priority. Keys `1–3` select the lab, parallel, and bulk swarm templates. Keys `4–7` select auto, general, research, and computational research. Press `Enter` on a model to focus its chat.

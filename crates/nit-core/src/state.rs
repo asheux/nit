@@ -418,7 +418,11 @@ pub struct AppState {
     /// is the "no render yet" sentinel.
     #[serde(skip, default = "gate_monitor_max_scroll_default")]
     pub gate_monitor_last_max_scroll: usize,
-    /// Active sub-view for the structural quality pane: Stats or FileScores.
+    #[serde(skip)]
+    pub selected_skill: usize,
+    #[serde(skip)]
+    pub skill_reader_open: bool,
+    /// Active tab in the structural quality pane.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
     /// Whether the substrate inspector popup overlay is open.
@@ -844,6 +848,8 @@ impl AppState {
             genome_eval_batches: HashMap::new(),
             genome_save_eval_pending: None,
             gate_monitor_scroll: 0,
+            selected_skill: 0,
+            skill_reader_open: false,
             gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
             show_substrate_overlay: false,

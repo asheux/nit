@@ -19,6 +19,8 @@ use crate::widgets::text_selection::apply_ui_selection;
 use crate::widgets::text_utils::truncate_with_ellipsis;
 use crate::workspace_scan::{WorkspaceScanItemState, WorkspaceScanRuntime};
 
+pub(crate) mod skills;
+
 const FOOTER_TABS: &[(GateMonitorSubView, &str)] = &[
     (GateMonitorSubView::Stats, " STATS "),
     (GateMonitorSubView::FileScores, " FILES "),
@@ -237,7 +239,7 @@ pub fn render(
     }
 
     let lines = match state.gate_monitor_sub_view {
-        GateMonitorSubView::Skills => build_lines_skills(theme, inner.width as usize),
+        GateMonitorSubView::Skills => skills::lines(state, theme, inner.width as usize),
         GateMonitorSubView::Stats => {
             build_lines_genome(state, genome_report, theme, inner.width as usize)
         }
@@ -286,7 +288,7 @@ pub fn build_lines(
         build_lines_games(state, theme, width)
     } else {
         match state.gate_monitor_sub_view {
-            GateMonitorSubView::Skills => build_lines_skills(theme, width),
+            GateMonitorSubView::Skills => skills::lines(state, theme, width),
             GateMonitorSubView::Stats => {
                 let report = state
                     .editor_buffer()
@@ -306,24 +308,6 @@ pub fn build_lines(
 // ---------------------------------------------------------------------------
 // Genome quality dashboard
 // ---------------------------------------------------------------------------
-
-fn build_lines_skills(theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        "NitSkills",
-        Style::default().fg(theme.accent),
-    ))];
-    for paragraph in nit_core::skills::catalog().lines().chain([
-        "",
-        "Read a skill in Agent Chat with /skills NAME or in a terminal with nit skills NAME.",
-    ]) {
-        lines.extend(
-            super::picker_utils::wrap_text(paragraph, width)
-                .into_iter()
-                .map(Line::from),
-        );
-    }
-    lines
-}
 
 fn build_lines_genome(
     state: &AppState,

@@ -1381,6 +1381,10 @@ pub(super) fn handle_mouse_down_with_swarm(
                 return true;
             }
         }
+        if gate_monitor_view::skills::click(state, layout.gate, point) {
+            input_state.mouse_select_anchor = None;
+            return true;
+        }
         if state.app_kind != nit_core::AppKind::Games
             && mouse.row == layout.gate.bottom().saturating_sub(1)
             && layout.gate.contains(point)

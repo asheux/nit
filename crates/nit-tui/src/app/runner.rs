@@ -677,6 +677,13 @@ pub(super) fn run_loop(
                             continue;
                         }
                     }
+                    if gate_monitor_view::skills::focused(state) {
+                        let gate = layout::split(terminal.size().unwrap_or_default()).gate;
+                        if gate_monitor_view::skills::handle_key(state, key, gate) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.change_review_active() && state.focus == PaneId::Visualizer {
                         let area = layout::split(terminal.size().unwrap_or_default()).visualizer;
                         if handle_change_review_key(key, state, syntax, area) {

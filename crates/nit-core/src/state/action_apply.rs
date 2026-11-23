@@ -769,6 +769,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.gate_monitor_scroll = 0;
         }
         Action::GateMonitorSetSubView(target) => {
+            if target == GateMonitorSubView::Skills {
+                state.skill_reader_open = false;
+                state.gate_monitor_scroll = 0;
+                state.selected_skill = 0;
+                state.ui_selection = None;
+            }
             if state.gate_monitor_sub_view != target {
                 state.gate_monitor_sub_view = target;
                 state.gate_monitor_scroll = 0;
