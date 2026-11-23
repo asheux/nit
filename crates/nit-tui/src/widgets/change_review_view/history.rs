@@ -150,14 +150,27 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
             r.summary,
         );
     } else {
-        frame.render_widget(Paragraph::new(status).style(muted), r.summary);
+        frame.render_widget(
+            Paragraph::new(status).style(if review.unborn {
+                muted
+            } else {
+                Style::default().fg(theme.success)
+            }),
+            r.summary,
+        );
     }
     frame.render_widget(
         Paragraph::new(clipped(
             &tracking(review, r.tracking.width),
             r.tracking.width,
         ))
-        .style(muted),
+        .style(if review.upstream_gone || review.behind > 0 {
+            Style::default().fg(theme.warning)
+        } else if review.upstream.is_some() && !review.detached {
+            Style::default().fg(theme.hl.link)
+        } else {
+            muted
+        }),
         r.tracking,
     );
     if review.commits.is_empty() {
@@ -184,10 +197,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
                 if selected { "› " } else { "  " },
                 style.fg(theme.title_focused),
             ),
-            Span::styled(
-                format!("{hash} "),
-                style.fg(if selected { theme.accent } else { theme.muted }),
-            ),
+            Span::styled(format!("{hash} "), style.fg(theme.hl.number)),
             Span::styled(
                 clipped(&commit.subject, r.commits.width.saturating_sub(10)),
                 style.fg(theme.foreground),
@@ -205,15 +215,24 @@ pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme
     }
     if let Some(commit) = review.commits.get(review.selected) {
         let id: String = commit.id.chars().take(7).collect();
-        let info = if review.history_patch_open {
-            format!("{id} · {} · {}", commit.date, commit.author)
+        let lead = if review.history_patch_open {
+            Span::styled(id, Style::default().fg(theme.hl.number))
         } else {
-            format!("Patch · {} · {}", commit.date, commit.author)
+            Span::styled("Patch", title)
         };
-        frame.render_widget(
-            Paragraph::new(clipped(&info, r.detail.width)).style(title),
-            r.detail,
-        );
+        let date = visible(&commit.date);
+        let remaining = usize::from(r.detail.width).saturating_sub(lead.width() + 6 + date.width());
+        let info = Line::from(vec![
+            lead,
+            Span::styled(" · ", muted),
+            Span::styled(date, muted),
+            Span::styled(" · ", muted),
+            Span::styled(
+                clipped(&commit.author, remaining as u16),
+                Style::default().fg(theme.hl.r#type),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(info), r.detail);
         if review.preview_commit.as_deref() != Some(commit.id.as_str()) || review.message.is_some()
         {
             frame.render_widget(

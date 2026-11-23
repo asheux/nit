@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use nit_core::{state::ChangeReview, AppState, PaneId};
 use ratatui::{
     layout::{Position, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -137,15 +137,53 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             unstaged += usize::from(file.worktree != ' ');
         }
     }
-    let suffix = if review.truncated { " · limited" } else { "" };
-    let summary = if conflicts > 0 {
-        format!("{conflicts} conflicted · S {staged}  W {unstaged}  ? {untracked}{suffix}")
+    let labels = if conflicts > 0 {
+        vec![
+            (format!("{conflicts} conflicted"), conflicts, theme.error),
+            (format!("S {staged}"), staged, theme.success),
+            (format!("W {unstaged}"), unstaged, theme.diff_modified),
+            (format!("? {untracked}"), untracked, theme.hl.r#type),
+        ]
     } else if r.summary.width >= 38 {
-        format!("{staged} staged · {unstaged} unstaged · {untracked} untracked{suffix}")
+        vec![
+            (format!("{staged} staged"), staged, theme.success),
+            (
+                format!("{unstaged} unstaged"),
+                unstaged,
+                theme.diff_modified,
+            ),
+            (format!("{untracked} untracked"), untracked, theme.hl.r#type),
+        ]
     } else {
-        format!("S {staged}  W {unstaged}  ? {untracked}{suffix}")
+        vec![
+            (format!("S {staged}"), staged, theme.success),
+            (format!("W {unstaged}"), unstaged, theme.diff_modified),
+            (format!("? {untracked}"), untracked, theme.hl.r#type),
+        ]
     };
-    frame.render_widget(Paragraph::new(summary).style(muted), r.summary);
+    let mut summary = Vec::new();
+    for (i, (label, count, color)) in labels.into_iter().enumerate() {
+        if i > 0 {
+            let separator = if conflicts > 0 && i == 1 || conflicts == 0 && r.summary.width >= 38 {
+                " · "
+            } else {
+                "  "
+            };
+            summary.push(Span::styled(separator, muted));
+        }
+        summary.push(Span::styled(
+            label,
+            if count > 0 {
+                Style::default().fg(color)
+            } else {
+                muted
+            },
+        ));
+    }
+    if review.truncated {
+        summary.push(Span::styled(" · limited", muted));
+    }
+    frame.render_widget(Paragraph::new(Line::from(summary)), r.summary);
     let first = first_row(review, r.files.height);
     for (row, file) in review
         .files
@@ -163,8 +201,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let path = file.path.to_string_lossy();
         let line = Line::from(vec![
             Span::styled(
-                format!("{}{} ", file.index, file.worktree),
-                style.fg(theme.accent),
+                file.index.to_string(),
+                style.fg(status_color(file.index, true, file.conflicted(), theme)),
+            ),
+            Span::styled(
+                format!("{} ", file.worktree),
+                style.fg(status_color(file.worktree, false, file.conflicted(), theme)),
             ),
             Span::styled(visible(&path), style.fg(theme.foreground)),
         ]);
@@ -192,28 +234,89 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Paragraph::new(hint).style(muted), r.footer);
 }
 
+fn status_color(code: char, staged: bool, conflict: bool, theme: &Theme) -> Color {
+    if conflict {
+        return theme.error;
+    }
+    match code {
+        'D' => theme.diff_deleted,
+        '?' => theme.hl.r#type,
+        'A' => theme.diff_added,
+        ' ' => theme.muted,
+        _ if staged => theme.success,
+        _ => theme.diff_modified,
+    }
+}
+
+fn hunk_boundary(line: &str) -> Option<bool> {
+    if line.starts_with("@@") {
+        Some(true)
+    } else if line.starts_with("diff --")
+        || matches!(line, "Staged" | "Unstaged" | "Merge conflict")
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn patch_line<'a>(text: &'a str, in_hunk: bool, theme: &Theme) -> Line<'a> {
+    let plain = Style::default();
+    let heading = plain.add_modifier(Modifier::BOLD);
+    let style = match text {
+        "Staged" => heading.fg(theme.success),
+        "Unstaged" => heading.fg(theme.diff_modified),
+        "Merge conflict" => heading.fg(theme.error),
+        _ if text.starts_with("@@") => {
+            let delimiter = if text.starts_with("@@@") { "@@@" } else { "@@" };
+            if let Some((range, context)) = text[delimiter.len()..].split_once(delimiter) {
+                return Line::from(vec![
+                    Span::styled(
+                        format!("{delimiter}{range}{delimiter}"),
+                        heading.fg(theme.hl.number),
+                    ),
+                    Span::styled(visible(context), plain.fg(theme.muted)),
+                ]);
+            }
+            heading.fg(theme.hl.number)
+        }
+        _ if text.starts_with("diff --") => heading.fg(theme.hl.r#type),
+        _ if text.starts_with("+++ ") || text.starts_with("--- ") => {
+            // A source line can itself start with "++ " or "-- ". Only the
+            // pre-hunk path pair belongs to the patch header.
+            if !in_hunk {
+                heading.fg(theme.hl.r#type)
+            } else if text.starts_with('+') {
+                plain.fg(theme.diff_added)
+            } else {
+                plain.fg(theme.diff_deleted)
+            }
+        }
+        _ if text.starts_with('+') => plain.fg(theme.diff_added),
+        _ if text.starts_with('-') => plain.fg(theme.diff_deleted),
+        _ if text.starts_with(' ') => plain.fg(theme.foreground),
+        _ => plain.fg(theme.muted),
+    };
+    Line::styled(visible(text), style)
+}
+
 fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Theme) {
     let start = review
         .scroll
         .min(review.preview.len().saturating_sub(patch.height as usize));
-    let lines: Vec<Line> = review
-        .preview
+    let mut in_hunk = review.preview[..start]
         .iter()
-        .skip(start)
+        .rev()
+        .find_map(|l| hunk_boundary(l))
+        .unwrap_or(false);
+    let lines: Vec<_> = review.preview[start..]
+        .iter()
         .take(patch.height as usize)
         .map(|line| {
-            let fg = if line.starts_with("@@") {
-                theme.accent
-            } else if line.starts_with("+++ ") || line.starts_with("--- ") {
-                theme.title
-            } else if line.starts_with('+') {
-                theme.diff_added
-            } else if line.starts_with('-') {
-                theme.diff_deleted
-            } else {
-                theme.foreground
-            };
-            Line::styled(visible(line), Style::default().fg(fg))
+            if let Some(boundary) = hunk_boundary(line) {
+                in_hunk = boundary;
+            }
+            patch_line(line, in_hunk, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), patch);
@@ -356,7 +459,7 @@ mod tests {
                 cell.bg == theme.background || (!empty && cell.bg == theme.selection_bg)
             }));
             let status = buffer.get(1, 1);
-            assert_eq!(Some(status.fg), theme.status_idle_style().fg);
+            assert_eq!(status.fg, theme.success);
             assert!(!status.modifier.contains(Modifier::DIM));
         }
     }

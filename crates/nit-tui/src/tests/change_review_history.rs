@@ -145,3 +145,27 @@ fn dirty_title_retains_porcelain_tracking_context() {
     assert!(output.contains("main...origin/main [ahead 2, behind 1]"));
     assert!(!output.contains("Recent commits"));
 }
+
+#[test]
+fn git_colors_keep_patch_headers_distinct_from_source_and_indices() {
+    let theme = Theme::default();
+    for (text, in_hunk, color) in [
+        ("diff --git a/src.rs b/src.rs", false, theme.hl.r#type),
+        ("index 123..abc", false, theme.muted),
+        ("--- a/src.rs", false, theme.hl.r#type),
+        ("+++ b/src.rs", false, theme.hl.r#type),
+        ("+++ source begins with ++", true, theme.diff_added),
+        ("--- source begins with --", true, theme.diff_deleted),
+        ("Merge conflict", false, theme.error),
+    ] {
+        let line = patch_line(text, in_hunk, &theme);
+        assert_eq!(line.to_string(), text);
+        assert_eq!(line.style.fg, Some(color));
+    }
+    let range = patch_line("@@ -12,2 +13,5 @@ fn sample()", true, &theme);
+    assert_eq!(range.spans[0].style.fg, Some(theme.hl.number));
+    assert_eq!(range.spans[1].style.fg, Some(theme.muted));
+    assert_eq!(status_color('M', true, false, &theme), theme.success);
+    assert_eq!(status_color('M', false, false, &theme), theme.diff_modified);
+    assert_eq!(status_color('U', true, true, &theme), theme.error);
+}
