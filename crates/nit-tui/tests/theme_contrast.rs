@@ -32,6 +32,20 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
             theme.success,
             theme.error,
             theme.hl.comment,
+            theme.hl.doc_comment,
+            theme.hl.string,
+            theme.hl.number,
+            theme.hl.boolean,
+            theme.hl.keyword,
+            theme.hl.keyword_control,
+            theme.hl.r#type,
+            theme.hl.function,
+            theme.hl.macro_token,
+            theme.hl.attribute,
+            theme.hl.namespace,
+            theme.hl.parameter,
+            theme.hl.property,
+            theme.hl.link,
             theme.hl.punctuation,
         ] {
             for bg in [
@@ -44,6 +58,33 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
                 assert!(ratio >= 4.5, "{fg:?} on {bg:?} has contrast {ratio:.2}");
             }
         }
+    }
+}
+
+#[test]
+fn default_source_roles_are_distinguishable_in_both_shipped_palettes() {
+    let preset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/devs.toml");
+    let defaults = Theme::default();
+    let bundled = Theme::load(Some(&preset));
+    let roles = |theme: &Theme| {
+        [
+            theme.hl.keyword,
+            theme.hl.function,
+            theme.hl.r#type,
+            theme.hl.variable,
+            theme.hl.string,
+            theme.hl.number,
+            theme.hl.comment,
+            theme.hl.property,
+        ]
+    };
+    let colors = roles(&defaults);
+    assert_eq!(colors, roles(&bundled));
+    for (i, color) in colors.iter().enumerate() {
+        assert!(
+            !colors[..i].contains(color),
+            "duplicate source color {color:?}"
+        );
     }
 }
 

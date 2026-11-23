@@ -341,9 +341,7 @@ fn base_line_style(
 ) -> Style {
     let mut style = Style::default().fg(theme.foreground).bg(content_bg);
     if is_cursor_line && !selection_active {
-        style = style
-            .bg(theme.cursor_line_bg)
-            .add_modifier(Modifier::UNDERLINED);
+        style = style.bg(theme.cursor_line_bg);
     }
     style
 }
