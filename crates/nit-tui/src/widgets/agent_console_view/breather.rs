@@ -181,6 +181,35 @@ pub fn build_pane_thread_rows_with_breathers_for_pane(
     combined
 }
 
+/// Shared fixed-width telemetry columns for a running turn and its final receipt.
+pub(super) fn panel_row(
+    width: usize,
+    agent: &str,
+    elapsed: &str,
+    hb: &str,
+    output: &str,
+    kind: ThreadRowKind,
+) -> ThreadRow {
+    let metrics = [(elapsed, 6usize), (hb, 4), (output, 4)];
+    let count = match width {
+        0..=12 => 0,
+        13..=19 => 1,
+        20..=25 => 2,
+        _ => 3,
+    };
+    let used: usize = metrics[..count].iter().map(|(_, n)| n + 1).sum();
+    let agent_width = width.saturating_sub(used + 1).max(1);
+    let mut text = pad_to_width(agent, agent_width);
+    for (value, n) in &metrics[..count] {
+        text.push(' ');
+        text.push_str(&fit_right(value, *n));
+    }
+    ThreadRow {
+        text: pad_to_width(&text, width),
+        kind,
+    }
+}
+
 pub(super) fn inline_breather_rows(
     state: &AppState,
     agent_ids: &[String],
@@ -189,12 +218,6 @@ pub(super) fn inline_breather_rows(
 ) -> Vec<ThreadRow> {
     let now = Instant::now();
     let width = width.max(1);
-    let elap_w = 6usize;
-    let hb_w = 4usize;
-    let out_w = 4usize;
-    let times_and_spacing = elap_w + hb_w + out_w + 3;
-    let agent_w = width.saturating_sub(times_and_spacing + 1).max(1);
-
     let seed_id = agent_ids.first().map(String::as_str);
     let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, true);
 
@@ -203,19 +226,14 @@ pub(super) fn inline_breather_rows(
         text: format!("{ecg} Working ..."),
         kind: ThreadRowKind::Breather,
     });
-    rows.push(ThreadRow {
-        text: pad_to_width(
-            &format!(
-                "{} {} {} {}",
-                fit_left("AGENT", agent_w),
-                fit_right("ELAP", elap_w),
-                fit_right("HB", hb_w),
-                fit_right("OUT", out_w),
-            ),
-            width,
-        ),
-        kind: ThreadRowKind::StatusHeader,
-    });
+    rows.push(panel_row(
+        width,
+        "AGENT",
+        "ELAP",
+        "HB",
+        "OUT",
+        ThreadRowKind::StatusHeader,
+    ));
     for id in agent_ids {
         let agent = state.agents.agents_get(id.as_str());
         let badge = agent
@@ -249,30 +267,16 @@ pub(super) fn inline_breather_rows(
                 out.map(|s| format!("{s}s")).unwrap_or_else(|| "--".into()),
             )
         };
+        rows.push(panel_row(
+            width,
+            &badge,
+            &elapsed_s,
+            &hb_s,
+            &out_s,
+            ThreadRowKind::StatusRow,
+        ));
         rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{} {} {} {}",
-                    fit_left(&badge, agent_w),
-                    fit_right(&elapsed_s, elap_w),
-                    fit_right(&hb_s, hb_w),
-                    fit_right(&out_s, out_w),
-                ),
-                width,
-            ),
-            kind: ThreadRowKind::StatusRow,
-        });
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!(
-                    "{} {} {} {}",
-                    fit_left(&format!("\u{21b3} {stage}"), agent_w),
-                    fit_right("", elap_w),
-                    fit_right("", hb_w),
-                    fit_right("", out_w),
-                ),
-                width,
-            ),
+            text: pad_to_width(&format!("↳ {stage}"), width),
             kind: ThreadRowKind::StatusSubRow,
         });
     }

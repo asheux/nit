@@ -1690,9 +1690,6 @@ pub(super) fn thread_lines<'a>(
 ) -> Vec<Line<'static>> {
     rows.into_iter()
         .map(|row| match row.kind {
-            ThreadRowKind::Reply => {
-                Line::styled(row.text.clone(), Style::default().fg(theme.foreground))
-            }
             ThreadRowKind::User => user_line_with_prompt_bg(&row.text, theme),
             ThreadRowKind::Agent => agent_line_with_accent_ecg(&row.text, theme),
             ThreadRowKind::FinishedBand { artifact } => {
@@ -2754,13 +2751,17 @@ pub(super) fn format_message_rows(
                 format_duration_compact(Duration::from_millis(ms))
             }
         });
-        out.extend(finished::rows(
+        return finished::rows(
             status,
-            &agent_badge,
+            &state
+                .agents
+                .agents_get(src)
+                .map(agent_roster_label)
+                .unwrap_or_else(|| src.to_string()),
             elapsed.as_deref(),
             width,
             message_idx.filter(|_| artifact_target.is_some()),
-        ));
+        );
     } else if artifact_target.is_some() {
         let callout = format!("{indent_str}\u{21b3} {header} {legacy_status} (see ARTIFACTS)");
         out.push(ThreadRow {
@@ -2773,35 +2774,6 @@ pub(super) fn format_message_rows(
             text: callout,
             kind: ThreadRowKind::Agent,
         });
-    }
-    if state.station_chat_center() {
-        // Artifacts retain the full response. Bound long output in the station's
-        // cached transcript so resizing cannot reflow an entire tool log.
-        const REPLY_ROWS: usize = 96;
-        const REPLY_BYTES: usize = 16 * 1024;
-        let mut end = msg.text.len().min(REPLY_BYTES);
-        while !msg.text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut reply = msg.text[..end]
-            .split('\n')
-            .flat_map(|line| wrap_visual_line(line, width));
-        for text in reply.by_ref().take(REPLY_ROWS) {
-            out.push(ThreadRow {
-                text,
-                kind: ThreadRowKind::Reply,
-            });
-        }
-        if end < msg.text.len() || reply.next().is_some() {
-            out.push(ThreadRow {
-                text: if artifact_target.is_some() {
-                    "… Full reply in ARTIFACTS".into()
-                } else {
-                    "… Reply preview truncated".into()
-                },
-                kind: ThreadRowKind::StatusSubRow,
-            });
-        }
     }
     // Spacer after agent reply to separate chat turns.
     out.push(ThreadRow {

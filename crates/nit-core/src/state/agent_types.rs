@@ -410,7 +410,6 @@ pub struct AgentDiagnosticEvent {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AgentConsoleRowKind {
     User,
-    Reply,
     Agent,
     ArtifactLink,
     FinishedBand { artifact: Option<usize> },

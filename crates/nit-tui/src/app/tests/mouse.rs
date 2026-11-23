@@ -832,15 +832,12 @@ fn station_artifacts_button_pins_original_reply_after_scrolling_and_new_completi
             .collect();
         if let Some(offset) = row.to_ascii_lowercase().find("artifacts") {
             let x = area.x + unicode_width::UnicodeWidthStr::width(&row[..offset]) as u16;
-            if y + 1 < area.bottom() {
-                let next: String = (area.x..area.right())
-                    .map(|col| buf.get(col, y + 1).symbol())
-                    .collect();
-                if let Some((_, text)) = next.split_once("Original response number ") {
-                    let (number, _) = text.split_once('.').unwrap();
-                    candidates.push((x, y, number.parse::<usize>().unwrap()));
-                }
-            }
+            // Each historical reply occupies the original four-row working panel.
+            // With no prompts, the absolute heading index is four times the reply index.
+            let thread = agent_console_view::thread_text_area(area, &state).unwrap();
+            let absolute = state.agents.console_scroll + usize::from(y - thread.y);
+            assert_eq!(absolute % 4, 0);
+            candidates.push((x, y, absolute / 4));
         }
     }
     assert!(state.agents.console_scroll > 0);
@@ -863,7 +860,7 @@ fn station_artifacts_button_pins_original_reply_after_scrolling_and_new_completi
             &theme,
         )
     };
-    assert!(click(area.x + 2, y, &mut state));
+    assert!(click(area.right() - 3, y, &mut state));
     assert!(!state.agents.artifacts_popup_open);
     assert!(click(x, y, &mut state));
     add_reply(&mut state, "codex", "Arrived after the click".into());
