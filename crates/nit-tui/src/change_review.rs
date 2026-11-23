@@ -154,6 +154,7 @@ fn read_review(workspace: &Path, preferred: Option<&Path>) -> Result<ChangeRevie
         [
             "status",
             "--porcelain=v1",
+            "--branch",
             "-z",
             "--no-renames",
             "--untracked-files=all",
@@ -161,11 +162,16 @@ fn read_review(workspace: &Path, preferred: Option<&Path>) -> Result<ChangeRevie
         MAX_STATUS,
     )?;
     let mut files = Vec::new();
+    let mut branch = String::new();
     let mut truncated = status.truncated;
     for record in status.bytes.split_inclusive(|b| *b == 0) {
         let Some(record) = record.strip_suffix(&[0]) else {
             break;
         };
+        if let Some(header) = record.strip_prefix(b"## ") {
+            branch = String::from_utf8_lossy(header).into_owned();
+            continue;
+        }
         if record.len() < 4 {
             continue;
         }
@@ -185,6 +191,7 @@ fn read_review(workspace: &Path, preferred: Option<&Path>) -> Result<ChangeRevie
         .unwrap_or(0);
     let mut review = ChangeReview {
         root,
+        branch,
         files,
         selected,
         truncated,
@@ -201,7 +208,7 @@ fn read_review(workspace: &Path, preferred: Option<&Path>) -> Result<ChangeRevie
                 (file.index, true, "Staged"),
                 (file.worktree, false, "Unstaged"),
             ] {
-                if status == ' ' {
+                if status == ' ' || (cached && file.conflicted()) {
                     continue;
                 }
                 let mut args: Vec<OsString> = [
@@ -219,7 +226,14 @@ fn read_review(workspace: &Path, preferred: Option<&Path>) -> Result<ChangeRevie
                 }
                 args.push("--".into());
                 args.push(file.path.clone().into_os_string());
-                review.preview.push(label.into());
+                review.preview.push(
+                    if file.conflicted() {
+                        "Merge conflict"
+                    } else {
+                        label
+                    }
+                    .into(),
+                );
                 match git(&review.root, args, MAX_PATCH) {
                     Ok(output) => {
                         let patch = String::from_utf8_lossy(&output.bytes);

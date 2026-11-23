@@ -76,7 +76,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 theme.border
             }))
             .title(Line::styled(
-                " CHANGES ",
+                format!(" CHANGES  {} ", visible(&review.branch)),
                 Style::default()
                     .fg(theme.title)
                     .add_modifier(Modifier::BOLD),
@@ -93,11 +93,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         );
         return;
     }
+    let mut conflicts = 0;
     let mut staged = 0;
     let mut unstaged = 0;
     let mut untracked = 0;
     for file in &review.files {
-        if file.index == '?' {
+        if file.conflicted() {
+            conflicts += 1;
+        } else if file.index == '?' {
             untracked += 1;
         } else {
             staged += usize::from(file.index != ' ');
@@ -105,7 +108,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         }
     }
     let suffix = if review.truncated { " · limited" } else { "" };
-    let summary = if r.summary.width >= 38 {
+    let summary = if conflicts > 0 {
+        format!("{conflicts} conflicted · S {staged}  W {unstaged}  ? {untracked}{suffix}")
+    } else if r.summary.width >= 38 {
         format!("{staged} staged · {unstaged} unstaged · {untracked} untracked{suffix}")
     } else {
         format!("S {staged}  W {unstaged}  ? {untracked}{suffix}")
