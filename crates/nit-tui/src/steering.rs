@@ -32,3 +32,44 @@ pub(crate) fn matches_chat_prompt(provider_prompt: &str, operator_prompt: &str) 
             .and_then(|body| body.split_once("[/genome context]\n\n"))
             .is_some_and(|(_, text)| text == operator_prompt)
 }
+
+use crate::{claude_runner::{ClaudeLiveTurn, ClaudeRunner}, codex_runner::{CodexLiveTurn, CodexRunner}};
+use std::{path::Path, sync::mpsc::{self, Receiver}};
+
+pub(crate) enum LiveTurn {
+    Codex(CodexLiveTurn),
+    Claude(ClaudeLiveTurn),
+}
+
+pub(crate) fn live_turn(
+    codex: Option<&CodexRunner>, claude: Option<&ClaudeRunner>,
+    agent: &str, mission: Option<&str>, cwd: &Path,
+) -> Option<LiveTurn> {
+    codex.and_then(|r| r.live_turn(agent, mission, cwd)).map(LiveTurn::Codex)
+        .or_else(|| claude.and_then(|r| r.live_turn(agent, mission, cwd)).map(LiveTurn::Claude))
+}
+
+impl LiveTurn {
+    pub(crate) fn matches_task_turn(&self, nonce: &str) -> bool {
+        matches!(self, Self::Codex(turn) if turn.matches_task_turn(nonce))
+    }
+
+    pub(crate) fn matches_chat_prompt(&self, text: &str) -> bool {
+        match self {
+            Self::Codex(turn) => turn.matches_chat_prompt(text),
+            Self::Claude(turn) => turn.matches_chat_prompt(text),
+        }
+    }
+
+    pub(crate) fn send(self, codex: Option<&CodexRunner>, claude: Option<&ClaudeRunner>, id:String, text:String) -> Receiver<SteerOutcome> {
+        match (self,codex,claude) {
+            (Self::Codex(turn), Some(runner), _) => runner.steer(turn,id,text),
+            (Self::Claude(turn), _, Some(runner)) => runner.steer(turn,id,text),
+            _ => {
+                let (tx, rx) = mpsc::channel();
+                let _ = tx.send(SteerOutcome::Unavailable("Runner is no longer connected".into()));
+                rx
+            }
+        }
+    }
+}

@@ -28,6 +28,12 @@ pub(super) fn handle(state: &mut AppState, raw: &str) -> Option<bool> {
                 reset_chat_input_and_history_nav(state);
                 // Restoring a receipt reconstructs a draft only. A new receiver
                 // still passes through normal mission ownership checks on send.
+                if note.task_id.is_empty() {
+                    state.agents.chat_input = format!("@agent {} {}", note.agent_id, note.text);
+                    sync_cursor_to_input_end(state);
+                    state.status = Some(format!("Restored unsent follow-up for {}. Review the recipient before sending.", note.agent_id));
+                    return Some(true);
+                }
                 state.agents.chat_input = note.text;
                 state.agents.swarm_draft_target = Some(SwarmDraftTarget {
                     mission_id: note.mission_id.clone(),

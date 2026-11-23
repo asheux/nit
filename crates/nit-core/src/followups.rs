@@ -94,22 +94,23 @@ fn paths(workspace: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
         Err(e) => return Err(e),
     }
     let root = workspace.join(".nit/swarm");
+    let mut parents = Vec::new();
     for mission in entries(&root)?.into_iter().flatten() {
         let mission = mission?;
-        if !mission.file_type()?.is_dir() {
-            continue;
+        if mission.file_type()?.is_dir() {
+            parents.push(mission.path());
         }
-        for entry in entries(&mission.path().join("followups"))?
-            .into_iter()
-            .flatten()
-        {
+    }
+    let chat = workspace.join(".nit/chat");
+    if fs::symlink_metadata(&chat).is_ok_and(|meta| meta.is_dir()) {
+        parents.push(chat);
+    }
+    for parent in parents {
+        for entry in entries(&parent.join("followups"))?.into_iter().flatten() {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|s| s == "json")
-                && path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.starts_with(prefix))
+                && path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with(prefix))
                 && entry.file_type()?.is_file()
             {
                 files.push(path);
@@ -164,6 +165,9 @@ pub fn find(workspace: &Path, id: &str) -> io::Result<Receipt> {
 }
 
 fn summary(note: &Receipt) -> String {
+    if note.task_id.is_empty() {
+        return format!("{}  {}  Agent Chat → {}", note.id, note.status.label(), note.agent_id);
+    }
     format!(
         "{}  {}  {} / {} → {}",
         note.id,
