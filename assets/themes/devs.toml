@@ -1,4 +1,5 @@
 background = "#0a151e"
+list_background = "#17242e"
 popup_background = "#192e3b"
 foreground = "#deeaef"
 muted = "#abbfc7"
