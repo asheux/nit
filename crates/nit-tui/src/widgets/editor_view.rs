@@ -566,12 +566,12 @@ fn gutter_styles(
             .add_modifier(Modifier::BOLD)
             .patch(gutter_bg)
     } else {
-        Style::default().fg(theme.border).patch(gutter_bg)
+        theme.status_idle_style().patch(gutter_bg)
     };
     let sep_style = if data.is_cursor_line {
         Style::default().fg(theme.border_focused).patch(gutter_bg)
     } else {
-        Style::default().fg(theme.border).patch(gutter_bg)
+        theme.status_idle_style().patch(gutter_bg)
     };
     let ln_text = if line_idx < total_lines {
         let ln = format!("{:>width$}", line_idx + 1, width = line_num_width);

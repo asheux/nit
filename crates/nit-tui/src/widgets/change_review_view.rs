@@ -65,6 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
+            .style(Style::default().bg(theme.background).fg(theme.foreground))
             .border_type(if focused {
                 BorderType::Thick
             } else {
@@ -84,7 +85,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         area,
     );
     let r = regions(area, review.files.len());
-    let muted = Style::default().fg(theme.hl.comment);
+    let muted = theme.status_idle_style();
     if review.files.is_empty() {
         let message = review.message.as_deref().unwrap_or("Working tree clean");
         frame.render_widget(
@@ -271,6 +272,28 @@ mod tests {
             .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn review_paints_the_theme_on_empty_and_populated_worktrees() {
+        let theme = Theme::default();
+        let mut state = state();
+        let mut terminal = Terminal::new(TestBackend::new(64, 15)).unwrap();
+        for empty in [false, true] {
+            if empty {
+                state.change_review.files.clear();
+            }
+            terminal
+                .draw(|frame| render(frame, frame.size(), &state, &theme))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| {
+                cell.bg == theme.background || (!empty && cell.bg == theme.selection_bg)
+            }));
+            let status = buffer.get(1, 1);
+            assert_eq!(Some(status.fg), theme.status_idle_style().fg);
+            assert!(!status.modifier.contains(Modifier::DIM));
+        }
     }
 
     #[test]

@@ -27,9 +27,7 @@ pub fn render(
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.background));
 
-    let title_style = Style::default()
-        .fg(theme.foreground)
-        .add_modifier(Modifier::DIM);
+    let title_style = theme.status_idle_style();
     let block = block
         .title(Title::from(Span::styled(focus, title_style)).alignment(Alignment::Left))
         .title(Title::from(metrics).alignment(Alignment::Right));
@@ -70,7 +68,7 @@ impl BarStyles {
             sep: Style::default().fg(theme.border),
             cpu: Style::default().fg(theme.accent),
             gpu: Style::default().fg(theme.title_focused),
-            dim: Style::default().fg(theme.border),
+            dim: theme.status_idle_style(),
             mem: Style::default().fg(theme.warning),
             coord: Style::default().fg(theme.foreground),
         }

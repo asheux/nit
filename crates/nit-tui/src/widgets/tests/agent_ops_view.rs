@@ -1108,24 +1108,20 @@ fn roster_multiway_graph_button_greyed_until_a_dag_exists() {
     let theme = Theme::default();
     let idx = roster_multiway_buttons_line_idx(&state).unwrap();
 
-    let graph_dim = |state: &AppState| {
+    let graph_style = |state: &AppState| {
         let lines = current_lines_for_width(state, 96);
         let styled = roster_styled_line(state, idx, &lines[idx], 96, &theme);
         styled
             .spans
             .iter()
             .find(|s| s.content.contains("Graph"))
-            .expect("graph span")
+            .unwrap()
             .style
-            .add_modifier
-            .contains(Modifier::DIM)
     };
 
-    // No search has streamed a view yet -> Graph is greyed.
-    assert!(graph_dim(&state));
-    // A live view present -> Graph is an active button again.
+    assert_eq!(graph_style(&state), theme.status_idle_style());
     state.agents.multiway_view = Some(fake_multiway_view());
-    assert!(!graph_dim(&state));
+    assert_eq!(graph_style(&state).bg, Some(theme.border_focused));
 }
 
 #[test]

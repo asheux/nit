@@ -797,9 +797,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
 }
 
 fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let label_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
     let key_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
@@ -6107,12 +6105,7 @@ fn ops_styled_line(
     // Most tabs render a title row followed by a divider row. The roster tab uses a backend row on
     // line 1, so only apply the divider styling when the line is actually a divider.
     if line_idx == 1 && !line.is_empty() && line.chars().all(|c| c == '─') {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
+        return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
     }
 
     let usable = width.max(32);
@@ -6144,12 +6137,7 @@ fn artifacts_styled_line(
         return Line::from("");
     }
     if line.chars().all(|ch| ch == '─') {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
+        return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
     }
     if matches!(line, " Items") {
         return Line::from(Span::styled(
@@ -6232,7 +6220,7 @@ fn artifacts_styled_line(
 
     let trimmed = line.trim_start();
     if trimmed.contains(':') {
-        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let label_style = base.fg(theme.muted);
         let mut spans = Vec::new();
         let leading_spaces = line.bytes().take_while(|b| *b == b' ').count();
         if leading_spaces > 0 {
@@ -6282,14 +6270,14 @@ fn artifact_kv_value_style(
             if value.eq_ignore_ascii_case("yes") {
                 base.fg(theme.success).add_modifier(Modifier::BOLD)
             } else if value.eq_ignore_ascii_case("no") {
-                base.fg(theme.border).add_modifier(Modifier::DIM)
+                base.fg(theme.muted)
             } else {
                 base.fg(theme.hl.link).add_modifier(Modifier::UNDERLINED)
             }
         }
         "msgs" | "replies" | "patches" | "agents" | "evidence" => {
             if value.parse::<u64>().unwrap_or(0) == 0 {
-                base.fg(theme.border).add_modifier(Modifier::DIM)
+                base.fg(theme.muted)
             } else {
                 base.fg(theme.accent).add_modifier(Modifier::BOLD)
             }
@@ -6300,7 +6288,7 @@ fn artifact_kv_value_style(
         "codex_thread" | "claude_session" | "root" | "run" | "path" | "log" | "link" => {
             base.fg(theme.hl.link).add_modifier(Modifier::UNDERLINED)
         }
-        "note" => base.fg(theme.border).add_modifier(Modifier::DIM),
+        "note" => base.fg(theme.muted),
         _ => base,
     }
 }
@@ -6323,12 +6311,7 @@ fn diagnostics_styled_line(line: &str, theme: &Theme) -> Line<'static> {
         .filter(|(label, _)| label.ends_with(':'))
     {
         let label_text = format!(" {label} ");
-        let label_span = Span::styled(
-            label_text,
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        );
+        let label_span = Span::styled(label_text, theme.status_idle_style());
         if label.eq_ignore_ascii_case("latest_issue:") {
             let value = value.trim_start();
             if value.eq_ignore_ascii_case("none") {
@@ -6355,12 +6338,7 @@ fn diagnostics_styled_line(line: &str, theme: &Theme) -> Line<'static> {
                     format!("{sev} "),
                     Style::default().fg(sev_color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("{at} "),
-                    Style::default()
-                        .fg(theme.border)
-                        .add_modifier(Modifier::DIM),
-                ),
+                Span::styled(format!("{at} "), theme.status_idle_style()),
                 Span::styled(
                     format!("{source} "),
                     Style::default()
@@ -6422,12 +6400,7 @@ fn diagnostics_severity_line(
     let message = parts.next().unwrap_or_default();
     Line::from(vec![
         Span::styled(prefix.to_string(), Style::default().fg(severity_color)),
-        Span::styled(
-            format!("{at} "),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled(format!("{at} "), theme.status_idle_style()),
         Span::styled(
             format!("{source} "),
             Style::default()
@@ -6452,18 +6425,8 @@ fn diagnostics_runtime_line(rest: &str, theme: &Theme) -> Line<'static> {
         theme.title
     };
     Line::from(vec![
-        Span::styled(
-            " · ",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            format!("{time} "),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled(" · ", theme.status_idle_style()),
+        Span::styled(format!("{time} "), theme.status_idle_style()),
         Span::styled(
             format!("{level} "),
             Style::default()
@@ -6476,7 +6439,7 @@ fn diagnostics_runtime_line(rest: &str, theme: &Theme) -> Line<'static> {
 }
 
 pub(crate) fn ops_table_bg(theme: &Theme) -> Color {
-    dim_bg_towards(theme.border, theme.background, 85)
+    theme.background
 }
 
 fn dag_table_bg(theme: &Theme) -> Color {
@@ -6495,14 +6458,14 @@ fn dag_state_style(state: &str, base: Style, theme: &Theme) -> Style {
         || state.eq_ignore_ascii_case("skipped")
         || state.eq_ignore_ascii_case("skip")
     {
-        base.fg(theme.border).add_modifier(Modifier::DIM)
+        base.fg(theme.muted)
     } else if state.eq_ignore_ascii_case("plan")
         || state.eq_ignore_ascii_case("verify")
         || state.eq_ignore_ascii_case("synth")
     {
         base.fg(theme.accent).add_modifier(Modifier::BOLD)
     } else if state.eq_ignore_ascii_case("idle") || state.eq_ignore_ascii_case("empty") {
-        base.fg(theme.border).add_modifier(Modifier::DIM)
+        base.fg(theme.muted)
     } else {
         base.fg(theme.foreground)
     }
@@ -6512,7 +6475,7 @@ fn dag_gate_status_style(status: &str, base: Style, theme: &Theme) -> Style {
     match status {
         "PASS" => base.fg(theme.title_focused),
         "FAIL" => base.fg(theme.error),
-        "PENDING" => base.fg(theme.border).add_modifier(Modifier::DIM),
+        "PENDING" => base.fg(theme.muted),
         _ => base.fg(theme.foreground),
     }
 }
@@ -6521,9 +6484,9 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     let cols_total = usable.saturating_sub(1);
     let bg = dag_table_bg(theme);
     let base = Style::default().bg(bg);
-    let header_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+    let header_style = base.fg(theme.muted);
     let row_style = base.fg(theme.foreground);
-    let dim_row_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+    let dim_row_style = base.fg(theme.muted);
 
     let trimmed = line.trim_start();
     let kv_label = trimmed.split_once(':').map(|(label, _)| label.trim());
@@ -6533,7 +6496,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
             || label.eq_ignore_ascii_case("template")
             || label.eq_ignore_ascii_case("phase")
     }) {
-        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let label_style = base.fg(theme.muted);
         let mut spans = Vec::new();
         spans.push(Span::styled(" ", row_style));
         let segments = trimmed.split('|').collect::<Vec<_>>();
@@ -6569,7 +6532,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
             || label.eq_ignore_ascii_case("pending")
             || label.eq_ignore_ascii_case("skip")
     }) {
-        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let label_style = base.fg(theme.muted);
         let mut spans = Vec::new();
         spans.push(Span::styled(" ", row_style));
         let segments = trimmed.split('|').collect::<Vec<_>>();
@@ -6587,7 +6550,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
             } else if label.eq_ignore_ascii_case("done") {
                 row_style.fg(theme.title)
             } else if label.eq_ignore_ascii_case("skip") {
-                row_style.fg(theme.border).add_modifier(Modifier::DIM)
+                row_style.fg(theme.muted)
             } else {
                 row_style
             };
@@ -6604,7 +6567,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     }
 
     if trimmed.starts_with("Gate:") {
-        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let label_style = base.fg(theme.muted);
         let value = trimmed.strip_prefix("Gate:").unwrap_or(trimmed).trim();
         let spans = vec![
             Span::styled(" ", row_style),
@@ -6665,7 +6628,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
             let gate_style = row_style.fg(theme.title_focused);
             let status_style = dag_gate_status_style(status, row_style, theme);
             let cmd_style = if cols.first().map(|s| s.trim().is_empty()).unwrap_or(false) {
-                row_style.add_modifier(Modifier::DIM)
+                row_style.fg(theme.muted)
             } else {
                 row_style
             };
@@ -6715,7 +6678,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     let is_details = id_cell.trim().is_empty()
         && state_cell.trim().is_empty()
         && title_cell.trim_start().starts_with(arrow_glyph());
-    let marker_style = row_style.fg(theme.border).add_modifier(Modifier::DIM);
+    let marker_style = row_style.fg(theme.muted);
     let id_style = if is_details {
         dim_row_style
     } else {
@@ -6727,7 +6690,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
         dag_state_style(state_cell.trim(), row_style, theme)
     };
     let title_style = if is_details {
-        row_style.add_modifier(Modifier::DIM)
+        row_style.fg(theme.muted)
     } else {
         row_style
     };
@@ -6788,9 +6751,7 @@ fn roster_multiway_selector_line(
     options: &[(&str, bool)],
     theme: &Theme,
 ) -> Line<'static> {
-    let label_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let label_style = theme.status_idle_style();
     let selected_style = Style::default()
         .fg(theme.background)
         .bg(theme.border_focused)
@@ -6821,9 +6782,7 @@ fn roster_multiway_selector_line(
 /// `[ Graph ]` is greyed while there is no DAG to render — `multiway_view` only
 /// becomes `Some` once a search has streamed a snapshot.
 fn roster_multiway_buttons_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let gap_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let gap_style = theme.status_idle_style();
     let button_style = Style::default()
         .fg(theme.background)
         .bg(theme.border_focused)
@@ -6845,12 +6804,8 @@ fn roster_multiway_buttons_line(state: &AppState, theme: &Theme) -> Line<'static
 fn agent_status_style(status: AgentStatus, theme: &Theme) -> Style {
     match status {
         AgentStatus::Running => Style::default().fg(theme.title_focused),
-        AgentStatus::Waiting => Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-        AgentStatus::Idle => Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
+        AgentStatus::Waiting => theme.status_idle_style(),
+        AgentStatus::Idle => theme.status_idle_style(),
         AgentStatus::Error => Style::default().fg(theme.error),
     }
 }
@@ -6869,9 +6824,7 @@ fn queue_len_style(queue_len: usize, theme: &Theme) -> Style {
     if queue_len > 0 {
         Style::default().fg(theme.accent)
     } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     }
 }
 
@@ -6887,9 +6840,7 @@ fn mcp_state_style(state: McpConnectionState, theme: &Theme) -> Style {
     match state {
         McpConnectionState::Connected => Style::default().fg(theme.title_focused),
         McpConnectionState::Connecting => Style::default().fg(theme.hl.operator),
-        McpConnectionState::Disconnected => Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
+        McpConnectionState::Disconnected => theme.status_idle_style(),
         McpConnectionState::Error => Style::default().fg(theme.error),
     }
 }
@@ -6929,23 +6880,17 @@ fn roster_backend_styled_line(
     let name_style = if available {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     };
     let primary_style = if available {
         Style::default().fg(theme.foreground)
     } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     };
     let secondary_style = if active {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     };
 
     Line::from(vec![
@@ -7050,9 +6995,7 @@ fn roster_styled_line(
         ));
     }
     if line_idx == offsets.template_line {
-        let label_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
+        let label_style = theme.status_idle_style();
         let selected_style = Style::default()
             .fg(theme.background)
             .bg(theme.border_focused)
@@ -7083,9 +7026,7 @@ fn roster_styled_line(
         return Line::from(spans);
     }
     if line_idx == offsets.mission_line {
-        let label_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
+        let label_style = theme.status_idle_style();
         let selected_style = Style::default()
             .fg(theme.background)
             .bg(theme.border_focused)
@@ -7161,19 +7102,13 @@ fn roster_styled_line(
     if line_idx == offsets.table_separator {
         return Line::from(Span::styled(
             line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-                .bg(table_bg),
+            theme.status_idle_style().bg(table_bg),
         ));
     }
     if !line.is_empty() && line.chars().all(|c| c == '─') {
         return Line::from(Span::styled(
             line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-                .bg(table_bg),
+            theme.status_idle_style().bg(table_bg),
         ));
     }
     // Virtual rows injected by `roster_lines` (display-only info banner under
@@ -7193,12 +7128,7 @@ fn roster_styled_line(
     let body_line = line_idx.saturating_sub(roster_body_offset(state));
     let Some(meta) = roster_body_meta(state, body_line) else {
         if state.agents.agents.is_empty() {
-            return Line::from(Span::styled(
-                line.to_string(),
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM),
-            ));
+            return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
         }
         return Line::from(Span::styled(
             line.to_string(),
@@ -7221,10 +7151,7 @@ fn roster_styled_line(
                 if selected {
                     Style::default().fg(theme.accent).bg(table_bg)
                 } else {
-                    Style::default()
-                        .fg(theme.border)
-                        .add_modifier(Modifier::DIM)
-                        .bg(table_bg)
+                    theme.status_idle_style().bg(table_bg)
                 },
                 selected,
                 theme,
@@ -7237,14 +7164,8 @@ fn roster_styled_line(
                 selected,
                 theme,
             );
-            let cell_style = selected_row_style(
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg),
-                selected,
-                theme,
-            );
+            let cell_style =
+                selected_row_style(theme.status_idle_style().bg(table_bg), selected, theme);
             let space_style = selected_row_style(Style::default().bg(table_bg), selected, theme);
 
             let mut spans = Vec::with_capacity(14);
@@ -7297,28 +7218,19 @@ fn roster_styled_line(
             let marker_style = if selected {
                 selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
             } else {
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg)
+                theme.status_idle_style().bg(table_bg)
             };
 
             let role_style = selected_row_style(
                 if is_clone {
-                    Style::default()
-                        .fg(theme.border)
-                        .add_modifier(Modifier::DIM)
-                        .bg(table_bg)
+                    theme.status_idle_style().bg(table_bg)
                 } else {
                     Style::default().fg(theme.foreground).bg(table_bg)
                 },
                 selected,
                 theme,
             );
-            let clone_dim = Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-                .bg(table_bg);
+            let clone_dim = theme.status_idle_style().bg(table_bg);
             let clone_is_active =
                 is_clone && matches!(agent.status, nit_core::AgentStatus::Running);
             let status_style = selected_row_style(
@@ -7354,10 +7266,7 @@ fn roster_styled_line(
                 } else if agent.current_mission.is_some() {
                     Style::default().fg(theme.title).bg(table_bg)
                 } else {
-                    Style::default()
-                        .fg(theme.border)
-                        .add_modifier(Modifier::DIM)
-                        .bg(table_bg)
+                    theme.status_idle_style().bg(table_bg)
                 },
                 selected,
                 theme,
@@ -7376,10 +7285,7 @@ fn roster_styled_line(
                 let base_prefix_style = if checked {
                     Style::default().fg(theme.warning).bg(table_bg)
                 } else {
-                    Style::default()
-                        .fg(theme.border)
-                        .add_modifier(Modifier::DIM)
-                        .bg(table_bg)
+                    theme.status_idle_style().bg(table_bg)
                 };
                 let prefix_style = selected_row_style(base_prefix_style, selected, theme);
                 spans.push(Span::styled(prefix, prefix_style));
@@ -7422,27 +7328,15 @@ fn roster_styled_line(
                     .roster_tree_selected
                     .is_some_and(|sel| sel.branch == branch);
 
-            let marker_style = Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-                .bg(table_bg);
+            let marker_style = theme.status_idle_style().bg(table_bg);
             let base_role_style = if active {
                 Style::default().fg(theme.foreground).bg(table_bg)
             } else {
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg)
+                theme.status_idle_style().bg(table_bg)
             };
             let role_style = selected_row_style(base_role_style, false, theme);
-            let cell_style = selected_row_style(
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg),
-                false,
-                theme,
-            );
+            let cell_style =
+                selected_row_style(theme.status_idle_style().bg(table_bg), false, theme);
 
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
@@ -7493,10 +7387,7 @@ fn roster_styled_line(
             let marker_style = if selected {
                 selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
             } else {
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg)
+                theme.status_idle_style().bg(table_bg)
             };
 
             let is_chosen = match branch {
@@ -7536,10 +7427,7 @@ fn roster_styled_line(
             let base_role_style = if is_chosen {
                 Style::default().fg(theme.title_focused).bg(table_bg)
             } else {
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
-                    .bg(table_bg)
+                theme.status_idle_style().bg(table_bg)
             };
             let role_style = selected_row_style(base_role_style, selected, theme);
             let cell_style = selected_row_style(Style::default().bg(table_bg), selected, theme);
@@ -7584,9 +7472,7 @@ fn mission_phase_style(phase: nit_core::MissionPhase, theme: &Theme) -> Style {
             .fg(theme.title_focused)
             .add_modifier(Modifier::BOLD),
         nit_core::MissionPhase::Verify => Style::default().fg(theme.title),
-        nit_core::MissionPhase::Report => Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
+        nit_core::MissionPhase::Report => theme.status_idle_style(),
     }
 }
 
@@ -7616,12 +7502,7 @@ fn mission_styled_line(
     theme: &Theme,
 ) -> Line<'static> {
     if state.agents.missions.is_empty() {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
+        return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
     }
     let body_idx = line_idx.saturating_sub(2);
     let Some(meta) = mission_body_meta(state, body_idx) else {
@@ -7651,23 +7532,9 @@ fn mission_styled_line(
     let marker_style = if selected && meta.agent_row == Some(0) {
         striped_row_style(Style::default().fg(theme.accent), selected, striped, theme)
     } else {
-        striped_row_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-            selected,
-            striped,
-            theme,
-        )
+        striped_row_style(theme.status_idle_style(), selected, striped, theme)
     };
-    let muted_style = striped_row_style(
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-        selected,
-        striped,
-        theme,
-    );
+    let muted_style = striped_row_style(theme.status_idle_style(), selected, striped, theme);
     let is_primary_line = meta.agent_row == Some(0);
     let id_style = if is_primary_line {
         striped_row_style(
@@ -7694,9 +7561,7 @@ fn mission_styled_line(
             if mission.swarm {
                 Style::default().fg(theme.accent)
             } else {
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM)
+                theme.status_idle_style()
             },
             selected,
             striped,
@@ -7717,28 +7582,14 @@ fn mission_styled_line(
     };
     let space_style = striped_row_style(Style::default(), selected, striped, theme);
 
-    let agent_edges = striped_row_style(
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-        selected,
-        striped,
-        theme,
-    );
+    let agent_edges = striped_row_style(theme.status_idle_style(), selected, striped, theme);
     let agent_assigned = striped_row_style(
         Style::default().fg(theme.title_focused),
         selected,
         striped,
         theme,
     );
-    let agent_missing = striped_row_style(
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-        selected,
-        striped,
-        theme,
-    );
+    let agent_missing = striped_row_style(theme.status_idle_style(), selected, striped, theme);
 
     let mut spans = Vec::with_capacity(20);
     spans.push(Span::styled(marker, marker_style));
@@ -7802,12 +7653,7 @@ fn mcp_styled_line(
         return Line::from(Span::styled(String::new(), Style::default()));
     }
     if line.starts_with(" [") {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
+        return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
     }
     if line.starts_with(' ') {
         let key = take_chars(line, 1, key_w);
@@ -7815,9 +7661,7 @@ fn mcp_styled_line(
         if key.trim().is_empty() && value.trim().is_empty() {
             return Line::from(Span::styled(String::new(), Style::default()));
         }
-        let key_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
+        let key_style = theme.status_idle_style();
         let value_style = if key.trim() == "STATE" {
             mcp_state_style(mcp.state, theme)
         } else if key.trim() == "LATENCY" {
@@ -7848,12 +7692,7 @@ fn alert_styled_line(
     theme: &Theme,
 ) -> Line<'static> {
     if state.agents.alerts.is_empty() {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
+        return Line::from(Span::styled(line.to_string(), theme.status_idle_style()));
     }
     let body_line = line_idx.saturating_sub(2);
     let Some(meta) = alert_body_meta(state, usable, body_line) else {
@@ -7881,38 +7720,18 @@ fn alert_styled_line(
     let marker_style = if selected {
         selected_row_style(Style::default().fg(theme.accent), true, theme)
     } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+        theme.status_idle_style()
     };
     let sev_style = if meta.wrap_row == 0 {
         selected_row_style(alert_severity_style(alert.severity, theme), selected, theme)
     } else {
-        selected_row_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-            selected,
-            theme,
-        )
+        selected_row_style(theme.status_idle_style(), selected, theme)
     };
-    let time_style = selected_row_style(
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-        selected,
-        theme,
-    );
+    let time_style = selected_row_style(theme.status_idle_style(), selected, theme);
     let src_style = if meta.wrap_row == 0 {
         selected_row_style(Style::default().fg(theme.title), selected, theme)
     } else {
-        selected_row_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-            selected,
-            theme,
-        )
+        selected_row_style(theme.status_idle_style(), selected, theme)
     };
     let msg_style = selected_row_style(Style::default().fg(theme.foreground), selected, theme);
     let space_style = selected_row_style(Style::default(), selected, theme);
@@ -7946,14 +7765,10 @@ fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
         return Style::default().fg(theme.title);
     }
     if line_idx == 1 {
-        return Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
+        return theme.status_idle_style();
     }
     if line.chars().all(|ch| ch == '─') {
-        return Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
+        return theme.status_idle_style();
     }
     let selected = line.starts_with('>');
     let mut style = Style::default().fg(theme.foreground);
@@ -7973,7 +7788,7 @@ fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
     } else if line.contains("NEW") || line.contains("PLAN") {
         style = style.fg(theme.accent);
     } else if line.contains("IDLE") || line.contains("DISCONNECTED") {
-        style = style.fg(theme.border).add_modifier(Modifier::DIM);
+        style = style.fg(theme.muted);
     }
     if selected {
         style = style.bg(theme.selection_bg);
