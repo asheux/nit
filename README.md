@@ -110,10 +110,12 @@ nit                # current directory, untitled buffer
 nit gol [path]     # Game of Life lab (the default lab)
 nit games [path]   # Games lab: tournaments between programs
 nit multipane      # a grid of independent agent chat panes
+nit skills         # list built-in agent references
+nit skills genome-encoders  # read one reference
 ```
 
 Press `F1` or `?` for the help overlay, and `:` in Normal mode for the command prompt.
-The full key map is in `docs/KEYBINDINGS.md`.
+The full key map is in `docs/KEYBINDINGS.md`. Use `:skills` to open the NitSkills catalog in Code Structural Quality. In agent chat, enter `/skills` to list NitSkills or `/skills NAME` to read one locally.
 
 ## Agent station
 

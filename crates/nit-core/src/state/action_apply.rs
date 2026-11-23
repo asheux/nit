@@ -763,7 +763,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.gate_monitor_sub_view = match state.gate_monitor_sub_view {
                 GateMonitorSubView::Stats => GateMonitorSubView::FileScores,
                 GateMonitorSubView::FileScores => GateMonitorSubView::Live,
-                GateMonitorSubView::Live => GateMonitorSubView::Stats,
+                GateMonitorSubView::Live => GateMonitorSubView::Skills,
+                GateMonitorSubView::Skills => GateMonitorSubView::Stats,
             };
             state.gate_monitor_scroll = 0;
         }

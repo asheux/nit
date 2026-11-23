@@ -22,6 +22,7 @@ use crate::workspace_scan::{WorkspaceScanItemState, WorkspaceScanRuntime};
 // Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES " ++ " LIVE " ++ "  EVALUATE GENOME  "
 const BTN_STATS_LABEL: &str = " STATS ";
 const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
+const BTN_SKILLS_LABEL: &str = " SKILLS ";
 const BTN_LIVE_LABEL: &str = " LIVE ";
 // EVAL button uses an explicit verb-noun label so the operator knows the
 // click triggers a full-project genome evaluation (not a tab switch).
@@ -64,7 +65,9 @@ pub fn title_button_hit(
     let live_end = live_start + BTN_LIVE_LABEL.len() as u16;
     // Double-space gap before EVAL to visually separate the action button
     // from the sub-view tabs.
-    let eval_start = live_end + 2;
+    let skills_start = live_end + 1;
+    let skills_end = skills_start + BTN_SKILLS_LABEL.len() as u16;
+    let eval_start = skills_end + 2;
     let eval_end = eval_start + eval_label_width;
     if (stats_start..stats_end).contains(&col) {
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
@@ -74,6 +77,8 @@ pub fn title_button_hit(
         ))
     } else if (live_start..live_end).contains(&col) {
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
+    } else if (skills_start..skills_end).contains(&col) {
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Skills))
     } else if (eval_start..eval_end).contains(&col) {
         Some(Action::WorkspaceScanStart)
     } else {
@@ -192,6 +197,11 @@ pub fn render(
     } else {
         btn_inactive
     };
+    let skills_style = if sub_view == GateMonitorSubView::Skills {
+        btn_active
+    } else {
+        btn_inactive
+    };
     let eval_label = eval_button_label(state);
     let scanning = state.agents.workspace_scan_progress.is_some();
     let clean = !scanning && state.agents.workspace_scan_clean;
@@ -228,6 +238,8 @@ pub fn render(
         Span::styled(BTN_FILESCORES_LABEL, fs_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_LIVE_LABEL, live_style),
+        Span::styled(" ", sep_style),
+        Span::styled(BTN_SKILLS_LABEL, skills_style),
         Span::styled("  ", sep_style),
         Span::styled(eval_label, eval_style),
     ]);
@@ -241,7 +253,7 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if genome_report.is_none() && state.genome_computing {
+    if sub_view == GateMonitorSubView::Stats && genome_report.is_none() && state.genome_computing {
         draw_loading_bar(frame, inner, theme);
         return;
     }
@@ -252,6 +264,7 @@ pub fn render(
     }
 
     let lines = match state.gate_monitor_sub_view {
+        GateMonitorSubView::Skills => build_lines_skills(theme, inner.width as usize),
         GateMonitorSubView::Stats => {
             build_lines_genome(state, genome_report, theme, inner.width as usize)
         }
@@ -300,6 +313,7 @@ pub fn build_lines(
         build_lines_games(state, theme, width)
     } else {
         match state.gate_monitor_sub_view {
+            GateMonitorSubView::Skills => build_lines_skills(theme, width),
             GateMonitorSubView::Stats => {
                 let report = state
                     .editor_buffer()
@@ -319,6 +333,24 @@ pub fn build_lines(
 // ---------------------------------------------------------------------------
 // Genome quality dashboard
 // ---------------------------------------------------------------------------
+
+fn build_lines_skills(theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "NitSkills",
+        Style::default().fg(theme.accent),
+    ))];
+    for paragraph in nit_core::skills::catalog().lines().chain([
+        "",
+        "Read a skill in Agent Chat with /skills NAME or in a terminal with nit skills NAME.",
+    ]) {
+        lines.extend(
+            super::picker_utils::wrap_text(paragraph, width)
+                .into_iter()
+                .map(Line::from),
+        );
+    }
+    lines
+}
 
 fn build_lines_genome(
     state: &AppState,

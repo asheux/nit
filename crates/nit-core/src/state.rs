@@ -490,6 +490,7 @@ pub enum GateMonitorSubView {
     /// queued after a file-watcher invalidation. Session-local, shrinks
     /// to empty as the scan drains.
     Live,
+    Skills,
 }
 
 /// Sub-tab inside the substrate inspector popup overlay.

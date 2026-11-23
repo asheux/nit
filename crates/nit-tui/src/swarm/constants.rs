@@ -102,54 +102,23 @@ pub(crate) const FINDINGS_RETRY_CLAUSE: &str =
      report findings, do NOT attempt to fix them yourself.";
 
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
-    "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands of any \
-     toolchain — `cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
-     `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, \
-     `npm test --workspaces`, `just test`, `just ci`, full lint/type-check \
-     sweeps, etc. — are ONLY allowed when the OPERATOR explicitly asked for \
-     them in the request above (phrases like \"run full CI\", \"verify the \
-     whole workspace\", \"run all tests\", \"make sure nothing else broke\"). \
-     If the operator did not, you MUST NOT run a workspace-wide command — \
-     not as a confirmation pass after a targeted run, not to be thorough, \
-     not \"just to be safe\", not even when a targeted run fails (in that \
-     case, report the failure and let the operator decide whether to widen). \
-     DEFAULT: run only targeted commands scoped to the modules/packages/files \
-     the swarm actually touched (e.g. `cargo test -p <affected-crate>`, \
-     `pytest path/to/affected/dir`, `go test ./path/to/affected/...`, \
-     `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: combine targeted \
-     flags (`cargo test -p crate1 -p crate2`) or run one targeted command \
-     per module. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: \
-     running `cargo test -p <affected-crate>` (passes) AND THEN running \
-     `cargo test --all` to \"verify the full results\" — exactly the \
-     duplication the rule forbids. The post-execution gate verifier handles \
-     workspace-wide gates as the next swarm stage.";
+    "TEST DISCIPLINE — Workspace-wide commands in any toolchain (including cargo test --all, \
+     --workspace, format, build and lint sweeps) are ONLY allowed when the OPERATOR explicitly \
+     asked. Otherwise run targeted commands on touched modules only. MULTI-MODULE: combine \
+     targeted flags or run each module separately. Never widen after success or failure; report \
+     failures. The post-execution verifier handles full gates. NitSkill swarm-verification \
+     contains examples.";
 
 pub(crate) const NO_PADDING_CLAUSE: &str =
-    "CODE SHAPE: Do NOT add inline test modules (e.g. Rust `#[cfg(test)] \
-     mod tests { ... }`, Python `if __name__ == '__main__'` test blocks, \
-     Go `_test.go` stubs co-located in source files) inside production \
-     source files — tests live in a dedicated tests directory or test \
-     file. If you encounter an existing inline test module during a \
-     refactor, move it to the appropriate test file. Do NOT pad small \
-     files (re-export / barrel files such as `lib.rs`, `mod.rs`, \
-     `index.ts`, `__init__.py`) with unnecessary code to boost genome \
-     scores — trivially small files are auto-passed. Do NOT over-engineer \
-     trivial logic to hit a metric. COMMENTS: trim doc comments that \
-     restate type/function names, echo visible type signatures, or \
-     describe obvious behavior. Keep comments that explain WHY, document \
-     non-obvious constraints, safety invariants, or algorithmic choices.";
+    "CODE SHAPE: Do NOT add inline test modules in production sources. Keep tests in dedicated \
+     test files or directories; move existing inline tests there when refactoring. Keep re-export \
+     files minimal. Do not over-engineer for metrics. Trim comments that repeat names, signatures \
+     or obvious behavior; retain reasons, constraints, safety invariants and algorithmic choices.";
 
 pub(crate) const NO_REVERT_CLAUSE: &str =
-    "REVERT POLICY: reverting your own BROKEN code (compile errors, failing \
-     tests, broken logic) is fine — that's how you fix things. Rolling back \
-     WORKING edits just to make a gate or metric pass vacuously (e.g. `git \
-     restore` on a real refactor because genome-quality dropped a tier, \
-     deleting a new file the proposer asked for, restoring the pre-refactor \
-     body of a function) is a task failure, not a fix. Passing a gate by \
-     throwing away real work is strictly worse than failing the gate with \
-     the work intact. If you genuinely can't improve the metric further \
-     through real edits, say so in your reply and STOP — leave the mission's \
-     actual changes on disk.";
+    "REVERT POLICY: You may revert your own broken edits. Never discard working changes or delete \
+     required files just to pass a gate or metric. If further changes cannot improve the metric, \
+     report that and stop with the mission changes on disk.";
 
 pub(crate) const CODE_HYGIENE_OPEN_MARKER: &str = "[code hygiene]";
 

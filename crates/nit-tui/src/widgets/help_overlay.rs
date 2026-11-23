@@ -70,6 +70,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+F", " content search"),
                 ("F4 / Ctrl+Shift+T", " open / close terminal popup"),
                 ("F1 / ?", " toggle help"),
+                (":skills", " open NitSkills in Code Structural Quality"),
                 ("Tab/Shift+Tab", " focus panes"),
                 ("Ctrl+1/2/3", " focus Editor / Agent Ops / Agent Chat"),
                 (
@@ -246,6 +247,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         (
             "AGENT CHAT (FOCUSED)",
             &[
+                ("/skills [NAME]", " list or read built-in NitSkills"),
                 ("Enter", " send message (@all <msg> broadcasts)"),
                 ("Shift+Enter", " newline (preserves indentation)"),
                 ("Tab", " insert tab"),

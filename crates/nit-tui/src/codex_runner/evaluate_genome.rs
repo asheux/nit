@@ -1,20 +1,5 @@
 use std::path::Path;
 
-// Evaluate-genome tool — injected into every agent prompt so agents know nit
-// measures their output automatically. They don't call the tool; the runner
-// watches for the marker in case an agent explicitly requests a report.
-pub const EVALUATE_GENOME_TOOL_DESCRIPTION: &str = r#"
-[nit tool: evaluate_genome]
-nit evaluates genome quality automatically in real time as you write files.
-You do NOT need to call [evaluate_genome] — nit measures quality externally
-after your changes are written to disk. If quality degrades, nit will retry
-your turn automatically with specific per-encoder feedback.
-
-Focus on writing good code using the encoder guide and recommendations above.
-nit handles the measurement.
-[/nit tool]
-"#;
-
 // Looks for `[evaluate_genome:<path>]` in agent output and returns a formatted
 // genome report when the path resolves to a readable file.
 pub fn handle_evaluate_genome_request(workspace_root: &Path, message: &str) -> Option<String> {

@@ -26,6 +26,7 @@ pub mod rule_config;
 pub mod rule_protocol;
 pub mod search;
 pub mod seed;
+pub mod skills;
 pub mod state;
 pub mod substrate;
 pub mod viewport;

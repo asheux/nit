@@ -25,7 +25,7 @@ use jsonl::{
     extract_total_tokens, token_count_from_value,
 };
 
-pub use evaluate_genome::{handle_evaluate_genome_request, EVALUATE_GENOME_TOOL_DESCRIPTION};
+pub use evaluate_genome::handle_evaluate_genome_request;
 
 #[derive(Clone, Debug)]
 pub struct CodexRunnerConfig {

@@ -47,6 +47,22 @@ pub(crate) fn handle_tools_call<B: Backchannel>(
             message: "missing tool name".into(),
         })?;
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if tool == "nit_skill" {
+        let name = args
+            .get("name")
+            .map(|value| {
+                value.as_str().ok_or_else(|| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: "name must be a string".into(),
+                })
+            })
+            .transpose()?;
+        let text = nit_core::skills::lookup(name).map_err(|message| JsonRpcError {
+            code: INVALID_PARAMS,
+            message,
+        })?;
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
     *counter = counter.saturating_add(1);
     let req = build_backchannel_request(tool, *counter, agent_id, &args)?;
     let resp = bc.send(&req).map_err(|e| JsonRpcError {

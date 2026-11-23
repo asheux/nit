@@ -1415,6 +1415,22 @@ pub(crate) fn submit_chat_input_and_dispatch(
     if raw.trim().is_empty() {
         return false;
     }
+    if let Some(reply) = nit_core::skills::chat_reply(&raw) {
+        let message = AgentMessage {
+            at: timestamp_label(state),
+            channel: AgentChannel::Agent,
+            agent_id: state.agents.selected_context_agent().map(str::to_owned),
+            mission_id: state.agents.selected_context_mission().map(str::to_owned),
+            text: reply,
+            prompt_msg_idx: None,
+            kind: Some("nit-skills".into()),
+        };
+        chat_history_remember(state, &raw);
+        reset_chat_input_and_history_nav(state);
+        state.agents.messages.push(message);
+        state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
+        return true;
+    }
     // Reject "@shadow" / "@swarm" with no body — the parsers return None
     // for these (so no prefix-strip runs) and `push_chat_message` would
     // otherwise hand the literal `@shadow` / `@swarm` string to the agent

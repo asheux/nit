@@ -242,6 +242,12 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             return false;
         }
     }
+    if tokens.as_slice() == ["skills"] && state.app_kind == AppKind::Gol {
+        state.gate_monitor_sub_view = crate::GateMonitorSubView::Skills;
+        state.gate_monitor_scroll = 0;
+        state.focus = PaneId::GateMonitor;
+        return false;
+    }
     if is_help_command_tokens(&tokens) {
         state.show_help = true;
         state.help_scroll = 0;

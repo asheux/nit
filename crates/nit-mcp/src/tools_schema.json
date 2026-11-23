@@ -1,6 +1,15 @@
 {
   "tools": [
     {
+      "name": "nit_skill",
+      "description": "List built-in NitSkills or read one by name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "emit_signal",
       "description": "Emit a stigmergic signal into nit's substrate. Visible to observers, arbiters, and other agents.",
       "inputSchema": {

@@ -143,10 +143,15 @@ fn gate_monitor_tab_clicks_set_target_sub_view_directly() {
         title_button_hit(live_col + 1, prefix, eval_label_width),
         Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
     );
-    // EVAL hit-test: button starts at live_end + 2 (gap), spans
+    let skills_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 1 + 3;
+    assert_eq!(
+        title_button_hit(skills_col + 1, prefix, eval_label_width),
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Skills))
+    );
+    // EVAL hit-test: button starts after the skills tab and a gap, spans
     // `eval_label_width` cells. Pick a column a few cells in from the
     // start so we hit the button regardless of label-width drift.
-    let eval_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 2 + 3;
+    let eval_col = prefix + 1 + 7 + 1 + 12 + 1 + 6 + 1 + 8 + 2 + 3;
     assert_eq!(
         title_button_hit(eval_col + 1, prefix, eval_label_width),
         Some(Action::WorkspaceScanStart)

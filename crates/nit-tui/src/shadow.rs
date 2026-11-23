@@ -597,7 +597,7 @@ fn nit_system_awareness() -> String {
          comments that restate the code.\n\
          - Files with >40% comment lines, or where >50% of functions are \
          <=5 lines, are auto-flagged and tier-capped.\n\n\
-         Full genome instructions (read-only reference — follow these when \
+         Genome contract (follow this when \
          proposing/judging/reviewing):\n",
     );
     out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);

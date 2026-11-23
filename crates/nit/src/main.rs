@@ -24,6 +24,12 @@ use crate::workspace::{find_theme, load_notes, open_target_games, open_target_go
 fn main() -> anyhow::Result<()> {
     let mut cli = Cli::parse_from(cli::normalize_lab_args(std::env::args()));
 
+    if let Some(Command::Skills { name }) = &cli.command {
+        let reference = nit_core::skills::lookup(name.as_deref()).map_err(anyhow::Error::msg)?;
+        println!("{reference}");
+        return Ok(());
+    }
+
     if let Some(Command::Update) = cli.command {
         return update::run_update();
     }

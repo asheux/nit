@@ -68,6 +68,8 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
+    /// Browse built-in NitSkills or read one by name
+    Skills { name: Option<String> },
     /// Explicit GoL mode (current behavior)
     Gol {
         /// File or directory to open

@@ -47,6 +47,11 @@ pub(crate) fn submit_focused_pane_input(
     if chat_input.trim().is_empty() {
         return;
     }
+    if let Some(reply) = nit_core::skills::chat_reply(&chat_input) {
+        clear_focused_pane_input(state);
+        push_pane_system_message(state, reply);
+        return;
+    }
     let bound = !pane.agent_id.is_empty()
         || pane
             .selected_agent_id
