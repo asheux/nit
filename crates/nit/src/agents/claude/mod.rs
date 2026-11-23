@@ -43,8 +43,10 @@ pub(super) fn load_only_claude_agents(cli_available: bool) -> nit_core::AgentsSt
     agents
 }
 
-pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState) {
-    let metadata = build_claude_model_metadata(&roster.claude_models);
+pub(super) fn populate_claude_model_metadata(
+    roster: &mut nit_core::AgentsState,
+    metadata: nit_core::BackendModelsMetadata,
+) {
     roster.claude_effective_context_window_tokens = metadata.effective_context_window_tokens;
     roster.claude_supported_efforts = metadata.supported_efforts;
     roster.claude_default_effort = metadata.default_effort;
@@ -52,13 +54,6 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
 }
 
 /// Compute the per-model metadata maps for the listed Claude models.
-/// Shared by `populate_claude_model_metadata` (cache-hit init path) and
-/// the async-probe spawner (the cache-miss path that emits a
-/// `BackendModelsLoaded` event carrying the populated maps). Pre-fix
-/// the latter path emitted only the model list, so the roster showed
-/// model names with blank context-window cells until a restart picked
-/// up the freshly written cache. The shared computation guarantees
-/// both paths populate identically.
 pub(super) fn build_claude_model_metadata(model_ids: &[String]) -> nit_core::BackendModelsMetadata {
     use std::collections::HashMap;
     let supported = probe::probe_claude_supported_efforts();

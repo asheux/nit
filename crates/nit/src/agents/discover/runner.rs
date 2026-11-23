@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
@@ -80,12 +80,16 @@ fn run_command_capture_timeout(
 ) -> io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
     let resolved_exe =
         find_executable_in_path(binary_name).unwrap_or_else(|| PathBuf::from(binary_name));
+    // File-backed captures also complete when a wrapper exits but a descendant
+    // retains its output handles. Pipe buffers can fill before the child exits.
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
     let mut process = ProcessCommand::new(&resolved_exe);
     process
         .args(cli_args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?);
     if let Some(augmented_path) = preferred_path_for_executable(&resolved_exe) {
         process.env("PATH", augmented_path);
     }
@@ -93,9 +97,11 @@ fn run_command_capture_timeout(
     let started_at = Instant::now();
     loop {
         if let Some(exit_status) = child.try_wait()? {
-            let stdout = drain_pipe(child.stdout.take());
-            let stderr = drain_pipe(child.stderr.take());
-            return Ok((exit_status, stdout, stderr));
+            return Ok((
+                exit_status,
+                read_capture(&mut stdout)?,
+                read_capture(&mut stderr)?,
+            ));
         }
         if started_at.elapsed() >= timeout {
             let _ = child.kill();
@@ -110,10 +116,37 @@ fn run_command_capture_timeout(
     }
 }
 
-fn drain_pipe<R: Read>(pipe: Option<R>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Some(mut handle) = pipe {
-        let _ = handle.read_to_end(&mut buf);
+fn read_capture(file: &mut std::fs::File) -> io::Result<Vec<u8>> {
+    let size = file.metadata()?.len();
+    file.rewind()?;
+    let mut bytes = Vec::new();
+    file.take(size).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captures_output_larger_than_a_pipe_and_bounds_a_silent_child() {
+        let (status, stdout, stderr) = run_command_capture_timeout(
+            "/bin/sh",
+            &[
+                "-c",
+                "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+            ],
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert!(status.success());
+        assert_eq!((stdout.len(), stderr.len()), (262144, 262144));
+        let error = run_command_capture_timeout(
+            "/bin/sh",
+            &["-c", "exec sleep 8"],
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
-    buf
 }

@@ -23,10 +23,8 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_FILENAME: &str = "agents_cache.json";
 const CACHE_TTL_SECS: u64 = 60 * 60 * 24;
-/// Bumped to 2 when binary mtime tracking was added. Old v1 caches don't
-/// carry mtime fields and the safest fallback is to treat them as a miss
-/// — a single one-time re-probe per host after the upgrade lands.
-pub(super) const SCHEMA_VERSION: u32 = 2;
+/// v3 records Claude's probed metadata and only fingerprints probed backends.
+pub(super) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) struct ProbeCache {
@@ -40,6 +38,7 @@ pub(super) struct ProbeCache {
     /// the cache so an in-place upgrade gets picked up immediately.
     #[serde(default)]
     pub claude_binary_mtime_unix: Option<u64>,
+    pub claude_metadata: Option<nit_core::BackendModelsMetadata>,
     pub claude_models: Vec<String>,
     pub claude_models_error: Option<String>,
     pub gemini_binary_path: Option<String>,
@@ -52,6 +51,7 @@ pub(super) struct ProbeCache {
 impl ProbeCache {
     pub(super) fn new(
         claude_binary_path: Option<&Path>,
+        claude_metadata: Option<nit_core::BackendModelsMetadata>,
         claude_models: Vec<String>,
         claude_models_error: Option<String>,
         gemini_binary_path: Option<&Path>,
@@ -63,6 +63,7 @@ impl ProbeCache {
             probed_at_unix: now_unix(),
             claude_binary_path: claude_binary_path.map(path_to_string),
             claude_binary_mtime_unix: claude_binary_path.and_then(binary_mtime_unix),
+            claude_metadata,
             claude_models,
             claude_models_error,
             gemini_binary_path: gemini_binary_path.map(path_to_string),
@@ -82,30 +83,26 @@ impl ProbeCache {
         now_unix.saturating_sub(self.probed_at_unix) < CACHE_TTL_SECS
     }
 
-    /// `true` when the cached binary paths AND mtimes still match the
-    /// current resolution for `claude` / `gemini` on the current PATH.
-    /// Either a path change (upgrade moved the binary) or an mtime change
-    /// (upgrade replaced the binary in place) invalidates the cache, so
-    /// the next launch re-probes and picks up whatever the new binary
-    /// reports.
-    ///
-    /// mtime semantics: `metadata()` follows symlinks, so binaries
-    /// reached via `~/.npm-global/bin/claude → claude.js` correctly
-    /// reflect the target's mtime. An unreadable mtime (permission
-    /// denied, filesystem without mtime support) returns `None` from
-    /// `binary_mtime_unix`; both sides being `None` is treated as a
-    /// match (best-effort; the path check still applies), but a
-    /// `Some` vs `None` mismatch invalidates so we err on the side of
-    /// re-probing.
+    /// A broader probe can satisfy a narrower backend selection.
     pub(super) fn binaries_match(
         &self,
         claude_path: Option<&Path>,
         gemini_path: Option<&Path>,
     ) -> bool {
-        self.claude_binary_path == claude_path.map(path_to_string)
-            && self.gemini_binary_path == gemini_path.map(path_to_string)
-            && self.claude_binary_mtime_unix == claude_path.and_then(binary_mtime_unix)
-            && self.gemini_binary_mtime_unix == gemini_path.and_then(binary_mtime_unix)
+        let matches = |requested: Option<&Path>, cached: &Option<String>, mtime| {
+            requested.is_none_or(|path| {
+                cached.as_ref() == Some(&path_to_string(path)) && mtime == binary_mtime_unix(path)
+            })
+        };
+        matches(
+            claude_path,
+            &self.claude_binary_path,
+            self.claude_binary_mtime_unix,
+        ) && matches(
+            gemini_path,
+            &self.gemini_binary_path,
+            self.gemini_binary_mtime_unix,
+        )
     }
 }
 
@@ -185,6 +182,7 @@ mod tests {
             probed_at_unix: now,
             claude_binary_path: Some("/opt/homebrew/bin/claude".into()),
             claude_binary_mtime_unix: Some(42),
+            claude_metadata: None,
             claude_models: vec!["claude-opus-4-7".into()],
             claude_models_error: None,
             gemini_binary_path: Some("/opt/homebrew/bin/gemini".into()),
@@ -192,6 +190,34 @@ mod tests {
             gemini_models: vec!["gemini-2.0-flash".into()],
             gemini_models_error: None,
         }
+    }
+
+    #[test]
+    fn cached_efforts_survive_a_restart() {
+        let mut cache = sample_cache(0);
+        let model = cache.claude_models[0].clone();
+        let mut metadata = nit_core::BackendModelsMetadata::default();
+        metadata
+            .supported_efforts
+            .insert(model.clone(), vec!["custom".into()]);
+        cache.claude_metadata = Some(metadata);
+        let restored: ProbeCache =
+            serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        let mut roster = nit_core::AgentsState::default();
+        super::super::claude::populate_claude_model_metadata(
+            &mut roster,
+            restored.claude_metadata.unwrap(),
+        );
+        assert_eq!(roster.claude_supported_efforts[&model], ["custom"]);
+    }
+
+    #[test]
+    fn claude_only_cache_cannot_satisfy_a_new_gemini_request() {
+        let mut cache = sample_cache(0);
+        cache.gemini_binary_path = None;
+        cache.gemini_binary_mtime_unix = None;
+        assert!(!cache.binaries_match(None, Some(Path::new("gemini"))));
+        assert!(cache.binaries_match(None, None));
     }
 
     #[test]
@@ -317,6 +343,7 @@ mod tests {
             probed_at_unix: 0,
             claude_binary_path: None,
             claude_binary_mtime_unix: None,
+            claude_metadata: None,
             claude_models: Vec::new(),
             claude_models_error: None,
             gemini_binary_path: None,

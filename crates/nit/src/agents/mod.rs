@@ -41,6 +41,13 @@ pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
         matches!(backend_selection, AgentsArg::All | AgentsArg::Claude) && claude_detected;
     let want_gemini = matches!(backend_selection, AgentsArg::All) && gemini_detected;
 
+    if !want_claude && !want_gemini {
+        return roster;
+    }
+    // Only fingerprint backends included in this probe.
+    let claude_path = claude_path.filter(|_| want_claude);
+    let gemini_path = gemini_path.filter(|_| want_gemini);
+
     // Try to skip the subprocess probes via the on-disk cache. Two miss
     // conditions: TTL expired (`is_fresh`) or the resolved binary path
     // changed since the last cache write (`binaries_match`). On hit, we
@@ -54,13 +61,15 @@ pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
 
     if let Some(cached) = cache_hit {
         if want_claude {
-            roster.claude_models = cached.claude_models.clone();
-            roster.claude_models_error = cached.claude_models_error.clone();
-            claude::populate_claude_model_metadata(&mut roster);
+            roster.claude_models = cached.claude_models;
+            roster.claude_models_error = cached.claude_models_error;
+            if let Some(metadata) = cached.claude_metadata {
+                claude::populate_claude_model_metadata(&mut roster, metadata);
+            }
         }
         if want_gemini {
-            roster.gemini_models = cached.gemini_models.clone();
-            roster.gemini_models_error = cached.gemini_models_error.clone();
+            roster.gemini_models = cached.gemini_models;
+            roster.gemini_models_error = cached.gemini_models_error;
         }
         sync_backend_model_lanes(&mut roster, backend_selection);
         return roster;
@@ -91,9 +100,6 @@ struct BackgroundProbeArgs {
 }
 
 fn spawn_background_probe(args: BackgroundProbeArgs) {
-    if !args.want_claude && !args.want_gemini {
-        return;
-    }
     std::thread::Builder::new()
         .name("nit-agents-probe".into())
         .spawn(move || {
@@ -120,9 +126,12 @@ fn spawn_background_probe(args: BackgroundProbeArgs) {
                 None => (Vec::new(), None),
             };
 
+            let claude_metadata = (!claude_models.is_empty())
+                .then(|| claude::build_claude_model_metadata(&claude_models));
             // Persist for the next launch.
             cache::save(&cache::ProbeCache::new(
                 args.claude_path.as_deref(),
+                claude_metadata.clone(),
                 claude_models.clone(),
                 claude_error.clone(),
                 args.gemini_path.as_deref(),
@@ -130,19 +139,8 @@ fn spawn_background_probe(args: BackgroundProbeArgs) {
                 gemini_error.clone(),
             ));
 
-            // Push events into the async queue for the event loop to drain.
-            // Emit one event per backend that was probed so the loader
-            // clears as soon as each finishes (Claude usually returns
-            // first; Gemini's CLI is heavier).
+            // Notify the event loop for each backend included in the probe.
             if args.want_claude {
-                // Populate metadata before emitting — pre-fix the event
-                // carried only model names, and the handler couldn't
-                // know context-window sizes / supported efforts, leaving
-                // the roster with blank size cells until a restart hit
-                // the freshly written cache (which DID populate via
-                // `populate_claude_model_metadata`).
-                let claude_metadata = (!claude_models.is_empty())
-                    .then(|| claude::build_claude_model_metadata(&claude_models));
                 nit_core::agent_bus::async_queue::push(
                     nit_core::AgentBusEvent::BackendModelsLoaded {
                         backend: nit_core::BackendKind::Claude,

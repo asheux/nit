@@ -33,11 +33,15 @@ const DISQUALIFYING_KEYWORDS: &[&str] = &[
 const VERSION_DISQUALIFIERS: &[&str] = &["-latest", "-v1", "-v2", "-v3"];
 
 pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
-    let fragments = extract_ascii_runs(bytes);
+    let mut fragments = bytes
+        .split(|b| !(b.is_ascii_graphic() || *b == b' '))
+        .filter(|run| run.len() >= MIN_ASCII_RUN_LENGTH)
+        .filter_map(|run| std::str::from_utf8(run).ok())
+        .peekable();
 
     let mut models = Vec::new();
-    for pair in fragments.windows(2) {
-        let Some(model) = normalize_claude_model_token(&pair[0]) else {
+    while let Some(candidate) = fragments.next() {
+        let Some(model) = normalize_claude_model_token(candidate) else {
             continue;
         };
         // A genuine model entry sits next to its human-readable display name.
@@ -48,7 +52,9 @@ pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
             continue;
         };
         let family_display = capitalize_ascii(&family);
-        let label = pair[1].trim();
+        let Some(label) = fragments.peek().map(|next| next.trim()) else {
+            break;
+        };
         let label_names_model = !label.is_empty()
             && !label.starts_with("claude-")
             && (label.contains(&family_display) || label.contains("Claude "));
@@ -94,37 +100,20 @@ pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
     result
 }
 
-fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
-    let mut runs = Vec::new();
-    let mut start: Option<usize> = None;
-
-    // The trailing 0u8 sentinel terminates any open run at index == bytes.len()
-    // so the trailing-run case folds into the same branch as the in-loop case.
-    for (i, &b) in bytes.iter().chain(std::iter::once(&0u8)).enumerate() {
-        if b.is_ascii_graphic() || b == b' ' {
-            start.get_or_insert(i);
-            continue;
-        }
-        if let Some(begin) = start.take() {
-            if i - begin >= MIN_ASCII_RUN_LENGTH {
-                runs.push(String::from_utf8_lossy(&bytes[begin..i]).into_owned());
-            }
-        }
-    }
-
-    runs
-}
-
 fn normalize_claude_model_token(raw: &str) -> Option<&str> {
     let stripped = raw.trim().strip_suffix("[1m]").unwrap_or(raw.trim());
     is_probable_claude_model(stripped).then_some(stripped)
 }
 
 fn is_probable_claude_model(raw: &str) -> bool {
-    let name = raw.to_ascii_lowercase();
-    if !name.starts_with("claude-") || name.ends_with('-') {
+    if !raw
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+        || raw.ends_with('-')
+    {
         return false;
     }
+    let name = raw.to_ascii_lowercase();
     if name.contains("--") || name.contains("..") {
         return false;
     }
