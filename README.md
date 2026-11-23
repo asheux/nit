@@ -19,7 +19,7 @@ For independent reviews, `nit multipane --panes 4` opens four conversations. For
 
 ### Give agents only the guidance they need
 
-The **NitSkills** pane opens with the editor. Its 16 playbooks cover code structure, swarm work, research and shared-workspace decisions. Select a playbook to preview it, or press Enter to read it in full. Agents can fetch one reference when needed. Required constraints, plan schemas and output formats stay with the task. Use `:skills` to focus the pane, `/skills` in chat, or `nit skills NAME` from a shell. [Measured effect on prompt size](docs/PERF.md)
+The **NitSkills** pane opens with the editor. Its 16 playbooks cover code structure, swarm work, research and shared-workspace decisions. Select a playbook to preview it, or press Enter to read it in full. Click **Use skill** or press `a` to add a reference to your chat draft. When you send the draft, the agent can fetch that playbook. Swarm tasks receive their required instructions automatically. Use `:skills` to focus the pane, `/skills` in chat, or `nit skills NAME` from a shell. [Measured effect on prompt size](docs/PERF.md)
 
 ## Install
 
