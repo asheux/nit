@@ -2012,22 +2012,42 @@ fn chat_tab_at_column_maps_agent_chat_and_terminal_labels() {
 }
 
 #[test]
-fn central_chat_composer_stays_at_the_bottom_as_the_draft_grows() {
+fn central_chat_composer_grows_upward_until_capped_then_scrolls_at_the_cursor() {
     let mut state = test_state();
     state.center_tab = Some(nit_core::StationCenterTab::Chat);
-    for (width, height) in [(32, 14), (76, 40)] {
+    for (width, height, cap) in [(30, 7, 1), (38, 14, 4), (76, 40, 8)] {
         let area = ratatui::layout::Rect::new(21, 4, width, height);
-        state.agents.chat_input.clear();
-        let initial = super::compute_console_layout(area, &state).unwrap();
-        state.agents.chat_input = "follow up\n".repeat(20);
-        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
-        let growing = super::compute_console_layout(area, &state).unwrap();
-        assert_eq!(initial.input_area, growing.input_area);
-        assert_eq!(initial.thread_area, growing.thread_area);
-        assert_eq!(growing.input_chunk.bottom(), area.bottom() - 1);
-        assert!(growing.thread_area.height > growing.input_area.height);
-        assert!(growing.input_lines_all.len() > usize::from(growing.input_area.height));
+        for n in [1, 2, 4, 12] {
+            state.agents.chat_input = if n == 1 {
+                String::new()
+            } else {
+                vec!["line"; n].join("\n")
+            };
+            state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+            let view = super::compute_console_layout(area, &state).unwrap();
+            let visible = n.min(cap);
+            assert_eq!(view.input_area.height as usize, visible);
+            assert_eq!(view.input_chunk.bottom(), area.bottom() - 1);
+            assert_eq!(view.input_window_start, n - visible);
+            assert!(view.thread_area.height > 0);
+            state.agents.chat_input_cursor = 0;
+            assert_eq!(
+                super::compute_console_layout(area, &state)
+                    .unwrap()
+                    .input_window_start,
+                0
+            );
+        }
     }
+    state.agents.chat_input = "a long follow up that will wrap naturally".into();
+    let wide =
+        super::compute_console_layout(ratatui::layout::Rect::new(0, 0, 80, 36), &state).unwrap();
+    let narrow =
+        super::compute_console_layout(ratatui::layout::Rect::new(0, 0, 24, 36), &state).unwrap();
+    assert_eq!(wide.input_area.height, 1);
+    assert!(narrow.input_area.height > 1);
+    assert_eq!(wide.input_chunk.bottom(), narrow.input_chunk.bottom());
+    assert!(narrow.thread_area.height < wide.thread_area.height);
 }
 
 #[test]
