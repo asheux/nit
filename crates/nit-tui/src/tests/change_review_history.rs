@@ -169,3 +169,23 @@ fn git_colors_keep_patch_headers_distinct_from_source_and_indices() {
     assert_eq!(status_color('M', false, false, &theme), theme.diff_modified);
     assert_eq!(status_color('U', true, true, &theme), theme.error);
 }
+
+#[test]
+fn history_rows_share_the_roster_surface_while_patch_and_footer_keep_their_own() {
+    let state = fixture();
+    let theme = Theme::default();
+    let mut term = Terminal::new(TestBackend::new(70, 17)).unwrap();
+    term.draw(|f| super::super::render(f, f.size(), &state, &theme))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let r = layout(buf.area, &state.change_review);
+    for row in [r.summary.y, r.tracking.y, r.heading.y, r.commits.y + 1] {
+        assert_eq!(
+            buf.get(r.commits.right() - 1, row).bg,
+            theme.list_background()
+        );
+    }
+    assert_eq!(buf.get(r.commits.x, r.commits.y).bg, theme.selection_bg);
+    assert_eq!(buf.get(r.patch.x, r.patch.y).bg, theme.editor_background);
+    assert_eq!(buf.get(r.footer.x, r.footer.y).bg, theme.background);
+}

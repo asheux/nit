@@ -11,6 +11,17 @@ pub(super) struct Layout {
     footer: Rect,
 }
 
+impl Layout {
+    pub(super) fn list_area(&self) -> Rect {
+        Rect::new(
+            self.summary.x,
+            self.summary.y,
+            self.summary.width,
+            self.summary.height + self.tracking.height + self.heading.height + self.commits.height,
+        )
+    }
+}
+
 pub(super) fn layout(area: Rect, review: &ChangeReview) -> Layout {
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let mut body = inner;
@@ -125,6 +136,12 @@ pub(super) fn click(review: &mut ChangeReview, area: Rect, point: Position) -> b
 
 pub(super) fn render(frame: &mut Frame, area: Rect, review: &ChangeReview, theme: &Theme) {
     let r = layout(area, review);
+    if !review.history_patch_open {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.list_background())),
+            r.list_area(),
+        );
+    }
     let muted = theme.status_idle_style();
     let title = Style::default()
         .fg(theme.title)

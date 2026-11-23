@@ -122,6 +122,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         return;
     }
     let r = regions(area, review.files.len());
+    for area in [r.summary, r.files] {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.list_background())),
+            area,
+        );
+    }
     let muted = theme.status_idle_style();
     let mut conflicts = 0;
     let mut staged = 0;
@@ -472,6 +478,14 @@ mod tests {
                         theme.editor_background
                     } else if !empty && r.files.contains(point) && y == r.files.y {
                         theme.selection_bg
+                    } else if !empty && (r.summary.contains(point) || r.files.contains(point)) {
+                        theme.list_background()
+                    } else if empty
+                        && history::layout(buffer.area, &state.change_review)
+                            .list_area()
+                            .contains(point)
+                    {
+                        theme.list_background()
                     } else {
                         theme.background
                     };

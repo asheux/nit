@@ -229,13 +229,13 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 "{label:<width$} {count}",
                 width = usize::from(room)
             ))
-            .style(accent),
+            .style(accent.bg(theme.list_background())),
             r.filter,
         );
     }
     if indices.is_empty() {
         frame.render_widget(
-            Paragraph::new("No matching skills").style(regular.bg(theme.editor_background)),
+            Paragraph::new("No matching skills").style(regular.bg(theme.list_background())),
             r.catalog,
         );
         frame.render_widget(Paragraph::new("Esc clear filter").style(muted), r.help);
@@ -275,7 +275,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
     }
     frame.render_widget(
         Paragraph::new(rows)
-            .style(regular.bg(theme.editor_background))
+            .style(regular.bg(theme.list_background()))
             .scroll((top(state, r.catalog, &indices) as u16, 0)),
         r.catalog,
     );

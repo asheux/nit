@@ -207,7 +207,7 @@ fn multiword_filter_matches_all_terms_across_fields_and_id_separators() {
 }
 
 #[test]
-fn catalog_uses_source_background_and_reader_keeps_its_category_color() {
+fn catalog_uses_list_background_and_reader_keeps_its_category_color() {
     let mut state = browser();
     let mut theme = Theme::default();
     theme.hl.macro_token = Color::Rgb(201, 155, 235);
@@ -239,14 +239,14 @@ fn catalog_uses_source_background_and_reader_keeps_its_category_color() {
         let buf = term.backend().buffer();
         let (x, y) = locate(buf, group);
         assert_eq!(buf.get(x, y).fg, theme.accent);
-        assert_eq!(buf.get(x, y).bg, theme.editor_background);
+        assert_eq!(buf.get(x, y).bg, theme.list_background());
         let other = skills::definitions()
             .iter()
             .find(|s| s.name != entry(&state).name)
             .unwrap();
         let (x, y) = locate(buf, other.title);
         assert_eq!(buf.get(x, y).fg, theme.foreground);
-        assert_eq!(buf.get(x, y).bg, theme.editor_background);
+        assert_eq!(buf.get(x, y).bg, theme.list_background());
         let (x, y) = locate(buf, "› ");
         assert_eq!(buf.get(x, y).fg, theme.border_focused);
         assert_eq!(buf.get(x + 2, y).fg, theme.foreground);
@@ -260,4 +260,26 @@ fn catalog_uses_source_background_and_reader_keeps_its_category_color() {
         assert!(buf.get(x, y).modifier.contains(Modifier::UNDERLINED));
         state.skill_reader_open = false;
     }
+}
+
+#[test]
+fn compact_empty_filter_and_catalog_share_list_surface() {
+    let mut state = browser();
+    state.skill_filter = "no-such-playbook".into();
+    state.skill_filter_editing = true;
+    let theme = Theme::default();
+    let area = Rect::new(0, 0, 32, 11);
+    let r = regions(inner(area), &state);
+    let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    term.draw(|f| render(f, inner(area), &mut state, &theme))
+        .unwrap();
+    let buf = term.backend().buffer();
+    for region in [r.filter, r.catalog] {
+        assert!(region.height > 0);
+        assert_eq!(
+            buf.get(region.right() - 1, region.y).bg,
+            theme.list_background()
+        );
+    }
+    assert_ne!(buf.get(r.help.x, r.help.y).bg, theme.list_background());
 }
