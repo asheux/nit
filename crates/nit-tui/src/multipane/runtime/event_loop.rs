@@ -88,6 +88,7 @@ pub fn run_loop(
         .checked_sub(frame_interval)
         .unwrap_or_else(Instant::now);
 
+    let mut needs_redraw = true;
     loop {
         // Drain any already-buffered input BEFORE the agent-bus drain so
         // wheel / PgUp / Ctrl+Q events don't get queued behind a 100+
@@ -95,6 +96,7 @@ pub fn run_loop(
         // so a runaway producer can't starve the bus. The bottom-of-loop
         // `event::poll(TICK_RATE)` remains the idle-wait pump.
         if event::poll(Duration::from_millis(0))? {
+            needs_redraw = true;
             let area = terminal_size(terminal)?;
             let should_quit = drain_input_burst(
                 state,
@@ -132,6 +134,7 @@ pub fn run_loop(
         // disabled in multipane v1 (genome_worker = None).
         let mut codex_batch: Vec<nit_core::AgentBusEvent> = codex.events.try_iter().collect();
         if !codex_batch.is_empty() {
+            needs_redraw = true;
             crate::app::event_coalesce::coalesce_heartbeats(&mut codex_batch);
             for event in codex_batch {
                 crate::app::event_drain::drain_codex_event(
@@ -149,6 +152,7 @@ pub fn run_loop(
         }
         let mut claude_batch: Vec<nit_core::AgentBusEvent> = claude.events.try_iter().collect();
         if !claude_batch.is_empty() {
+            needs_redraw = true;
             crate::app::event_coalesce::coalesce_heartbeats(&mut claude_batch);
             for event in claude_batch {
                 crate::app::event_drain::drain_claude_event(
@@ -168,9 +172,11 @@ pub fn run_loop(
         // Async backend-probe events (cache-miss path of init_agents).
         // See app/runner.rs for the single-pane mirror.
         for event in nit_core::agent_bus::async_queue::drain() {
+            needs_redraw = true;
             event.apply(state);
         }
         for event in dir_search_runner.events.try_iter() {
+            needs_redraw = true;
             apply_dir_search_event(state, event);
         }
 
@@ -191,6 +197,7 @@ pub fn run_loop(
         // "Verifying (genome gate) ..." forever and the verifier never
         // dispatches.
         for mut dispatch in swarm.poll_genome_gates(state) {
+            needs_redraw = true;
             crate::app::augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
             crate::app::apply_swarm_task_role(state, &dispatch);
             crate::app::dispatch_agent_prompt(
@@ -204,6 +211,7 @@ pub fn run_loop(
             );
         }
         for mut dispatch in swarm.poll_genome_reviews(state) {
+            needs_redraw = true;
             crate::app::augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
             crate::app::apply_swarm_task_role(state, &dispatch);
             crate::app::dispatch_agent_prompt(
@@ -217,19 +225,44 @@ pub fn run_loop(
             );
         }
 
-        capture_pane_mission_ids(state);
+        if needs_redraw {
+            capture_pane_mission_ids(state);
+        }
+        let mut reap_terminal = false;
+        for (idx, session) in &terminals {
+            reap_terminal |= session.has_exited();
+            if session.take_output_changed()
+                && state
+                    .multipane
+                    .as_ref()
+                    .and_then(|mp| mp.panes.get(*idx))
+                    .is_some_and(|pane| pane.terminal_active)
+            {
+                needs_redraw = true;
+            }
+        }
+        if terminal_popup
+            .as_ref()
+            .is_some_and(|s| s.take_output_changed())
+            && state.terminal_popup.visible
+        {
+            needs_redraw = true;
+        }
+        if needs_redraw || reap_terminal {
+            needs_redraw = true;
+            let term_area = terminal_size(terminal)?;
+            reconcile_pane_terminals(state, &mut terminals, term_area);
+            reconcile_grid_terminal_popup(state, &mut terminal_popup, term_area);
+        }
 
-        let term_area = terminal_size(terminal)?;
-        reconcile_pane_terminals(state, &mut terminals, term_area);
-        reconcile_grid_terminal_popup(state, &mut terminal_popup, term_area);
-
-        // Render only when the per-frame minimum interval has elapsed.
-        // `frame_count` advances INSIDE the gate so the breather phase
-        // tracks real frames rather than loop iterations — without this,
-        // a high-event-rate burst would visibly speed up the histogram
-        // glyph next to "Working …" / "Verifying …" relative to the
-        // single-pane path.
-        if last_render.elapsed() >= frame_interval {
+        let animating = !state.agents.active_turns.is_empty()
+            || state.multipane.as_ref().is_some_and(|mp| {
+                mp.panes
+                    .iter()
+                    .filter_map(|pane| pane.mission_id.as_deref())
+                    .any(|id| swarm.is_active_mission(id))
+            });
+        if (needs_redraw || animating) && last_render.elapsed() >= frame_interval {
             state.metrics.frame_count = state.metrics.frame_count.wrapping_add(1);
 
             terminal.draw(|frame| {
@@ -281,31 +314,30 @@ pub fn run_loop(
                     frame.set_cursor(c.x, c.y);
                 }
             })?;
-            // Match the single-pane chat-input caret shape so the operator
-            // sees the same thin steady bar across both modes; the visible
-            // blink comes from gating `frame.set_cursor` on
-            // `cursor_visible(state)` (a frame-counter pulse), exactly
-            // like single-pane.
-            let _ = crossterm::execute!(
-                terminal.backend_mut(),
+            let cursor_style = if state.terminal_popup.visible || focused_terminal_active(state) {
                 crossterm::cursor::SetCursorStyle::SteadyBar
-            );
-
+            } else {
+                crossterm::cursor::SetCursorStyle::BlinkingBar
+            };
+            let _ = crossterm::execute!(terminal.backend_mut(), cursor_style);
             last_render = Instant::now();
+            needs_redraw = false;
         }
 
-        // Adaptive idle wait: when the next frame is closer than
-        // `TICK_RATE`, wake at the frame boundary instead of the full
-        // 50 ms tick so a deferred render fires promptly. The 1 ms
-        // floor avoids degenerate sub-millisecond polls that some
-        // terminals reduce to a busy-spin.
-        let wait = frame_interval
-            .saturating_sub(last_render.elapsed())
-            .min(TICK_RATE)
-            .max(Duration::from_millis(1));
+        // Input interrupts poll immediately. Keep checking background workers
+        // and PTYs while idle, without waking at the configured frame rate.
+        let wait = if needs_redraw || animating {
+            frame_interval
+                .saturating_sub(last_render.elapsed())
+                .min(TICK_RATE)
+                .max(Duration::from_millis(1))
+        } else {
+            TICK_RATE
+        };
         if !event::poll(wait)? {
             continue;
         }
+        needs_redraw = true;
         let area = terminal_size(terminal)?;
         // Coalesce a burst of input (e.g. wheel scroll fires 5–20
         // events per gesture) so we render once per batch instead of

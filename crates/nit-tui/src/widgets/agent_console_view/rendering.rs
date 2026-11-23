@@ -18,9 +18,9 @@ use ratatui::{
 
 use super::breather::build_pane_thread_rows_with_breathers_for_pane;
 use super::{
-    chat_input_display_pos_for_char_idx, compute_pane_layout, cursor_visible, dim_bg_towards,
-    format_context_text, highlight_plain_line, paint_pane_thread_selection, resolve_context_pct,
-    resolve_context_used, thread_lines, ChatCursor,
+    chat_input_display_pos_for_char_idx, compute_pane_layout, dim_bg_towards, format_context_text,
+    highlight_plain_line, paint_pane_thread_selection, resolve_context_pct, resolve_context_used,
+    thread_lines, ChatCursor,
 };
 use crate::swarm::SwarmRuntime;
 use crate::theme::Theme;
@@ -295,10 +295,8 @@ pub fn render_pane(
         layout.input_area,
     );
 
-    // Same blink gating as `render` (single-pane). `cursor_visible`
-    // toggles every ~6 frames via the global frame counter, so the
-    // pane caret pulses in lockstep with the editor caret.
-    if focused && cursor_visible(state) {
+    // The terminal blinks this caret even when the grid is idle.
+    if focused {
         let cursor_visible_in_window = layout.cursor_line_all >= layout.input_window_start
             && layout.cursor_line_all
                 < layout

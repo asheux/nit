@@ -186,7 +186,8 @@ fn adjacent_pty_chunks_are_collected_before_the_parser_is_published() {
     )));
     let exited = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
-    let worker = spawn_parser(rx, parser.clone(), exited.clone());
+    let dirty = Arc::new(AtomicBool::new(false));
+    let worker = spawn_parser(rx, parser.clone(), exited.clone(), dirty.clone());
 
     tx.send(b"old frame".to_vec()).unwrap();
     std::thread::sleep(PARSE_BATCH_DELAY * 2);
@@ -199,6 +200,7 @@ fn adjacent_pty_chunks_are_collected_before_the_parser_is_published() {
     assert!(contents.contains("new frame"), "screen was {contents:?}");
     assert!(!contents.contains("old frame"), "screen was {contents:?}");
     assert!(exited.load(Ordering::SeqCst));
+    assert!(dirty.load(Ordering::Acquire));
 }
 
 #[cfg(unix)]

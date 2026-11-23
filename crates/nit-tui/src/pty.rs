@@ -57,6 +57,7 @@ pub struct PtySession {
     reader: Option<JoinHandle<()>>,
     parser_thread: Option<JoinHandle<()>>,
     exited: Arc<AtomicBool>,
+    output_changed: Arc<AtomicBool>,
     size: Mutex<PtySize>,
 }
 
@@ -112,7 +113,13 @@ impl PtySession {
         let exited = Arc::new(AtomicBool::new(false));
         let (parser_tx, parser_rx) = mpsc::channel::<Vec<u8>>();
         let reader = spawn_reader(reader, parser_tx);
-        let parser_thread = spawn_parser(parser_rx, parser.clone(), exited.clone());
+        let output_changed = Arc::new(AtomicBool::new(false));
+        let parser_thread = spawn_parser(
+            parser_rx,
+            parser.clone(),
+            exited.clone(),
+            output_changed.clone(),
+        );
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>();
         let writer_thread = spawn_writer(writer, writer_rx);
 
@@ -125,6 +132,7 @@ impl PtySession {
             reader: Some(reader),
             parser_thread: Some(parser_thread),
             exited,
+            output_changed,
             size: Mutex::new(size),
         })
     }
@@ -208,6 +216,10 @@ impl PtySession {
         self.exited.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn take_output_changed(&self) -> bool {
+        self.output_changed.swap(false, Ordering::AcqRel)
+    }
+
     /// OS pid of the spawned shell, or `None` if the platform backend
     /// doesn't expose one. Used by the popup title bar to poll the
     /// shell's live cwd via sysinfo so `cd` updates the header.
@@ -261,6 +273,7 @@ fn spawn_parser(
     parser_rx: Receiver<Vec<u8>>,
     parser: Arc<Mutex<TerminalParser>>,
     exited: Arc<AtomicBool>,
+    output_changed: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(mut batch) = parser_rx.recv() {
@@ -272,8 +285,10 @@ fn spawn_parser(
                 }
             }
             lock(&parser).process(&batch);
+            output_changed.store(true, Ordering::Release);
         }
         exited.store(true, Ordering::SeqCst);
+        output_changed.store(true, Ordering::Release);
     })
 }
 
