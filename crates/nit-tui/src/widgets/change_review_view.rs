@@ -16,7 +16,9 @@ pub(crate) mod interaction;
 
 struct Regions {
     summary: Rect,
+    heading: Rect,
     files: Rect,
+    detail: Rect,
     patch: Rect,
     footer: Rect,
 }
@@ -27,13 +29,42 @@ fn regions(area: Rect, count: usize) -> Regions {
     let summary = row(0, inner.height.min(1));
     let footer_height = u16::from(inner.height >= 5);
     let body = inner.height.saturating_sub(summary.height + footer_height);
-    let file_rows = (body / 3).max(1).min(body).min(count.min(8) as u16);
+    // Keep actual entries and diff lines available in short panes.
+    let heading_height = u16::from(body >= 6);
+    let detail_height = u16::from(body >= 4);
+    let content = body - heading_height - detail_height;
+    let file_rows = (content / 3).max(1).min(content).min(count.min(8) as u16);
+    let heading = row(summary.height, heading_height);
+    let files = row(summary.height + heading.height, file_rows);
+    let detail = row(files.bottom() - inner.y, detail_height);
     Regions {
         summary,
-        files: row(summary.height, file_rows),
-        patch: row(summary.height + file_rows, body - file_rows),
+        heading,
+        files,
+        detail,
+        patch: row(detail.bottom() - inner.y, content - file_rows),
         footer: row(inner.height - footer_height, footer_height),
     }
+}
+
+/// Keep section names and right-aligned column labels on a single row.
+fn section(frame: &mut Frame, area: Rect, label: &str, context: &str, theme: &Theme) {
+    use unicode_width::UnicodeWidthStr;
+    let width = usize::from(area.width);
+    let available = width.saturating_sub(label.width() + 3);
+    let context = history::clipped(context, available as u16);
+    let gap = width.saturating_sub(label.width() + context.width() + 2);
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" {label}"),
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(context, theme.status_idle_style()),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn first_row(review: &ChangeReview, height: u16) -> usize {
@@ -118,7 +149,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         return;
     }
     let r = regions(area, review.files.len());
-    for area in [r.summary, r.files] {
+    for area in [r.summary, r.heading, r.files] {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme.list_background())),
             area,
@@ -139,39 +170,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             unstaged += usize::from(file.worktree != ' ');
         }
     }
-    let labels = if conflicts > 0 {
-        vec![
-            (format!("{conflicts} conflicted"), conflicts, theme.error),
-            (format!("S {staged}"), staged, theme.success),
-            (format!("W {unstaged}"), unstaged, theme.diff_modified),
-            (format!("? {untracked}"), untracked, theme.hl.r#type),
-        ]
-    } else if r.summary.width >= 38 {
-        vec![
-            (format!("{staged} staged"), staged, theme.success),
-            (
-                format!("{unstaged} unstaged"),
-                unstaged,
-                theme.diff_modified,
-            ),
-            (format!("{untracked} untracked"), untracked, theme.hl.r#type),
-        ]
-    } else {
-        vec![
-            (format!("S {staged}"), staged, theme.success),
-            (format!("W {unstaged}"), unstaged, theme.diff_modified),
-            (format!("? {untracked}"), untracked, theme.hl.r#type),
-        ]
-    };
-    let mut summary = Vec::new();
-    for (i, (label, count, color)) in labels.into_iter().enumerate() {
+    let categories = [
+        (conflicts, "conflicted", "!", theme.error),
+        (staged, "staged", "S", theme.success),
+        (unstaged, "unstaged", "W", theme.diff_modified),
+        (untracked, "untracked", "?", theme.hl.r#type),
+    ];
+    let include_zero = r.summary.width >= 38 && conflicts == 0;
+    let mut labels = categories
+        .iter()
+        .filter(|(n, _, _, _)| *n > 0 || include_zero)
+        .filter(|(n, label, _, _)| *label != "conflicted" || *n > 0)
+        .map(|(n, label, short, color)| (format!("{n} {label}"), *short, *n, *color))
+        .collect::<Vec<_>>();
+    let needed =
+        labels.iter().map(|v| v.0.len()).sum::<usize>() + 3 * labels.len().saturating_sub(1) + 1;
+    if needed > usize::from(r.summary.width) {
+        labels.retain(|(_, _, n, _)| *n > 0);
+        for (label, short, n, _) in &mut labels {
+            *label = format!("{short} {n}");
+        }
+    }
+    let mut summary = vec![Span::raw(" ")];
+    for (i, (label, _, count, color)) in labels.into_iter().enumerate() {
         if i > 0 {
-            let separator = if conflicts > 0 && i == 1 || conflicts == 0 && r.summary.width >= 38 {
-                " · "
-            } else {
-                "  "
-            };
-            summary.push(Span::styled(separator, muted));
+            summary.push(Span::styled(" · ", muted));
         }
         summary.push(Span::styled(
             label,
@@ -186,6 +209,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         summary.push(Span::styled(" · limited", muted));
     }
     frame.render_widget(Paragraph::new(Line::from(summary)), r.summary);
+    section(
+        frame,
+        r.heading,
+        "Changed files",
+        &format!("{}", review.files.len()),
+        theme,
+    );
     let first = first_row(review, r.files.height);
     for (row, file) in review
         .files
@@ -202,6 +232,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         };
         let path = file.path.to_string_lossy();
         let line = Line::from(vec![
+            Span::styled(if selected { "› " } else { "  " }, style.fg(theme.accent)),
             Span::styled(
                 file.index.to_string(),
                 style.fg(status_color(file.index, true, file.conflicted(), theme)),
@@ -215,6 +246,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         frame.render_widget(
             Paragraph::new(line).style(style),
             Rect::new(r.files.x, r.files.y + row as u16, r.files.width, 1),
+        );
+    }
+    if let Some(file) = review.files.get(review.selected) {
+        section(
+            frame,
+            r.detail,
+            "Patch",
+            &file.path.to_string_lossy(),
+            theme,
         );
     }
     let current = review
@@ -234,10 +274,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     } else {
         paint_patch(frame, state, r.patch, theme);
     }
-    frame.render_widget(
-        Paragraph::new("f Follow up  ↑↓ file  PgDn diff  ↵ open").style(muted),
-        r.footer,
-    );
+    let mut footer = Vec::new();
+    let mut remaining = usize::from(r.footer.width);
+    for (label, style) in [
+        ("f Follow up", Style::default().fg(theme.accent)),
+        ("  ↑↓ file", muted),
+        ("  ↵ open", muted),
+        ("  PgDn diff", muted),
+    ] {
+        let width = unicode_width::UnicodeWidthStr::width(label);
+        if width <= remaining {
+            footer.push(Span::styled(label, style));
+            remaining -= width;
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(footer)), r.footer);
 }
 
 fn status_color(code: char, staged: bool, conflict: bool, theme: &Theme) -> Color {
@@ -491,7 +542,7 @@ mod tests {
                     assert_eq!(buffer.get(x, y).bg, expected, "{point:?}");
                 }
             }
-            let status = buffer.get(1, 1);
+            let status = buffer.get(2, 1);
             assert_eq!(status.fg, theme.success);
             assert!(!status.modifier.contains(Modifier::DIM));
         }
@@ -503,7 +554,9 @@ mod tests {
         let output = screen(&state, 62, 15);
         for s in [
             "1 staged · 1 unstaged · 1 untracked",
-            "MM one.rs",
+            "Changed files",
+            "Patch",
+            "› MM one.rs",
             "?? new\\nfile",
             "-old",
             "+new",

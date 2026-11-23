@@ -55,7 +55,8 @@ fn clean_history_shows_tracking_selection_and_commit_patch() {
             "Recent commits",
             "abc1230",
             "Commit 0",
-            "Patch · 2026-11-23 · Ada",
+            "Patch",
+            "2026-11-23 · Ada",
             "+patch line 0",
             "Open",
         ] {
@@ -198,4 +199,28 @@ fn history_list_uses_roster_surface_and_patch_uses_main_canvas() {
         }
     }
     assert_eq!(buf.get(r.footer.x, r.footer.y).bg, theme.background);
+}
+
+#[test]
+fn commit_dates_align_under_their_heading_and_yield_space_on_small_panes() {
+    let state = fixture();
+    for width in [28, 64] {
+        let output = screen(&state, width, 16);
+        let heading = output
+            .lines()
+            .find(|line| line.contains("Recent commits"))
+            .unwrap();
+        let commit = output
+            .lines()
+            .find(|line| line.contains("Commit 0"))
+            .unwrap();
+        if width == 64 {
+            let column =
+                |line: &str, label: &str| line[..line.find(label).unwrap()].chars().count();
+            assert_eq!(column(heading, "Date"), column(commit, "2026-11-23"));
+        } else {
+            assert!(!heading.contains("Date"));
+            assert!(!commit.contains("2026-11-23"));
+        }
+    }
 }

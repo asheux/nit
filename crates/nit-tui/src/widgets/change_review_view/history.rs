@@ -80,7 +80,7 @@ fn tracking(review: &ChangeReview, width: u16) -> String {
         format!("Matches {branch}")
     } else {
         let full = format!(
-            "{} ahead · {} behind vs {branch}",
+            "{} ahead · {} behind · {branch}",
             review.ahead, review.behind
         );
         if full.width() <= usize::from(width) {
@@ -91,7 +91,7 @@ fn tracking(review: &ChangeReview, width: u16) -> String {
     }
 }
 
-fn clipped(text: &str, width: u16) -> String {
+pub(super) fn clipped(text: &str, width: u16) -> String {
     let text = visible(text);
     if text.width() <= usize::from(width) {
         return text.into_owned();
@@ -169,7 +169,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         );
     } else {
         frame.render_widget(
-            Paragraph::new(status).style(if review.unborn {
+            Paragraph::new(format!(" {status}")).style(if review.unborn {
                 muted
             } else {
                 Style::default().fg(theme.success)
@@ -178,9 +178,12 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         );
     }
     frame.render_widget(
-        Paragraph::new(clipped(
-            &tracking(review, r.tracking.width),
-            r.tracking.width,
+        Paragraph::new(format!(
+            " {}",
+            clipped(
+                &tracking(review, r.tracking.width.saturating_sub(1)),
+                r.tracking.width.saturating_sub(1),
+            )
         ))
         .style(if review.upstream_gone || review.behind > 0 {
             Style::default().fg(theme.warning)
@@ -194,7 +197,14 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
     if review.commits.is_empty() {
         return;
     }
-    frame.render_widget(Paragraph::new("Recent commits").style(title), r.heading);
+    let show_date = r.commits.width >= 52;
+    section(
+        frame,
+        r.heading,
+        "Recent commits",
+        if show_date { "Date      " } else { "" },
+        theme,
+    );
     let first = first_row(review, r.commits.height);
     for (i, commit) in review
         .commits
@@ -210,17 +220,36 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
             Style::default()
         };
         let hash: String = commit.id.chars().take(7).collect();
-        let line = Line::from(vec![
+        let subject_width = r
+            .commits
+            .width
+            .saturating_sub(if show_date { 22 } else { 10 });
+        let subject = clipped(&commit.subject, subject_width);
+        let mut spans = vec![
             Span::styled(
                 if selected { "› " } else { "  " },
                 style.fg(theme.title_focused),
             ),
-            Span::styled(format!("{hash} "), style.fg(theme.hl.number)),
             Span::styled(
-                clipped(&commit.subject, r.commits.width.saturating_sub(10)),
-                style.fg(theme.foreground),
+                format!("{hash} "),
+                if selected {
+                    style.fg(theme.title_focused)
+                } else {
+                    style.fg(theme.muted)
+                },
             ),
-        ]);
+            Span::styled(subject.clone(), style.fg(theme.foreground)),
+        ];
+        if show_date {
+            spans.push(Span::raw(" ".repeat(
+                usize::from(subject_width).saturating_sub(subject.width()) + 1,
+            )));
+            spans.push(Span::styled(
+                clipped(&commit.date, 10),
+                style.fg(theme.muted),
+            ));
+        }
+        let line = Line::from(spans);
         frame.render_widget(
             Paragraph::new(line).style(style),
             Rect::new(
@@ -233,27 +262,21 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
     }
     if let Some(commit) = review.commits.get(review.selected) {
         let id: String = commit.id.chars().take(7).collect();
-        let lead = if review.history_patch_open {
-            Span::styled(id, Style::default().fg(theme.hl.number))
+        let label = if review.history_patch_open {
+            id.as_str()
         } else {
-            Span::styled("Patch", title)
+            "Patch"
         };
         let date = visible(&commit.date);
-        let remaining = usize::from(r.detail.width).saturating_sub(lead.width() + 6 + date.width());
-        let info = Line::from(vec![
-            lead,
-            Span::styled(" · ", muted),
-            Span::styled(date, muted),
-            Span::styled(" · ", muted),
-            Span::styled(
-                clipped(&commit.author, remaining as u16),
-                Style::default().fg(theme.hl.r#type),
-            ),
-        ]);
-        frame.render_widget(
-            Paragraph::new(info).style(Style::default().bg(theme.background)),
-            r.detail,
-        );
+        let author = visible(&commit.author);
+        // In a narrow pane prioritize the complete date over a clipped author.
+        let available = usize::from(r.detail.width).saturating_sub(label.width() + 3);
+        let info = if author.is_empty() || available < date.width() + 6 {
+            date.into_owned()
+        } else {
+            format!("{date} · {author}")
+        };
+        section(frame, r.detail, label, &info, theme);
         if review.preview_commit.as_deref() != Some(commit.id.as_str()) || review.message.is_some()
         {
             frame.render_widget(
