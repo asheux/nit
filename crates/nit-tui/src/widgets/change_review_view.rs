@@ -11,6 +11,8 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+mod history;
+
 struct Regions {
     summary: Rect,
     files: Rect,
@@ -59,6 +61,37 @@ fn visible(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+fn branch_label(review: &ChangeReview) -> Cow<'_, str> {
+    let branch = visible(&review.branch);
+    if review.files.is_empty() {
+        return branch;
+    }
+    if review.detached {
+        return Cow::Borrowed("HEAD (no branch)");
+    }
+    if review.unborn {
+        return format!("No commits yet on {branch}").into();
+    }
+    let Some(upstream) = review.upstream.as_deref() else {
+        return branch;
+    };
+    let mut label = format!("{branch}...{}", visible(upstream));
+    let mut status = Vec::new();
+    if review.upstream_gone {
+        status.push("gone".into());
+    }
+    if review.ahead > 0 {
+        status.push(format!("ahead {}", review.ahead));
+    }
+    if review.behind > 0 {
+        status.push(format!("behind {}", review.behind));
+    }
+    if !status.is_empty() {
+        label.push_str(&format!(" [{}]", status.join(", ")));
+    }
+    label.into()
+}
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let review = &state.change_review;
     let focused = state.focus == PaneId::Visualizer;
@@ -77,23 +110,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 theme.border
             }))
             .title(Line::styled(
-                format!(" CHANGES  {} ", visible(&review.branch)),
+                format!(" CHANGES  {} ", branch_label(review)),
                 Style::default()
                     .fg(theme.title)
                     .add_modifier(Modifier::BOLD),
             )),
         area,
     );
-    let r = regions(area, review.files.len());
-    let muted = theme.status_idle_style();
     if review.files.is_empty() {
-        let message = review.message.as_deref().unwrap_or("Working tree clean");
-        frame.render_widget(
-            Paragraph::new(visible(message)).style(muted),
-            r.summary.union(r.patch),
-        );
+        history::render(frame, area, review, theme);
         return;
     }
+    let r = regions(area, review.files.len());
+    let muted = theme.status_idle_style();
     let mut conflicts = 0;
     let mut staged = 0;
     let mut unstaged = 0;
@@ -153,30 +182,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     } else if !current {
         frame.render_widget(Paragraph::new("Loading diff…").style(muted), r.patch);
     } else {
-        let start = review
-            .scroll
-            .min(review.preview.len().saturating_sub(r.patch.height as usize));
-        let lines: Vec<Line> = review
-            .preview
-            .iter()
-            .skip(start)
-            .take(r.patch.height as usize)
-            .map(|line| {
-                let fg = if line.starts_with("@@") {
-                    theme.accent
-                } else if line.starts_with("+++ ") || line.starts_with("--- ") {
-                    theme.title
-                } else if line.starts_with('+') {
-                    theme.diff_added
-                } else if line.starts_with('-') {
-                    theme.diff_deleted
-                } else {
-                    theme.foreground
-                };
-                Line::styled(visible(line), Style::default().fg(fg))
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines), r.patch);
+        paint_patch(frame, review, r.patch, theme);
     }
     let hint = if r.footer.width >= 41 {
         "↑↓ file  PgUp/PgDn diff  Enter open  r sync"
@@ -186,8 +192,40 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Paragraph::new(hint).style(muted), r.footer);
 }
 
+fn paint_patch(frame: &mut Frame, review: &ChangeReview, patch: Rect, theme: &Theme) {
+    let start = review
+        .scroll
+        .min(review.preview.len().saturating_sub(patch.height as usize));
+    let lines: Vec<Line> = review
+        .preview
+        .iter()
+        .skip(start)
+        .take(patch.height as usize)
+        .map(|line| {
+            let fg = if line.starts_with("@@") {
+                theme.accent
+            } else if line.starts_with("+++ ") || line.starts_with("--- ") {
+                theme.title
+            } else if line.starts_with('+') {
+                theme.diff_added
+            } else if line.starts_with('-') {
+                theme.diff_deleted
+            } else {
+                theme.foreground
+            };
+            Line::styled(visible(line), Style::default().fg(fg))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), patch);
+}
+
 pub(crate) fn select(review: &mut ChangeReview, index: usize) {
-    let next = index.min(review.files.len().saturating_sub(1));
+    let count = if review.files.is_empty() {
+        review.commits.len()
+    } else {
+        review.files.len()
+    };
+    let next = index.min(count.saturating_sub(1));
     if next != review.selected {
         review.selected = next;
         review.scroll = 0;
@@ -200,7 +238,12 @@ pub(crate) fn move_file(review: &mut ChangeReview, delta: isize) {
 }
 
 pub(crate) fn scroll_patch(review: &mut ChangeReview, area: Rect, delta: isize, page: bool) {
-    let rows = regions(area, review.files.len()).patch.height.max(1) as usize;
+    let patch = if review.files.is_empty() {
+        history::layout(area, review).patch
+    } else {
+        regions(area, review.files.len()).patch
+    };
+    let rows = patch.height.max(1) as usize;
     let amount = if page {
         delta.saturating_mul(rows as isize)
     } else {
@@ -213,6 +256,19 @@ pub(crate) fn scroll_patch(review: &mut ChangeReview, area: Rect, delta: isize, 
 }
 
 pub(crate) fn mouse_select(review: &mut ChangeReview, area: Rect, point: Position) {
+    if review.files.is_empty() {
+        if history::click(review, area, point) {
+            return;
+        }
+        let rows = history::layout(area, review).commits;
+        if rows.contains(point) {
+            select(
+                review,
+                first_row(review, rows.height) + usize::from(point.y - rows.y),
+            );
+        }
+        return;
+    }
     let r = regions(area, review.files.len());
     if r.files.contains(point) {
         select(
@@ -223,6 +279,15 @@ pub(crate) fn mouse_select(review: &mut ChangeReview, area: Rect, point: Positio
 }
 
 pub(crate) fn mouse_scroll(review: &mut ChangeReview, area: Rect, point: Position, delta: i32) {
+    if review.files.is_empty() {
+        let r = history::layout(area, review);
+        if r.commits.contains(point) {
+            move_file(review, delta as isize);
+        } else if r.patch.contains(point) {
+            scroll_patch(review, area, delta as isize, false);
+        }
+        return;
+    }
     if regions(area, review.files.len()).files.contains(point) {
         move_file(review, delta as isize);
     } else {
