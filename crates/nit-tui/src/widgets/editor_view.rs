@@ -2,10 +2,10 @@ use crate::theme::Theme;
 use nit_core::{find_matching_bracket, BracketMatch, Buffer, LineDiffStatus, Mode, PaneId};
 use nit_syntax::{hash_line_bytes, map_line_segments_to_chars, HighlightSnapshot, SegmentMapError};
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{block::Title, Block, BorderType, Borders, Paragraph},
     Frame,
 };
 use std::sync::{Mutex, OnceLock};
@@ -24,7 +24,6 @@ pub struct SearchHighlight<'a> {
     pub live: bool,
 }
 
-const EDITOR_TITLE: &str = "EDITOR  [ SAVE ]";
 const DEFAULT_LINE_NUM_WIDTH: usize = 3;
 const GUTTER_PAD_CHARS: usize = 4;
 
@@ -62,7 +61,7 @@ pub fn render_editor(
         line_map,
         PaneId::Editor,
         focus,
-        EDITOR_TITLE,
+        buffer.name(),
         theme,
         tab_width,
         true,
@@ -81,6 +80,7 @@ pub fn render_editor_with_search(
     frame: &mut Frame,
     area: Rect,
     buffer: &Buffer,
+    workspace: &std::path::Path,
     snapshot: Option<&HighlightSnapshot>,
     line_map: Option<&[Option<usize>]>,
     focus: PaneId,
@@ -89,6 +89,10 @@ pub fn render_editor_with_search(
     tab_width: usize,
     search: Option<SearchHighlight<'_>>,
 ) -> Option<CursorPlacement> {
+    let relative = buffer
+        .path()
+        .and_then(|p| p.strip_prefix(workspace).ok())
+        .map(|p| p.to_string_lossy());
     render_buffer(
         frame,
         area,
@@ -97,7 +101,7 @@ pub fn render_editor_with_search(
         line_map,
         PaneId::Editor,
         focus,
-        EDITOR_TITLE,
+        relative.as_deref().unwrap_or(buffer.name()),
         theme,
         tab_width,
         true,
@@ -124,7 +128,19 @@ pub fn render_buffer(
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
     let content_bg = buffer_input_bg(theme, focused);
-    let block = build_editor_block(theme, focused, title);
+    let block = if pane_id == PaneId::Editor {
+        source_block(theme, focused, title, buffer.is_dirty(), area.width)
+    } else {
+        let color = if focused {
+            theme.title_focused
+        } else {
+            theme.title
+        };
+        editor_border(theme, focused).title(Span::styled(
+            title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    };
 
     let actual_lines = buffer.lines_len();
     let total_lines = actual_lines.max(1);
@@ -197,23 +213,69 @@ pub fn render_buffer(
     }
 }
 
-fn build_editor_block<'a>(theme: &Theme, focused: bool, title: &'a str) -> Block<'a> {
-    let (border_color, border_type, title_color) = if focused {
-        (theme.border_focused, BorderType::Thick, theme.title_focused)
+fn editor_border<'a>(theme: &Theme, focused: bool) -> Block<'a> {
+    let (color, border) = if focused {
+        (theme.border_focused, BorderType::Thick)
     } else {
-        (theme.border, BorderType::Plain, theme.title)
+        (theme.border, BorderType::Plain)
     };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .border_type(border_type)
+        .border_type(border)
+        .border_style(Style::default().fg(color))
         .style(Style::default().bg(theme.background))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ))
+}
+
+fn source_block(
+    theme: &Theme,
+    focused: bool,
+    name: &str,
+    dirty: bool,
+    pane_width: u16,
+) -> Block<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let width = usize::from(pane_width.saturating_sub(2));
+    let save = if width >= 32 { " Ctrl+S SAVE " } else { "" };
+    let prefix = if width >= 24 { " EDITOR " } else { "" };
+    let mark = if dirty { " ●" } else { "" };
+    let room = width.saturating_sub(save.len() + prefix.len() + mark.width() + 1);
+    let mut name: String = name
+        .chars()
+        .map(|c| if c.is_control() { '�' } else { c })
+        .collect();
+    if name.width() > room {
+        let mut remaining = room.saturating_sub(1);
+        let mut start = name.len();
+        for (i, ch) in name.char_indices().rev() {
+            let cells = ch.width().unwrap_or(0);
+            if cells > remaining {
+                break;
+            }
+            start = i;
+            remaining -= cells;
+        }
+        name = if room == 0 {
+            String::new()
+        } else {
+            format!("…{}", &name[start..])
+        };
+    }
+    let label = if focused {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+    let title = Line::from(vec![
+        Span::styled(prefix, theme.status_idle_style()),
+        Span::styled(
+            name,
+            Style::default().fg(label).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(mark, Style::default().fg(theme.diff_modified)),
+    ]);
+    editor_border(theme, focused).title(title).title(
+        Title::from(Span::styled(save, theme.status_idle_style())).alignment(Alignment::Right),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -369,8 +431,10 @@ fn render_lines<'a>(
         );
         let diff_sep_style = diff_sep_style(sep_style, data.diff_status, theme);
         let diff_indicator = match data.diff_status {
+            LineDiffStatus::Added => "+",
+            LineDiffStatus::Modified => "~",
             LineDiffStatus::DeletedAbove => "▔",
-            _ => "│",
+            LineDiffStatus::Unchanged => "│",
         };
 
         let mut spans = vec![

@@ -56,3 +56,29 @@ fn plain_snapshot_version_matches() {
     );
     assert_eq!(snapshot.version, 1);
 }
+
+#[test]
+fn source_title_keeps_filename_dirty_mark_and_save_hint_on_one_border() {
+    use ratatui::{buffer::Buffer as Screen, widgets::Widget};
+    let render = |width, dirty| {
+        let area = Rect::new(0, 0, width, 4);
+        let mut screen = Screen::empty(area);
+        source_block(
+            &Theme::default(),
+            true,
+            "src/very/long/module/解析.rs",
+            dirty,
+            width,
+        )
+        .render(area, &mut screen);
+        (0..width)
+            .map(|x| screen.get(x, 0).symbol())
+            .collect::<String>()
+    };
+    let wide = render(70, true);
+    assert!(wide.contains("src/very/long/module/解") && wide.contains(".rs ●"));
+    assert!(wide.ends_with("Ctrl+S SAVE ┓"));
+    let narrow = render(19, true);
+    assert!(narrow.contains('…') && narrow.contains(".rs ●"));
+    assert!(!render(70, false).contains('●'));
+}

@@ -128,6 +128,7 @@ pub(super) fn draw(
                 f,
                 layout.editor,
                 state.editor_buffer(),
+                &state.workspace_root,
                 editor_render.snapshot,
                 editor_render.line_map,
                 state.focus,
