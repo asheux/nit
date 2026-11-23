@@ -140,11 +140,6 @@ fn command_line_bare_number_clamps_to_last_line_when_too_large() {
 
 // --- Count + operator (T2 follow-up: `3dw`, `2db`, `2dW`) ---
 //
-// These pin the count-prefix → DeleteWord* end-to-end path that the
-// `tests/vim_semantics.rs::counts_apply_to_motions_and_operators`
-// placeholder was waiting on. Each test seeds a count, fires the
-// action, and asserts both the buffer content and the cursor landing.
-
 fn state_with_text(text: &str) -> AppState {
     let mut state = AppState::new(
         crate::test_helpers::temp_dir("count-operator"),

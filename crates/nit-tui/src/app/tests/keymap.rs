@@ -4,6 +4,46 @@
 use super::*;
 
 #[test]
+fn normal_editor_percent_matches_brackets_in_both_directions() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    state.mode = Mode::Normal;
+    *state.editor_buffer_mut() = nit_core::Buffer::from_str("editor", "fn foo(x) { y }", None);
+    state.editor_buffer_mut().cursor.col = 6;
+    let mut input = InputState::new();
+
+    for (modifiers, expected_col) in [(KeyModifiers::NONE, 8), (KeyModifiers::SHIFT, 6)] {
+        let key = KeyEvent::new(KeyCode::Char('%'), modifiers);
+        let action = map_key_to_action(key, &state, &mut input).expect("bracket motion");
+        nit_core::apply_action(&mut state, action);
+        assert_eq!(state.editor_buffer().cursor.col, expected_col);
+    }
+}
+
+#[test]
+fn normal_editor_counts_reach_motion_and_word_delete() {
+    let mut state = state_for_test();
+    state.focus = PaneId::Editor;
+    state.mode = Mode::Normal;
+    *state.editor_buffer_mut() =
+        nit_core::Buffer::from_str("editor", "1\n2\n3\n4\n5\nalpha beta gamma delta", None);
+    let mut input = InputState::new();
+
+    for ch in "5j3dw".chars() {
+        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        if let Some(action) = map_key_to_action(key, &state, &mut input) {
+            nit_core::apply_action(&mut state, action);
+        }
+    }
+    assert_eq!(
+        state.editor_buffer().content_as_string(),
+        "1\n2\n3\n4\n5\ndelta"
+    );
+    assert_eq!(state.editor_buffer().cursor.line, 5);
+    assert_eq!(state.pending_count, None);
+}
+
+#[test]
 fn agent_ops_space_does_not_toggle_pause() {
     let mut state = state_for_test();
     state.focus = PaneId::JobOutput;

@@ -416,17 +416,6 @@ fn redo_reapplies_undone_edit() {
 // ticket lands, drop the `#[ignore]` attribute.
 
 #[test]
-#[ignore = "vim-precision-T13: % match-pair motion currently mis-wired to move_home"]
-fn percent_jumps_to_matching_bracket() {
-    // Expected: cursor at the `(` (col 6) should land on the matching
-    // `)`. Today there is no buffer-level matchpair helper; the
-    // action_apply layer routes `%` to `move_home`. Filed as T13.
-    let mut buf = Buffer::from_str("t", "fn foo(x) { y }", None);
-    buf.cursor.col = 6;
-    let _ = &buf;
-}
-
-#[test]
 #[ignore = "vim-precision-T13: named registers (\"ay / \"ap) not yet implemented"]
 fn named_registers_round_trip_yanked_text() {
     // The buffer doesn't own the register table — that lives on
@@ -441,15 +430,6 @@ fn marks_and_jump_back_to_mark() {
     // Vim marks (`m` to set, `'` to jump to mark line, `` ` `` to jump
     // to mark line+col) are unimplemented. Filed as part of the
     // jumplist (T5) follow-up.
-}
-
-#[test]
-#[ignore = "vim-precision-T13: counts on operators (5dd, 3dw) live at action_apply"]
-fn counts_apply_to_motions_and_operators() {
-    // `3dw` should delete three words. The count prefix is captured at
-    // the chord layer; the buffer-level methods iterate one unit at a
-    // time. Once Integrator 3's Action::DeleteWord* lands, this test
-    // moves there.
 }
 
 #[test]
