@@ -1637,7 +1637,7 @@ pub(super) fn settle_initial_terminal_size(
 }
 
 fn spawn_app_runtimes(
-    state: &AppState,
+    state: &mut AppState,
 ) -> (
     Option<SeedRuntime>,
     Option<PetriDishRuntime>,

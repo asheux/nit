@@ -8,6 +8,7 @@ use nit_core::seed::SeedViewMode;
 use nit_core::{
     encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
 };
+use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::rng::SplitMix64;
 
 use crate::gol_render::GolRenderState;
@@ -48,7 +49,7 @@ pub struct SeedRuntime {
 }
 
 impl SeedRuntime {
-    pub fn new(state: &AppState) -> Self {
+    pub fn new(state: &mut AppState) -> Self {
         let snapshot_dir = state.workspace_root.join("gol-snapshots");
         let snapshot_config = SeedSnapshotManagerConfig::new(
             snapshot_dir,
@@ -56,6 +57,7 @@ impl SeedRuntime {
             state.settings.gol.snapshots.min_interval_ms,
         );
         let input = SeedInputOwned::from_state(state);
+        state.visualizer.seed = stable_hash_bytes(input.text.as_bytes());
         Self {
             size: (0, 0),
             render_state: GolRenderState::new(),

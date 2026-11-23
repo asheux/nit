@@ -3,7 +3,6 @@ use std::path::Path;
 use nit_core::{AppKind, AppState, LabId, Mode, PaneId};
 use nit_tui::claude_runner::ClaudeRunnerConfig;
 use nit_tui::codex_runner::{CodexRunnerConfig, CodexRuntimeMode};
-use nit_utils::hashing::stable_hash_bytes;
 
 use crate::agents;
 use crate::cli::{self, AgentsArg, Cli, Command};
@@ -54,7 +53,6 @@ pub(crate) fn configure_app_state(
 ) {
     state.agents = agents::init_agents(agent_selection.unwrap_or(AgentsArg::All));
     state.app_kind = requested_kind;
-    state.visualizer.seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.mode = Mode::Normal;
 
     migrate_legacy_notes(state);
