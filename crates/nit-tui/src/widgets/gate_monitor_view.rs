@@ -46,39 +46,68 @@ const GAUGE_MID_THRESHOLD: f32 = 0.3;
 const TIER_LEVELS: usize = 5;
 const LOADING_PERIOD_MS: f64 = 1600.0;
 
-// Tabs occupy the bottom border so even narrow panes have room for all four.
-pub fn footer_hit(col: u16, width: u16, state: &AppState) -> Option<Action> {
-    if col == 0 || col >= width.saturating_sub(1) {
-        return None;
+// Both the bottom-border title and mouse routing consume these exact cells.
+fn footer_controls(state: &AppState, width: u16) -> Vec<(Action, std::borrow::Cow<'static, str>)> {
+    let space = width.saturating_sub(2);
+    let padded: u16 = FOOTER_TABS
+        .iter()
+        .map(|(_, label)| display_width(label))
+        .sum();
+    let compact: u16 = FOOTER_TABS
+        .iter()
+        .map(|(_, label)| display_width(label.trim_end()))
+        .sum();
+    let mut controls = Vec::new();
+    let mut remaining = space;
+    for &(tab, padded_label) in FOOTER_TABS {
+        let label = if space >= padded + 4 {
+            padded_label
+        } else if space >= compact + 4 {
+            padded_label.trim_start()
+        } else if tab == state.gate_monitor_sub_view {
+            padded_label.trim()
+        } else {
+            continue;
+        };
+        let cells = display_width(label);
+        if cells <= remaining {
+            controls.push((Action::GateMonitorSetSubView(tab), label.into()));
+            remaining -= cells;
+        }
     }
+    // Keep every tab reachable when the footer only fits one tab name.
+    if space < compact + 4 && remaining > 4 {
+        let label = if remaining >= 12 { " Next › " } else { "›" };
+        remaining -= display_width(label);
+        controls.push((Action::GateMonitorToggleSubView, label.into()));
+    }
+    let full = eval_button_label(state);
+    let compact = if state.agents.workspace_scan_progress.is_some() {
+        " ⟳ EVAL "
+    } else if state.agents.workspace_scan_clean {
+        " ✓ EVAL "
+    } else {
+        " ▶ EVAL "
+    };
+    for label in [full.as_str(), compact, " EVAL", "EVAL"] {
+        if display_width(label) <= remaining {
+            controls.push((Action::WorkspaceScanStart, label.to_owned().into()));
+            break;
+        }
+    }
+    controls
+}
+
+pub fn footer_hit(col: u16, width: u16, state: &AppState) -> Option<Action> {
     let mut start = 1;
-    for &(tab, label) in FOOTER_TABS {
-        let end = start + display_width(label);
-        if col < end {
-            return Some(Action::GateMonitorSetSubView(tab));
+    for (action, label) in footer_controls(state, width) {
+        let end = start + display_width(&label);
+        if (start..end).contains(&col) {
+            return Some(action);
         }
         start = end;
     }
-    (col < start + display_width(&footer_eval_label(state, width)))
-        .then_some(Action::WorkspaceScanStart)
-}
-
-fn footer_eval_label(state: &AppState, width: u16) -> String {
-    let label = eval_button_label(state);
-    let tabs_width: u16 = FOOTER_TABS
-        .iter()
-        .map(|(_, text)| display_width(text))
-        .sum();
-    if tabs_width + display_width(&label) <= width.saturating_sub(2) {
-        return label;
-    }
-    if state.agents.workspace_scan_progress.is_some() {
-        " ⟳ EVAL ".into()
-    } else if state.agents.workspace_scan_clean {
-        " ✓ EVAL ".into()
-    } else {
-        " ▶ EVAL ".into()
-    }
+    None
 }
 
 /// Renders the EVAL button label. Three states:
@@ -176,7 +205,6 @@ pub fn render(
         .add_modifier(Modifier::BOLD);
     let btn_inactive = theme.status_idle_style();
     let sub_view = state.gate_monitor_sub_view;
-    let eval_label = footer_eval_label(state, area.width);
     let scanning = state.agents.workspace_scan_progress.is_some();
     let clean = !scanning && state.agents.workspace_scan_clean;
     // EVAL button is intentionally distinct from the STATS / FILESCORES /
@@ -201,20 +229,17 @@ pub fn render(
             .add_modifier(Modifier::BOLD)
     };
 
-    let mut buttons: Vec<_> = FOOTER_TABS
-        .iter()
-        .map(|&(tab, text)| {
-            Span::styled(
-                text,
-                if tab == sub_view {
-                    btn_active
-                } else {
-                    btn_inactive
-                },
-            )
+    let buttons: Vec<_> = footer_controls(state, area.width)
+        .into_iter()
+        .map(|(action, label)| {
+            let style = match action {
+                Action::GateMonitorSetSubView(tab) if tab == sub_view => btn_active,
+                Action::GateMonitorSetSubView(_) | Action::GateMonitorToggleSubView => btn_inactive,
+                _ => eval_style,
+            };
+            Span::styled(label, style)
         })
         .collect();
-    buttons.push(Span::styled(eval_label, eval_style));
 
     let block = Block::default()
         .borders(Borders::ALL)

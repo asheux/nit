@@ -165,3 +165,54 @@ fn gate_monitor_tab_clicks_set_target_sub_view_directly() {
     assert_eq!(state.gate_monitor_sub_view, GateMonitorSubView::FileScores);
     cleanup(&root);
 }
+
+#[test]
+fn genome_footer_only_draws_complete_clickable_controls_at_compact_widths() {
+    use crate::{theme::Theme, widgets::gate_monitor_view};
+    use nit_core::{Action, GateMonitorSubView};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let root = temp_workspace();
+    let mut state = make_state(root.clone());
+    state.gate_monitor_sub_view = GateMonitorSubView::Skills;
+    let scan = WorkspaceScanRuntime::new();
+    for width in [12, 24, 30, 31, 32, 33, 34, 35, 40, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|f| gate_monitor_view::render(f, f.size(), &mut state, &scan, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text_for = |action: Action| -> String {
+            (0..width)
+                .filter(|&x| {
+                    gate_monitor_view::footer_hit(x, width, &state).as_ref() == Some(&action)
+                })
+                .map(|x| buf.get(x, 11).symbol())
+                .collect()
+        };
+        for (tab, title) in [
+            (GateMonitorSubView::Stats, "STATS"),
+            (GateMonitorSubView::FileScores, "FILES"),
+            (GateMonitorSubView::Live, "LIVE"),
+            (GateMonitorSubView::Skills, "SKILLS"),
+        ] {
+            let actual = text_for(Action::GateMonitorSetSubView(tab));
+            if !actual.is_empty() || tab == GateMonitorSubView::Skills || width >= 30 {
+                assert_eq!(actual.trim(), title, "width {width}");
+            }
+        }
+        if width == 24 {
+            assert_eq!(text_for(Action::GateMonitorToggleSubView).trim(), "Next ›");
+        }
+        let eval = text_for(Action::WorkspaceScanStart);
+        assert!(
+            matches!(eval.trim(), "EVAL" | "▶ EVAL" | "▶ EVALUATE GENOME"),
+            "width {width}: {eval:?}"
+        );
+        assert_eq!(
+            gate_monitor_view::footer_hit(width - 1, width, &state),
+            None
+        );
+    }
+    cleanup(&root);
+}
