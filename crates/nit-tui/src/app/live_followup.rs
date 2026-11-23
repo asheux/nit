@@ -26,9 +26,9 @@ struct Followup {
     prompt: usize,
     parent: Option<usize>,
     reply: Option<Receiver<SteerOutcome>>,
-    parent_result: Option<bool>,
+    parent_result: Option<(bool, String)>,
     notice: Option<usize>,
-    cancelled: bool,
+    fallback_blocked: bool,
     saved: bool,
 }
 
@@ -136,7 +136,7 @@ pub(super) fn submit(
         reply: None,
         parent_result: None,
         notice: None,
-        cancelled: false,
+        fallback_blocked: false,
         saved: true,
     };
     if let Some(turn) = turn {
@@ -194,9 +194,18 @@ impl Followup {
                 && message.prompt_msg_idx == Some(self.prompt)
             {
                 message.text = format!("{detail} · {}", self.note.agent_id);
+                state.agents.console_rows_cache.key = None;
+                self.mark_provenance_dirty(state);
             }
         }
         state.status = Some(format!("{detail} · {}", self.note.agent_id));
+    }
+    fn mark_provenance_dirty(&self, state: &mut AppState) {
+        if let Some(mid) = self.mission() {
+            super::mark_mission_provenance_dirty(state, &mid);
+        } else {
+            chat_input::mark_ad_hoc_provenance_dirty(state, &self.note.agent_id);
+        }
     }
     fn persist(&mut self, state: &mut AppState) {
         if !self.saved {
@@ -226,6 +235,15 @@ impl Followup {
             );
         }
     }
+    fn finish_accepted(&mut self, state: &mut AppState) {
+        if let Some((success, result)) = self.parent_result.take() {
+            self.finish(state, success);
+            if !result.is_empty() {
+                self.note.detail = Some(format!("Original turn result: {result}"));
+            }
+        }
+    }
+
     fn apply(&mut self, state: &mut AppState, vitals: &mut VitalsState, outcome: SteerOutcome) {
         if !matches!(outcome, SteerOutcome::Received) {
             self.reply = None;
@@ -233,9 +251,7 @@ impl Followup {
         match outcome {
             SteerOutcome::Accepted => {
                 self.transition(state, Status::Accepted, "Accepted on the current turn");
-                if let Some(result) = self.parent_result {
-                    self.finish(state, result);
-                }
+                self.finish_accepted(state);
             }
             SteerOutcome::Received => {
                 self.transition(state, Status::Received, "Received by the Claude session")
@@ -248,14 +264,17 @@ impl Followup {
                     mission_id: self.mission(),
                     text: message.clone(),
                     prompt_msg_idx: Some(self.prompt),
-                    turn: None,
+                    turn: Some(nit_core::state::AgentTurnReceipt {
+                        outcome: if failed {
+                            nit_core::state::TurnOutcome::Failed
+                        } else {
+                            nit_core::state::TurnOutcome::Completed
+                        },
+                        elapsed_ms: None,
+                    }),
                     kind: None,
                 });
-                if let Some(mid) = self.mission() {
-                    super::mark_mission_provenance_dirty(state, &mid);
-                } else {
-                    chat_input::mark_ad_hoc_provenance_dirty(state, &self.note.agent_id);
-                }
+                self.mark_provenance_dirty(state);
                 self.finish(state, !failed);
                 // Keep the correlated reply available through /followups after restart.
                 self.note.detail = Some(message);
@@ -269,8 +288,8 @@ impl Followup {
                 // A definitive rejection permits exactly one queued delivery.
                 // A later turn, lane reset, or cwd change requires the operator
                 // to rebind the saved text explicitly.
-                let can_queue = !self.cancelled
-                    && self.parent_result != Some(false)
+                let can_queue = !self.fallback_blocked
+                    && !matches!(self.parent_result, Some((false, _)))
                     && state.agents.agents_get(&self.note.agent_id).is_some()
                     && self.root == dispatch::resolve_dispatch_cwd(state, &self.note.agent_id)
                     && state
@@ -278,11 +297,32 @@ impl Followup {
                         .messages
                         .get(self.prompt)
                         .is_some_and(|m| m.agent_id.is_none() && m.text == self.note.text)
-                    && !queued(state, &self.note.agent_id, None)
                     && (!state.agents.active_turns.contains_key(&self.note.agent_id)
                         || active_prompt(state, &self.note.agent_id) == self.parent);
                 if can_queue {
+                    // Live delivery was attempted only with an empty lane queue.
+                    // Notes queued since then belong after this definitively unsent one.
                     self.queue(state, vitals);
+                    let agent = &self.note.agent_id;
+                    if state
+                        .agents
+                        .agents_get(agent)
+                        .is_some_and(|a| a.is_claude())
+                    {
+                        prioritize_fallback(
+                            &mut state.agents.queued_claude_turns,
+                            |q| (&q.agent_id, q.prompt_msg_idx),
+                            agent,
+                            self.prompt,
+                        );
+                    } else {
+                        prioritize_fallback(
+                            &mut state.agents.queued_codex_turns,
+                            |q| (&q.agent_id, q.prompt_msg_idx),
+                            agent,
+                            self.prompt,
+                        );
+                    }
                     self.transition(
                         state,
                         Status::Pending,
@@ -296,11 +336,31 @@ impl Followup {
     }
 }
 
+fn prioritize_fallback<T>(
+    queue: &mut std::collections::VecDeque<T>,
+    key: impl Fn(&T) -> (&String, Option<usize>),
+    agent: &str,
+    prompt: usize,
+) {
+    if !queue.back().is_some_and(|q| {
+        let (lane, index) = key(q);
+        lane == agent && index == Some(prompt)
+    }) {
+        return;
+    }
+    let entry = queue.pop_back().expect("checked queue back");
+    let position = queue
+        .iter()
+        .position(|q| key(q).0 == agent)
+        .unwrap_or(queue.len());
+    queue.insert(position, entry);
+}
+
 impl PendingSteers {
     pub(super) fn cancel(&mut self, target: &str) {
         for note in &mut self.0 {
             if note.note.agent_id == target {
-                note.cancelled = true;
+                note.fallback_blocked = true;
             }
         }
     }
@@ -315,34 +375,46 @@ impl PendingSteers {
             AgentBusEvent::TurnCompleted {
                 agent_id,
                 mission_id,
+                message,
                 ..
-            } => (agent_id, mission_id, Some(true)),
+            } => (agent_id, mission_id, Some((true, message))),
             AgentBusEvent::TurnFailed {
                 agent_id,
                 mission_id,
+                message,
                 ..
-            } => (agent_id, mission_id, Some(false)),
+            } => (agent_id, mission_id, Some((false, message))),
             _ => return,
         };
-        let Some(idx) = active_prompt(state, agent) else {
-            return;
-        };
+        let active = active_prompt(state, agent);
+        if result.is_none() {
+            for entry in &mut self.0 {
+                if entry.note.agent_id == *agent
+                    && (active.is_none() || entry.parent != active || entry.mission() != *mission)
+                {
+                    entry.fallback_blocked = true;
+                }
+            }
+        }
+        let Some(idx) = active else { return };
         for entry in self.0.iter_mut().filter(|f| {
             &f.note.agent_id == agent && f.note.mission_id == mission.as_deref().unwrap_or_default()
         }) {
             if entry.prompt == idx
                 && matches!(entry.note.status, Status::Pending | Status::Submitted)
             {
-                if let Some(ok) = result {
+                if let Some((ok, _)) = result {
                     entry.finish(state, ok)
                 } else {
                     entry.transition(state, Status::Submitted, "Follow-up turn started");
                 }
-            } else if entry.parent == Some(idx) {
-                if let Some(ok) = result {
-                    entry.parent_result = Some(ok);
+            } else if entry.parent == Some(idx)
+                && matches!(entry.note.status, Status::Steering | Status::Accepted)
+            {
+                if let Some((ok, message)) = result {
+                    entry.parent_result = Some((ok, message.clone()));
                     if entry.note.status == Status::Accepted {
-                        entry.finish(state, ok);
+                        entry.finish_accepted(state);
                     }
                 }
             }
@@ -400,3 +472,6 @@ impl PendingSteers {
         changed
     }
 }
+
+#[cfg(test)]
+mod tests;
