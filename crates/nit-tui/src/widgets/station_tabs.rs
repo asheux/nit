@@ -59,7 +59,7 @@ pub(crate) fn render(
             Style::default()
                 .fg(theme.title_focused)
                 .bg(theme.selection_bg)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.muted)
         };
@@ -97,6 +97,7 @@ mod tests {
             let spans = tabs(area).collect::<Vec<_>>();
             assert_eq!(spans.len(), 2);
             for (tab, r, label) in spans {
+                assert!(!buffer.get(r.x, r.y).modifier.contains(Modifier::UNDERLINED));
                 assert_eq!(tab_at(area, (r.x, r.y).into()), Some(tab));
                 assert_eq!(tab_at(area, (r.right() - 1, r.y).into()), Some(tab));
                 assert_eq!(
