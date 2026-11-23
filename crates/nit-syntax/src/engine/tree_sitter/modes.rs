@@ -15,8 +15,6 @@ use crate::highlight::{
 };
 use crate::language::{LanguageId, LanguageRegistry};
 
-use super::job::fallback_snapshot;
-
 // Amount by which viewport-scoped highlights extend beyond the visible range,
 // so small scroll jitter doesn't immediately require a re-request.
 pub(super) const VIEWPORT_MARGIN_LINES: usize = 100;
@@ -27,11 +25,34 @@ pub(super) fn full_highlight(
     highlighter: &mut Highlighter,
     job: &HighlightRequest,
 ) -> anyhow::Result<HighlightSnapshot> {
+    let spans = highlight_source(configs, config, highlighter, job.text.as_bytes())?;
+    Ok(HighlightSnapshot::from_spans(
+        job.buffer_id,
+        job.version,
+        job.language,
+        EngineKind::TreeSitter,
+        SyntaxStatus::Ok(EngineKind::TreeSitter),
+        &job.text,
+        spans,
+        job.max_spans_per_line,
+    ))
+}
+
+pub(super) fn highlight_source(
+    configs: &HashMap<LanguageId, HighlightConfiguration>,
+    config: &HighlightConfiguration,
+    highlighter: &mut Highlighter,
+    source: &[u8],
+) -> anyhow::Result<Vec<HighlightSpan>> {
     let mut spans = Vec::new();
     let mut stack: Vec<HighlightGroup> = Vec::new();
 
-    let iter = highlighter.highlight(config, job.text.as_bytes(), None, |name| {
-        LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id))
+    let iter = highlighter.highlight(config, source, None, |name| {
+        if name == "markdown_inline" {
+            crate::captures::markdown_inline_config()
+        } else {
+            LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id))
+        }
     })?;
 
     for event in iter {
@@ -55,20 +76,11 @@ pub(super) fn full_highlight(
         }
     }
 
-    Ok(HighlightSnapshot::from_spans(
-        job.buffer_id,
-        job.version,
-        job.language,
-        EngineKind::TreeSitter,
-        SyntaxStatus::Ok(EngineKind::TreeSitter),
-        &job.text,
-        spans,
-        job.max_spans_per_line,
-    ))
+    Ok(spans)
 }
 
 pub(super) fn viewport_highlight(
-    query_configs: &HashMap<LanguageId, QueryConfig>,
+    window: &mut super::window::WindowHighlighter,
     tree: &Tree,
     job: &HighlightRequest,
     cursor: &mut QueryCursor,
@@ -86,7 +98,9 @@ pub(super) fn viewport_highlight(
         .first_line
         .saturating_sub(VIEWPORT_MARGIN_LINES)
         .min(last_line_idx);
-    let end_line = (viewport.last_line + VIEWPORT_MARGIN_LINES)
+    let end_line = viewport
+        .last_line
+        .saturating_add(VIEWPORT_MARGIN_LINES)
         .min(last_line_idx)
         .max(start_line);
 
@@ -95,25 +109,14 @@ pub(super) fn viewport_highlight(
         "start_line {start_line} out of offsets len {}",
         offsets.len()
     );
-    let start_byte = offsets.get(start_line).copied().unwrap_or(0);
-    let end_byte = offsets.get(end_line + 1).copied().unwrap_or(job.text.len());
-
-    let Some(cfg) = query_configs.get(&job.language) else {
-        return Ok(fallback_snapshot(
-            job,
-            SyntaxStatus::Error("no query config".into()),
-        ));
-    };
-
-    let mut spans = Vec::new();
-    collect_spans(
-        cfg,
+    let (mut spans, start_line, end_line) = window.spans(
+        job.language,
         tree,
-        job.text.as_bytes(),
-        &[(start_byte, end_byte)],
-        &mut spans,
+        &job.text,
+        &offsets,
+        (start_line, end_line),
         cursor,
-    );
+    )?;
     sort_spans(&mut spans);
 
     let mut per_line = vec![Vec::new(); total];
@@ -143,7 +146,8 @@ pub(super) fn viewport_highlight(
         line_start_bytes: offsets,
         line_hashes,
         per_line,
-        highlighted_range: Some((start_line, end_line)),
+        highlighted_range: (start_line != 0 || end_line + 1 < total)
+            .then_some((start_line, end_line)),
     })
 }
 

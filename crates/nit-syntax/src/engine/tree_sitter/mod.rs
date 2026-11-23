@@ -15,6 +15,7 @@ mod incremental;
 mod job;
 mod modes;
 mod progressive;
+mod window;
 mod worker;
 
 use worker::{worker_loop, HighlightResult};

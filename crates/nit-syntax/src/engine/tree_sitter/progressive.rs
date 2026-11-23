@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use crate::captures::QueryConfig;
 use crate::engine::HighlightRequest;
 use crate::highlight::{
     distribute_spans_to_lines, recompute_line_hashes, sort_spans, HighlightSnapshot,
@@ -14,7 +13,7 @@ use crate::highlight::{
 use crate::language::LanguageId;
 
 use super::job::BufferState;
-use super::modes::collect_spans;
+use super::window::WindowHighlighter;
 use super::worker::{HighlightResult, WorkerState};
 
 // Chunk size for progressive fill beyond the initial viewport window.
@@ -76,7 +75,12 @@ pub(super) fn step_progressive_fills(
         let Some(fill) = fills.get_mut(&id) else {
             continue;
         };
-        if process_fill_chunk(fill, &mut state.buffers, &state.query_configs, res_tx) {
+        let mut window = WindowHighlighter {
+            configs: &state.hl_configs,
+            queries: &state.query_configs,
+            highlighter: &mut state.highlighter,
+        };
+        if process_fill_chunk(fill, &mut state.buffers, &mut window, res_tx) {
             fills.remove(&id);
         }
     }
@@ -85,16 +89,13 @@ pub(super) fn step_progressive_fills(
 fn process_fill_chunk(
     fill: &mut ProgressiveFill,
     buffers: &mut HashMap<usize, BufferState>,
-    query_configs: &HashMap<LanguageId, QueryConfig>,
+    window: &mut WindowHighlighter,
     res_tx: &Sender<HighlightResult>,
 ) -> bool {
     let Some((start_line, end_line)) = next_fill_chunk(fill) else {
         return true;
     };
 
-    let Some(cfg) = query_configs.get(&fill.language) else {
-        return true;
-    };
     // Pattern-destructure the buffer state so `tree`, `snapshot`, and `cursor`
     // land as independent field borrows — avoids an aliasing error when we
     // pass an immutable `tree` alongside a mutable `snapshot`/`cursor` below.
@@ -122,22 +123,26 @@ fn process_fill_chunk(
         "start_line {start_line} out of fill line_start_bytes len {}",
         fill.line_start_bytes.len()
     );
-    let start_byte = fill.line_start_bytes[start_line];
-    let end_byte = fill
-        .line_start_bytes
-        .get(end_line + 1)
-        .copied()
-        .unwrap_or(fill.text.len());
-
-    let mut spans = Vec::new();
-    collect_spans(
-        cfg,
+    let Ok((mut spans, start_line, end_line)) = window.spans(
+        fill.language,
         tree,
-        fill.text.as_bytes(),
-        &[(start_byte, end_byte)],
-        &mut spans,
+        &fill.text,
+        &fill.line_start_bytes,
+        (start_line, end_line),
         cursor,
-    );
+    ) else {
+        return true;
+    };
+    // An enclosing block can extend into previously published rows.
+    for line in &mut snapshot.per_line[start_line..=end_line] {
+        line.clear();
+    }
+    if fill.next_below.is_some_and(|next| next <= end_line) {
+        fill.next_below = (end_line + 1 < fill.total_lines).then_some(end_line + 1);
+    }
+    if fill.next_above.is_some_and(|next| next >= start_line) {
+        fill.next_above = (start_line > 0).then_some(start_line);
+    }
 
     sort_spans(&mut spans);
     distribute_spans_to_lines(

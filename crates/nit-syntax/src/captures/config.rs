@@ -52,6 +52,22 @@ pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfigur
     configs
 }
 
+/// The inline grammar is an internal child of Markdown, never a standalone file language.
+pub(crate) fn markdown_inline_config() -> Option<&'static HighlightConfiguration> {
+    static INLINE: std::sync::OnceLock<Option<HighlightConfiguration>> = std::sync::OnceLock::new();
+    INLINE
+        .get_or_init(|| {
+            let mut config = try_build_config(
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+                include_str!("../../queries/markdown/inline.scm"),
+                "",
+            )?;
+            config.configure(&capture_names());
+            Some(config)
+        })
+        .as_ref()
+}
+
 // Injection queries can fail to compile for some grammars; retry without them
 // so the language still loads with bare highlights.
 fn try_build_config(

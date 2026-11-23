@@ -181,6 +181,14 @@ fn highlight_job(
         ));
     };
 
+    let has_injections = !LanguageRegistry::injections_query(lang).is_empty();
+    if has_injections && job.viewport.is_none() {
+        // The full highlighter owns its parser and evaluates nested languages.
+        // An edit may change the meaning of a later fence or script terminator.
+        buffers.remove(&job.buffer_id);
+        return full_highlight(hl_configs, config, highlighter, job);
+    }
+
     let state = buffers
         .entry(job.buffer_id)
         .or_insert_with(|| BufferState::new(lang));
@@ -194,7 +202,7 @@ fn highlight_job(
         ));
     };
 
-    let snapshot = if should_incremental_update(state, job) {
+    let snapshot = if !has_injections && should_incremental_update(state, job) {
         if let Some(prev) = state.snapshot.as_ref() {
             incremental_highlight(
                 prev,
@@ -208,7 +216,12 @@ fn highlight_job(
             full_highlight(hl_configs, config, highlighter, job)?
         }
     } else if job.viewport.is_some() {
-        viewport_highlight(query_configs, &tree, job, &mut state.cursor)?
+        let mut window = super::window::WindowHighlighter {
+            configs: hl_configs,
+            queries: query_configs,
+            highlighter,
+        };
+        viewport_highlight(&mut window, &tree, job, &mut state.cursor)?
     } else {
         full_highlight(hl_configs, config, highlighter, job)?
     };

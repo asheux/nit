@@ -5,9 +5,7 @@
 ; reference definitions) and `INLINE_LANGUAGE` parses inline spans (emphasis,
 ; strong, inline code spans, autolinks, inline links/images). Rich inline
 ; highlighting (emphasis / strong / code_span / inline link_text) therefore
-; requires wiring the inline sub-parser as an INJECTION on the `(inline)` node —
-; until that injection is live, none of those inline node types exist in this
-; tree, so we only capture nodes the BLOCK grammar actually produces.
+; is provided by the inline injection query; this file targets the block tree.
 ;
 ; Every named node and anonymous token below was confirmed against this
 ; grammar's src/node-types.json (tree-sitter-md 0.3.2). This grammar is markup,
