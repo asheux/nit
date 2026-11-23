@@ -183,7 +183,9 @@
 ; Declarations: functions, constructors, parameters, properties
 ; ---------------------------------------------------------------------------
 (function_declaration
-  (simple_identifier) @method)
+  name: (simple_identifier) @function)
+(class_body (function_declaration name: (simple_identifier) @method))
+(enum_class_body (function_declaration name: (simple_identifier) @method))
 (protocol_function_declaration
   name: (simple_identifier) @method)
 

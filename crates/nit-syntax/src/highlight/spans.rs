@@ -2,18 +2,16 @@
 //! the line-offset table and cuts them into `LineSegment`s respecting the
 //! `max_per_line` cap and an optional per-line predicate.
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 
 use super::lines::find_line;
 use super::types::{HighlightSpan, LineSegment};
 
-/// Sort by `start_byte` ascending; break ties by `priority` descending so
-/// higher-priority spans land first on the line.
-pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
-    spans.sort_unstable_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
-        Ordering::Equal => b.priority.cmp(&a.priority),
-        ord => ord,
-    });
+/// The editor paints spans in order. Paint enclosing nodes before children,
+/// and keep the last matching query pattern for identical token ranges.
+pub(crate) fn sort_spans(spans: &mut Vec<HighlightSpan>) {
+    spans.sort_unstable_by_key(|s| (s.start_byte, Reverse(s.end_byte), Reverse(s.priority)));
+    spans.dedup_by_key(|s| (s.start_byte, s.end_byte));
 }
 
 pub(crate) fn distribute_spans_to_lines(

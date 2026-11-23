@@ -36,7 +36,7 @@ pub(crate) const CAPTURES: &[(&str, HighlightGroup)] = &[
     ("error", HighlightGroup::Error),
     ("warning", HighlightGroup::Warning),
     // Dotted aliases that fall back to a parent group.
-    ("constant.builtin", HighlightGroup::Number),
+    ("constant.builtin", HighlightGroup::Constant),
     ("function.macro", HighlightGroup::Macro),
     ("function.method", HighlightGroup::Method),
     ("variable.parameter", HighlightGroup::Parameter),
@@ -46,6 +46,14 @@ pub(crate) const CAPTURES: &[(&str, HighlightGroup)] = &[
     ("constructor", HighlightGroup::Type),
     ("label", HighlightGroup::KeywordControl),
     ("escape", HighlightGroup::String),
+    ("module", HighlightGroup::Namespace),
+    ("symbol", HighlightGroup::Constant),
+    ("regexp", HighlightGroup::String),
+    ("conditional", HighlightGroup::KeywordControl),
+    ("repeat", HighlightGroup::KeywordControl),
+    ("exception", HighlightGroup::KeywordControl),
+    ("include", HighlightGroup::Keyword),
+    ("tag.error", HighlightGroup::Error),
 ];
 
 pub(crate) fn capture_names() -> Vec<&'static str> {

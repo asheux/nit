@@ -15,6 +15,8 @@
 [
   (true)
   (false)
+] @boolean
+[
   (null)
   (undefined)
 ] @constant.builtin

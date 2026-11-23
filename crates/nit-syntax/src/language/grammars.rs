@@ -92,7 +92,7 @@ pub(crate) fn highlights_query(language_id: LanguageId) -> Option<&'static str> 
         LanguageId::Html => Some(tree_sitter_html::HIGHLIGHTS_QUERY),
         LanguageId::Css => Some(tree_sitter_css::HIGHLIGHTS_QUERY),
         LanguageId::Json => Some(include_str!("../../queries/json/highlights.scm")),
-        LanguageId::Toml => Some(tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
+        LanguageId::Toml => Some(include_str!("../../queries/toml/highlights.scm")),
         LanguageId::Yaml => Some(include_str!("../../queries/yaml/highlights.scm")),
         LanguageId::Bash => Some(tree_sitter_bash::HIGHLIGHT_QUERY),
         LanguageId::Awk => Some(tree_sitter_awk::HIGHLIGHTS_QUERY),

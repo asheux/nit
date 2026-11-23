@@ -1,6 +1,8 @@
 ; Rust highlights (editor-grade, full token taxonomy)
 (line_comment) @comment
 (block_comment) @comment
+(line_comment (doc_comment)) @comment.documentation
+(block_comment (doc_comment)) @comment.documentation
 
 (string_literal) @string
 (raw_string_literal) @string
@@ -61,20 +63,32 @@
 
 (primitive_type) @type.builtin
 (type_identifier) @type
+(field_identifier) @property
+(scoped_identifier path: (identifier) @namespace)
+((identifier) @constructor (#match? @constructor "^[A-Z]"))
 
 (lifetime) @label
 
 (function_item name: (identifier) @function)
+(function_signature_item name: (identifier) @function)
 (call_expression function: (identifier) @function)
 (call_expression function: (field_expression field: (field_identifier) @method))
+(call_expression function: (scoped_identifier name: (identifier) @function))
+(generic_function function: (identifier) @function)
+(generic_function function: (field_expression field: (field_identifier) @method))
+(generic_function function: (scoped_identifier name: (identifier) @function))
 (macro_invocation macro: (identifier) @macro)
+(macro_invocation macro: (scoped_identifier name: (identifier) @macro))
+
+; Uppercase call targets refer to constructors under Rust naming conventions.
+((call_expression function: (identifier) @constructor) (#match? @constructor "^[A-Z]"))
+((call_expression function: (scoped_identifier name: (identifier) @constructor))
+ (#match? @constructor "^[A-Z]"))
 
 (attribute_item) @attribute
 (inner_attribute_item) @attribute
 
 (parameter pattern: (identifier) @parameter)
-(field_identifier) @property
-(scoped_identifier path: (identifier) @namespace)
 
 [
   "+" "-" "*" "/" "%"

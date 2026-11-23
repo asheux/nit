@@ -103,6 +103,13 @@
 
 ; --- Types ---
 (type_identifier) @type
+[
+  (class_declaration name: (identifier) @type)
+  (enum_declaration name: (identifier) @type)
+  (interface_declaration name: (identifier) @type)
+  (record_declaration name: (identifier) @type)
+  (annotation_type_declaration name: (identifier) @type)
+]
 
 [
   (boolean_type)

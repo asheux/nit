@@ -112,6 +112,8 @@
   "END"
 ] @keyword
 
+(identifier) @variable
+
 ((identifier) @keyword
  (#match? @keyword "^(private|protected|public|require|require_relative|include|extend|attr_accessor|attr_reader|attr_writer)$"))
 
@@ -154,8 +156,6 @@
 ; ---------------------------------------------------------------------------
 ; Variables & properties
 ; ---------------------------------------------------------------------------
-(identifier) @variable
-
 [
   (self)
   (super)
@@ -166,8 +166,6 @@
 (global_variable) @variable.builtin
 
 (pair key: (hash_key_symbol) @property)
-(call receiver: (_) method: (identifier) @property
- (#match? @property "^[a-z_][a-zA-Z0-9_]*$"))
 
 ; ---------------------------------------------------------------------------
 ; Operators

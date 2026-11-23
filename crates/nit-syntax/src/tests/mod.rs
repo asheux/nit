@@ -10,6 +10,7 @@ mod debouncer;
 mod engines;
 mod language_detect;
 mod segments;
+mod source_roles;
 mod span_distribution;
 mod viewport;
 

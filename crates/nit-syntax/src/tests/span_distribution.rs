@@ -46,12 +46,7 @@ fn buffer_edit_points_for_insert() {
 }
 
 #[test]
-fn overlapping_spans_emit_higher_priority_first() {
-    // Two spans starting at the same byte: `sort_spans` orders by
-    // start_byte ascending, then priority descending, so the higher-
-    // priority span lands first on the line. UI layers then choose how
-    // to render the overlap — but they need a stable, priority-ordered
-    // input.
+fn nested_tokens_paint_inside_the_enclosing_span() {
     let spans = vec![
         HighlightSpan {
             start_byte: 0,
