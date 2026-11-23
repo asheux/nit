@@ -9,6 +9,7 @@ use std::path::Path;
 struct ThemeFile {
     background: Option<String>,
     panel_background: Option<String>,
+    editor_background: Option<String>,
     foreground: Option<String>,
     muted: Option<String>,
     border: Option<String>,
@@ -96,6 +97,7 @@ struct SeedThemeFile {
 pub struct Theme {
     pub background: Color,
     pub panel_background: Color,
+    pub editor_background: Color,
     pub foreground: Color,
     pub muted: Color,
     pub border: Color,
@@ -197,6 +199,12 @@ impl Theme {
         overlay(
             &mut theme.panel_background,
             cfg.panel_background
+                .as_deref()
+                .or(cfg.background.as_deref()),
+        );
+        overlay(
+            &mut theme.editor_background,
+            cfg.editor_background
                 .as_deref()
                 .or(cfg.background.as_deref()),
         );
@@ -312,6 +320,7 @@ impl Default for Theme {
         Theme {
             background: Color::Rgb(10, 21, 30),
             panel_background: Color::Rgb(16, 31, 42),
+            editor_background: Color::Rgb(41, 45, 53),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),
             border: Color::Rgb(96, 121, 134),

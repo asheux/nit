@@ -127,9 +127,14 @@ pub fn render_buffer(
     search: Option<SearchHighlight<'_>>,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
-    let content_bg = buffer_input_bg(theme, focused);
+    let content_bg = if pane_id == PaneId::Editor {
+        theme.editor_background
+    } else {
+        buffer_input_bg(theme, focused)
+    };
     let block = if pane_id == PaneId::Editor {
         source_block(theme, focused, title, buffer.is_dirty(), area.width)
+            .style(Style::default().bg(content_bg))
     } else {
         let color = if focused {
             theme.title_focused
