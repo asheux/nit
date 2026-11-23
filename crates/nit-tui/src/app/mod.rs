@@ -72,6 +72,7 @@ use ratatui::{
 
 mod artifacts_popup_handler;
 mod chat_input;
+pub(crate) mod live_followup;
 mod swarm_chat;
 pub(crate) use swarm_chat::drafts::restore_on_start as restore_followup_drafts;
 pub(crate) use swarm_chat::{

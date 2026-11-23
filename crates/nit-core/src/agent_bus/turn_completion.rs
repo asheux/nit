@@ -95,7 +95,7 @@ fn update_provenance_and_threads(
             .agents
             .missions
             .iter_mut()
-            .find(|mission| mission.id == mission_id)
+            .find(|mission| mission.id == mission_id && mission.status != "ABORTED")
         {
             mission.status = "LIVE".into();
             mission.updated_at = at.to_string();

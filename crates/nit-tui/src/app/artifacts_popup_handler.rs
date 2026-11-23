@@ -840,7 +840,7 @@ pub(crate) fn handle_artifacts_popup_key(
                     source: None,
                 });
             swap_in_artifacts_popup_chat(state);
-            let submitted = super::swarm_chat::submit_active_followup(state, swarm, &prompt);
+            let submitted = super::swarm_chat::submit_active_followup(state, swarm, &prompt, codex, claude);
             swap_out_artifacts_popup_chat(state);
             state.agents.artifacts_popup_followup_draft_id = state
                 .agents

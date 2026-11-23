@@ -1100,6 +1100,7 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "ctrlc",
+ "getrandom",
  "metal",
  "nit-core",
  "nit-games",
