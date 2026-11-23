@@ -197,6 +197,10 @@ fn select(state: &mut AppState, index: usize) {
 }
 
 pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme: &Theme) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.list_background())),
+        inner,
+    );
     let r = regions(inner, state);
     let accent = Style::default()
         .fg(theme.accent)
@@ -237,13 +241,13 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 "{label:<width$} {count}",
                 width = usize::from(room)
             ))
-            .style(accent.bg(theme.list_background())),
+            .style(accent),
             r.filter,
         );
     }
     if indices.is_empty() {
         frame.render_widget(
-            Paragraph::new("No matching skills").style(regular.bg(theme.list_background())),
+            Paragraph::new("No matching skills").style(regular),
             r.catalog,
         );
         state.gate_monitor_last_max_scroll = 0;
@@ -282,7 +286,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
     }
     frame.render_widget(
         Paragraph::new(rows)
-            .style(regular.bg(theme.list_background()))
+            .style(regular)
             .scroll((top(state, r.catalog, &indices) as u16, 0)),
         r.catalog,
     );

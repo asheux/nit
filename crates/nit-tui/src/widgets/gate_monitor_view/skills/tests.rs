@@ -281,7 +281,7 @@ fn compact_empty_filter_and_catalog_share_list_surface() {
             theme.list_background()
         );
     }
-    assert_ne!(buf.get(r.help.x, r.help.y).bg, theme.list_background());
+    assert_eq!(buf.get(r.help.x, r.help.y).bg, theme.list_background());
 }
 
 #[test]
@@ -332,4 +332,36 @@ fn filter_allows_mouse_use_while_a_is_text_and_hides_use_for_no_results() {
     assert!(!draw(&mut state, area).contains("Use skill"));
     assert!(click(&mut state, area, Position::new(help.x, help.y)));
     assert!(state.skill_filter.is_empty() && state.agents.chat_input.is_empty());
+}
+
+#[test]
+fn catalog_and_document_share_one_surface_in_every_layout() {
+    let theme = Theme {
+        background: Color::Rgb(42, 37, 20),
+        editor_background: Color::Rgb(87, 72, 51),
+        ..Theme::default()
+    };
+    for width in [30, 100] {
+        for (reader, filter) in [(false, ""), (true, ""), (false, "no-such-playbook")] {
+            let mut state = browser();
+            state.skill_reader_open = reader;
+            state.skill_filter = filter.into();
+            let area = Rect::new(0, 0, width, 24);
+            let mut term = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            term.draw(|f| render(f, inner(area), &mut state, &theme))
+                .unwrap();
+            let buf = term.backend().buffer();
+            let content = inner(area);
+            for y in content.y..content.bottom() {
+                for x in content.x..content.right() {
+                    let bg = buf.get(x, y).bg;
+                    assert!(
+                        bg == theme.list_background() || bg == theme.selection_bg,
+                        "{width}×24, x={x}, y={y}, reader={reader}: {bg:?}"
+                    );
+                }
+            }
+            assert_ne!(buf.get(0, 0).bg, theme.list_background());
+        }
+    }
 }
