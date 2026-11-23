@@ -24,7 +24,7 @@ In the search popup, `Tab` switches between filenames and contents. Up/Down or `
 
 ## Edit and save
 
-The center pane shows the open file's path. A `●` beside it means the buffer has unsaved edits. When a Git baseline is available, the gutter marks additions with `+`, modifications with `~`, and a deletion above a line with `▔`. Saving clears the dot. The gutter still shows changes relative to Git.
+The center pane shows the open file's path. A `●` beside it means the buffer has unsaved edits. The gutter marks additions with `+`, modifications with `~`, and a deletion above a line with `▔`. Saving clears the dot and resets the gutter. Use `:changes` to review the saved patch against Git.
 
 | Task | Keys |
 |---|---|
