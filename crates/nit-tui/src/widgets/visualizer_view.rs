@@ -4,7 +4,7 @@ use ratatui::{
     buffer::Buffer,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders},
+    widgets::{Block, Borders},
     Frame,
 };
 
@@ -66,11 +66,6 @@ pub fn render(
     } else {
         Style::default().fg(theme.border)
     };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
     let title_color = if focused {
         theme.title_focused
     } else {
@@ -111,7 +106,6 @@ pub fn render(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .border_type(border_type)
         .style(Style::default().bg(body_bg))
         .title(title);
 

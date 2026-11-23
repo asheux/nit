@@ -210,7 +210,7 @@ fn render_markdown_quote(text: &str, theme: &Theme, width: usize) -> Vec<Line<'s
     let prefix = " │ ";
     let available = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(8);
     let quote_style = Style::default()
-        .fg(theme.border_focused)
+        .fg(theme.accent)
         .add_modifier(Modifier::ITALIC);
     wrap_visual_line(text, available)
         .into_iter()

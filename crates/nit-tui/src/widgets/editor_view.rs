@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{block::Title, Block, BorderType, Borders, Paragraph},
+    widgets::{block::Title, Block, Borders, Paragraph},
     Frame,
 };
 use std::sync::{Mutex, OnceLock};
@@ -218,14 +218,13 @@ pub fn render_buffer(
 }
 
 fn editor_border<'a>(theme: &Theme, focused: bool) -> Block<'a> {
-    let (color, border) = if focused {
-        (theme.border_focused, BorderType::Thick)
+    let color = if focused {
+        theme.border_focused
     } else {
-        (theme.border, BorderType::Plain)
+        theme.border
     };
     Block::default()
         .borders(Borders::ALL)
-        .border_type(border)
         .border_style(Style::default().fg(color))
         .style(Style::default().bg(theme.background))
 }
@@ -628,14 +627,14 @@ fn gutter_styles(
     };
     let ln_style = if data.is_cursor_line {
         Style::default()
-            .fg(theme.border_focused)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
             .patch(gutter_bg)
     } else {
         theme.status_idle_style().patch(gutter_bg)
     };
     let sep_style = if data.is_cursor_line {
-        Style::default().fg(theme.border_focused).patch(gutter_bg)
+        Style::default().fg(theme.accent).patch(gutter_bg)
     } else {
         theme.status_idle_style().patch(gutter_bg)
     };

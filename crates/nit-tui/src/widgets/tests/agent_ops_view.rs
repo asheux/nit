@@ -1145,7 +1145,7 @@ fn roster_multiway_graph_button_greyed_until_a_dag_exists() {
 
     assert_eq!(graph_style(&state), theme.status_idle_style());
     state.agents.multiway_view = Some(fake_multiway_view());
-    assert_eq!(graph_style(&state).bg, Some(theme.border_focused));
+    assert_eq!(graph_style(&state).bg, Some(theme.accent));
 }
 
 #[test]

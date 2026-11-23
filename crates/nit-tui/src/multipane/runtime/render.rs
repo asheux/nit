@@ -527,7 +527,7 @@ fn render_pane_dir_search_overlay(
             let style = if abs_idx == ds.selected {
                 Style::default()
                     .fg(theme.background)
-                    .bg(theme.border_focused)
+                    .bg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.foreground)
@@ -606,11 +606,6 @@ fn paint_pane_chrome(
     let title_line = pane_tabs_line(idx, PaneTab::Nit, &cwd_text, focused, theme);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
         .border_style(Style::default().fg(border_color))
         .title(title_line)
         .style(Style::default().bg(theme.background));

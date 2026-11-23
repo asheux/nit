@@ -328,7 +328,7 @@ fn status_glyph(status: MultiwayNodeStatus) -> &'static str {
 
 fn status_color(status: MultiwayNodeStatus, theme: &Theme) -> Color {
     match status {
-        MultiwayNodeStatus::Open => theme.border_focused,
+        MultiwayNodeStatus::Open => theme.accent,
         MultiwayNodeStatus::Held => theme.warning,
         MultiwayNodeStatus::Expanded => theme.title,
         MultiwayNodeStatus::GateFailed => theme.error,
