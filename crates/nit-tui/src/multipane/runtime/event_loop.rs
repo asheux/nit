@@ -134,7 +134,10 @@ pub fn run_loop(
         // propose/judge/review never run), breathers stick on
         // "Waiting…", and queued turns never drain. Genome retries are
         // disabled in multipane v1 (genome_worker = None).
-        let mut codex_batch: Vec<nit_core::AgentBusEvent> = codex.events.try_iter().collect();
+        needs_redraw |= swarm.chat_steers.poll(state, &mut vitals, &codex, &claude);
+        needs_redraw |= swarm.poll_live_followups(state);
+        let mut codex_batch = swarm.take_ready_live_terminals();
+        codex_batch.extend(codex.events.try_iter());
         if !codex_batch.is_empty() {
             needs_redraw = true;
             crate::app::event_coalesce::coalesce_heartbeats(&mut codex_batch);

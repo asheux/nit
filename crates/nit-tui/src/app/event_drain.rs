@@ -55,6 +55,9 @@ pub(crate) fn drain_codex_event(
     compile_gate: Option<&CompileGateWorker>,
     event: AgentBusEvent,
 ) -> EventDrainOutcome {
+    if swarm.defer_terminal_for_live_followup(&event) {
+        return EventDrainOutcome::default();
+    }
     drain_event_inner(
         state,
         vitals,
@@ -114,6 +117,7 @@ fn drain_event_inner(
     apply_fn: impl FnOnce(&mut AppState, &AgentBusEvent),
     do_clear: impl FnOnce(&mut AppState, &str, Option<&str>),
 ) -> EventDrainOutcome {
+    swarm.chat_steers.event(state, &event);
     record_agent_bus_vitals(vitals, &event);
     let finished = matches!(
         event,

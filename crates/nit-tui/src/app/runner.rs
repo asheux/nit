@@ -1068,7 +1068,12 @@ pub(super) fn run_loop(
         // heartbeat coalescer can drop dominated heartbeats before the
         // per-event side-effect pipeline runs. Other variants are
         // preserved verbatim (see crate::app::event_coalesce docs).
-        let mut codex_batch: Vec<AgentBusEvent> = codex_runner.events.try_iter().collect();
+        needs_redraw |= swarm
+            .chat_steers
+            .poll(state, &mut vitals, &codex_runner, &claude_runner);
+        needs_redraw |= swarm.poll_live_followups(state);
+        let mut codex_batch = swarm.take_ready_live_terminals();
+        codex_batch.extend(codex_runner.events.try_iter());
         if !codex_batch.is_empty() {
             super::event_coalesce::coalesce_heartbeats(&mut codex_batch);
             for event in codex_batch {

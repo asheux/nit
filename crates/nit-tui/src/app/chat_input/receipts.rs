@@ -22,34 +22,36 @@ pub(super) fn handle(state: &mut AppState, raw: &str) -> Option<bool> {
     let args: Vec<_> = words.collect();
     let result = match args.as_slice() {
         [] => followups::list(workspace, Some(20)),
-        ["recover", id] => match followups::find(workspace, id) {
-            Ok(note) => {
-                chat_history_remember(state, raw);
-                reset_chat_input_and_history_nav(state);
-                // Restoring a receipt reconstructs a draft only. A new receiver
-                // still passes through normal mission ownership checks on send.
-                if note.task_id.is_empty() {
-                    state.agents.chat_input = format!("@agent {} {}", note.agent_id, note.text);
+        ["recover", id] => {
+            match followups::find(workspace, id) {
+                Ok(note) => {
+                    chat_history_remember(state, raw);
+                    reset_chat_input_and_history_nav(state);
+                    // Restoring a receipt reconstructs a draft only. A new receiver
+                    // still passes through normal mission ownership checks on send.
+                    if note.task_id.is_empty() {
+                        state.agents.chat_input = format!("@agent {} {}", note.agent_id, note.text);
+                        sync_cursor_to_input_end(state);
+                        state.status = Some(format!("Restored unsent follow-up for {}. Review the recipient before sending.", note.agent_id));
+                        return Some(true);
+                    }
+                    state.agents.chat_input = note.text;
+                    state.agents.swarm_draft_target = Some(SwarmDraftTarget {
+                        mission_id: note.mission_id.clone(),
+                        needs_choice: true,
+                        source: note.source,
+                        ..Default::default()
+                    });
                     sync_cursor_to_input_end(state);
-                    state.status = Some(format!("Restored unsent follow-up for {}. Review the recipient before sending.", note.agent_id));
-                    return Some(true);
-                }
-                state.agents.chat_input = note.text;
-                state.agents.swarm_draft_target = Some(SwarmDraftTarget {
-                    mission_id: note.mission_id.clone(),
-                    needs_choice: true,
-                    source: note.source,
-                    ..Default::default()
-                });
-                sync_cursor_to_input_end(state);
-                state.status = Some(format!(
+                    state.status = Some(format!(
                     "Restored unsent draft from {} / {}. Choose a live mission and use Alt+→ to select its task.",
                     note.mission_id, note.task_id
                 ));
-                return Some(true);
+                    return Some(true);
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        },
+        }
         [id] if *id != "recover" => {
             followups::find(workspace, id).map(|note| followups::describe(&note))
         }

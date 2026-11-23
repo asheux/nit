@@ -118,7 +118,10 @@ fn paths(workspace: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|s| s == "json")
-                && path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with(prefix))
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with(prefix))
                 && entry.file_type()?.is_file()
             {
                 files.push(path);
@@ -174,7 +177,12 @@ pub fn find(workspace: &Path, id: &str) -> io::Result<Receipt> {
 
 fn summary(note: &Receipt) -> String {
     if note.task_id.is_empty() {
-        return format!("{}  {}  Agent Chat → {}", note.id, note.status.label(), note.agent_id);
+        return format!(
+            "{}  {}  Agent Chat → {}",
+            note.id,
+            note.status.label(),
+            note.agent_id
+        );
     }
     format!(
         "{}  {}  {} / {} → {}",
