@@ -39,6 +39,9 @@ pub struct AgentsState {
     pub dock_tab: AgentOpsTab,
     pub console_tab: AgentConsoleTab,
     pub chat_input: String,
+    /// A draft is waiting for explicit confirmation of a roster recipient.
+    #[serde(skip)]
+    pub chat_needs_recipient: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm_draft_target: Option<SwarmDraftTarget>,
     #[serde(default)]
@@ -474,6 +477,7 @@ impl Default for AgentsState {
             dock_tab: AgentOpsTab::Roster,
             console_tab: AgentConsoleTab::Thread,
             chat_input: String::new(),
+            chat_needs_recipient: false,
             swarm_draft_target: None,
             chat_input_cursor: 0,
             chat_input_selection_anchor: None,

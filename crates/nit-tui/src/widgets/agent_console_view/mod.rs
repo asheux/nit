@@ -290,10 +290,85 @@ fn composer_title(
             None => format!("To swarm {mid}"),
         };
     }
-    if draft.is_empty() {
-        return "CHAT BOX".into();
-    }
     agent.map_or_else(|| "CHAT BOX".into(), |id| format!("To {id}"))
+}
+
+/// Composer border action, using the same label and available cells for painting and hit-testing.
+fn recipient_action(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: u16,
+) -> Option<(&'static str, &'static str)> {
+    if state.terminal_pane_active
+        || !state.station_chat_center()
+        || crate::app::followup_mission(state, swarm).is_some()
+        || crate::app::chat_recipient(state).is_some()
+        || matches!(
+            state.agents.chat_input.split_whitespace().next(),
+            Some(
+                "@all"
+                    | "@swarm"
+                    | "@new"
+                    | "@multiway"
+                    | "@shadow"
+                    | "@abort"
+                    | "/abort"
+                    | "@queue"
+                    | "@q"
+            )
+        )
+    {
+        return None;
+    }
+    let model_available = state
+        .agents
+        .agents
+        .iter()
+        .any(|a| a.is_codex() || a.is_claude());
+    let action = if model_available {
+        "[Select agent]"
+    } else {
+        "[Agent Ops]"
+    };
+    let hint = if model_available {
+        " · Enter to choose"
+    } else {
+        " · No chat models"
+    };
+    Some(if width >= (action.len() + hint.chars().count()) as u16 {
+        (action, hint)
+    } else if width >= action.len() as u16 {
+        (action, "")
+    } else if width >= 5 {
+        ("[Ops]", "")
+    } else {
+        return None;
+    })
+}
+
+pub(crate) fn select_agent_button_at(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> bool {
+    if !area.contains((column, row).into()) {
+        return false;
+    }
+    let Some(layout) = compute_console_layout(area, state) else {
+        return false;
+    };
+    if !layout.input_boxed || row != layout.input_chunk.y {
+        return false;
+    }
+    let Some((label, _)) =
+        recipient_action(state, swarm, layout.input_chunk.width.saturating_sub(2))
+    else {
+        return false;
+    };
+    let x = layout.input_chunk.x + 1;
+    (x..x + label.len() as u16).contains(&column)
 }
 
 pub fn render(
@@ -658,22 +733,37 @@ pub fn render(
             })
             .unwrap_or(0);
         let mut title_spans = Vec::new();
-        title_spans.push(Span::styled(
-            composer_title(
-                Some(swarm),
-                state.agents.swarm_draft_target.as_ref(),
-                crate::app::followup_mission(state, swarm),
-                state.agents.selected_context_agent(),
-                &state.agents.chat_input,
-            ),
-            Style::default()
-                .fg(if focused {
-                    theme.border_focused
-                } else {
-                    theme.border
-                })
-                .add_modifier(Modifier::BOLD),
-        ));
+        let recipient = recipient_action(state, swarm, layout.input_chunk.width.saturating_sub(2));
+        if let Some((label, hint)) = recipient {
+            title_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+            title_spans.push(Span::styled(hint, Style::default().fg(theme.muted)));
+        } else {
+            title_spans.push(Span::styled(
+                composer_title(
+                    Some(swarm),
+                    state.agents.swarm_draft_target.as_ref(),
+                    crate::app::followup_mission(state, swarm),
+                    if state.station_chat_center() {
+                        crate::app::chat_recipient(state)
+                    } else {
+                        state.agents.selected_context_agent()
+                    },
+                    &state.agents.chat_input,
+                ),
+                Style::default()
+                    .fg(if focused {
+                        theme.border_focused
+                    } else {
+                        theme.muted
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let swarm_template = state.agents.swarm_default_template.trim();
         if !swarm_template.is_empty() {
             title_spans.push(Span::raw("  "));
@@ -725,6 +815,24 @@ pub fn render(
                 BorderType::Plain
             })
             .style(Style::default().bg(theme.background));
+        let input_block = if recipient.is_some()
+            && !state
+                .agents
+                .agents
+                .iter()
+                .any(|a| a.is_codex() || a.is_claude())
+        {
+            let setup = if layout.input_chunk.width >= 51 {
+                " Set up Codex or Claude CLI · nit --agents all ."
+            } else if layout.input_chunk.width >= 24 {
+                " nit --agents codex . "
+            } else {
+                " Set up CLI "
+            };
+            input_block.title_bottom(Line::styled(setup, Style::default().fg(theme.muted)))
+        } else {
+            input_block
+        };
         frame.render_widget(input_block, layout.input_chunk);
     }
     let input_bg = if focused {
