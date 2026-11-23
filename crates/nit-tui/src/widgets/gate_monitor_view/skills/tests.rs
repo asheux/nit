@@ -207,7 +207,7 @@ fn multiword_filter_matches_all_terms_across_fields_and_id_separators() {
 }
 
 #[test]
-fn category_colors_follow_the_theme_across_catalog_reader_and_focus() {
+fn catalog_uses_source_background_and_reader_keeps_its_category_color() {
     let mut state = browser();
     let mut theme = Theme::default();
     theme.hl.macro_token = Color::Rgb(201, 155, 235);
@@ -238,7 +238,15 @@ fn category_colors_follow_the_theme_across_catalog_reader_and_focus() {
             .unwrap();
         let buf = term.backend().buffer();
         let (x, y) = locate(buf, group);
-        assert_eq!(buf.get(x, y).fg, color);
+        assert_eq!(buf.get(x, y).fg, theme.accent);
+        assert_eq!(buf.get(x, y).bg, theme.editor_background);
+        let other = skills::definitions()
+            .iter()
+            .find(|s| s.name != entry(&state).name)
+            .unwrap();
+        let (x, y) = locate(buf, other.title);
+        assert_eq!(buf.get(x, y).fg, theme.foreground);
+        assert_eq!(buf.get(x, y).bg, theme.editor_background);
         let (x, y) = locate(buf, "› ");
         assert_eq!(buf.get(x, y).fg, theme.border_focused);
         assert_eq!(buf.get(x + 2, y).fg, theme.foreground);

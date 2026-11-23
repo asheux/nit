@@ -336,7 +336,7 @@ impl Default for Theme {
         Theme {
             background: Color::Rgb(10, 21, 30),
             panel_background: Color::Rgb(16, 31, 42),
-            editor_background: Color::Rgb(41, 45, 53),
+            editor_background: Color::Rgb(7, 15, 25),
             popup_background: Color::Rgb(25, 46, 59),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),

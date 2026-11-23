@@ -211,7 +211,6 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
             theme.cursor_line_bg
         })
         .add_modifier(Modifier::BOLD);
-    let entries = skills::definitions();
     let indices = catalog::matches(state);
     if r.filter.height > 0 {
         let mark = if state.skill_filter_editing {
@@ -236,7 +235,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
     }
     if indices.is_empty() {
         frame.render_widget(
-            Paragraph::new("No matching skills").style(regular),
+            Paragraph::new("No matching skills").style(regular.bg(theme.editor_background)),
             r.catalog,
         );
         frame.render_widget(Paragraph::new("Esc clear filter").style(muted), r.help);
@@ -249,7 +248,7 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
             let (marker, style) = if i == state.selected_skill {
                 ("›", selected)
             } else {
-                (" ", regular.fg(group_color(entries[i].group, theme)))
+                (" ", regular)
             };
             let name = crate::widgets::text_utils::truncate_with_ellipsis(
                 name,
@@ -271,16 +270,13 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 ),
             ]));
         } else {
-            rows.push(Line::styled(
-                name,
-                Style::default()
-                    .fg(group_color(name, theme))
-                    .add_modifier(Modifier::BOLD),
-            ));
+            rows.push(Line::styled(name, accent));
         }
     }
     frame.render_widget(
-        Paragraph::new(rows).scroll((top(state, r.catalog, &indices) as u16, 0)),
+        Paragraph::new(rows)
+            .style(regular.bg(theme.editor_background))
+            .scroll((top(state, r.catalog, &indices) as u16, 0)),
         r.catalog,
     );
     if r.divider.width > 0 {
