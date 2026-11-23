@@ -19,7 +19,7 @@ These are local observations. The latency includes tmux input and capture overhe
 
 ## How much text do NitSkills save?
 
-Nit puts required instructions in each request and lets agents fetch detailed references when needed. We counted representative prompt text before and after this change with the `o200k_base` tokenizer. The current counts include the Codex hint pointing to the local skills directory.
+Nit puts required instructions in each request and lets agents fetch detailed references when needed. We counted four representative prompt bodies from the initial six-playbook rollout at `3b82579` against the earlier implementation at `69657d0`, using the `o200k_base` tokenizer. The NitSkills counts include the Codex hint pointing to the local skills directory. The catalog later expanded to 16 playbooks. These figures describe the original measurement.
 
 | Prompt | Earlier input tokens | With NitSkills |
 | --- | ---: | ---: |

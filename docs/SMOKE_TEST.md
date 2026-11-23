@@ -20,7 +20,7 @@ nit --agents local .
 1. Run `:changes` and select `audit.py`. The **Staged** patch replaces 401 with 403. The **Unstaged** patch adds 401 back. Press Enter to open the version currently on disk.
 2. Press F4 and run `git diff --cached -- audit.py`, then `git diff -- audit.py`. Compare the two outputs with what you saw in **Changes**. Press F4 to return.
 3. Press `Ctrl+F`, search for `denied` and open the match. Press `i` to make a small edit, Esc and `:w` to save. Inspect the updated worktree patch. Use `u` to undo and save again.
-4. Run `:skills`, select a reference and read it. Run `:gol` to see the same file encoded for the simulation, then `:changes` to return to the diff.
+4. Run `:skills`, press `/` and type `research`. Keep the results with Enter, choose a playbook and open it. Press Esc to return. Press `a` and check that its reference appears in your unsent Agent Chat draft. Run `:gol` to see the same file encoded for the simulation, then `:changes` to return to the diff.
 
 ## Ask an agent to explain the change
 
