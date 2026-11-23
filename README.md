@@ -23,7 +23,7 @@ The **NitSkills** pane opens with the editor. Its 16 playbooks cover code struct
 
 ## Install
 
-The following commands install a published release. To use the features in this checkout, build from source.
+Install the latest release using one of the commands below.
 
 | Platform | Command |
 | --- | --- |

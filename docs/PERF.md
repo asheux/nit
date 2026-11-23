@@ -23,6 +23,18 @@ Nit loads the highlighting rules for a language when you first open it. In a rel
 
 The sample was `crates/nit-core/src/buffer/cursor_motion.rs` at `7715252` (584 lines, 19,149 bytes). The comparison used that revision with and without the change in `67b982e`. After one warm-up per build and mode, nine fresh processes per condition ran in alternating order. Timing started after the file was read, as the syntax manager was created, and ended when a snapshot contained a keyword on a visible line. Terminal startup, file reads and drawing the frame take additional time.
 
+### When do the colors actually appear in the terminal?
+
+On small Rust and Python files, the editor could have the colors ready and still wait for its next idle redraw. The following release-build measurements start at the keystroke and end at the first tmux capture with the expected token color. Each build ran in 20 fresh local-agent sessions on the same Mac, split evenly between the two languages and two ways of opening a file.
+
+| Action | Before immediate redraw | With immediate redraw |
+| --- | ---: | ---: |
+| Open with `:e`, median | 266 ms | 25 ms |
+| Open from NITTree, median | 275 ms | 40 ms |
+| Type a character and see its syntax color, median | 264 ms | 77 ms |
+
+On a generated 12.9 MB Rust file, an in-editor open also had to wait for the whole file to parse. With immediate redraw alone, the first screen took about 1.46 seconds to show colors in one run. After adding a preview of the opening lines, that same screen showed colors in 54, 54 and 55 ms across three opens. The full parse continues in the background. This measurement covers opening at the top of the file.
+
 ## How much text do NitSkills save?
 
 Nit puts required instructions in each request and lets agents fetch detailed references when needed. We counted four representative prompt bodies from the initial six-playbook rollout at `3b82579` against the earlier implementation at `69657d0`, using the `o200k_base` tokenizer. The NitSkills counts include the Codex hint pointing to the local skills directory. The catalog later expanded to 16 playbooks. These figures describe the original measurement.
