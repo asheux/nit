@@ -779,3 +779,101 @@ fn station_tree_click_opens_source_and_keeps_the_chat_draft() {
     assert_eq!(state.editor_buffer().path(), Some(&filename));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn station_artifacts_button_pins_original_reply_after_scrolling_and_new_completions() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut state = state_for_test();
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    state.select_station_center(nit_core::StationCenterTab::Chat);
+    state.agents.selected_mission = Some("mission".into());
+    let add_reply = |state: &mut AppState, agent: &str, text: String| {
+        state.agents.messages.push(AgentMessage {
+            at: "12:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some(agent.into()),
+            mission_id: Some("mission".into()),
+            text,
+            prompt_msg_idx: None,
+            kind: Some("turn-completed".into()),
+        });
+    };
+    for i in 0..48 {
+        add_reply(
+            &mut state,
+            if i % 3 == 0 { "claude" } else { "codex" },
+            format!("Original response number {i}."),
+        );
+    }
+    state.agents.console_scroll = 5;
+    let screen = Rect::new(0, 0, 160, 48);
+    let area = layout::split_for_state(screen, &state).notes;
+    let theme = Theme::default();
+    let swarm = SwarmRuntime::default();
+    let mut terminal = Terminal::new(TestBackend::new(screen.width, screen.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            agent_console_view::render(frame, area, &mut state, &swarm, &theme);
+        })
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let mut candidates = Vec::new();
+    for y in area.y..area.bottom() {
+        let row: String = (area.x..area.right())
+            .map(|x| buf.get(x, y).symbol())
+            .collect();
+        if let Some(offset) = row.to_ascii_lowercase().find("artifacts") {
+            let x = area.x + unicode_width::UnicodeWidthStr::width(&row[..offset]) as u16;
+            if y + 1 < area.bottom() {
+                let next: String = (area.x..area.right())
+                    .map(|col| buf.get(col, y + 1).symbol())
+                    .collect();
+                if let Some((_, text)) = next.split_once("Original response number ") {
+                    let (number, _) = text.split_once('.').unwrap();
+                    candidates.push((x, y, number.parse::<usize>().unwrap()));
+                }
+            }
+        }
+    }
+    assert!(state.agents.console_scroll > 0);
+    let (x, y, idx) = *candidates
+        .iter()
+        .find(|(_, _, idx)| *idx % 3 != 0)
+        .expect("visible codex reply");
+    let click = |x, y, state: &mut AppState| {
+        handle_mouse_down(
+            MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            },
+            screen,
+            state,
+            &mut InputState::new(),
+            &mut None,
+            &theme,
+        )
+    };
+    assert!(click(area.x + 2, y, &mut state));
+    assert!(!state.agents.artifacts_popup_open);
+    assert!(click(x, y, &mut state));
+    add_reply(&mut state, "codex", "Arrived after the click".into());
+    assert_eq!(state.agents.artifacts_popup_reply_idx, Some(idx));
+    assert_eq!(
+        agent_ops_view::selected_artifact_agent_id(&state, &swarm, 80).as_deref(),
+        Some("codex")
+    );
+    let body = artifacts_popup::build_lines(&state, &swarm, &theme, 80)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains(&format!("Original response number {idx}.")),
+        "{body}"
+    );
+    assert!(!body.contains("Arrived after the click"));
+    close_artifacts_popup(&mut state);
+    assert!(state.agents.artifacts_popup_reply_idx.is_none());
+}

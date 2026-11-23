@@ -726,6 +726,9 @@ pub fn maybe_open_artifact_popup_from_console_line_for_pane(
     ) else {
         return false;
     };
+    if state.station_chat_center() {
+        return open_station_reply_artifact(state, message_idx);
+    }
     let Some(message) = state.agents.messages.get(message_idx).cloned() else {
         return false;
     };
@@ -765,6 +768,24 @@ pub fn maybe_open_artifact_popup_from_console_line_for_pane(
 
     state.agents.artifacts_selected_saved_run_path = None;
     state.agents.artifacts_selected = card_idx;
+    state.agents.artifacts_popup_open = true;
+    state.agents.artifacts_popup_scroll = 0;
+    true
+}
+
+/// Pin the original reply without changing the conversation or relying on a
+/// card offset that may move when another agent finishes.
+pub(super) fn open_station_reply_artifact(state: &mut AppState, message_idx: usize) -> bool {
+    if !state
+        .agents
+        .messages
+        .get(message_idx)
+        .is_some_and(|msg| msg.agent_id.is_some())
+    {
+        return false;
+    }
+    state.agents.global_archive_opened_entry = None;
+    state.agents.artifacts_popup_reply_idx = Some(message_idx);
     state.agents.artifacts_popup_open = true;
     state.agents.artifacts_popup_scroll = 0;
     true
