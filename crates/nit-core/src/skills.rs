@@ -1,41 +1,132 @@
 //! Built-in reference material shared by the CLI, chat, and MCP.
 
-const SKILLS: &[(&str, &str, &str)] = &[
-    (
-        "genome-quality",
-        "Tier ladder and parsimony rules",
-        include_str!("skills/genome-quality.md"),
-    ),
-    (
-        "genome-encoders",
-        "Encoder guide, regression attribution, and targets",
-        include_str!("skills/genome-encoders.md"),
-    ),
-    (
-        "swarm-verification",
-        "Targeted verification, code hygiene, and gate retries",
-        include_str!("skills/swarm-verification.md"),
-    ),
-    (
-        "swarm-propose",
-        "Landscape analysis, structural plans, and file handoff",
-        include_str!("skills/swarm-propose.md"),
-    ),
-    (
-        "swarm-judge",
-        "Proposal comparison and verdict scope",
-        include_str!("skills/swarm-judge.md"),
-    ),
-    (
-        "swarm-integrate",
-        "Implementation scope, blockers, and structural checks",
-        include_str!("skills/swarm-integrate.md"),
-    ),
-];
+#[derive(Debug)]
+pub struct Skill {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub group: &'static str,
+    pub summary: &'static str,
+    pub body: &'static str,
+}
+
+macro_rules! skill {
+    ($group:literal, $name:literal, $title:literal, $summary:literal) => {
+        Skill {
+            name: $name,
+            title: $title,
+            group: $group,
+            summary: $summary,
+            body: include_str!(concat!("skills/", $name, ".md")),
+        }
+    };
+}
+
+pub fn definitions() -> &'static [Skill] {
+    &[
+        skill!(
+            "Code structure",
+            "genome-quality",
+            "Interpret a genome tier",
+            "Read a file’s simulation score and understand its limits."
+        ),
+        skill!(
+            "Code structure",
+            "genome-encoders",
+            "Compare encoders",
+            "Trace a score change back to the source features each encoder uses."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-plan",
+            "Plan a mission",
+            "Assign owners, dependencies and acceptance checks."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-propose",
+            "Propose a change",
+            "Compare implementation options and identify the files each would touch."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-judge",
+            "Judge proposals",
+            "Choose an approach and record the reasons for the writer."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-integrate",
+            "Implement the verdict",
+            "Carry the accepted change through callers, tests and integration points."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-review",
+            "Review a change",
+            "Trace user-visible regressions and report actionable findings."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-test",
+            "Test a change",
+            "Choose focused checks and distinguish results from coverage gaps."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-verification",
+            "Verify a mission",
+            "Interpret gate results and retry the checks that failed."
+        ),
+        skill!(
+            "Swarm workflow",
+            "swarm-handoff",
+            "Hand off evidence",
+            "Package changed paths, commands and findings for the next agent."
+        ),
+        skill!(
+            "Research",
+            "research-evidence",
+            "Compare research evidence",
+            "Weigh sources, state assumptions and rank candidate strategies."
+        ),
+        skill!(
+            "Research",
+            "research-experiment",
+            "Run an experiment",
+            "Define a baseline, record measurements and bound the conclusion."
+        ),
+        skill!(
+            "Workspace",
+            "workspace-scope",
+            "Define file scope",
+            "Separate files that need edits from paths inspected for context."
+        ),
+        skill!(
+            "Workspace",
+            "workspace-claims",
+            "Coordinate file ownership",
+            "Check claims and revalidate assumptions when edits overlap."
+        ),
+        skill!(
+            "Workspace",
+            "shadow-review",
+            "Compare two approaches",
+            "Use independent proposals and a review to guide one agent’s turn."
+        ),
+        skill!(
+            "Workspace",
+            "multiway-candidates",
+            "Compare worktrees",
+            "Evaluate candidate commits against the same checks in isolated worktrees."
+        ),
+    ]
+}
 
 /// Catalog entries in display order, without allocating the reference bodies.
 pub fn entries() -> impl ExactSizeIterator<Item = (&'static str, &'static str)> {
-    SKILLS.iter().map(|&(name, summary, _)| (name, summary))
+    definitions()
+        .iter()
+        .map(|skill| (skill.name, skill.summary))
 }
 
 pub fn catalog() -> &'static str {
@@ -49,10 +140,10 @@ pub fn catalog() -> &'static str {
 }
 
 pub fn read(name: &str) -> Option<&'static str> {
-    SKILLS
+    definitions()
         .iter()
-        .find(|entry| entry.0 == name)
-        .map(|entry| entry.2)
+        .find(|skill| skill.name == name)
+        .map(|skill| skill.body)
 }
 
 pub fn lookup(name: Option<&str>) -> Result<String, String> {
@@ -82,9 +173,9 @@ pub fn chat_reply(input: &str) -> Option<String> {
 pub fn write_references(dir: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    let references = SKILLS
+    let references = definitions()
         .iter()
-        .map(|(name, _, body)| (*name, *body))
+        .map(|skill| (skill.name, skill.body))
         .chain(std::iter::once(("INDEX", catalog())));
     for (name, body) in references {
         let path = dir.join(format!("{name}.md"));

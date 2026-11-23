@@ -6186,10 +6186,9 @@ fn structured_artifacts_block_for_propose_explains_files_semantics() {
         false,
     );
     assert!(prompt.contains("STRUCTURED ARTIFACTS"));
-    assert!(prompt.contains("`files` array — load-bearing for compliance"));
-    assert!(prompt.contains("Existing files to MODIFY"));
-    assert!(prompt.contains("NEW files to CREATE"));
-    assert!(prompt.contains("trigger an automatic re-dispatch"));
+    assert!(prompt.contains("file the integrator must MODIFY or CREATE"));
+    assert!(prompt.contains("AUDIT-ONLY decisions in `notes`"));
+    assert!(prompt.contains("NitSkill swarm-handoff"));
 }
 
 #[test]
@@ -6207,7 +6206,7 @@ fn structured_artifacts_block_for_judge_explains_files_semantics() {
         false,
     );
     assert!(prompt.contains("STRUCTURED ARTIFACTS"));
-    assert!(prompt.contains("`files` array — load-bearing for compliance"));
+    assert!(prompt.contains("file the integrator must MODIFY or CREATE"));
 }
 
 #[test]
@@ -6227,7 +6226,7 @@ fn structured_artifacts_block_for_review_skips_load_bearing_section() {
         None,
         false,
     );
-    assert!(!prompt.contains("`files` array — load-bearing for compliance"));
+    assert!(!prompt.contains("file the integrator must MODIFY or CREATE"));
 }
 
 // --- Parallel template multi-writer permissions ---
@@ -6847,9 +6846,7 @@ fn structured_artifacts_block_excludes_audit_only_files_from_files_array() {
         None,
         false,
     );
-    assert!(prompt.contains("Do NOT include"));
-    assert!(prompt.contains("AUDIT-ONLY"));
-    assert!(prompt.contains("Mention these in your prose summary"));
+    assert!(prompt.contains("Put paths read for context and AUDIT-ONLY decisions in `notes`"));
 }
 
 // Critical: if signoff and structural compliance both fire on the same turn,

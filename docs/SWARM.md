@@ -89,7 +89,7 @@ The optional `genome-quality` check reports structural and simulation-derived me
 | `gates/report.json` | Per-gate results and overall verification status |
 | `gates/output.txt` and `gates/verify.md` | Captured verifier output and readable summary |
 
-A task that declares artifacts places a fenced JSON block in its response. Its top-level fields are `type: "swarm_artifacts"`, `version: 1`, `task_id`, `summary` and `artifacts`. A missing-block message means Nit could not parse the structured handoff. Read the task's Markdown output before relying on the artifact list. For the worker's exact role instructions, run `nit skills swarm-propose`, `nit skills swarm-judge`, `nit skills swarm-integrate` or `nit skills swarm-verification`.
+A task that declares artifacts places a fenced JSON block in its response. Its top-level fields are `type: "swarm_artifacts"`, `version: 1`, `task_id`, `summary` and `artifacts`. A missing-block message means Nit could not parse the structured handoff. Read the task's Markdown output before relying on the artifact list. Use `nit skills swarm-plan` to plan dependencies, `nit skills swarm-handoff` to interpret task evidence and `nit skills research-experiment` to design a measurable comparison. The full catalog is available in the NitSkills pane and through `nit skills`.
 
 ## Control cost and cancel work
 

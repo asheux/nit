@@ -23,11 +23,8 @@ pub(super) const TASK_COMPLETE_SENTINEL: &str = "<SWARM_TASK_COMPLETE>";
 /// weigh tradeoffs explicitly. Without distinct lenses, proposers produce
 /// correlated output and the judge has nothing to choose between.
 const PROPOSER_LENS_TABLE: &str = "\
--   LENS A (minimal-diff, focused): favor the smallest change that solves the request. Avoid new abstractions, new modules, new types, new dependencies unless strictly required. Blast radius as small as possible.\n\
--   LENS B (architectural coherence): if the shape of the code is what's causing the problem, propose the consolidation, split, or abstraction the system is asking for. Larger diff fine when it lands on a better overall shape.\n\
--   LENS C (incremental/staged): prefer a multi-step plan that converts the current shape into the target shape through atomic, reversible steps. Optimise for safety and roll-back at each step.\n\
--   LENS D (performance/genome-first): target the files the GENOME LANDSCAPE flags as lowest-tier or highest-leverage. Accept more invasive changes when they unlock a tier jump or eliminate parsimony bloat.\n\
--   LENS E (safety/invariants): prioritise invariants, error handling, edge cases the tests don't cover. Be defensive about assumptions; flag anything the current tests don't exercise.\n";
+LENS A: minimal-diff; LENS B: architectural coherence; LENS C: reversible stages; \
+LENS D: measured performance and structural signals; LENS E: invariants and edge cases.\n";
 
 /// Floor at which the parallel template upgrades from a single-recon shape
 /// to multi-proposer + judge + integrators. Below this, integrators
@@ -204,7 +201,7 @@ fn append_planner_header(
     integrator_agent_id: Option<&str>,
 ) {
     out.push_str(
-        "You are the SWARM PLANNER inside nit. Create an execution plan for a multi-agent workflow.\n\n",
+        "You are the SWARM PLANNER inside nit. Plan tasks under the supplied constraints. NitSkill swarm-plan covers dependency design and proposal lenses.\n\n",
     );
     out.push_str(&format!("Template: `{}`\n\n", template.label()));
     out.push_str(&format!("Mission focus: `{}`\n\n", mission_kind.label()));
@@ -1243,21 +1240,7 @@ fn append_task_shard_section(out: &mut String, task: &SwarmTask, shard_files: Op
 
 fn append_task_integrate_checklist(out: &mut String, scope_files: &[String]) {
     out.push_str("\n## FILE CHECKLIST (informational hint)\n");
-    out.push_str("This list is sourced from the propose/judge `swarm_artifacts.files` arrays in your dependency outputs — it's the set of files the proposers and judge identified as LIKELY targets for your work. Treat it as a starting hint, not a contract.\n");
-    out.push('\n');
-    out.push_str("Authoritative source: the JUDGE'S VERDICT in the Dependency outputs section below. Follow the verdict's specific choices end-to-end. The checklist exists so you don't have to re-derive the scope from scratch; the verdict exists to tell you what to actually build.\n");
-    out.push('\n');
-    out.push_str("How to use it:\n");
-    out.push_str("- Process the list as a starting point: open each file, read it, decide whether the work declared in the verdict actually requires editing it.\n");
-    out.push_str("- A file listed here that you decide doesn't need editing is acceptable — say so in your final message under an `audit-only` heading with a one-line reason (e.g. \"core/diagnostics.py — judge endorsed in-place refactor; this file's surface area was unaffected\").\n");
-    out.push_str("- A file NOT listed here that you DO need to edit is also acceptable — your role contract's COMPLETION-MANDATED OUT-OF-SCOPE EDITS clause authorises edits anywhere the work requires. Name them under an `out-of-scope edits` heading with a one-line reason.\n");
-    out.push_str("- The runtime's structural compliance check is now ADVISORY for missing files — an Info diag in soft mode (the default), only a re-dispatch under `NIT_STRICT_CHECKLIST=1`. Stub files (newly-created files under 20 lines) and incomplete splits (a declared huge source that didn't shrink while sibling submodules appeared) DO still trigger re-dispatch — those are genuine work-not-done signals regardless of the checklist contract.\n");
-    out.push('\n');
-    out.push_str("Other persistent rules:\n");
-    out.push_str("- Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests live in a dedicated tests directory or test file.\n");
-    out.push_str("- COMMENTS: trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior (e.g. \"/// Returns the value\" on `fn value()`). Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.\n");
-    out.push_str("- \"Refactor module\" still means \"do the refactor the judge endorsed across the whole module\" — partial coverage is a task failure, just one detected by the reviewer / compile gate / genome retry rather than the FILE CHECKLIST.\n");
-    out.push('\n');
+    out.push_str("Scope comes from propose/judge `swarm_artifacts.files`. Follow the JUDGE'S VERDICT end-to-end. Inspect these candidate files. Record untouched paths under `audit-only` and necessary additional edits under `out-of-scope edits`, with reasons. Missing paths are advisory unless NIT_STRICT_CHECKLIST=1. Stub and incomplete-split checks still apply. Keep tests in dedicated test files and preserve comments that explain invariants. See NitSkill workspace-scope.\n");
     for (i, path) in scope_files.iter().enumerate() {
         out.push_str(&format!("{}. {path}\n", i + 1));
     }
@@ -1428,18 +1411,9 @@ fn append_task_structured_artifacts(out: &mut String, task: &SwarmTask) {
     out.push_str("  }\n");
     out.push_str("}\n");
     out.push_str("```\n");
-    out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked. `findings` is VERIFIER-ONLY: test/review roles emit it to flag concrete fixable issues, which trigger one automatic integrator-retry turn (budget = 1). Writer roles MUST NOT emit findings — they describe their own work in `diffs` / `notes`.\n");
+    out.push_str("Use the relevant keys. Test/review roles alone emit actionable `findings` for one integrator retry. Writers use `diffs` and `notes`. See NitSkill swarm-handoff for examples.\n");
     if is_propose_or_judge {
-        out.push_str(
-            "\n### `files` array — load-bearing for compliance\n\
-             Your `files` array is the canonical handoff to the integrator AND the source of truth for the runtime's structural-compliance check. Include EVERY file the integrator must MODIFY or CREATE:\n\
-             - Existing files to MODIFY.\n\
-             - NEW files to CREATE (e.g., when the plan calls for splitting a large source into a directory of submodules, list each new submodule path).\n\
-             Do NOT include:\n\
-             - Files you read for CONTEXT only (\"I read X to understand Y\").\n\
-             - Files where you concluded AUDIT-ONLY / no-changes-needed. Mention these in your prose summary or in the `notes` field, not in `files`. The compliance check requires every entry in `files` to be modified — an audit-only file here would trigger a false-positive re-dispatch.\n\
-             Files omitted from `files` are files the integrator can silently skip; files included here that don't get touched (or get touched only with stub doc-comment shells) trigger an automatic re-dispatch with the gap descriptor.\n",
-        );
+        out.push_str("Include EVERY file the integrator must MODIFY or CREATE in `files`. Put paths read for context and AUDIT-ONLY decisions in `notes`. The judge selects the final scope hints.\n");
     }
 }
 

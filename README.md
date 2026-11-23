@@ -19,7 +19,7 @@ For independent reviews, `nit multipane --panes 4` opens four conversations. For
 
 ### Give agents only the guidance they need
 
-NitSkills are six short references covering code-structure feedback, swarm roles and verification. Agents can read the relevant playbook on demand. The prompt still carries required constraints and output formats. Use `:skills` to browse the catalog in **Code Structural Quality**, `/skills` in Agent Chat, or `nit skills swarm-judge` from your shell. [Measured effect on prompt size](docs/PERF.md)
+The **NitSkills** pane opens with the editor. Its 16 playbooks cover code structure, swarm work, research and shared-workspace decisions. Select a playbook to preview it, or press Enter to read it in full. Agents can fetch one reference when needed. Required constraints, plan schemas and output formats stay with the task. Use `:skills` to focus the pane, `/skills` in chat, or `nit skills NAME` from a shell. [Measured effect on prompt size](docs/PERF.md)
 
 ## Install
 
