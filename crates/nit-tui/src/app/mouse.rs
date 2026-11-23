@@ -1334,7 +1334,11 @@ pub(super) fn handle_mouse_down_with_swarm(
         reset_ui_selection(state, input_state);
         state.focus = PaneId::JobOutput;
         let rel_col = mouse.column.saturating_sub(agent_ops_tabs_area.x) as usize;
-        if let Some(tab) = agent_ops_view::tab_at_column(rel_col) {
+        if let Some(tab) = agent_ops_view::tab_at_column(
+            rel_col,
+            agent_ops_tabs_area.width as usize,
+            state.agents.dock_tab,
+        ) {
             if state.agents.dock_tab != tab {
                 state.agents.dock_tab = tab;
                 state.agents.roster_tree_selected = None;

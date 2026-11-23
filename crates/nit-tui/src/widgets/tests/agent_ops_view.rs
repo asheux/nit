@@ -1715,3 +1715,42 @@ fn parse_roster_truncation_disabled_handles_common_inputs() {
     assert!(parse_roster_truncation_disabled(Some("anything-else")));
     assert!(parse_roster_truncation_disabled(Some(" 1 "))); // whitespace stripped
 }
+
+#[test]
+fn tab_strip_keeps_selection_and_mouse_targets_inside_the_pane() {
+    use super::{tab_at_column, tab_line, OPS_TABS};
+    for active in OPS_TABS {
+        for width in 0..=76 {
+            let rendered = tab_line(active, width, &Theme::default());
+            assert!(rendered.width() <= width);
+            let mut x = 0;
+            let mut selected = false;
+            for span in rendered.spans {
+                let target = tab_at_column(x, width, active);
+                if span.style.add_modifier.contains(Modifier::UNDERLINED) {
+                    selected = true;
+                    assert_eq!(target, Some(active));
+                    if width >= active.label().len() {
+                        assert_eq!(span.content, active.label());
+                    }
+                }
+                if let Some(tab) = OPS_TABS.iter().find(|tab| tab.label() == span.content) {
+                    assert_eq!(target, Some(*tab));
+                    assert_eq!(tab_at_column(x + span.width() - 1, width, active), target);
+                }
+                x += span.width();
+            }
+            assert_eq!(selected, width > 0);
+            assert_eq!(tab_at_column(x, width, active), None);
+        }
+    }
+    let width = 40;
+    let first = tab_line(AgentOpsTab::Roster, width, &Theme::default());
+    assert!(first.to_string().ends_with('›'));
+    let next = tab_at_column(first.width() - 1, width, AgentOpsTab::Roster).unwrap();
+    assert!(!first.to_string().contains(next.label()));
+    let last = tab_line(AgentOpsTab::Scratchpad, width, &Theme::default());
+    assert!(last.to_string().starts_with('‹'));
+    let previous = tab_at_column(0, width, AgentOpsTab::Scratchpad).unwrap();
+    assert!(last.to_string().contains(previous.next().label()));
+}

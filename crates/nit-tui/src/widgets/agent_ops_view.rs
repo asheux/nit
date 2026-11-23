@@ -776,7 +776,7 @@ pub fn render(
 }
 
 pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let tabs = tab_line(state, theme);
+    let tabs = tab_line(state.agents.dock_tab, area.width as usize, theme);
     frame.render_widget(Paragraph::new(tabs), area);
 }
 
@@ -873,62 +873,123 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    const TABS: [AgentOpsTab; 8] = [
-        AgentOpsTab::Roster,
-        AgentOpsTab::Missions,
-        AgentOpsTab::Dag,
-        AgentOpsTab::Evidence,
-        AgentOpsTab::Mcp,
-        AgentOpsTab::Alerts,
-        AgentOpsTab::Diagnostics,
-        AgentOpsTab::Scratchpad,
-    ];
-    const TAB_SPACING: &str = "  ";
-    let active = match state.agents.dock_tab {
-        AgentOpsTab::Patch => AgentOpsTab::Diagnostics,
-        other => other,
-    };
-    let mut spans = Vec::new();
-    for (idx, tab) in TABS.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw(TAB_SPACING));
-        }
-        let style = if active == *tab {
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            theme.status_idle_style()
-        };
-        spans.push(Span::styled(tab.label(), style));
-    }
-    Line::from(spans)
+const OPS_TABS: [AgentOpsTab; 8] = [
+    AgentOpsTab::Roster,
+    AgentOpsTab::Missions,
+    AgentOpsTab::Dag,
+    AgentOpsTab::Evidence,
+    AgentOpsTab::Mcp,
+    AgentOpsTab::Alerts,
+    AgentOpsTab::Diagnostics,
+    AgentOpsTab::Scratchpad,
+];
+
+struct TabPart {
+    text: &'static str,
+    target: Option<AgentOpsTab>,
+    active: bool,
 }
 
-pub fn tab_at_column(col: usize) -> Option<AgentOpsTab> {
-    const TABS: [AgentOpsTab; 8] = [
-        AgentOpsTab::Roster,
-        AgentOpsTab::Missions,
-        AgentOpsTab::Dag,
-        AgentOpsTab::Evidence,
-        AgentOpsTab::Mcp,
-        AgentOpsTab::Alerts,
-        AgentOpsTab::Diagnostics,
-        AgentOpsTab::Scratchpad,
-    ];
-    const TAB_GAP: usize = 2;
-
-    let mut x = 0usize;
-    for (idx, tab) in TABS.iter().enumerate() {
-        let label = tab.label();
-        let end = x.saturating_add(label.len());
-        if col >= x && col < end {
-            return Some(*tab);
+fn tab_parts(active: AgentOpsTab, width: usize) -> Vec<TabPart> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let active = if active == AgentOpsTab::Patch {
+        AgentOpsTab::Diagnostics
+    } else {
+        active
+    };
+    let selected = OPS_TABS.iter().position(|&tab| tab == active).unwrap();
+    let mut first = selected;
+    let mut end = selected + 1;
+    let mut used = active.label().len();
+    // At exceptionally small widths, retain a unique, complete tab identifier.
+    let names = ["1", "2", "3", "4", "5", "6", "7", "8"];
+    let active_label = if used > width {
+        used = 1;
+        names[selected]
+    } else {
+        active.label()
+    };
+    while first > 0 {
+        let next = used + 2 + OPS_TABS[first - 1].label().len();
+        if next + usize::from(first > 1) * 2 + usize::from(end < OPS_TABS.len()) * 2 > width {
+            break;
         }
-        x = end;
-        if idx + 1 < TABS.len() {
-            x = x.saturating_add(TAB_GAP);
+        first -= 1;
+        used = next;
+    }
+    while end < OPS_TABS.len() {
+        let next = used + 2 + OPS_TABS[end].label().len();
+        if next + usize::from(first > 0) * 2 + usize::from(end + 1 < OPS_TABS.len()) * 2 > width {
+            break;
+        }
+        used = next;
+        end += 1;
+    }
+    let mut parts = Vec::new();
+    let mut spare = width - used;
+    if first > 0 && spare > 0 {
+        let arrow = if spare >= 2 { "‹ " } else { "‹" };
+        parts.push(TabPart {
+            text: arrow,
+            target: Some(OPS_TABS[first - 1]),
+            active: false,
+        });
+        spare -= arrow.chars().count();
+    }
+    for (i, &tab) in OPS_TABS[first..end].iter().enumerate() {
+        if i > 0 {
+            parts.push(TabPart {
+                text: "  ",
+                target: None,
+                active: false,
+            });
+        }
+        parts.push(TabPart {
+            text: if tab == active {
+                active_label
+            } else {
+                tab.label()
+            },
+            target: Some(tab),
+            active: tab == active,
+        });
+    }
+    if end < OPS_TABS.len() && spare > 0 {
+        parts.push(TabPart {
+            text: if spare >= 2 { " ›" } else { "›" },
+            target: Some(OPS_TABS[end]),
+            active: false,
+        });
+    }
+    parts
+}
+
+fn tab_line(active: AgentOpsTab, width: usize, theme: &Theme) -> Line<'static> {
+    Line::from(
+        tab_parts(active, width)
+            .into_iter()
+            .map(|part| {
+                let style = if part.active {
+                    Style::default()
+                        .fg(theme.title_focused)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    theme.status_idle_style()
+                };
+                Span::styled(part.text, style)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub fn tab_at_column(col: usize, width: usize, active: AgentOpsTab) -> Option<AgentOpsTab> {
+    let mut end = 0;
+    for part in tab_parts(active, width) {
+        end += part.text.chars().count();
+        if col < end {
+            return part.target;
         }
     }
     None
