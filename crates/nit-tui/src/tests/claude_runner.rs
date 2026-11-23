@@ -679,3 +679,130 @@ fn cold_error_malformed_and_cancel_emit_one_failure_while_streams_are_inherited(
         assert!(results[0].contains(expected), "{results:?}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn live_followup_keeps_both_uuid_correlated_results_in_their_original_session() {
+    use crate::steering::SteerOutcome;
+    use std::sync::atomic::AtomicUsize;
+    struct Scripted {
+        spawns: Arc<AtomicUsize>,
+    }
+    impl WorkerSpawn for Scripted {
+        fn spawn(&self, key: &WorkerKey, _: &str) -> std::io::Result<SpawnedChild> {
+            self.spawns.fetch_add(1, Ordering::Relaxed);
+            let args = super::build_pool_worker_args(key, &ClaudeRunnerConfig::default());
+            assert!(args.windows(2).any(|a| a == ["--effort", "high"]));
+            assert!(args.windows(2).any(|a| a == ["--tools", "Read,Glob,Grep"]));
+            assert!(args.iter().any(|a| a == "--replay-user-messages"));
+            assert!(!args.iter().any(|a| a == "--no-session-persistence"));
+            let code = r#"
+import json, sys
+def get(): return json.loads(sys.stdin.readline())
+def emit(kind, **fields):
+    print(json.dumps(dict(type=kind, session_id=session, **fields)), flush=True)
+a=get(); session=a['session_id']; aid=a['uuid']
+emit('system',subtype='init',user_message_uuids=[aid])
+emit('user',uuid=aid,isReplay=True)
+b=get(); bid=b['uuid']; assert b['session_id']==session
+assert b['message']['content']=='please check the limit'
+emit('result',subtype='success',result='original answer',user_message_uuid=aid,is_error=False)
+emit('user',uuid=bid,isReplay=True)
+emit('result',subtype='success',result='follow-up answer',user_message_uuid=bid,is_error=False)
+c=get()
+assert c['session_id']==session and c['message']['content']=='resume here'
+emit('result',subtype='success',result='resumed answer',user_message_uuid=c['uuid'],is_error=False)
+sys.stdin.read()
+"#;
+            let mut child = Command::new("python3")
+                .args(["-u", "-c", code])
+                .current_dir(&key.cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            Ok(SpawnedChild {
+                stdin: child.stdin.take().unwrap(),
+                stdout: child.stdout.take().unwrap(),
+                stderr: child.stderr.take().unwrap(),
+                child,
+            })
+        }
+    }
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let pool = ClaudePool::new(
+        1,
+        Box::new(Scripted {
+            spawns: spawns.clone(),
+        }),
+    );
+    let mut runner = ClaudeRunner::spawn_with_pool(ClaudeRunnerConfig::default(), Some(pool));
+    let cwd = tempfile::tempdir().unwrap();
+    let send = |prompt: &str, session| ClaudeCommand::RunTurn {
+        model: "sonnet".into(),
+        cwd: cwd.path().into(),
+        mission_id: None,
+        resume_session_id: session,
+        persist_session: true,
+        effort: Some("high".into()),
+        prompt: prompt.into(),
+        read_only: true,
+        max_turns: None,
+    };
+    runner.send(send("first question", None));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let target = loop {
+        if let Some(t) = runner.live_turn("sonnet", None, cwd.path()) {
+            break t;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker failed to advertise a correlated stream"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(target.matches_chat_prompt("first question"));
+    assert!(runner
+        .live_turn("sonnet", Some("different-mission"), cwd.path())
+        .is_none());
+    assert!(runner
+        .live_turn("sonnet", None, &cwd.path().join("other"))
+        .is_none());
+    let outcome = runner.steer(
+        target.clone(),
+        live::uuid().unwrap(),
+        "please check the limit".into(),
+    );
+    let get_answer = || loop {
+        if let AgentBusEvent::TurnCompleted {
+            message, thread_id, ..
+        } = runner.events.recv_timeout(Duration::from_secs(5)).unwrap()
+        {
+            break (message, thread_id.unwrap());
+        }
+    };
+    let (answer, sid) = get_answer();
+    assert_eq!(answer, "original answer");
+    runner.send(send("resume here", Some(sid.clone())));
+    assert_eq!(
+        outcome.recv_timeout(Duration::from_secs(5)).unwrap(),
+        SteerOutcome::Received
+    );
+    assert_eq!(
+        outcome.recv_timeout(Duration::from_secs(5)).unwrap(),
+        SteerOutcome::Completed {
+            message: "follow-up answer".into(),
+            failed: false
+        }
+    );
+    assert_eq!(get_answer(), ("resumed answer".into(), sid));
+    assert_eq!(
+        runner
+            .steer(target, live::uuid().unwrap(), "stale".into())
+            .recv()
+            .unwrap(),
+        SteerOutcome::Stale
+    );
+    assert_eq!(spawns.load(Ordering::Relaxed), 1);
+    runner.shutdown();
+}

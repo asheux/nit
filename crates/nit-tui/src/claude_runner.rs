@@ -1,3 +1,5 @@
+mod live;
+pub use live::ClaudeLiveTurn;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -84,6 +86,7 @@ pub const SWARM_SUPPORT_MAX_TURNS: u32 = 200;
 pub const INTEGRATOR_MAX_TURNS: u32 = 500;
 
 pub struct ClaudeRunner {
+    live: live::Registry,
     cmd_tx: Sender<ClaudeCommand>,
     pub events: Receiver<AgentBusEvent>,
     shutdown: Arc<AtomicBool>,
@@ -97,6 +100,7 @@ impl ClaudeRunner {
         let (_, events) = mpsc::channel();
         (
             Self {
+                live: Default::default(),
                 cmd_tx,
                 events,
                 shutdown: Arc::new(AtomicBool::new(false)),
@@ -125,11 +129,14 @@ impl ClaudeRunner {
         let (event_tx, event_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_worker = Arc::clone(&shutdown);
+        let live = live::Registry::default();
+        let sessions = live.clone();
         let handle = thread::Builder::new()
             .name("nit-claude".into())
-            .spawn(move || runner_loop(config, shutdown_worker, cmd_rx, event_tx, pool))
+            .spawn(move || runner_loop(config, shutdown_worker, cmd_rx, event_tx, pool, sessions))
             .expect("spawn claude runner");
         Self {
+            live,
             cmd_tx,
             events: event_rx,
             shutdown,
@@ -137,6 +144,22 @@ impl ClaudeRunner {
         }
     }
 
+    pub fn live_turn(
+        &self,
+        agent_id: &str,
+        mission_id: Option<&str>,
+        cwd: &Path,
+    ) -> Option<ClaudeLiveTurn> {
+        self.live.lookup(agent_id, mission_id, cwd)
+    }
+    pub fn steer(
+        &self,
+        target: ClaudeLiveTurn,
+        id: String,
+        text: String,
+    ) -> Receiver<crate::steering::SteerOutcome> {
+        self.live.steer(target, id, text)
+    }
     // Returns `false` when the runner channel is disconnected (shut down or crashed).
     pub fn send(&self, command: ClaudeCommand) -> bool {
         self.cmd_tx.send(command).is_ok()
@@ -198,6 +221,7 @@ fn runner_loop(
     cmd_rx: Receiver<ClaudeCommand>,
     event_tx: Sender<AgentBusEvent>,
     pool: Option<Arc<ClaudePool>>,
+    live: live::Registry,
 ) {
     let mut seq = 0u64;
     let mut queue: VecDeque<ClaudeCommand> = VecDeque::new();
@@ -329,6 +353,7 @@ fn runner_loop(
                     max_turns,
                     config.clone(),
                     pool.clone(),
+                    live.clone(),
                 ));
             }
         }
@@ -449,6 +474,7 @@ fn spawn_turn_worker(
     max_turns: Option<u32>,
     config: ClaudeRunnerConfig,
     pool: Option<Arc<ClaudePool>>,
+    live: live::Registry,
 ) -> ActiveTurn {
     let agent_id = model.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -472,6 +498,7 @@ fn spawn_turn_worker(
                 max_turns,
                 config,
                 pool,
+                live,
                 cancel_worker,
             );
             let _ = done_tx.send(());
@@ -500,16 +527,39 @@ fn dispatch_turn(
     max_turns: Option<u32>,
     config: ClaudeRunnerConfig,
     pool: Option<Arc<ClaudePool>>,
+    live: live::Registry,
     cancel: Arc<AtomicBool>,
 ) {
     if let Some(pool) = pool.as_ref() {
-        if turn_supports_pool(&resume_session_id, persist_session, &effort, max_turns) {
-            let key = WorkerKey::new(
+        let direct = mission_id
+            .as_deref()
+            .is_none_or(crate::multipane::agent_id::is_pane_chat_mission_id)
+            && crate::shadow::parse_shadow_lane_id(&model).is_none()
+            && crate::intake::parse_intake_lane_id(&model).is_none();
+        if turn_supports_pool(&resume_session_id, persist_session, &effort, max_turns)
+            || (direct && persist_session)
+        {
+            let mut key = WorkerKey::new(
                 claude_model_slug_for_agent_id(&model).to_string(),
                 cwd.clone(),
                 read_only,
             );
-            if let Some(worker) = pool.checkout(&key, model.as_str(), POOL_CHECKOUT_TIMEOUT) {
+            if direct {
+                if let Some(session) = resume_session_id.clone().or_else(live::uuid) {
+                    key.session = Some(crate::claude_pool::DirectSession {
+                        id: session,
+                        resume: resume_session_id.is_some(),
+                        agent: model.clone(),
+                        mission: mission_id.clone(),
+                        effort: effort.clone(),
+                        max_turns,
+                    });
+                }
+            }
+            let worker = (!direct || key.session.is_some())
+                .then(|| pool.checkout(&key, model.as_str(), POOL_CHECKOUT_TIMEOUT))
+                .flatten();
+            if let Some(worker) = worker {
                 run_turn_pooled(
                     event_tx,
                     worker,
@@ -519,6 +569,7 @@ fn dispatch_turn(
                     mission_id,
                     resume_session_id,
                     prompt,
+                    live,
                     cancel,
                 );
                 return;
@@ -1351,23 +1402,42 @@ fn is_stream_result_event(value: &serde_json::Value) -> bool {
 /// Production [`WorkerSpawn`] that boots a real `claude` CLI process with the
 /// long-lived `--input-format stream-json --output-format stream-json` pair.
 ///
-/// Pool slots are baked at default `--max-turns` / no `--effort` /
-/// `--no-session-persistence` — only "vanilla" turns are eligible (see
-/// [`turn_supports_pool`]). Specialised turns (integrators with custom
-/// `--max-turns`, resumed sessions, custom effort levels) bypass the pool
-/// entirely and take the cold-spawn path.
+/// Direct chats bind a process to a persisted session and its tool/effort
+/// settings. Other eligible checkouts use the existing one-turn protocol.
 pub(crate) struct ClaudeCliSpawner {
     config: ClaudeRunnerConfig,
+    replay_supported: std::sync::OnceLock<bool>,
 }
 
 impl ClaudeCliSpawner {
     pub(crate) fn new(config: ClaudeRunnerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            replay_supported: Default::default(),
+        }
     }
 }
 
 impl WorkerSpawn for ClaudeCliSpawner {
     fn spawn(&self, key: &WorkerKey, _agent_id: &str) -> std::io::Result<SpawnedChild> {
+        if key.session.is_some()
+            && !self.replay_supported.get_or_init(|| {
+                Command::new("claude")
+                    .arg("--help")
+                    .stdin(Stdio::null())
+                    .output()
+                    .is_ok_and(|out| {
+                        out.status.success()
+                            && String::from_utf8_lossy(&out.stdout)
+                                .contains("--replay-user-messages")
+                    })
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Claude lacks stream-json replay",
+            ));
+        }
         let mut cmd = Command::new("claude");
         cmd.current_dir(&key.cwd)
             .args(build_pool_worker_args(key, &self.config))
@@ -1408,12 +1478,34 @@ fn build_pool_worker_args(key: &WorkerKey, config: &ClaudeRunnerConfig) -> Vec<S
         key.model_slug.clone(),
         "--add-dir".into(),
         key.cwd.to_string_lossy().to_string(),
-        "--no-session-persistence".into(),
     ];
+    if let Some(session) = &key.session {
+        if let Some(effort) = session.effort.as_deref().filter(|s| !s.trim().is_empty()) {
+            args.extend(["--effort".into(), effort.into()]);
+        }
+        args.extend([
+            "--replay-user-messages".into(),
+            if session.resume {
+                "--resume"
+            } else {
+                "--session-id"
+            }
+            .into(),
+            session.id.clone(),
+        ]);
+    } else {
+        args.push("--no-session-persistence".into());
+    }
     add_skill_references(&mut args);
     add_tool_permissions(&mut args, key.read_only, config);
     args.push("--max-turns".into());
-    args.push(DEFAULT_MAX_TURNS.to_string());
+    args.push(
+        key.session
+            .as_ref()
+            .and_then(|s| s.max_turns)
+            .unwrap_or(DEFAULT_MAX_TURNS)
+            .to_string(),
+    );
     args
 }
 
@@ -1427,11 +1519,31 @@ fn run_turn_pooled(
     mission_id: Option<String>,
     resume_session_id: Option<String>,
     prompt: String,
+    registry: live::Registry,
     cancel: Arc<AtomicBool>,
 ) {
     let started_at = Instant::now();
     let endpoint = claude_endpoint_label(&model, resume_session_id.as_deref());
-    let envelope = build_stream_json_envelope(&prompt);
+    let direct = worker
+        .key()
+        .session
+        .as_ref()
+        .and_then(|scope| Some((scope.id.clone(), live::uuid()?)));
+    let envelope = direct
+        .as_ref()
+        .map(|(sid, input)| live::envelope(input, sid, &prompt))
+        .unwrap_or_else(|| build_stream_json_envelope(&prompt));
+    let mut stream = direct.map(|(sid, input)| {
+        live::LiveInput::new(
+            registry,
+            &model,
+            mission_id.clone(),
+            &cwd,
+            &sid,
+            input,
+            &prompt,
+        )
+    });
 
     if let Err(err) = worker.write_envelope(envelope.as_bytes()) {
         worker.recycle(RecycleReason::BrokenPipe);
@@ -1483,9 +1595,6 @@ fn run_turn_pooled(
                 kill_reason = Some(TurnKillReason::OperatorCancel);
             } else if state.result_seen {
                 break;
-            } else if worker.is_dead() {
-                kill_reason = Some(TurnKillReason::ResultSeen);
-                break;
             } else if let Some(timeout) = idle_timeout {
                 if !state.turn_did_writes && last_stdout_at.elapsed() >= timeout {
                     worker.kill_child();
@@ -1498,10 +1607,33 @@ fn run_turn_pooled(
             break;
         }
 
+        if let Some(s) = stream.as_mut() {
+            s.pump(&mut worker);
+            if s.uncertain {
+                worker.kill_child();
+                break;
+            }
+        }
         let Some(line) = worker.recv_timeout(Duration::from_millis(50)) else {
+            // Read buffered terminal events before acting on EOF from a fast-exiting child.
+            if worker.is_dead() {
+                kill_reason = Some(TurnKillReason::ResultSeen);
+                break;
+            }
             continue;
         };
         last_stdout_at = Instant::now();
+        if let Some(s) = stream.as_mut() {
+            let supplemental = s.observe(&line.raw);
+            if s.uncertain {
+                state.stdout_buf = br#"{"type":"result","is_error":true,"result":"Claude returned a result without its input ID. Check session history before retrying."}"#.to_vec();
+                state.result_seen = true;
+                break;
+            }
+            if supplemental {
+                continue;
+            }
+        }
         state.observe(&line.raw, event_tx, &model, &mission_id, &cwd);
     }
 
@@ -1509,27 +1641,52 @@ fn run_turn_pooled(
     let json_errors = std::mem::take(&mut state.json_errors);
     let stderr = worker.stderr_snapshot();
 
-    let unhealthy = matches!(
+    if let Some(s) = stream.as_mut() {
+        s.close();
+    }
+    finish_pooled_primary(
+        event_tx,
+        model,
+        mission_id,
+        resume_session_id,
+        endpoint,
+        started_at,
         kill_reason,
-        Some(TurnKillReason::IdleTimeout) | Some(TurnKillReason::OperatorCancel)
-    ) || worker.is_dead();
-    let result_only = matches!(kill_reason, Some(TurnKillReason::ResultSeen)) && !worker.is_dead();
-    if unhealthy {
-        worker.recycle(match kill_reason {
-            Some(TurnKillReason::OperatorCancel) => RecycleReason::Cancel,
-            Some(TurnKillReason::IdleTimeout) => RecycleReason::IdleTimeout,
-            _ => RecycleReason::NonZeroExit,
-        });
-    } else if result_only {
-        // Worker still alive after `result` — return slot for reuse. CLI
-        // protocol may or may not actually serve another turn; the next
-        // checkout validates via try_wait and recycles on failure.
-        worker.check_in();
+        idle_timeout,
+        stdout,
+        json_errors,
+        stderr,
+    );
+    if let Some(s) = stream.as_mut() {
+        s.drain(&mut worker, &cancel);
+    }
+    if matches!(
+        kill_reason,
+        Some(TurnKillReason::IdleTimeout | TurnKillReason::OperatorCancel)
+    ) || worker.is_dead()
+        || stream.is_some_and(|s| s.uncertain)
+    {
+        worker.recycle(RecycleReason::StreamError);
     } else {
-        // Reached the break via `state.result_seen`, worker alive.
+        worker.mark_session_resumable();
         worker.check_in();
     }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn finish_pooled_primary(
+    event_tx: &Sender<AgentBusEvent>,
+    model: String,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    endpoint: String,
+    started_at: Instant,
+    kill_reason: Option<TurnKillReason>,
+    idle_timeout: Option<Duration>,
+    stdout: Vec<u8>,
+    json_errors: Vec<String>,
+    stderr: Vec<u8>,
+) {
     if kill_reason == Some(TurnKillReason::OperatorCancel) {
         let _ = event_tx.send(AgentBusEvent::TurnFailed {
             agent_id: model,
