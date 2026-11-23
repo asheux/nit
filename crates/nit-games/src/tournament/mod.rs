@@ -9,6 +9,8 @@ mod schedule;
 mod session;
 mod types;
 
+pub use schedule::first_match_id;
+
 pub const TOURNAMENT_FORMAT_VERSION: u32 = 1;
 
 pub type MatchResultWithPreview = (MatchResult, Option<MatchHistoryPreview>);

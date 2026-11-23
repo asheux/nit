@@ -472,7 +472,21 @@ impl GamesPetriDishRuntime {
             }
             state.games.replay.loading = true;
             state.games.replay.last_error = None;
+            let strategies = &run.config.strategies;
+            let match_id = strategies
+                .iter()
+                .position(|s| s.id == request.a_id)
+                .zip(strategies.iter().position(|s| s.id == request.b_id))
+                .and_then(|(a, b)| {
+                    nit_games::tournament::first_match_id(
+                        strategies.len(),
+                        run.config.self_play,
+                        a,
+                        b,
+                    )
+                });
             self.runs_runner.send(RunsCommand::LoadReplay {
+                match_id,
                 history_path,
                 a_id: request.a_id,
                 b_id: request.b_id,

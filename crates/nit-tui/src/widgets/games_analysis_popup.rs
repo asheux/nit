@@ -74,11 +74,9 @@ impl Styles {
             header: Style::default()
                 .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
-            label: Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            label: Style::default().fg(theme.title),
             value: Style::default().fg(theme.foreground),
-            dim: Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
+            dim: Style::default().fg(theme.muted),
             number: Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),

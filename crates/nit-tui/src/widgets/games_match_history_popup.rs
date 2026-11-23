@@ -1,7 +1,7 @@
 use nit_core::{AppState, UiSelectionPane};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -55,7 +55,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
@@ -76,17 +76,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 }
 
 pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
-    let zero_style = Style::default().fg(Color::White).bg(theme.background);
+    let zero_style = Style::default().fg(theme.foreground).bg(theme.background);
     let one_style = Style::default().fg(theme.accent).bg(theme.background);
-    let empty_cell_style = Style::default().fg(Color::DarkGray).bg(theme.background);
+    let empty_cell_style = Style::default().fg(theme.muted).bg(theme.background);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let entries = state.games.match_history.entries.as_slice();

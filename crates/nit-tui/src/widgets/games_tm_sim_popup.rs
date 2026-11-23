@@ -107,11 +107,9 @@ pub fn build_columns(
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -1370,10 +1368,7 @@ fn build_legend_lines(
     output_symbol: Option<u8>,
 ) -> Vec<Line<'static>> {
     let mut spans = Vec::new();
-    spans.push(Span::styled(
-        "legend: ",
-        Style::default().fg(theme.title).add_modifier(Modifier::DIM),
-    ));
+    spans.push(Span::styled("legend: ", Style::default().fg(theme.title)));
     for symbol in 0..symbols {
         if symbol > 0 {
             spans.push(Span::raw(" "));
@@ -1391,10 +1386,7 @@ fn build_legend_lines(
     }
     let (halt_style, halt_hit_style) = halt_styles(theme);
     let mut halt_line = Vec::new();
-    halt_line.push(Span::styled(
-        "halt: ",
-        Style::default().fg(theme.title).add_modifier(Modifier::DIM),
-    ));
+    halt_line.push(Span::styled("halt: ", Style::default().fg(theme.title)));
     halt_line.push(Span::styled("  ", halt_style));
     halt_line.push(Span::raw(" "));
     halt_line.push(Span::styled(
@@ -1402,10 +1394,7 @@ fn build_legend_lines(
         Style::default().fg(theme.foreground),
     ));
     halt_line.push(Span::raw("  "));
-    halt_line.push(Span::styled(
-        "output: ",
-        Style::default().fg(theme.title).add_modifier(Modifier::DIM),
-    ));
+    halt_line.push(Span::styled("output: ", Style::default().fg(theme.title)));
     halt_line.push(Span::styled("  ", halt_hit_style));
     let output_text = match (output_value, output_symbol) {
         (Some(value), Some(symbol)) => {

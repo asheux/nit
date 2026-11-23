@@ -67,6 +67,16 @@ impl SchedulePlan {
     }
 }
 
+/// Match ID assigned to an ordered pair in the first repetition.
+pub fn first_match_id(strategy_count: usize, self_play: bool, a: usize, b: usize) -> Option<usize> {
+    if a >= strategy_count || b >= strategy_count || (!self_play && a == b) {
+        return None;
+    }
+    let row_width = strategy_count - usize::from(!self_play);
+    let column = b - usize::from(!self_play && b > a);
+    a.checked_mul(row_width)?.checked_add(column)
+}
+
 // Distinct matchups in a single repetition: N*N with self-play, N*(N-1)
 // otherwise. Returns `None` on overflow so callers can refuse oversized
 // schedules instead of panicking deep inside scheduling.
@@ -87,4 +97,29 @@ pub(super) fn total_schedule_matches(
     self_play: bool,
 ) -> Option<usize> {
     matches_per_repetition(strategy_count, self_play)?.checked_mul(repetitions as usize)
+}
+
+#[cfg(test)]
+mod first_match_tests {
+    use super::*;
+
+    #[test]
+    fn first_match_ids_identify_the_scheduled_pair() {
+        for n in 1..8 {
+            for self_play in [true, false] {
+                let schedule = SchedulePlan::new(n, 2, self_play);
+                for a in 0..n {
+                    for b in 0..n {
+                        if !self_play && a == b {
+                            assert_eq!(first_match_id(n, self_play, a, b), None);
+                            continue;
+                        }
+                        let id = first_match_id(n, self_play, a, b).unwrap();
+                        let m = schedule.matchup(id).unwrap();
+                        assert_eq!((m.a_idx, m.b_idx, m.repetition), (a, b, 0));
+                    }
+                }
+            }
+        }
+    }
 }

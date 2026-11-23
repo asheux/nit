@@ -50,3 +50,23 @@ fn fsm_graph_spec_filters_unreachable_states() {
         .iter()
         .all(|edge| edge.from != 2 && edge.to != 2));
 }
+
+#[test]
+fn scrolled_strategy_detail_matches_window_of_full_document() {
+    let mut state = AppState::new(
+        std::env::temp_dir(),
+        nit_core::Buffer::empty("x", None),
+        nit_core::Buffer::empty("n", None),
+    );
+    state.games.strategy_inspect.lines = (0..120).map(|i| format!("step {i}")).collect();
+    let theme = Theme::default();
+    let full = build_lines(&state, &theme, 60);
+    let (details, _) = split_graph_sections(&state.games.strategy_inspect.lines);
+    for start in [0, 1, 47, 116] {
+        let window = build_lines_window(&state, &theme, 60, start, 8, &details);
+        assert_eq!(
+            window,
+            full.iter().skip(start).take(8).cloned().collect::<Vec<_>>()
+        );
+    }
+}

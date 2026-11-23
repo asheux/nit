@@ -47,11 +47,9 @@ pub fn build_columns(
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -507,10 +505,7 @@ fn build_legend_lines(
     output_action: Action,
 ) -> Vec<Line<'static>> {
     let mut legend = Vec::new();
-    legend.push(Span::styled(
-        "legend: ",
-        Style::default().fg(theme.title).add_modifier(Modifier::DIM),
-    ));
+    legend.push(Span::styled("legend: ", Style::default().fg(theme.title)));
     let mut push_cell = |label: &str, value: i16| {
         legend.push(Span::raw(" "));
         legend.push(Span::styled(
@@ -523,10 +518,7 @@ fn build_legend_lines(
     push_cell("1", 1);
 
     let output_line = Line::from(vec![
-        Span::styled(
-            "output: ",
-            Style::default().fg(theme.title).add_modifier(Modifier::DIM),
-        ),
+        Span::styled("output: ", Style::default().fg(theme.title)),
         Span::styled(
             format!("{output_symbol} (= {})", output_action.as_char()),
             Style::default().fg(theme.foreground),

@@ -609,11 +609,9 @@ fn build_lines_window(
     height: usize,
     display_lines: &[String],
 ) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -684,6 +682,7 @@ fn build_lines_window(
         if end > lines_start && start < lines_end {
             let slice_start = start.saturating_sub(lines_start).min(total_lines);
             let slice_end = end.saturating_sub(lines_start).min(total_lines);
+            idx = lines_start + slice_start;
             for line in &display_lines[slice_start..slice_end] {
                 let styled = style_definition_line(
                     line,
@@ -731,6 +730,7 @@ fn build_lines_window(
         if end > list_start && start < list_end {
             let slice_start = start.saturating_sub(list_start).min(list.len());
             let slice_end = end.saturating_sub(list_start).min(list.len());
+            idx = list_start + slice_start;
             for (offset, def) in list[slice_start..slice_end].iter().enumerate() {
                 let item_idx = slice_start + offset;
                 let style = if item_idx == state.games.strategy_inspect.selected_index {
@@ -810,7 +810,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
@@ -890,9 +890,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             scroll,
         );
         let left_paragraph = Paragraph::new(left_lines)
-            .style(Style::default().fg(theme.foreground).bg(theme.background))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0));
+            .style(Style::default().fg(theme.foreground).bg(theme.background));
         frame.render_widget(left_paragraph, left_inner);
 
         if let Some(graph) = graph_spec {
@@ -902,11 +900,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             );
             render_graph_canvas(frame, right_inner, theme, &graph);
         } else {
-            let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+            let label_style = Style::default().fg(theme.title);
             let value_style = Style::default().fg(theme.foreground);
-            let dim_style = Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM);
+            let dim_style = Style::default().fg(theme.muted);
             let max_width = right_inner.width.max(1) as usize;
             let mut graph_styled = Vec::new();
             let mut idx = 0usize;
@@ -951,10 +947,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         theme.selection_bg,
         scroll,
     );
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.foreground).bg(theme.background))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+    let paragraph =
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.background));
     frame.render_widget(paragraph, inner);
 }
 

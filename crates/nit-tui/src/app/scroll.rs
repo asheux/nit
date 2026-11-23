@@ -367,7 +367,9 @@ pub(super) fn adjust_run_browser_scroll(state: &mut AppState, screen: ratatui::l
     if inner_height == 0 {
         return;
     }
-    let selected = state.games.run_browser.selected;
+    let selected = 2
+        + usize::from(state.games.run_browser.last_error.is_some())
+        + state.games.run_browser.selected;
     if selected < state.games.run_browser.scroll_offset {
         state.games.run_browser.scroll_offset = selected;
     } else if selected >= state.games.run_browser.scroll_offset + inner_height {
@@ -381,7 +383,9 @@ pub(super) fn adjust_replay_scroll(state: &mut AppState, screen: ratatui::layout
     if inner_height == 0 {
         return;
     }
-    let selected = state.games.replay.selected_index;
+    let selected = 3
+        + usize::from(state.games.replay.last_error.is_some())
+        + state.games.replay.selected_index;
     if selected < state.games.replay.scroll_offset {
         state.games.replay.scroll_offset = selected;
     } else if selected >= state.games.replay.scroll_offset + inner_height {
@@ -395,7 +399,9 @@ pub(super) fn adjust_strategy_scroll(state: &mut AppState, screen: ratatui::layo
     if inner_height == 0 {
         return;
     }
-    let selected = state.games.strategy_inspect.selected_index;
+    let selected = 3
+        + usize::from(state.games.strategy_inspect.last_error.is_some())
+        + state.games.strategy_inspect.selected_index;
     if selected < state.games.strategy_inspect.scroll_offset {
         state.games.strategy_inspect.scroll_offset = selected;
     } else if selected >= state.games.strategy_inspect.scroll_offset + inner_height {

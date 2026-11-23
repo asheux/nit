@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -51,11 +51,9 @@ pub fn line_count(state: &AppState) -> usize {
 }
 
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -141,7 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
@@ -150,16 +148,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let mut lines = build_lines(state, theme, inner.width);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     let scroll = state.games.run_browser.scroll_offset.min(max_scroll);
+    let visible = lines.drain(scroll..).take(inner.height as usize).collect();
     lines = apply_ui_selection(
-        lines,
+        visible,
         state.ui_selection.as_ref(),
         UiSelectionPane::GamesRunBrowserPopup,
         theme.selection_bg,
         scroll,
     );
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.foreground).bg(theme.background))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+    let paragraph =
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.background));
     frame.render_widget(paragraph, inner);
 }

@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -41,7 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
@@ -58,10 +58,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         theme.selection_bg,
         scroll,
     );
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.foreground).bg(theme.background))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+    let paragraph =
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.background));
     frame.render_widget(paragraph, inner);
 }
 
@@ -104,11 +102,9 @@ fn build_lines_window(
     start: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title);
     let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(theme.muted);
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -191,6 +187,7 @@ fn build_lines_window(
         if end > lines_start && start < lines_end {
             let slice_start = start.saturating_sub(lines_start).min(total_rounds);
             let slice_end = end.saturating_sub(lines_start).min(total_rounds);
+            idx = lines_start + slice_start;
             for line in &state.games.replay.lines[slice_start..slice_end] {
                 push(
                     Line::from(Span::styled(trim_to_width(line, max_width), value_style)),
@@ -214,7 +211,10 @@ fn build_lines_window(
     let pairs = pair_list(state);
     if pairs.is_empty() {
         push(
-            Line::from(Span::styled("No pairwise results available.", dim_style)),
+            Line::from(Span::styled(
+                "No pairwise results. Run an interactive tournament to record matchups.",
+                dim_style,
+            )),
             &mut idx,
             &mut lines,
         );
@@ -229,6 +229,7 @@ fn build_lines_window(
         if end > pairs_start && start < pairs_end {
             let slice_start = start.saturating_sub(pairs_start).min(pairs.len());
             let slice_end = end.saturating_sub(pairs_start).min(pairs.len());
+            idx = pairs_start + slice_start;
             for (offset, (a, b)) in pairs[slice_start..slice_end].iter().enumerate() {
                 let pair_idx = slice_start + offset;
                 let is_selected = pair_idx == state.games.replay.selected_index;
@@ -252,11 +253,46 @@ fn build_lines_window(
     push(Line::from(""), &mut idx, &mut lines);
     push(
         Line::from(Span::styled(
-            "Enter replay · Esc close · R reset",
+            if pairs.is_empty() {
+                "Esc close"
+            } else {
+                "Enter replay · Esc close · R reset"
+            },
             dim_style,
         )),
         &mut idx,
         &mut lines,
     );
     lines
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn draws_only_one_window_for_scrolled_matchups_and_rounds() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        state.games.replay.pairs = (0..100)
+            .map(|i| (format!("player-{i}"), "other".into()))
+            .collect();
+        state.games.replay.selected_index = 80;
+        state.games.replay.scroll_offset = 83;
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
+        for expected in ["› player-80 vs other", "round 81"] {
+            terminal
+                .draw(|f| render(f, f.size(), &state, &theme))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let row: String = (1..69).map(|x| buf.get(x, 1).symbol()).collect();
+            assert_eq!(row.trim_end(), expected);
+            state.games.replay.lines = (0..100).map(|i| format!("round {i}")).collect();
+        }
+    }
 }

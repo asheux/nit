@@ -26,6 +26,7 @@ pub enum RunsCommand {
         summary_path: PathBuf,
     },
     LoadReplay {
+        match_id: Option<usize>,
         history_path: PathBuf,
         a_id: String,
         b_id: String,
@@ -85,11 +86,12 @@ fn runner_loop(cmd_rx: Receiver<RunsCommand>, event_tx: Sender<RunsEvent>) {
                 .map(|summary| RunsEvent::SummaryLoaded(Box::new(summary)))
                 .unwrap_or_else(RunsEvent::Error),
             RunsCommand::LoadReplay {
+                match_id,
                 history_path,
                 a_id,
                 b_id,
                 payoff,
-            } => load_replay(&history_path, &a_id, &b_id, payoff)
+            } => load_replay(&history_path, match_id, &a_id, &b_id, payoff)
                 .map(RunsEvent::ReplayLoaded)
                 .unwrap_or_else(RunsEvent::Error),
             RunsCommand::Shutdown => break,
@@ -204,35 +206,55 @@ fn entry_from_summary(summary: &RunSummary, summary_path: &Path) -> GamesRunEntr
 
 fn load_replay(
     history_path: &Path,
+    match_id: Option<usize>,
     a_id: &str,
     b_id: &str,
     payoff: PayoffMatrix,
 ) -> Result<ReplayData, String> {
     let file = File::open(history_path)
         .map_err(|e| format!("Failed to open {}: {e}", history_path.display()))?;
-    let reader = BufReader::new(file);
-    let a_tag = format!("\"a\":\"{a_id}\"");
-    let b_tag = format!("\"b\":\"{b_id}\"");
+    read_replay(BufReader::new(file), match_id, a_id, b_id, payoff)
+        .map_err(|e| format!("{e} in {}", history_path.display()))
+}
+
+fn read_replay(
+    reader: impl BufRead,
+    match_id: Option<usize>,
+    a_id: &str,
+    b_id: &str,
+    payoff: PayoffMatrix,
+) -> Result<ReplayData, String> {
+    #[derive(serde::Deserialize)]
+    struct Identity<'a> {
+        match_id: usize,
+        #[serde(borrow)]
+        a: std::borrow::Cow<'a, str>,
+        #[serde(borrow)]
+        b: std::borrow::Cow<'a, str>,
+    }
+
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
-        if !line.contains(&a_tag) || !line.contains(&b_tag) {
-            continue;
-        }
-        let record: MatchHistory =
+        let identity: Identity<'_> =
             serde_json::from_str(&line).map_err(|e| format!("History parse error: {e}"))?;
-        if record.a == a_id && record.b == b_id {
+        // History can use compact numeric strategy labels. The schedule ID
+        // identifies the pair even when different strategies share a label.
+        let matches = match match_id {
+            Some(id) => identity.match_id == id,
+            None => identity.a == a_id && identity.b == b_id,
+        };
+        if matches {
+            let mut record: MatchHistory =
+                serde_json::from_str(&line).map_err(|e| format!("History parse error: {e}"))?;
+            record.a = a_id.to_owned();
+            record.b = b_id.to_owned();
             return Ok(build_replay(record, payoff));
         }
     }
-    Err(format!(
-        "Match not found for {} vs {} in {}",
-        a_id,
-        b_id,
-        history_path.display()
-    ))
+    Err(format!("Match not found for {a_id} vs {b_id}"))
 }
 
 fn build_replay(record: MatchHistory, payoff: PayoffMatrix) -> ReplayData {
@@ -306,3 +328,26 @@ fn outcome_label(ch: char) -> &'static str {
 #[cfg(test)]
 #[path = "tests/games_runs.rs"]
 mod tests;
+
+#[cfg(test)]
+mod replay_identity_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_compact_labels_resolve_to_selected_schedule_entry() {
+        let history = br#"{"match_id":0,"match_index":1,"total_matches":4,"a":"1","b":"1","repetition":1,"rounds":1,"score_idx":"0"}
+{"match_id":1,"match_index":2,"total_matches":4,"a":"1","b":"1","repetition":1,"rounds":2,"score_idx":"00"}"#;
+        let replay = read_replay(
+            &history[..],
+            Some(1),
+            "cooperate",
+            "copy",
+            PayoffMatrix::default_pd(),
+        )
+        .unwrap();
+        assert!(replay.title.contains("cooperate vs copy"));
+        assert!(replay.lines[0].contains("rounds: 2"));
+        let legacy = read_replay(&history[..], None, "1", "1", PayoffMatrix::default_pd()).unwrap();
+        assert!(legacy.lines[0].contains("rounds: 1"));
+    }
+}
