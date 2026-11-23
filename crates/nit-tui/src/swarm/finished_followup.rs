@@ -8,6 +8,31 @@ use std::{
 
 pub(super) type TaskWrites = HashMap<PathBuf, BTreeSet<String>>;
 
+/// Prefer physical identity for existing files, including aliased workspace roots.
+/// Deleted files retain their lexical path for matching earlier writes.
+pub(super) fn workspace_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    let absolute = root.join(path);
+    let physical_root = root.canonicalize().ok()?;
+    for ancestor in absolute.ancestors() {
+        match ancestor.symlink_metadata() {
+            Ok(_) => {
+                let parent = ancestor.canonicalize().ok()?;
+                let inside = parent.strip_prefix(&physical_root).ok()?;
+                return Some(inside.join(absolute.strip_prefix(ancestor).ok()?));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 impl SwarmRuntime {
     pub(super) fn record_task_write(&mut self, mid: &str, agent: &str, path: &Path) {
         let Some(run) = self
@@ -27,10 +52,13 @@ impl SwarmRuntime {
         }) else {
             return;
         };
+        let Some(relative) = workspace_path(&run.spawn_cwd, path) else {
+            return;
+        };
         self.task_writes
             .entry(mid.into())
             .or_default()
-            .entry(run.spawn_cwd.join(path))
+            .entry(relative)
             .or_default()
             .insert(task.id.clone());
     }

@@ -14,7 +14,7 @@ use nit_core::{
 use std::{
     collections::BTreeSet,
     io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -163,23 +163,19 @@ impl SwarmRuntime {
             .get(mid)
             .ok_or("No active swarm for that mission.")?;
         let absolute = state.workspace_root.join(path);
-        let relative = absolute
-            .strip_prefix(&run.spawn_cwd)
-            .map_err(|_| "Choose a task explicitly for a path outside this mission workspace.")?;
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|c| matches!(c, Component::ParentDir))
-        {
-            return Err("Choose a task explicitly for a path outside this workspace.".into());
-        }
+        let resolved = super::finished_followup::workspace_path(&run.spawn_cwd, &absolute)
+            .ok_or("Choose a task explicitly for a path outside this mission workspace.")?;
+        let relative = resolved.as_path();
         let claimants: BTreeSet<_> = state
             .substrate
             .claims_iter()
             .filter(|c| c.kind == ClaimKind::ExclusiveWrite)
             .filter(|c| match &c.target {
                 ClaimTarget::File { path } | ClaimTarget::Region { path, .. } => {
-                    path == relative || path == &absolute
+                    path == relative
+                        || path == &absolute
+                        || super::finished_followup::workspace_path(&run.spawn_cwd, path).as_deref()
+                            == Some(relative)
                 }
                 ClaimTarget::Global => false,
             })
@@ -188,7 +184,7 @@ impl SwarmRuntime {
         let recorded = self
             .task_writes
             .get(mid)
-            .and_then(|paths| paths.get(&absolute));
+            .and_then(|paths| paths.get(relative));
         let mut owners = vec![];
         for task in run.tasks.iter().filter(|t| {
             t.writes && (!t.state.is_terminal() || super::finished_followup::available(run, t))
@@ -216,7 +212,11 @@ impl SwarmRuntime {
             }
             .is_some_and(|paths| paths.iter().any(|p| Path::new(p) == relative));
 
-            if written || declared || claimants.contains(task.agent_id.as_str()) {
+            if written
+                || declared
+                || claimants.contains(task.agent_id.as_str())
+                || recorded.is_some_and(|ids| ids.contains(&task.id))
+            {
                 owners.push(task);
             }
         }
@@ -224,7 +224,7 @@ impl SwarmRuntime {
             [task] if claimants.iter().all(|owner| *owner == task.agent_id) => Ok(task.id.clone()),
             _ => Err(format!(
                 "No unique live owner for {}. Choose a task explicitly: {}.",
-                relative.display(),
+                path.display(),
                 self.operator_followup_tasks(mid).join(", ")
             )),
         }

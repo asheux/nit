@@ -313,3 +313,39 @@ fn deferred_writer_waits_for_repair_added_by_earlier_reviewer() {
     assert!(next[0].prompt.contains(note));
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn writer_ownership_resolves_workspace_aliases_and_excludes_external_symlinks() {
+    use std::os::unix::fs::symlink;
+    let (mut rt, mut state, dir) = fixture();
+    let real = dir.join("repo");
+    let alias = dir.join("linked-repo");
+    fs::create_dir(&real).unwrap();
+    symlink(&real, &alias).unwrap();
+    fs::write(real.join("fees.rs"), "result").unwrap();
+    rt.set_test_workspace(MID, &real);
+    state.workspace_root = alias.clone();
+    rt.runs.get_mut(MID).unwrap().tasks[0].writes = true;
+    symlink(&dir, alias.join("outside")).unwrap();
+    for path in [alias.join("fees.rs"), alias.join("outside/ghost/fees.rs")] {
+        rt.handle_event(
+            &mut state,
+            &AgentBusEvent::FileWrite {
+                agent_id: "a".into(),
+                mission_id: Some(MID.into()),
+                path,
+            },
+        );
+    }
+    rt.handle_event(&mut state, &completed("a"));
+    assert_eq!(
+        rt.operator_followup_task_for_path(&state, MID, Path::new("fees.rs"))
+            .unwrap(),
+        "task-00"
+    );
+    assert!(rt
+        .operator_followup_task_for_path(&state, MID, Path::new("outside/ghost/fees.rs"))
+        .is_err());
+    fs::remove_dir_all(dir).unwrap();
+}
