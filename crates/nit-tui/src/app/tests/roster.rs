@@ -77,3 +77,94 @@ fn selecting_first_agent_preserves_skill_attached_to_empty_draft() {
     assert_eq!(state.agents.chat_input_cursor, 0);
     assert!(state.agents.messages.is_empty() && state.agents.active_turns.is_empty());
 }
+
+#[test]
+fn painted_recipient_button_and_model_pick_leave_multiline_draft_unsent() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut state = state_for_test();
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    state.select_station_center(nit_core::StationCenterTab::Chat);
+    state.agents.codex_cli_available = true;
+    let draft = "review\nthe fixture";
+    state.agents.chat_input = draft.into();
+    state.agents.chat_input_cursor = 3;
+    for (id, role, kind) in [
+        ("local", "Local", nit_core::AgentLaneKind::Mock),
+        ("codex-a", "Alpha", nit_core::AgentLaneKind::Codex),
+        ("codex-b", "Beta", nit_core::AgentLaneKind::Codex),
+    ] {
+        state.agents.agents.push(nit_core::AgentLane {
+            id: id.into(),
+            role: role.into(),
+            lane: format!("{kind:?}"),
+            kind,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            shadow: false,
+            last_message: String::new(),
+        });
+    }
+    state.agents.selected_mission = Some("draft-mission".into());
+    state.agents.agents[2].current_mission = Some("another-mission".into());
+    state.agents.selected_agent = Some("local".into());
+    let screen = Rect::new(0, 0, 176, 60);
+    let area = layout::split_for_state(screen, &state);
+    let swarm = SwarmRuntime::default();
+    let theme = Theme::default();
+    let mut term = Terminal::new(TestBackend::new(screen.width, screen.height)).unwrap();
+    let mut paint_find = |state: &mut AppState, where_: Rect, needle: &str| {
+        term.draw(|frame| {
+            agent_ops_view::render(frame, area.job, state, &swarm, &theme);
+            agent_console_view::render(frame, area.notes, state, &swarm, &theme);
+        })
+        .unwrap();
+        for y in where_.y..where_.bottom() {
+            let row: String = (where_.x..where_.right())
+                .map(|x| term.backend().buffer().get(x, y).symbol())
+                .collect();
+            if let Some(i) = row.find(needle) {
+                return (
+                    where_.x + unicode_width::UnicodeWidthStr::width(&row[..i]) as u16,
+                    y,
+                );
+            }
+        }
+        panic!("missing {needle}");
+    };
+    let mut input = InputState::new();
+    let mut click = |x, y, state: &mut AppState| {
+        handle_mouse_down(
+            MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            },
+            screen,
+            state,
+            &mut input,
+            &mut None,
+            &theme,
+        )
+    };
+    let (x, y) = paint_find(&mut state, area.notes, "[Select agent]");
+    click(x - 1, y, &mut state);
+    assert!(!state.agents.chat_needs_recipient);
+    assert!(click(x + 1, y, &mut state));
+    assert_eq!(state.focus, PaneId::JobOutput);
+    assert!(state.agents.chat_needs_recipient);
+    assert_eq!(state.agents.chat_input, draft);
+    let (x, y) = paint_find(&mut state, area.job, "Beta");
+    assert!(click(x + 1, y, &mut state));
+    assert_eq!(state.focus, PaneId::Notes);
+    assert_eq!(state.agents.selected_agent.as_deref(), Some("codex-b"));
+    assert_eq!(
+        state.agents.selected_context_mission(),
+        Some("draft-mission")
+    );
+    assert!(!state.agents.chat_needs_recipient);
+    assert_eq!(state.agents.chat_input, draft);
+    assert!(state.agents.messages.is_empty() && state.agents.active_turns.is_empty());
+}

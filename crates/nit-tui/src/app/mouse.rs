@@ -1263,6 +1263,17 @@ pub(super) fn handle_mouse_down_with_swarm(
             return true;
         }
     }
+    if agent_console_view::select_agent_button_at(
+        state,
+        swarm,
+        layout.notes,
+        mouse.column,
+        mouse.row,
+    ) {
+        input_state.mouse_select_anchor = None;
+        choose_chat_recipient(state);
+        return true;
+    }
     if let Some(cursor_char_idx) = agent_console_view::map_chat_input_point_to_cursor(
         layout.notes,
         state,
@@ -1557,6 +1568,10 @@ pub(super) fn handle_mouse_down_with_swarm(
     {
         state.focus = PaneId::JobOutput;
         apply_agent_ops_click_selection(state, line_idx, col, text_width, &lines);
+        if state.focus == PaneId::Notes {
+            reset_ui_selection(state, input_state);
+            return true;
+        }
         if state.agents.dock_tab == AgentOpsTab::Scratchpad {
             state.mode = Mode::Insert;
         }
@@ -1685,6 +1700,11 @@ pub(super) fn apply_agent_ops_click_selection(
 
             let was_selected = agent_idx == state.agents.roster_selected;
             sync_roster_selected_agent(state, agent_idx);
+            if matches!(meta.node, agent_ops_view::RosterBodyNode::Agent)
+                && confirm_chat_recipient(state)
+            {
+                return;
+            }
             if let Some(agent) = state.agents.agents.get(agent_idx) {
                 match meta.node {
                     agent_ops_view::RosterBodyNode::Agent => {
