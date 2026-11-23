@@ -1,4 +1,6 @@
-use nit_core::{AgentConsoleTab, AppState, Mode, PaneId};
+#[cfg(test)]
+use nit_core::PaneId;
+use nit_core::{AgentConsoleTab, AppState, Mode};
 
 pub(crate) fn attach(state: &mut AppState, id: &str) {
     if !super::focused(state) || state.terminal_popup.visible {
@@ -17,7 +19,7 @@ pub(crate) fn attach(state: &mut AppState, id: &str) {
     }
     state.terminal_pane_active = false;
     state.agents.console_tab = AgentConsoleTab::Thread;
-    state.focus = PaneId::Notes;
+    state.select_station_center(nit_core::StationCenterTab::Chat);
     state.mode = Mode::Normal;
 }
 

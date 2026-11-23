@@ -85,7 +85,7 @@ pub(super) fn draft(state: &mut AppState, swarm: &SwarmRuntime, pasted: Option<&
     } else {
         state.terminal_pane_active = false;
         state.agents.console_tab = AgentConsoleTab::Thread;
-        state.focus = PaneId::Notes;
+        state.select_station_center(nit_core::StationCenterTab::Chat);
         state.mode = Mode::Normal;
     }
     let draft = &mut state.agents.chat_input;

@@ -118,7 +118,7 @@ pub(super) fn close_active_editor_buffer(state: &mut AppState) {
             }
             let new_active = if idx > active { idx - 1 } else { idx };
             state.active_editor_buffer_id = new_active;
-            state.focus = PaneId::Editor;
+            state.select_station_center(crate::StationCenterTab::Editor);
             state.mode = Mode::Normal;
             let label = state
                 .editor_buffer()
@@ -135,10 +135,7 @@ pub(super) fn close_active_editor_buffer(state: &mut AppState) {
             state.buffers[active] = Buffer::empty("untitled", None);
             state.file_tree.root = state.workspace_root.clone();
             state.file_tree.open = true;
-            // File tree is a sidebar over the Editor pane; focus stays
-            // on Editor while the tree handles arrow keys (matches the
-            // existing `:tree` command's behaviour).
-            state.focus = PaneId::Editor;
+            state.focus_file_tree();
             state.mode = Mode::Normal;
             state.status = Some("Buffer closed; NITTree opened".into());
         }
@@ -171,7 +168,7 @@ fn open_file_at_path(state: &mut AppState, raw_path: &str) {
             state.jumplist.push(pre_open);
         }
         state.active_editor_buffer_id = buffer_id;
-        state.focus = PaneId::Editor;
+        state.select_station_center(crate::StationCenterTab::Editor);
         state.mode = Mode::Normal;
         state.visualizer.pending_reseed = true;
         state.status = Some(format!("Opened {}", absolute.display()));
@@ -196,7 +193,7 @@ fn open_file_at_path(state: &mut AppState, raw_path: &str) {
                 state.buffers.push(buf);
                 state.active_editor_buffer_id = state.buffers.len() - 1;
             }
-            state.focus = PaneId::Editor;
+            state.select_station_center(crate::StationCenterTab::Editor);
             state.mode = Mode::Normal;
             state.visualizer.pending_reseed = true;
             state.status = Some(format!("Opened {}", absolute.display()));
@@ -341,15 +338,25 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             }
         }
         ["tree"] | ["nittree"] | ["explore"] => {
-            state.file_tree.open = !state.file_tree.open;
-            if state.file_tree.open {
-                state.file_tree.root = state.workspace_root.clone();
-                state.focus = PaneId::Editor;
-                state.mode = Mode::Normal;
-                state.status = Some("NITTree opened".into());
-            } else {
-                state.status = Some("NITTree closed".into());
-            }
+            state.toggle_file_tree();
+            state.status = Some(
+                if state.tree_focused() {
+                    "NITTree focused"
+                } else if state.station_chat_center() {
+                    "Center focused"
+                } else {
+                    "NITTree closed"
+                }
+                .into(),
+            );
+            false
+        }
+        ["chat"] if state.station_chat_center() => {
+            state.select_station_center(crate::StationCenterTab::Chat);
+            false
+        }
+        ["editor"] if state.station_chat_center() => {
+            state.select_station_center(crate::StationCenterTab::Editor);
             false
         }
         ["find"] | ["ff"] => {

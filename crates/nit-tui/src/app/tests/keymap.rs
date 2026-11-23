@@ -2224,3 +2224,58 @@ fn f1_toggles_help_even_in_insert_mode() {
         Some(Action::ShowHelp)
     );
 }
+
+#[test]
+fn station_tree_directories_keep_tree_focus_and_files_open_in_center() {
+    use nit_core::StationCenterTab;
+    let mut state = state_for_test_in_workspace("center-file-tree");
+    state.center_tab = Some(StationCenterTab::Chat);
+    state.focus_file_tree();
+    let dir = state.workspace_root.join("src");
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("file.rs");
+    fs::write(&path, "fn first() {}").unwrap();
+    let area = ratatui::layout::Rect::new(0, 3, 32, 20);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    state.file_tree.rows = vec![nit_core::FileTreeRow {
+        text: "src".into(),
+        path: dir.clone(),
+        depth: 0,
+        kind: nit_core::FileTreeKind::Dir,
+    }];
+    assert!(handle_file_tree_key(&enter, &mut state, &mut syntax, area));
+    assert!(state.tree_focused() && state.file_tree.expanded_dirs.contains(&dir));
+    assert_eq!(state.station_center_tab(), StationCenterTab::Chat);
+    state.file_tree.rows = vec![nit_core::FileTreeRow {
+        text: "file.rs".into(),
+        path: path.clone(),
+        depth: 1,
+        kind: nit_core::FileTreeKind::File,
+    }];
+    assert!(handle_file_tree_key(&enter, &mut state, &mut syntax, area));
+    assert_eq!(state.editor_buffer().path(), Some(&path));
+    assert_eq!(state.station_center_tab(), StationCenterTab::Editor);
+    assert_eq!(state.focus, PaneId::Editor);
+    assert!(state.file_tree.open && !state.tree_focused());
+    state.agents.chat_input = "unsent".into();
+    state.select_station_center(StationCenterTab::Chat);
+    assert_eq!(state.agents.chat_input, "unsent");
+    assert_eq!(state.editor_buffer().path(), Some(&path));
+    fs::remove_dir_all(&state.workspace_root).unwrap();
+}
+
+#[test]
+fn station_terminal_exit_keeps_other_pane_focus_and_restores_chat() {
+    use nit_core::StationCenterTab;
+    let mut state = state_for_test();
+    state.center_tab = Some(StationCenterTab::Chat);
+    state.select_station_center(StationCenterTab::Terminal);
+    state.focus_file_tree();
+    state.terminal_pane_ended();
+    assert_eq!(state.station_center_tab(), StationCenterTab::Chat);
+    assert!(state.tree_focused());
+    assert!(!state.terminal_pane_active);
+    state.toggle_file_tree();
+    assert_eq!(state.focus, PaneId::Notes);
+}

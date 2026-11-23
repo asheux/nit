@@ -68,7 +68,7 @@ pub use mission_memory::{IndexedMission, MissionHit, MissionMemoryIndex};
 pub use mode::Mode;
 pub use mood::{Mood, MoodModulation};
 pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
-pub use pane::PaneId;
+pub use pane::{PaneId, StationCenterTab};
 pub use prompt::Prompt;
 pub use rule_config::{load_rule_config, persist_rule_selection, RuleConfigLoad, RulePersistence};
 pub use rule_protocol::{

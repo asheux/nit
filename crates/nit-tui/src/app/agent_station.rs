@@ -38,7 +38,11 @@ pub(super) fn handle_agent_station_key_with_clipboard(
                 buf.break_undo_group();
             }
         }
-        state.focus = target;
+        if state.station_chat_center() && target == PaneId::Notes {
+            state.select_station_center(nit_core::StationCenterTab::Chat);
+        } else {
+            state.focus_pane(target);
+        }
         if target == PaneId::JobOutput && state.agents.dock_tab == AgentOpsTab::Scratchpad {
             state.mode = Mode::Insert;
         } else if target != PaneId::Editor {
@@ -55,6 +59,17 @@ pub(super) fn handle_agent_station_key_with_clipboard(
         || games_modal_popup_open(state)
     {
         return false;
+    }
+
+    if state.station_chat_center() && state.focus == PaneId::Notes && !state.terminal_pane_active {
+        let empty = state.agents.chat_input.is_empty();
+        if ctrl_nav_dir(&key).is_some()
+            || (empty && is_command_prompt_open_key(&key))
+            || (empty && key.code == KeyCode::Tab)
+            || key.code == KeyCode::BackTab
+        {
+            return false;
+        }
     }
 
     match state.focus {
@@ -498,7 +513,7 @@ pub(super) fn handle_agent_ops_key(
                         state.agents.mission_selected = usize::MAX;
                     }
                 }
-                state.focus = PaneId::Notes;
+                state.select_station_center(nit_core::StationCenterTab::Chat);
                 state.mode = Mode::Normal;
                 state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
                 changed = true;
@@ -561,7 +576,7 @@ pub(super) fn handle_agent_ops_key(
             code: KeyCode::Enter,
             ..
         } => {
-            state.focus = PaneId::Notes;
+            state.select_station_center(nit_core::StationCenterTab::Chat);
             state.mode = Mode::Normal;
             state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
             changed = true;

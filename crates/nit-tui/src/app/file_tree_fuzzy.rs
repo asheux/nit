@@ -18,13 +18,17 @@ use crate::{
 use super::*;
 
 pub(super) fn file_tree_tick(state: &mut AppState, runner: &FileTreeRunner) -> bool {
-    if !state.file_tree.open {
+    if !state.file_tree.open && !state.station_chat_center() {
         return false;
     }
     if dispatch_submitted_prompt(state, runner) {
         return true;
     }
 
+    if state.file_tree.listings_scheduled {
+        return false;
+    }
+    state.file_tree.listings_scheduled = true;
     let preserve = file_tree::selected_path(state);
     let mut requested = false;
     for dir in file_tree::needed_dirs(state) {
@@ -262,7 +266,7 @@ pub(super) fn handle_file_tree_key(
     syntax: &mut SyntaxRuntime,
     editor_area: ratatui::layout::Rect,
 ) -> bool {
-    if !state.file_tree.open {
+    if !state.file_tree.open && !state.station_chat_center() {
         return false;
     }
     // When the substrate overlay is open, all keys (including Esc) should
@@ -280,6 +284,13 @@ pub(super) fn handle_file_tree_key(
         return handle_file_tree_prompt_key(key, state);
     }
     if is_petri_show_key(key, state) {
+        return false;
+    }
+    if state.station_chat_center()
+        && (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            || map_focus_hotkey(key).is_some()
+            || crate::pty::is_terminal_toggle_key(key))
+    {
         return false;
     }
     if ctrl_nav_dir(key).is_some() {
@@ -300,13 +311,13 @@ pub(super) fn handle_file_tree_key(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL)
     ) {
-        state.file_tree.open = false;
+        state.toggle_file_tree();
         return true;
     }
 
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            state.file_tree.open = false;
+            state.toggle_file_tree();
             true
         }
         KeyCode::Char('R') => {
@@ -354,7 +365,8 @@ pub(super) fn handle_file_tree_key(
                 nit_core::FileTreeKind::File => {
                     let path = row.path.clone();
                     apply_action_with_syntax(state, syntax, Action::OpenFile(path.clone()));
-                    state.file_tree.open = state.editor_buffer().path() != Some(&path);
+                    state.file_tree.open =
+                        state.station_chat_center() || state.editor_buffer().path() != Some(&path);
                     true
                 }
                 nit_core::FileTreeKind::Dir => {
@@ -369,6 +381,7 @@ pub(super) fn handle_file_tree_key(
                     } else {
                         state.file_tree.expanded_dirs.insert(path.clone());
                     }
+                    state.file_tree.listings_scheduled = false;
                     file_tree::rebuild_view(state, Some(path));
                     adjust_file_tree_scroll(state, editor_area);
                     true
@@ -616,7 +629,7 @@ pub(super) fn handle_fuzzy_search_key(
                 buf.cursor.desired_col = None;
                 buf.ensure_visible();
             }
-            state.file_tree.open = false;
+            state.file_tree.open = state.station_chat_center();
             state.fuzzy_search.close();
             runtime.preview_model = None;
             runtime.last_preview_key = None;

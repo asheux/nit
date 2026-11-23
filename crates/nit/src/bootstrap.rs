@@ -78,7 +78,16 @@ pub(crate) fn configure_app_state(
     state.launched_with_file_path = target_path.is_some_and(|p| p.is_file());
 
     // Open the file tree when launching into a directory rather than a single file.
-    if !state.launched_with_file_path {
+    if review_on_launch {
+        let tab = if state.launched_with_file_path {
+            nit_core::StationCenterTab::Editor
+        } else {
+            nit_core::StationCenterTab::Chat
+        };
+        state.center_tab = Some(tab);
+        state.file_tree.open = true;
+        state.select_station_center(tab);
+    } else if !state.launched_with_file_path {
         state.file_tree.root = state.workspace_root.clone();
         state.file_tree.open = true;
         state.focus = PaneId::Editor;

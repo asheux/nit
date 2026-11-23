@@ -370,7 +370,7 @@ fn runtime_defaults_to_auto_and_preserves_explicit_mcp() {
 }
 
 #[test]
-fn launch_selects_skills_for_editor_sessions_and_preserves_editor_focus() {
+fn station_launch_shows_chat_for_directories_and_editor_for_files() {
     use nit_core::{AppKind, AppState, Buffer, GateMonitorSubView, PaneId};
 
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -394,8 +394,27 @@ fn launch_selects_skills_for_editor_sessions_and_preserves_editor_focus() {
             );
             assert_eq!(state.gate_monitor_sub_view, tab);
             assert_eq!(state.show_change_review, review);
-            assert_eq!(state.focus, PaneId::Editor);
-            assert_eq!(state.file_tree.open, tree_open);
+            let expects_chat = review && tree_open;
+            assert_eq!(
+                state.focus,
+                if expects_chat {
+                    PaneId::Notes
+                } else {
+                    PaneId::Editor
+                }
+            );
+            assert_eq!(state.file_tree.open, review || tree_open);
+            assert_eq!(state.station_chat_center(), review);
+            if review {
+                assert_eq!(
+                    state.station_center_tab(),
+                    if expects_chat {
+                        nit_core::StationCenterTab::Chat
+                    } else {
+                        nit_core::StationCenterTab::Editor
+                    }
+                );
+            }
             assert_eq!(state.selected_skill, 0);
             assert!(!state.skill_reader_open);
         }

@@ -5,7 +5,7 @@ use crate::{
     gol_rules::{RuleCatalog, SelectedRule},
     lab::AppKind,
     mode::Mode,
-    pane::PaneId,
+    pane::{PaneId, StationCenterTab},
     prompt::Prompt,
     rule_protocol::{RuleMode, RuleRef},
     search::{FuzzySearchState, SearchMode},
@@ -236,6 +236,9 @@ pub struct Intervention {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub app_kind: AppKind,
+    /// Standard station layout; explicit labs keep their independent panes.
+    #[serde(skip)]
+    pub center_tab: Option<StationCenterTab>,
     pub workspace_root: PathBuf,
     /// `true` when nit was launched with a file path (`nit foo.rs`), `false`
     /// when launched with a directory or no argument (`nit`, `nit src/`).
@@ -765,6 +768,83 @@ fn default_games_state() -> GamesState {
 }
 
 impl AppState {
+    pub fn station_chat_center(&self) -> bool {
+        self.center_tab.is_some() && self.multipane.is_none()
+    }
+
+    pub fn station_center_tab(&self) -> StationCenterTab {
+        self.center_tab.unwrap_or_default()
+    }
+
+    pub fn select_station_center(&mut self, tab: StationCenterTab) {
+        if self.station_chat_center() {
+            self.center_tab = Some(tab);
+        }
+        self.focus = tab.pane();
+        self.terminal_pane_active = tab == StationCenterTab::Terminal;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn terminal_pane_ended(&mut self) {
+        self.terminal_pane_active = false;
+        if self.station_chat_center() {
+            self.center_tab = Some(StationCenterTab::Chat);
+            if self.focus == PaneId::Notes {
+                self.mode = Mode::Normal;
+            }
+        } else {
+            self.focus = PaneId::Editor;
+        }
+    }
+
+    pub fn focus_file_tree(&mut self) {
+        self.file_tree.open = true;
+        self.focus = if self.station_chat_center() {
+            PaneId::FileTree
+        } else {
+            PaneId::Editor
+        };
+        self.mode = Mode::Normal;
+    }
+
+    pub fn tree_focused(&self) -> bool {
+        if self.station_chat_center() {
+            self.focus == PaneId::FileTree
+        } else {
+            self.file_tree.open && self.focus == PaneId::Editor
+        }
+    }
+
+    pub fn toggle_file_tree(&mut self) {
+        if self.station_chat_center() && self.tree_focused() {
+            self.select_station_center(self.station_center_tab());
+        } else if self.station_chat_center() || !self.file_tree.open {
+            self.file_tree.root = self.workspace_root.clone();
+            self.focus_file_tree();
+        } else {
+            self.file_tree.open = false;
+        }
+    }
+
+    pub fn focus_pane(&mut self, pane: PaneId) {
+        if self.station_chat_center() {
+            match pane {
+                PaneId::Editor => return self.select_station_center(StationCenterTab::Editor),
+                PaneId::Notes => {
+                    let tab = if self.terminal_pane_active {
+                        StationCenterTab::Terminal
+                    } else {
+                        StationCenterTab::Chat
+                    };
+                    return self.select_station_center(tab);
+                }
+                PaneId::FileTree => return self.focus_file_tree(),
+                _ => {}
+            }
+        }
+        self.focus = pane;
+    }
+
     pub fn change_review_active(&self) -> bool {
         self.app_kind == AppKind::Gol && self.show_change_review
     }
@@ -785,6 +865,7 @@ impl AppState {
         let games = default_games_state();
         Self {
             app_kind: AppKind::Gol,
+            center_tab: None,
             launched_with_file_path: false,
             pending_count: None,
             gitignored_dirs: Vec::new(),

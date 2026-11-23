@@ -22,7 +22,6 @@ use super::AppState;
 use crate::buffer::{JumpEntry, JumpList};
 use crate::cursor::Cursor;
 use crate::mode::Mode;
-use crate::pane::PaneId;
 
 /// Outcome of a `Ctrl-O` / `Ctrl-I` step. Callers use it to decide whether
 /// to switch buffers (cross-buffer), reposition the cursor (in-buffer), or
@@ -101,7 +100,7 @@ pub fn apply_step(state: &mut AppState, dir: JumpDirection) -> JumpStepOutcome {
             col,
         } => {
             state.active_editor_buffer_id = target_buffer_id;
-            state.focus = PaneId::Editor;
+            state.select_station_center(crate::StationCenterTab::Editor);
             state.mode = Mode::Normal;
             place_focused_cursor(state, line, col);
         }

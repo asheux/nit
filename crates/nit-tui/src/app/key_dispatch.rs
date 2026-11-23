@@ -90,7 +90,7 @@ pub(super) fn handle_editor_buffer_shortcuts(
     if !pane_accepts_text_input(state, state.focus) {
         return false;
     }
-    if state.file_tree.open && state.focus == PaneId::Editor {
+    if state.tree_focused() {
         return false;
     }
     if handle_jumplist_shortcut(key, state) {
@@ -896,6 +896,10 @@ pub(super) fn map_key_to_action(
             ..
         } => Some(Action::ToggleDebug),
         KeyEvent {
+            code: KeyCode::BackTab,
+            ..
+        }
+        | KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
             ..

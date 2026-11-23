@@ -78,8 +78,24 @@ fn should_auto_pair(buf: &Buffer, opener: char) -> bool {
     true
 }
 
-fn focus_order_index(focus: PaneId) -> usize {
-    PaneId::ALL.iter().position(|p| *p == focus).unwrap_or(0)
+fn cycle_focus(state: &mut AppState, forward: bool) {
+    let order = if state.station_chat_center() {
+        [
+            PaneId::FileTree,
+            PaneId::JobOutput,
+            state.station_center_tab().pane(),
+            PaneId::Visualizer,
+            PaneId::GateMonitor,
+        ]
+    } else {
+        PaneId::ALL
+    };
+    let index = order
+        .iter()
+        .position(|pane| *pane == state.focus)
+        .unwrap_or(0);
+    let step = if forward { 1 } else { order.len() - 1 };
+    state.focus_pane(order[(index + step) % order.len()]);
 }
 
 /// Run `f` on the focused buffer (if any), then call `ensure_visible` so
@@ -344,23 +360,9 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             }
         }
-        Action::FocusNextPane => {
-            let idx = focus_order_index(state.focus);
-            let next = (idx + 1) % PaneId::ALL.len();
-            state.focus = PaneId::ALL[next];
-        }
-        Action::FocusPrevPane => {
-            let idx = focus_order_index(state.focus);
-            let prev = if idx == 0 {
-                PaneId::ALL.len() - 1
-            } else {
-                idx - 1
-            };
-            state.focus = PaneId::ALL[prev];
-        }
-        Action::FocusPane(p) => {
-            state.focus = p;
-        }
+        Action::FocusNextPane => cycle_focus(state, true),
+        Action::FocusPrevPane => cycle_focus(state, false),
+        Action::FocusPane(p) => state.focus_pane(p),
         Action::SwitchMode(m) => switch_mode_with_buffer(state, m),
         Action::ToggleMode => {
             // ToggleMode is special: even if the new mode isn't Normal,
@@ -984,20 +986,15 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.debug = !state.debug;
             state.status = Some(format!("Debug {}", on_off(state.debug)));
         }
-        Action::ToggleFileTree => {
-            state.file_tree.open = !state.file_tree.open;
-            if state.file_tree.open {
-                state.file_tree.root = state.workspace_root.clone();
-                state.focus = PaneId::Editor;
-                state.mode = Mode::Normal;
-            }
-        }
+        Action::ToggleFileTree => state.toggle_file_tree(),
         Action::OpenSearchPopup(mode) => {
             state.show_help = false;
             state.rule_picker.open = false;
             state.protocol_picker.open = false;
             state.fuzzy_search.open(mode, state.workspace_root.clone());
-            state.focus = PaneId::Editor;
+            if !state.station_chat_center() {
+                state.focus = PaneId::Editor;
+            }
             state.mode = Mode::Normal;
         }
         Action::CloseSearchPopup => {
@@ -1017,8 +1014,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                     state.jumplist.push(pre_open);
                 }
                 state.active_editor_buffer_id = buffer_id;
-                state.focus = PaneId::Editor;
-                state.mode = Mode::Normal;
+                state.select_station_center(StationCenterTab::Editor);
                 state.visualizer.pending_reseed = true;
                 state.status = Some(format!("Opened {}", path.display()));
             } else {
@@ -1046,7 +1042,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                             state.buffers.push(buf);
                             state.active_editor_buffer_id = state.buffers.len() - 1;
                         }
-                        state.focus = PaneId::Editor;
+                        state.select_station_center(StationCenterTab::Editor);
                         state.mode = Mode::Normal;
                         state.visualizer.pending_reseed = true;
                         state.status = Some(format!("Opened {}", path.display()));
@@ -1529,15 +1525,16 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             open_definition_popup(state);
         }
         Action::ToggleTerminalPane => {
-            state.terminal_pane_active = !state.terminal_pane_active;
-            // Focus the chat slot so the terminal owns input; restore the
-            // editor on toggle-off. The runner reconciles the PtySession.
-            if state.terminal_pane_active {
-                state.focus = PaneId::Notes;
-                state.mode = Mode::Normal;
+            let tab = if state.terminal_pane_active {
+                if state.station_chat_center() {
+                    StationCenterTab::Chat
+                } else {
+                    StationCenterTab::Editor
+                }
             } else {
-                state.focus = PaneId::Editor;
-            }
+                StationCenterTab::Terminal
+            };
+            state.select_station_center(tab);
         }
         Action::ToggleTerminalPopup => {
             // Record the intent only — the event loop pins the cwd and
