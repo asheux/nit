@@ -1,76 +1,21 @@
-# Terminal
+# Run a shell inside nit
 
-nit can run a real OS shell inside the TUI, with text selection, copy, and
-scrollback. This doc covers where the shell appears, its keys, and how
-selection and scrolling work. All key bindings live in `docs/KEYBINDINGS.md`.
+Press **F4** to open a shell over your current work. Run a command, then press **F4** again to return to the editor. Open the popup again to see the same shell, its output, and any command still running.
 
-## What it is
-
-nit starts your `$SHELL` (or `/bin/sh` when it is unset) in a PTY. A `vt100`
-emulator parses the output and nit paints it into its own frame. The shell sees
-`TERM=xterm-256color`, so colours, prompts, and full-screen programs work.
-
-The shell is not your host terminal. nit captures the mouse and keyboard to
-drive the rest of the UI, so nit provides selection and scrollback itself. This
-is the same model `tmux`, vim's `:terminal`, and editor terminals use.
-
-## Three surfaces
-
-| Surface | Where it appears | Behaviour |
+| Where you want the shell | How to open it | How to return |
 |---|---|---|
-| Agent-chat tab | The chat pane toggles between `AGENT CHAT` and `TERMINAL`. | Tabbing away parks the shell. Tabbing back resumes the same session. |
-| Modal popup | A centred overlay over whatever you are doing. | Closing hides the shell. Reopening resumes the same session. |
-| Multipane pane | Any pane can flip its `NIT` / `TERM` title pill to a terminal. | A grid of independent shells runs side by side. |
+| Popup over the station or pane grid | `F4` or `Ctrl+Shift+T` | Use the same key, or press `Esc` twice. The first Escape reaches the shell program. |
+| In place of Agent Chat | `Ctrl+\` | Click the chat tab or toggle back from the shell. |
+| In one multipane pane | Click its **TERM** tab or press `Ctrl+\` in that pane | Click **NIT** or toggle back. Other panes keep their own sessions. |
 
-The shell ends only when it exits (you run `exit`, or it dies) or when nit
-quits.
+Click inside a pane terminal to give it keyboard focus. You can leave a build running there while you edit elsewhere. Typing `exit` ends the shell. Quitting nit ends its embedded shell sessions. To launch several panes already running commands, see [Multipane](MULTIPANE.md).
 
-In multipane mode, `nit multipane --terminal-command <COMMAND>` (one per pane)
-starts each pane with its terminal open running that command. See
-`docs/MULTIPANE.md`.
+## Copy output and paste commands
 
-## Keys
+Drag across terminal output with the left mouse button and release to copy the selection to the system clipboard. Use `Ctrl+Shift+C` to copy it again. Scroll the wheel over a terminal to read up to 10,000 lines of history. Typing returns the view to live output.
 
-| Action | Key |
-|--------|-----|
-| Toggle the agent-chat terminal tab | `Ctrl+\` |
-| Open or close the modal popup | `F4` or `Ctrl+Shift+T` |
-| Close the popup | `Esc Esc` (the first Esc reaches the shell, the second closes) |
-| Toggle a multipane pane's terminal | click its `TERM` / `NIT` pill, or `Ctrl+\` on the focused pane |
-| Paste the clipboard | your terminal's paste shortcut, or `Ctrl+Shift+V` |
-| Copy the selection again | `Ctrl+Shift+C` |
+Use your host terminal's paste shortcut, such as `Cmd+V` on macOS, or `Ctrl+Shift+V` when the host passes that shortcut to nit. Programs that enable bracketed paste receive pasted text as a block.
 
-Every other keystroke goes to the shell, so editors, REPLs, and full-screen
-TUIs run as usual.
+## Which shell runs?
 
-## Selecting and copying text
-
-Drag with the left mouse button to select a rectangle of terminal text. nit
-highlights the selection and copies it to the system clipboard when you release
-the button. No extra copy keystroke is needed. This matches selection in nit's
-editor and chat panes. It works in the agent-chat terminal, the popup, and the
-focused multipane pane.
-
-## Pasting
-
-Paste with your terminal's usual shortcut (`Cmd+V` on macOS, `Ctrl+Shift+V` on
-Linux, or middle click). nit sends the text to the shell as one chunk, turns
-newlines into carriage returns like a real terminal, and wraps the text in
-bracketed-paste markers when the foreground program turned that mode on, so
-shells and editors treat it as a paste rather than typed keys.
-
-## Scrolling
-
-The terminal keeps 10,000 lines of scrollback. Scroll the mouse wheel over any
-terminal to move through history. Typing snaps the view back to the live
-bottom, like a real terminal. The scrollback belongs to the `vt100` emulator;
-the wheel only moves its offset.
-
-## Notes
-
-- Rendering is separate from output. The PTY reader thread keeps the grid
-  current on its own, and nit samples it at its normal frame rate. A chatty
-  process cannot flood nit's redraw loop. The popup repaints every frame to
-  keep live output smooth. See `docs/PERF.md`.
-- A parked or hidden terminal keeps its shell, and any running process, alive
-  in the background until you return to it or quit nit.
+On macOS and Linux, nit starts `$SHELL`, with `/bin/sh` as the fallback. On Windows it uses `%COMSPEC%`, with `cmd.exe` as the fallback. A new multipane shell starts in that pane's working directory. Changing directories in a running shell works as usual.
