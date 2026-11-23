@@ -151,6 +151,32 @@ impl Drop for ClaudeRunner {
     }
 }
 
+fn cancel_queued_turns(
+    queue: &mut VecDeque<ClaudeCommand>,
+    event_tx: &Sender<AgentBusEvent>,
+    agent: Option<&str>,
+) {
+    queue.retain(|command| {
+        let ClaudeCommand::RunTurn {
+            model, mission_id, ..
+        } = command
+        else {
+            return true;
+        };
+        if agent.is_some_and(|id| id != model) {
+            return true;
+        }
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model.clone(),
+            mission_id: mission_id.clone(),
+            thread_id: None,
+            token_count: None,
+            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+        });
+        false
+    });
+}
+
 fn runner_loop(
     config: ClaudeRunnerConfig,
     _shutdown: Arc<AtomicBool>,
@@ -201,13 +227,10 @@ fn runner_loop(
                             turn.cancel.store(true, Ordering::Relaxed);
                         }
                     }
-                    queue.retain(|cmd| match cmd {
-                        ClaudeCommand::RunTurn { model, .. } => model.as_str() != agent_id,
-                        _ => true,
-                    });
+                    cancel_queued_turns(&mut queue, &event_tx, Some(&agent_id));
                 }
                 ClaudeCommand::CancelAll => {
-                    queue.clear();
+                    cancel_queued_turns(&mut queue, &event_tx, None);
                     for turn in active.iter() {
                         turn.cancel.store(true, Ordering::Relaxed);
                     }

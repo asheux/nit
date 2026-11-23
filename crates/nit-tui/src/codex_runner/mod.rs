@@ -168,6 +168,32 @@ impl Drop for CodexRunner {
     }
 }
 
+fn cancel_queued_turns(
+    queue: &mut VecDeque<CodexCommand>,
+    event_tx: &Sender<AgentBusEvent>,
+    agent: Option<&str>,
+) {
+    queue.retain(|command| {
+        let CodexCommand::RunTurn {
+            model, mission_id, ..
+        } = command
+        else {
+            return true;
+        };
+        if agent.is_some_and(|id| id != model) {
+            return true;
+        }
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model.clone(),
+            mission_id: mission_id.clone(),
+            thread_id: None,
+            token_count: None,
+            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+        });
+        false
+    });
+}
+
 fn runner_loop(
     mode: CodexRuntimeMode,
     config: CodexRunnerConfig,
@@ -314,13 +340,10 @@ fn runner_loop_exec(
                     }
                     // Drop pending RunTurn commands for the same agent so a
                     // queued turn doesn't fire after the user aborted.
-                    queue.retain(|cmd| match cmd {
-                        CodexCommand::RunTurn { model, .. } => model.as_str() != agent_id,
-                        _ => true,
-                    });
+                    cancel_queued_turns(&mut queue, &event_tx, Some(&agent_id));
                 }
                 CodexCommand::CancelAll => {
-                    queue.clear();
+                    cancel_queued_turns(&mut queue, &event_tx, None);
                     for turn in active.iter() {
                         turn.cancel.store(true, Ordering::Relaxed);
                     }
@@ -767,13 +790,10 @@ fn runner_loop_mcp(
                             });
                         }
                     }
-                    queue.retain(|cmd| match cmd {
-                        CodexCommand::RunTurn { model, .. } => model.as_str() != agent_id,
-                        _ => true,
-                    });
+                    cancel_queued_turns(&mut queue, &event_tx, Some(&agent_id));
                 }
                 CodexCommand::CancelAll => {
-                    queue.clear();
+                    cancel_queued_turns(&mut queue, &event_tx, None);
                     for (_id, turn) in in_flight.drain() {
                         let _ = event_tx.send(AgentBusEvent::TurnFailed {
                             agent_id: turn.agent_id,

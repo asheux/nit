@@ -42,13 +42,7 @@ fn lane_with_queue(
     }
 }
 
-// Pins propose-03 important #3: when the runner-internal queue is non-empty
-// and the operator triggers CancelAll/CancelTurn, today's runner_loop calls
-// queue.clear() / queue.retain() without emitting TurnFailed for the dropped
-// queued commands. Without that emit, the bus-side queue_len decrement at
-// agent_bus.rs:482 never runs and the roster carries ghost queue rows.
 #[test]
-#[ignore = "fails until claude_runner::CancelAll emits TurnFailed for dropped queued items"]
 fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     use nit_core::state::{AgentLaneKind, AppState};
     use nit_core::{AgentBusEvent, OPERATOR_CANCEL_TURN_MESSAGE};
@@ -64,7 +58,42 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
         .push(lane_with_queue("claude-opus", AgentLaneKind::Claude, 3));
     state.agents.rebuild_agents_index();
 
-    // Today CancelAll only kills the active turn → exactly one TurnFailed.
+    let pending = |lane: &str, mission: &str| super::ClaudeCommand::RunTurn {
+        model: lane.into(),
+        cwd: ".".into(),
+        mission_id: Some(mission.into()),
+        resume_session_id: None,
+        persist_session: false,
+        effort: None,
+        prompt: "queued".into(),
+        read_only: true,
+        max_turns: None,
+    };
+    let mut queue = std::collections::VecDeque::from([
+        pending("claude-opus", "first"),
+        pending("other", "unrelated"),
+        pending("claude-opus", "second"),
+    ]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    super::cancel_queued_turns(&mut queue, &tx, Some("other"));
+    assert!(
+        matches!(rx.try_recv().unwrap(), AgentBusEvent::TurnFailed { agent_id, .. } if agent_id == "other")
+    );
+    assert_eq!(queue.len(), 2);
+
+    super::cancel_queued_turns(&mut queue, &tx, None);
+    super::cancel_queued_turns(&mut queue, &tx, None);
+    assert!(queue.is_empty());
+    for expected in ["first", "second"] {
+        let event = rx.try_recv().unwrap();
+        assert!(
+            matches!(&event, AgentBusEvent::TurnFailed { agent_id, mission_id: Some(mission), message, .. } if agent_id == "claude-opus" && mission == expected && message == OPERATOR_CANCEL_TURN_MESSAGE)
+        );
+        event.apply(&mut state);
+    }
+    assert!(rx.try_recv().is_err());
+    assert_eq!(state.agents.agents_get("claude-opus").unwrap().queue_len, 1);
+    // The active worker reports its own cancellation when it exits.
     AgentBusEvent::TurnFailed {
         agent_id: "claude-opus".into(),
         mission_id: None,
@@ -75,12 +104,7 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     .apply(&mut state);
 
     let agent = state.agents.agents_get("claude-opus").unwrap();
-    assert_eq!(
-        agent.queue_len, 0,
-        "after CancelAll every queue_len increment must be paired with a \
-         TurnFailed decrement; currently leaks because runner does not \
-         emit TurnFailed for runner-queued turns"
-    );
+    assert_eq!(agent.queue_len, 0);
 }
 
 #[test]

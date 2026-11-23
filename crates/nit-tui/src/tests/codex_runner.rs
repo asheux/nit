@@ -522,12 +522,7 @@ fn json_errors_cap_drains_oldest_half_on_overflow() {
     );
 }
 
-// Codex-side companion to claude_runner's queue_len parity test. Pins
-// propose-03 important #3: when CancelAll/CancelTurn drops queued
-// commands, today it does NOT emit TurnFailed for them, so the bus-side
-// queue_len decrement at agent_bus.rs:482 never runs.
 #[test]
-#[ignore = "fails until codex_runner::CancelAll emits TurnFailed for dropped queued items"]
 fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     use nit_core::state::{AgentLane, AgentLaneKind, AgentStatus, AppState};
     use nit_core::OPERATOR_CANCEL_TURN_MESSAGE;
@@ -550,6 +545,41 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     });
     state.agents.rebuild_agents_index();
 
+    let pending = |lane: &str, mission: &str| super::CodexCommand::RunTurn {
+        model: lane.into(),
+        cwd: ".".into(),
+        mission_id: Some(mission.into()),
+        resume_thread_id: None,
+        persist_session: false,
+        reasoning_effort: None,
+        prompt: "queued".into(),
+        read_only: true,
+    };
+    let mut queue = std::collections::VecDeque::from([
+        pending("gpt-test", "first"),
+        pending("other", "unrelated"),
+        pending("gpt-test", "second"),
+    ]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    super::cancel_queued_turns(&mut queue, &tx, Some("other"));
+    assert!(
+        matches!(rx.try_recv().unwrap(), AgentBusEvent::TurnFailed { agent_id, .. } if agent_id == "other")
+    );
+    assert_eq!(queue.len(), 2);
+
+    super::cancel_queued_turns(&mut queue, &tx, None);
+    super::cancel_queued_turns(&mut queue, &tx, None);
+    assert!(queue.is_empty());
+    for expected in ["first", "second"] {
+        let event = rx.try_recv().unwrap();
+        assert!(
+            matches!(&event, AgentBusEvent::TurnFailed { agent_id, mission_id: Some(mission), message, .. } if agent_id == "gpt-test" && mission == expected && message == OPERATOR_CANCEL_TURN_MESSAGE)
+        );
+        event.apply(&mut state);
+    }
+    assert!(rx.try_recv().is_err());
+    assert_eq!(state.agents.agents_get("gpt-test").unwrap().queue_len, 1);
+    // The active worker reports its own cancellation when it exits.
     AgentBusEvent::TurnFailed {
         agent_id: "gpt-test".into(),
         mission_id: None,
@@ -560,12 +590,7 @@ fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
     .apply(&mut state);
 
     let agent = state.agents.agents_get("gpt-test").unwrap();
-    assert_eq!(
-        agent.queue_len, 0,
-        "after CancelAll every queue_len increment must be paired with a \
-         TurnFailed decrement; currently leaks because the runner does \
-         not emit TurnFailed for runner-queued turns"
-    );
+    assert_eq!(agent.queue_len, 0);
 }
 
 #[test]
