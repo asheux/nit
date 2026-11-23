@@ -52,4 +52,4 @@ Run `nit --version` to identify your installed build and `nit update` to upgrade
 
 **About the experimental scores.** The Game of Life lab encodes source text as a grid and observes how the pattern evolves under a chosen rule. A survival time describes that simulation. To establish whether a change fixes a bug, use a reproducing test, a diff review and checks against the intended behavior. [Interpret the lab measurements](docs/SEEDS.md)
 
-Press F1 in the editor for controls. The guides cover daily workflows, what agents can access, and how to interpret results. [Browse the documentation](docs/README.md) · [Watch the demo](https://nit.tools/nit-demo.mp4) · [MIT license](LICENSE)
+Press F1 in the editor for controls. The guides cover daily workflows, what agents can access, and how to interpret results. [Browse the documentation](docs/README.md) · [Tour the editor](https://nit.tools/#features) · [MIT license](LICENSE)
