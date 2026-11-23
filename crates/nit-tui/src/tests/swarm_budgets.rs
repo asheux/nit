@@ -193,6 +193,16 @@ fn apply_prompt_budget_three_stage_order() {
 }
 
 #[test]
+fn all_needed_proposals_are_compacted_before_the_judge() {
+    let mut prompt = integrate_prompt_with_checklist(&["src/main.rs"], 250_000);
+    apply_prompt_budget(&mut prompt, 35_000, &integrate_task(), 3);
+    assert!(prompt.len() <= 35_000);
+    assert_eq!(prompt.matches("Dropped propose dep payload").count(), 2);
+    assert!(prompt.contains(&"j".repeat(20_000)));
+    assert!(prompt.contains("<SWARM_TASK_COMPLETE>"));
+}
+
+#[test]
 fn nit_prompt_tiers_zero_is_byte_identical() {
     let disabled = disabled_budgets();
     let budget = disabled.for_role(Some("integrate"), true);

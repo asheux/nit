@@ -210,32 +210,31 @@ fn halve_dep_payloads(prompt: &mut String, task: &SwarmTask, effective_dep_count
 }
 
 fn drop_dep_payloads_matching(prompt: &mut String, budget: usize, role_filter: &str) {
-    loop {
-        if prompt.len() <= budget {
-            return;
+    let Some(section) = find_dep_section_bounds(prompt) else {
+        return;
+    };
+    let marker = format!(
+        "[Dropped {role_filter} dep payload — see .nit/swarm/<mission>/tasks/<dep>/output.md]\n"
+    );
+    let mut remaining = prompt.len();
+    let mut offset = 0;
+    let mut compact = String::new();
+    for block in collect_dep_blocks(prompt, &section) {
+        if remaining <= budget {
+            break;
         }
-        let Some(section) = find_dep_section_bounds(prompt) else {
-            return;
-        };
-        let blocks = collect_dep_blocks(prompt, &section);
-        let Some(target) = blocks
-            .iter()
-            .find(|b| dep_label_role_matches(&b.label, role_filter))
-        else {
-            return;
-        };
-        let breadcrumb = format!(
-            "\n---\nDEP: {}\n[Dropped {role_filter} dep payload — see .nit/swarm/<mission>/tasks/<dep>/artifacts.json]\n",
-            target.label
-        );
-        let mut new_prompt = String::with_capacity(prompt.len());
-        new_prompt.push_str(&prompt[..target.header_start]);
-        new_prompt.push_str(&breadcrumb);
-        new_prompt.push_str(&prompt[target.end..]);
-        if new_prompt.len() >= prompt.len() {
-            return;
+        let length = block.end - block.payload_start;
+        if length <= marker.len() || !dep_label_role_matches(&block.label, role_filter) {
+            continue;
         }
-        *prompt = new_prompt;
+        compact.push_str(&prompt[offset..block.payload_start]);
+        compact.push_str(&marker);
+        offset = block.end;
+        remaining -= length - marker.len();
+    }
+    if offset > 0 {
+        compact.push_str(&prompt[offset..]);
+        *prompt = compact;
     }
 }
 
