@@ -167,6 +167,7 @@ pub(super) fn run_loop(
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
     let mut stashed_event: Option<Event> = None;
+    let mut review_runtime = crate::change_review::ReviewRuntime::default();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
@@ -673,6 +674,13 @@ pub(super) fn run_loop(
                             continue;
                         }
                     }
+                    if state.change_review_active() && state.focus == PaneId::Visualizer {
+                        let area = layout::split(terminal.size().unwrap_or_default()).visualizer;
+                        if handle_change_review_key(key, state, syntax, area) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if handle_agent_station_key_with_clipboard(
                         key,
                         state,
@@ -1074,9 +1082,20 @@ pub(super) fn run_loop(
         syntax.poll_results(editor_id, state.editor_buffer().version());
         syntax.poll_results(notes_id, state.notes_buffer().version());
 
+        if state.change_review_active() && state.visualizer.pending_run {
+            state.show_change_review = false;
+        }
+        if state.change_review_active() {
+            review_runtime.tick(&state.workspace_root, &mut state.change_review);
+        } else if state.app_kind == AppKind::Gol && seed_runtime.is_none() {
+            seed_runtime = Some(SeedRuntime::new(state));
+            gol_petri = Some(PetriDishRuntime::new(state));
+        }
         let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(seed_runtime) = seed_runtime.as_mut() {
-                seed_runtime.tick(state);
+                if !state.change_review_active() || state.visualizer.running {
+                    seed_runtime.tick(state);
+                }
             }
             match state.app_kind {
                 AppKind::Gol => {
@@ -1599,6 +1618,7 @@ fn spawn_app_runtimes(
     Option<GamesConfigPreviewRuntime>,
 ) {
     match state.app_kind {
+        AppKind::Gol if state.change_review_active() => (None, None, None, None),
         AppKind::Gol => (
             Some(SeedRuntime::new(state)),
             Some(PetriDishRuntime::new(state)),

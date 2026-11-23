@@ -26,8 +26,8 @@ pub(crate) struct Cli {
     pub path: Option<PathBuf>,
 
     /// Start in the specified lab (gol or games)
-    #[arg(long, value_enum, default_value_t = LabArg::Gol)]
-    pub lab: LabArg,
+    #[arg(long, value_enum)]
+    pub lab: Option<LabArg>,
 
     /// Agent station backend selection (defaults to all available backends)
     #[arg(long, value_enum)]
@@ -70,7 +70,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Browse built-in NitSkills or read one by name
     Skills { name: Option<String> },
-    /// Explicit GoL mode (current behavior)
+    /// Open the GoL visualizer
     Gol {
         /// File or directory to open
         path: Option<PathBuf>,

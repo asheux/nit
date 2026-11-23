@@ -70,6 +70,8 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+F", " content search"),
                 ("F4 / Ctrl+Shift+T", " open / close terminal popup"),
                 ("F1 / ?", " toggle help"),
+                (":changes", " review Git status and patches"),
+                (":gol", " open the GoL visualizer"),
                 (":skills", " open NitSkills in Code Structural Quality"),
                 ("Tab/Shift+Tab", " focus panes"),
                 ("Ctrl+1/2/3", " focus Editor / Agent Ops / Agent Chat"),

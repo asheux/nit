@@ -11,6 +11,7 @@ pub mod layout;
 pub mod theme;
 pub mod widgets;
 
+mod change_review;
 pub mod claude_pool;
 pub mod claude_runner;
 pub mod codex_runner;

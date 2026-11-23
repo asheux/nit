@@ -66,7 +66,11 @@ pub fn render(
     vitals: &LabVitalsSnapshot,
 ) {
     let mode = format!("{:?}", state.mode).to_uppercase();
-    let app_label = state.app_kind.label();
+    let app_label = if state.change_review_active() {
+        "REVIEW"
+    } else {
+        state.app_kind.label()
+    };
     let home = host_home_dir();
     let workspace_root = state.workspace_root.as_path();
     let file = state

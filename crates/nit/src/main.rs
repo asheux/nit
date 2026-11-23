@@ -71,10 +71,13 @@ fn main() -> anyhow::Result<()> {
         other => other,
     };
 
-    let (app_kind, target_path) = bootstrap::resolve_app_target(resolved, cli.lab, cli.path);
-    let (app_state, theme, log_receiver) =
+    let review_on_launch = resolved.is_none() && cli.lab.is_none();
+    let (app_kind, target_path) =
+        bootstrap::resolve_app_target(resolved, cli.lab.unwrap_or(cli::LabArg::Gol), cli.path);
+    let (mut app_state, theme, log_receiver) =
         prepare_app_state(app_kind, target_path.as_deref(), backend_selection)?;
 
+    app_state.show_change_review = review_on_launch;
     run(
         app_state,
         theme,

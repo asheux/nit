@@ -241,6 +241,15 @@ multipane pane. See `docs/TERMINAL.md`.
 - Mouse drag (left button): Select a rectangle of terminal text. Releasing copies it to the system clipboard.
 - Mouse wheel: Scroll the 10,000-line scrollback. Typing snaps back to the live bottom.
 
+## Changes
+
+Plain `nit` opens a read-only Git worktree view beside the editor. The two status columns show the index and working tree. Select a tracked file to review its staged and unstaged patches.
+
+- `:changes` focuses change review. Up/Down or k/j select a file. Enter opens it.
+- PageUp/PageDown scroll the patch. The mouse wheel scrolls the region under the pointer.
+- Changes refresh automatically. Press r to refresh immediately.
+- `:gol` switches to the GoL visualizer. `nit gol` and `nit --lab gol` open it at launch.
+
 ## Visualizer (GoL)
 
 ### Title bar buttons (clickable)

@@ -266,6 +266,19 @@ pub(super) fn handle_command_line(state: &mut AppState, input: &str) -> bool {
         }
     }
     match tokens.as_slice() {
+        ["changes"] if state.app_kind == AppKind::Gol => {
+            state.show_change_review = true;
+            state.change_review.refresh = true;
+            state.focus = PaneId::Visualizer;
+            state.status = Some("Reviewing working tree changes".into());
+            false
+        }
+        ["gol"] | ["gol", "view"] => {
+            state.show_change_review = false;
+            state.focus = PaneId::Visualizer;
+            state.status = Some("GoL visualizer".into());
+            false
+        }
         ["substrate"] | ["sub"] | ["sig"] | ["signals"] => {
             state.show_substrate_overlay = true;
             state.substrate_overlay_tab = SubstrateOverlayTab::Signals;

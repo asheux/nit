@@ -259,6 +259,9 @@ pub(super) fn draw(
             None
         };
         match state.app_kind {
+            AppKind::Gol if state.change_review_active() => {
+                crate::widgets::change_review_view::render(f, layout.visualizer, state, theme);
+            }
             AppKind::Gol => {
                 let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
                 let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;

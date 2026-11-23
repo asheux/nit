@@ -107,7 +107,7 @@ prints a `PATH` line to add. Add it and open a new shell, or run
 nit path/to/file   # open a file
 nit path/to/dir    # set the workspace root (opens an untitled buffer)
 nit                # current directory, untitled buffer
-nit gol [path]     # Game of Life lab (the default lab)
+nit gol [path]     # Open the Game of Life visualizer
 nit games [path]   # Games lab: tournaments between programs
 nit multipane      # a grid of independent agent chat panes
 nit skills         # list built-in agent references
@@ -197,7 +197,13 @@ nit multipane [--backend <model>] [--panes N] [--cwd PATH] [--terminal-command C
 Pane sessions persist to `<state_dir>/multipane/session-<workspace-hash>.json`. Keys are
 in `docs/KEYBINDINGS.md` under "Multipane mode"; the full spec is `docs/MULTIPANE.md`.
 
+## Working tree review
+
+Plain `nit` shows **Changes** beside the editor. It reads Git status in the background and shows both staged and unstaged patches for the selected file. Use `:changes` to focus the pane, ↑/↓ to select a path, PageUp/PageDown to read its patch, and Enter to open the file. Untracked files appear in the list too.
+
 ## Game of Life lab
+
+Open the seed visualizer with `:gol` or launch directly with `nit gol [path]`. Use `:changes` to return to worktree review.
 
 - `Ctrl+Enter` runs the Petri Dish; `Ctrl+^` shows a hidden one.
 - In the Petri Dish: `Space` pause, `Enter` step, `+`/`-` speed, `H` hide, `S` snapshot,

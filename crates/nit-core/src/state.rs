@@ -62,6 +62,9 @@ pub use multiway_view::{
 };
 pub use pickers::{ProtocolPickerState, RulePickerState};
 pub use text_input::{smart_case_insensitive, CommandLine, EditorSearch, SearchPrompt};
+mod change_review;
+pub use change_review::{ChangeReview, ChangedFile};
+
 pub use visualizer::{GolRenderMode, VisualizerMode, VisualizerRuleEntry, VisualizerState};
 
 use cmd_line::{apply_protocol_selection, apply_rule_selection, handle_command_line};
@@ -258,6 +261,10 @@ pub struct AppState {
     pub logs: LogBuffer,
     pub job: JobState,
     pub visualizer: VisualizerState,
+    #[serde(skip)]
+    pub show_change_review: bool,
+    #[serde(skip)]
+    pub change_review: ChangeReview,
     pub metrics: Metrics,
     pub prompt: Option<Prompt>,
     pub show_help: bool,
@@ -749,6 +756,10 @@ fn default_games_state() -> GamesState {
 }
 
 impl AppState {
+    pub fn change_review_active(&self) -> bool {
+        self.app_kind == AppKind::Gol && self.show_change_review
+    }
+
     pub fn new(workspace_root: PathBuf, editor: Buffer, notes: Buffer) -> Self {
         let settings = Settings::default();
         let rule_catalog = RuleCatalog::default();
@@ -781,6 +792,8 @@ impl AppState {
                 progress: 0.0,
             },
             visualizer,
+            show_change_review: false,
+            change_review: ChangeReview::default(),
             metrics: Metrics {
                 last_render_ms: 0,
                 frame_count: 0,
