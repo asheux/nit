@@ -825,10 +825,44 @@ fn alert_body_meta(state: &AppState, width: usize, body_line: usize) -> Option<A
     None
 }
 
+fn position_compact_roster(state: &mut AppState, rows: &[String], height: usize) {
+    if state.agents.dock_tab != AgentOpsTab::Roster {
+        state.agents.compact_roster_anchor = None;
+        return;
+    }
+    let first = roster_body_offset(state);
+    if height >= first + 2 {
+        if state.agents.compact_roster_anchor.take().is_some() {
+            state.agents.ops_scroll = 0;
+        }
+        return;
+    }
+    let cursor = cursor_glyph();
+    let selected = rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .find(|(_, line)| line.starts_with(cursor))
+        .map_or(first, |(idx, _)| idx);
+    let anchor = (height, selected);
+    if state.agents.compact_roster_anchor.replace(anchor) == Some(anchor) {
+        return;
+    }
+    // Leave the next few model rows visible below a selected group. All setup rows
+    // remain reachable by wheel, with the same document offsets used for clicks.
+    let context = height.min(4);
+    let start = (selected + context).saturating_sub(height);
+    state.agents.ops_scroll = state
+        .agents
+        .ops_scroll
+        .clamp(start, selected)
+        .min(rows.len().saturating_sub(height));
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     swarm: &SwarmRuntime,
     theme: &Theme,
 ) {
@@ -880,6 +914,7 @@ pub fn render(
 
     let rows = current_lines_for_width_with_swarm(state, Some(swarm), chunks[2].width as usize);
     let height = chunks[2].height as usize;
+    position_compact_roster(state, &rows, height);
     let max_scroll = rows.len().saturating_sub(height);
     let scroll = state.agents.ops_scroll.min(max_scroll);
     let visible = rows

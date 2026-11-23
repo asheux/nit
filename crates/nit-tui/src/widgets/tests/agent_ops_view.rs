@@ -1773,3 +1773,34 @@ fn tab_strip_keeps_selection_and_mouse_targets_inside_the_pane() {
     let previous = tab_at_column(0, width, AgentOpsTab::Scratchpad).unwrap();
     assert!(last.to_string().contains(previous.next().label()));
 }
+
+#[test]
+fn compact_roster_opens_on_models_and_keeps_setup_scrollable() {
+    let mut state = make_state_with_codex_lanes(4);
+    state.agents.dock_tab = AgentOpsTab::Roster;
+    state.agents.roster_selected_backend = Some(AgentLaneKind::Codex);
+    state
+        .agents
+        .roster_expanded_backend_kinds
+        .insert(AgentLaneKind::Codex);
+    let pane = crate::layout::split(ratatui::layout::Rect::new(0, 0, 100, 32)).job;
+    let height = usize::from(pane.height - 5);
+    let rows = current_lines_for_width(&state, usize::from(pane.width - 2));
+    super::position_compact_roster(&mut state, &rows, height);
+    let group = roster_body_offset(&state);
+    let scroll = state.agents.ops_scroll;
+    assert!(scroll <= group && group + 1 < scroll + height);
+    assert!(rows[group].starts_with(cursor_glyph()));
+    assert_eq!(
+        super::roster_meta_for_body_line(&state, 1)
+            .unwrap()
+            .agent_idx,
+        Some(0)
+    );
+    state.agents.ops_scroll = 0;
+    super::position_compact_roster(&mut state, &rows, height);
+    assert_eq!(state.agents.ops_scroll, 0);
+    assert!(roster_swarm_template_line_idx(&state) < height);
+    super::position_compact_roster(&mut state, &rows, 28);
+    assert_eq!(state.agents.compact_roster_anchor, None);
+}

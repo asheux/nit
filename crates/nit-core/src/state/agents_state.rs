@@ -157,6 +157,9 @@ pub struct AgentsState {
     pub ops_viewport_width: usize,
     #[serde(skip)]
     pub ops_viewport_height: usize,
+    /// Last compact roster height and selected document row, so manual scrolling is retained.
+    #[serde(skip)]
+    pub compact_roster_anchor: Option<(usize, usize)>,
     /// `CONSOLE_SCROLL_BOTTOM` (`usize::MAX`) means "auto-scroll to bottom".
     #[serde(skip)]
     pub console_scroll: usize,
@@ -502,6 +505,7 @@ impl Default for AgentsState {
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
+            compact_roster_anchor: None,
             console_scroll: CONSOLE_SCROLL_BOTTOM,
             console_max_scroll: 0,
             console_rows_cache: AgentConsoleRowsCache::default(),
