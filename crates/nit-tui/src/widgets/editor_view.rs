@@ -127,14 +127,13 @@ pub fn render_buffer(
     search: Option<SearchHighlight<'_>>,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
-    let content_bg = if pane_id == PaneId::Editor {
-        theme.editor_background
-    } else {
-        buffer_input_bg(theme, focused)
+    let content_bg = match (pane_id, focused) {
+        (PaneId::Editor, true) => theme.editor_background,
+        (PaneId::Editor, false) => theme.editor_background_unfocused,
+        _ => theme.input_background(focused),
     };
     let block = if pane_id == PaneId::Editor {
         source_block(theme, focused, title, buffer.is_dirty(), area.width)
-            .style(Style::default().bg(content_bg))
     } else {
         let color = if focused {
             theme.title_focused
@@ -679,34 +678,6 @@ fn cursor_placement(
         area.x + 1 + gutter_width as u16 + cursor_display_col.saturating_sub(offset_display) as u16;
     let y = area.y + 1 + cursor_line as u16;
     CursorPlacement { x, y }
-}
-
-fn buffer_input_bg(theme: &Theme, focused: bool) -> Color {
-    let dim_pct = if focused { 78 } else { 88 };
-    let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, dim_pct);
-    if bg == theme.selection_bg {
-        bg = theme.background;
-    }
-    if bg == theme.cursor_line_bg {
-        bg = theme.background;
-    }
-    bg
-}
-
-fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
-    let pct = background_pct.min(100) as u16;
-    match (color, background) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
-            let inv = 100u16.saturating_sub(pct);
-            let mix = |top: u8, base: u8| -> u8 {
-                let top = top as u16;
-                let base = base as u16;
-                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
-            };
-            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
-        }
-        _ => color,
-    }
 }
 
 fn apply_syntax_spans(

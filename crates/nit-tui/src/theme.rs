@@ -99,6 +99,7 @@ pub struct Theme {
     pub background: Color,
     pub panel_background: Color,
     pub editor_background: Color,
+    pub editor_background_unfocused: Color,
     pub popup_background: Color,
     pub foreground: Color,
     pub muted: Color,
@@ -186,6 +187,30 @@ pub struct HighlightTheme {
 }
 
 impl Theme {
+    pub fn list_background(&self) -> Color {
+        dim_bg_towards(self.border, self.background, 85)
+    }
+
+    pub(crate) fn input_background(&self, focused: bool) -> Color {
+        let bg = dim_bg_towards(
+            self.cursor_line_bg,
+            self.background,
+            if focused { 78 } else { 88 },
+        );
+        if bg == self.selection_bg || bg == self.cursor_line_bg {
+            self.background
+        } else {
+            bg
+        }
+    }
+
+    fn set_editor_backgrounds(&mut self, custom: Option<&str>) {
+        self.editor_background = self.input_background(true);
+        self.editor_background_unfocused = self.input_background(false);
+        overlay(&mut self.editor_background, custom);
+        overlay(&mut self.editor_background_unfocused, custom);
+    }
+
     pub fn for_popup(&self) -> Self {
         Self {
             background: self.popup_background,
@@ -211,11 +236,6 @@ impl Theme {
                 .as_deref()
                 .or(cfg.background.as_deref()),
         );
-        theme.editor_background = theme.panel_background;
-        overlay(
-            &mut theme.editor_background,
-            cfg.editor_background.as_deref(),
-        );
         overlay(
             &mut theme.popup_background,
             cfg.popup_background
@@ -235,6 +255,7 @@ impl Theme {
         overlay(&mut theme.cursor, cfg.cursor.as_deref());
         overlay(&mut theme.cursor_line_bg, cfg.cursor_line_bg.as_deref());
         overlay(&mut theme.selection_bg, cfg.selection_bg.as_deref());
+        theme.set_editor_backgrounds(cfg.editor_background.as_deref());
         overlay(&mut theme.bracket_match, cfg.bracket_match.as_deref());
         overlay(&mut theme.warning, cfg.warning.as_deref());
         overlay(&mut theme.success, cfg.success.as_deref());
@@ -332,11 +353,12 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        let panel_background = Color::Rgb(16, 31, 42);
-        Theme {
-            background: Color::Rgb(10, 21, 30),
-            panel_background,
-            editor_background: panel_background,
+        let base = Color::Rgb(10, 21, 30);
+        let mut theme = Theme {
+            background: base,
+            panel_background: base,
+            editor_background: base,
+            editor_background_unfocused: base,
             popup_background: Color::Rgb(25, 46, 59),
             foreground: Color::Rgb(222, 234, 239),
             muted: Color::Rgb(171, 191, 199),
@@ -358,7 +380,9 @@ impl Default for Theme {
             diff_added: Color::Rgb(158, 223, 168),
             diff_modified: Color::Rgb(122, 219, 228),
             diff_deleted: Color::Rgb(255, 163, 155),
-        }
+        };
+        theme.set_editor_backgrounds(None);
+        theme
     }
 }
 
@@ -522,4 +546,20 @@ fn parse_color(s: &str) -> Option<Color> {
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
     Some(Color::Rgb(r, g, b))
+}
+
+pub(crate) fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+    let pct = background_pct.min(100) as u16;
+    match (color, background) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
+            let inv = 100u16.saturating_sub(pct);
+            let mix = |top: u8, base: u8| -> u8 {
+                let top = top as u16;
+                let base = base as u16;
+                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
+            };
+            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
+    }
 }

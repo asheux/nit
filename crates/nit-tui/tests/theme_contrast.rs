@@ -22,7 +22,11 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
     let preset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/devs.toml");
     assert!(preset.is_file());
     for theme in [Theme::default(), Theme::load(Some(&preset))] {
-        assert_eq!(theme.editor_background, theme.panel_background);
+        assert_eq!(theme.background, Color::Rgb(10, 21, 30));
+        assert_eq!(theme.panel_background, theme.background);
+        assert_eq!(theme.editor_background, Color::Rgb(12, 27, 37));
+        assert_eq!(theme.editor_background_unfocused, Color::Rgb(11, 24, 34));
+        assert_eq!(theme.list_background(), Color::Rgb(23, 36, 46));
         for fg in [
             theme.foreground,
             theme.muted,
@@ -53,6 +57,8 @@ fn shipped_text_colors_keep_contrast_on_normal_and_selected_rows() {
                 theme.background,
                 theme.panel_background,
                 theme.editor_background,
+                theme.editor_background_unfocused,
+                theme.list_background(),
                 theme.popup_background,
                 theme.cursor_line_bg,
                 theme.selection_bg,
@@ -105,10 +111,11 @@ fn custom_surfaces_inherit_the_configured_canvas_until_overridden() {
     std::fs::remove_file(path).unwrap();
     assert_eq!(legacy.background, Color::Rgb(39, 56, 73));
     assert_eq!(legacy.panel_background, legacy.background);
-    assert_eq!(legacy.editor_background, legacy.background);
+    assert_ne!(legacy.editor_background, legacy.background);
     assert_eq!(legacy.popup_background, legacy.background);
     assert_eq!(custom.background, legacy.background);
     assert_eq!(custom.panel_background, Color::Rgb(54, 71, 88));
     assert_eq!(custom.editor_background, Color::Rgb(41, 48, 55));
+    assert_eq!(custom.editor_background_unfocused, custom.editor_background);
     assert_eq!(custom.for_popup().background, custom.panel_background);
 }

@@ -49,9 +49,9 @@ fn selected_row_spans_the_tree_interior_and_retains_nested_alignment() {
             assert_eq!(buf.get(1, 2).symbol(), if focused { "▸" } else { " " });
             assert_eq!(buf.get(7, 2).symbol(), "l");
             assert_eq!(buf.get(7, 3).symbol(), "t");
-            assert_eq!(buf.get(7, 3).bg, theme.editor_background);
-            assert_eq!(buf.get(0, 2).bg, theme.editor_background);
-            assert_eq!(buf.get(width - 1, 2).bg, theme.editor_background);
+            assert_eq!(buf.get(7, 3).bg, theme.background);
+            assert_eq!(buf.get(0, 2).bg, theme.background);
+            assert_eq!(buf.get(width - 1, 2).bg, theme.background);
         }
     }
 }

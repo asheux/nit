@@ -22,7 +22,7 @@ use crate::swarm::{
     task_uses_full_output_budget, GateReportGate, SwarmDashboardView, SwarmPersistenceView,
     SwarmRuntime, SwarmTaskArtifacts, DEP_BUDGET_PER_DEP_CEILING, SWARM_CLONE_INFIX,
 };
-use crate::theme::Theme;
+use crate::theme::{dim_bg_towards, Theme};
 use crate::widgets::text_selection::apply_ui_selection;
 
 pub fn mission_index_for_body_line(state: &AppState, body_line: usize) -> Option<usize> {
@@ -6690,7 +6690,7 @@ fn diagnostics_runtime_line(rest: &str, theme: &Theme) -> Line<'static> {
 }
 
 pub(crate) fn ops_table_bg(theme: &Theme) -> Color {
-    theme.background
+    theme.list_background()
 }
 
 fn dag_table_bg(theme: &Theme) -> Color {
@@ -6974,22 +6974,6 @@ fn striped_row_style(style: Style, selected: bool, striped: bool, theme: &Theme)
         style.bg(dim_bg_towards(theme.cursor_line_bg, theme.background, 60))
     } else {
         style
-    }
-}
-
-fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
-    let pct = background_pct.min(100) as u16;
-    match (color, background) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
-            let inv = 100u16.saturating_sub(pct);
-            let mix = |top: u8, base: u8| -> u8 {
-                let top = top as u16;
-                let base = base as u16;
-                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
-            };
-            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
-        }
-        _ => color,
     }
 }
 

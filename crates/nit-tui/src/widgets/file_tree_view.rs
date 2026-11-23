@@ -37,7 +37,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         } else if selected {
             theme.cursor_line_bg
         } else {
-            theme.editor_background
+            theme.background
         };
         let mut line = row_line(row, theme);
         let marker = if selected && focused { "▸ " } else { "  " };
@@ -128,18 +128,15 @@ fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a>
             TREE_TITLE,
             Style::default()
                 .fg(title_color)
-                .bg(theme.editor_background)
+                .bg(theme.background)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            commands,
-            theme.status_idle_style().bg(theme.editor_background),
-        ),
+        Span::styled(commands, theme.status_idle_style().bg(theme.background)),
     ]);
     Block::default()
         .borders(Borders::ALL)
-        .style(Style::default().bg(theme.editor_background))
+        .style(Style::default().bg(theme.background))
         .border_style(Style::default().fg(border_color))
         .border_type(border_type)
         .title(title)
