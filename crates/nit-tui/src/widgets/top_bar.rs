@@ -190,7 +190,14 @@ pub fn render(
 
     let left_width: usize = spans.iter().map(|s| s.content.as_ref().width()).sum();
     let max_right = inner_width.saturating_sub(left_width).saturating_sub(1);
-    let (mut vitals_spans, mut right_width) = build_vitals_spans(vitals, theme, max_right);
+    // Leave room to explain an unsuccessful file operation while the operator
+    // is still looking at the file or tree row that triggered it.
+    let vitals_budget = if is_file_error(&status_text) {
+        max_right.saturating_sub(status_label.width() + 2)
+    } else {
+        max_right
+    };
+    let (mut vitals_spans, mut right_width) = build_vitals_spans(vitals, theme, vitals_budget);
     if !status_label.is_empty() && max_right > right_width + 4 {
         let status_max = max_right.saturating_sub(right_width + 2);
         let trimmed = truncate_start(&status_label, status_max);
@@ -402,6 +409,10 @@ fn status_style(status: &str, theme: &Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
+fn is_file_error(text: &str) -> bool {
+    text.starts_with("Open failed:") || text.starts_with("Save failed:")
+}
+
 fn minify_status_text(status_text: &str) -> String {
     let text = status_text.trim();
     if text.is_empty() {
@@ -411,6 +422,9 @@ fn minify_status_text(status_text: &str) -> String {
     // A file open already updates the file label elsewhere (top-left), so avoid redundant paths.
     if text.starts_with("Opened ") {
         return "Opened".into();
+    }
+    if is_file_error(text) {
+        return text.split(" (os error ").next().unwrap_or(text).to_owned();
     }
 
     // Keep the first clause for multi-part guidance strings.
@@ -452,6 +466,9 @@ fn build_status_label(status_text: &str, compact_mode: bool) -> String {
     let text = status_text.trim();
     if text.is_empty() {
         return String::new();
+    }
+    if !compact_mode && is_file_error(text) {
+        return format!("STATUS: {text}");
     }
     let lower = text.to_ascii_lowercase();
     if lower.contains("error")

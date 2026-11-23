@@ -120,10 +120,11 @@ fn minify_status_text_keeps_short_colon_values() {
 }
 
 #[test]
-fn minify_status_text_drops_long_colon_payloads() {
+fn file_error_preserves_the_reason_in_the_station_header() {
+    let status = minify_status_text("Save failed: permission denied (os error 13)");
     assert_eq!(
-        minify_status_text("Save failed: permission denied (os error 13)"),
-        "Save failed"
+        build_status_label(&status, false),
+        "STATUS: Save failed: permission denied"
     );
 }
 
