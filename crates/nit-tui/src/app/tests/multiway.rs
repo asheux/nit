@@ -410,3 +410,17 @@ fn flag_off_selector_does_not_route() {
     assert!(state.agents.pending_multiway.is_none());
     assert_eq!(state.agents.pending_multiway_mood, None);
 }
+
+#[test]
+fn launch_ids_are_distinct_without_agent_events() {
+    let ids: std::collections::HashSet<_> = (0..100)
+        .map(|_| crate::app::runner::next_multiway_mission_id())
+        .collect();
+    assert_eq!(ids.len(), 100);
+    for id in ids {
+        assert!(id.starts_with("mw-"));
+        assert!(id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'-'));
+    }
+}

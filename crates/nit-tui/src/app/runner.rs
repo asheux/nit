@@ -1747,6 +1747,17 @@ fn latest_multiway_dag(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         })
 }
 
+/// DAGs and worktree roots are shared across projects and nit processes.
+pub(super) fn next_multiway_mission_id() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "mw-{}-{}-{sequence}",
+        nit_utils::now_millis(),
+        std::process::id()
+    )
+}
+
 /// Spawn a dedicated `ClaudeRunner` and start a search from a pending multiway
 /// dispatch, mapping its source to a `(SearchPolicy, Task)` first. v1 runs one
 /// search at a time; the mission id keys both the persisted DAG file and the
@@ -1761,7 +1772,7 @@ fn start_multiway(
     let Some((policy, task)) = resolve_multiway_dispatch(state, pending) else {
         return;
     };
-    let mission = format!("mw-{}", state.agents.event_epoch);
+    let mission = next_multiway_mission_id();
     let model = multiway_model(state);
     let runner = ClaudeRunner::spawn(claude_config.clone());
     match multiway.start(
