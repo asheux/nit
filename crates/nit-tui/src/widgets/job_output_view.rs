@@ -38,10 +38,7 @@ fn build_block(focused: bool, theme: &Theme) -> Block<'static> {
             theme.title_focused,
         )
     } else {
-        (
-            Style::default().fg(theme.border),
-            theme.title,
-        )
+        (Style::default().fg(theme.border), theme.title)
     };
     Block::default()
         .borders(Borders::ALL)

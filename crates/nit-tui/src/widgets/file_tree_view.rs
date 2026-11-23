@@ -41,10 +41,8 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         };
         let mut line = row_line(row, theme);
         let marker = if selected && focused { "▸ " } else { "  " };
-        line.spans.insert(
-            0,
-            Span::styled(marker, Style::default().fg(theme.accent)),
-        );
+        line.spans
+            .insert(0, Span::styled(marker, Style::default().fg(theme.accent)));
         let mut style = Style::default().bg(bg);
         if selected && focused {
             style = style.add_modifier(Modifier::BOLD);
