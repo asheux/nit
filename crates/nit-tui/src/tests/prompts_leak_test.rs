@@ -107,6 +107,7 @@ fn busy_codex_state(cwd: PathBuf, set_selected: bool) -> AppState {
     let mut state = AppState::new(cwd, editor, notes);
     state.agents.messages.clear();
     state.agents.agents.clear();
+    state.agents.codex_cli_available = true;
     state.agents.agents.push(codex_test_lane());
     if set_selected {
         state.agents.selected_agent = Some("codex-test".into());
