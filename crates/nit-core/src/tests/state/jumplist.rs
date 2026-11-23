@@ -322,3 +322,27 @@ fn jumplist_last_returns_most_recent_entry() {
     push_cursor(&mut list, 1, Cursor::new(5, 2));
     assert_eq!(list.last(), Some(JumpEntry::new(1, 5, 2)));
 }
+
+#[test]
+fn closing_a_middle_buffer_keeps_surviving_jump_positions_on_their_files() {
+    let (mut state, file_a, file_b) = state_with_two_files("jump-close", "one", "two");
+    let file_c = file_a.with_file_name("c.txt");
+    fs::write(&file_c, "three").unwrap();
+    state.editor_buffer_mut().cursor.col = 1;
+    apply_action(&mut state, Action::OpenFile(file_b.clone()));
+    state.editor_buffer_mut().cursor.col = 2;
+    apply_action(&mut state, Action::OpenFile(file_c.clone()));
+    state.editor_buffer_mut().cursor.col = 3;
+    apply_action(&mut state, Action::OpenFile(file_b));
+    apply_action(&mut state, Action::ConfirmCloseBufferYes);
+
+    assert_eq!(state.editor_buffer().path(), Some(&file_c));
+    // C already occupies its saved position. One jump skips closed B,
+    // even though C now occupies the slot B used to hold.
+    apply_action(&mut state, Action::JumpBack);
+    assert_eq!(state.editor_buffer().path(), Some(&file_a));
+    assert_eq!(state.editor_buffer().cursor.col, 1);
+    apply_action(&mut state, Action::JumpForward);
+    assert_eq!(state.editor_buffer().path(), Some(&file_c));
+    assert_eq!(state.editor_buffer().cursor.col, 3);
+}

@@ -111,6 +111,7 @@ pub(super) fn close_active_editor_buffer(state: &mut AppState) {
     match next_active {
         Some(idx) => {
             // Remove the active slot; trailing indices shift down by 1.
+            state.jumplist.remove_buffer(active);
             state.buffers.remove(active);
             if state.notes_buffer_id > active {
                 state.notes_buffer_id -= 1;
@@ -130,6 +131,7 @@ pub(super) fn close_active_editor_buffer(state: &mut AppState) {
             // No fallback buffer — replace the just-closed slot with an
             // untitled blank (so `active_editor_buffer_id` stays valid)
             // and open NITTree so the user has somewhere to go.
+            state.jumplist.clear();
             state.buffers[active] = Buffer::empty("untitled", None);
             state.file_tree.root = state.workspace_root.clone();
             state.file_tree.open = true;

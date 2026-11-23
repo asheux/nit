@@ -117,14 +117,11 @@ fn anchor_current_at_freshest_end(state: &mut AppState, current: JumpEntry) {
     if state.jumplist.cursor() != state.jumplist.len() {
         return;
     }
-    if state.jumplist.last() == Some(current) {
-        return;
+    if state.jumplist.last() != Some(current) {
+        state.jumplist.push(current);
     }
-    state.jumplist.push(current);
-    // The push left the nav cursor pointing past the just-anchored entry;
-    // walk it back one slot so the real step_back below returns the
-    // entry *before* the anchor instead of the anchor itself (which is
-    // where we already are).
+    // Whether this position was just appended or already present, step
+    // over it so the caller's backward jump lands somewhere older.
     let _ = state.jumplist.jump_back();
 }
 

@@ -117,6 +117,27 @@ impl JumpList {
         self.entries.back().copied()
     }
 
+    /// Remove positions belonging to a closed buffer and follow the live
+    /// buffers when their indices shift in AppState's buffer vector.
+    pub(crate) fn remove_buffer(&mut self, id: usize) {
+        let removed_before_cursor = self
+            .entries
+            .iter()
+            .take(self.cursor)
+            .filter(|entry| entry.buffer_id == id)
+            .count();
+        self.cursor -= removed_before_cursor;
+        self.entries.retain_mut(|entry| {
+            if entry.buffer_id == id {
+                return false;
+            }
+            if entry.buffer_id > id {
+                entry.buffer_id -= 1;
+            }
+            true
+        });
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.cursor = 0;
