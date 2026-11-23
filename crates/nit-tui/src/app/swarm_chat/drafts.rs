@@ -141,7 +141,7 @@ pub(crate) fn restore_on_start(state: &mut AppState) {
         let (initial, count) = (mp.focused, mp.panes.len());
         for i in 0..count {
             state.multipane.as_mut().unwrap().focused = i;
-            crate::multipane::dispatch::with_pane_aliased(state, i, |state| restore_one(state));
+            crate::multipane::dispatch::with_pane_aliased(state, i, &restore_one);
         }
         state.multipane.as_mut().unwrap().focused = initial;
     } else {
@@ -190,7 +190,7 @@ pub(super) fn command(state: &mut AppState, raw: &str) -> Option<bool> {
                     agent_id: agent,
                     mission_id: mid,
                     text,
-                    kind: Some("nit-skills".into()),
+                    kind: Some("followup-history".into()),
                     prompt_msg_idx: None,
                 });
                 reset_chat_input_and_history_nav(state);

@@ -2464,6 +2464,16 @@ pub(super) fn format_message_rows(
     } else {
         msg.text.split('\n').collect()
     };
+    if msg.kind.as_deref() == Some("followup-history") {
+        return text_lines
+            .iter()
+            .flat_map(|line| wrap_visual_line(line, width))
+            .map(|text| ThreadRow {
+                text,
+                kind: ThreadRowKind::StatusSubRow,
+            })
+            .collect();
+    }
     if msg.agent_id.is_none() {
         let bubble = format_user_bubble_rows(msg, &text_lines, width);
         return bubble
