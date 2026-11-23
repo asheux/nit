@@ -56,7 +56,7 @@ impl LabCriticality {
         }
         if (input.job_running && hb_age >= Duration::from_secs(2))
             || input.recent_errors > 0
-            || (input.agent_enabled && !input.agent_connected && !input.agent_active_tasks)
+            || (input.agent_enabled && input.agent_connection_error)
         {
             return LabCriticality::Warn;
         }
@@ -81,6 +81,7 @@ pub struct CriticalityInput {
     pub hb_age: Option<Duration>,
     pub agent_enabled: bool,
     pub agent_connected: bool,
+    pub agent_connection_error: bool,
     pub agent_active_tasks: bool,
     pub ag_age: Option<Duration>,
     pub recent_errors: u32,
@@ -104,6 +105,7 @@ pub struct VitalsCounters {
 pub struct AgentVitalsState {
     pub enabled: bool,
     pub connected: bool,
+    pub connection_error: bool,
     pub active_tasks: bool,
 }
 
@@ -112,6 +114,7 @@ impl AgentVitalsState {
         Self {
             enabled: false,
             connected: false,
+            connection_error: false,
             active_tasks: false,
         }
     }
@@ -321,6 +324,7 @@ impl VitalsState {
             hb_age,
             agent_enabled: agent.enabled,
             agent_connected: agent.connected,
+            agent_connection_error: agent.connection_error,
             agent_active_tasks: agent.active_tasks,
             ag_age,
             recent_errors,

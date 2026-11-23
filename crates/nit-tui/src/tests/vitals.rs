@@ -6,6 +6,7 @@ fn baseline_input() -> CriticalityInput {
         hb_age: Some(Duration::from_millis(1900)),
         agent_enabled: false,
         agent_connected: false,
+        agent_connection_error: false,
         agent_active_tasks: false,
         ag_age: None,
         recent_errors: 0,
@@ -15,6 +16,31 @@ fn baseline_input() -> CriticalityInput {
 
 fn last_ecg_sample(snap: &LabVitalsSnapshot) -> u64 {
     *snap.ecg_samples.last().unwrap_or(&0)
+}
+
+#[test]
+fn idle_roster_only_warns_on_an_actual_link_error() {
+    let idle = CriticalityInput {
+        job_running: false,
+        hb_age: None,
+        agent_enabled: true,
+        ..baseline_input()
+    };
+    assert_eq!(LabCriticality::classify(idle), LabCriticality::Idle);
+    assert_eq!(
+        LabCriticality::classify(CriticalityInput {
+            agent_connection_error: true,
+            ..idle
+        }),
+        LabCriticality::Warn
+    );
+    assert_eq!(
+        LabCriticality::classify(CriticalityInput {
+            agent_active_tasks: true,
+            ..idle
+        }),
+        LabCriticality::Crit
+    );
 }
 
 #[test]

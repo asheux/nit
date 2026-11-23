@@ -164,6 +164,7 @@ pub(super) fn current_agent_state(state: &AppState) -> AgentVitalsState {
     AgentVitalsState {
         enabled,
         connected,
+        connection_error: state.agents.mcp.state == McpConnectionState::Error,
         active_tasks,
     }
 }
