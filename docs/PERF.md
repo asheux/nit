@@ -17,6 +17,12 @@ Use these measurements to decide what to test on your own terminal and with your
 
 These are local observations. The latency includes tmux input and capture overhead. Terminal size, workload, build profile and hardware matter. On a slow remote terminal, try `NIT_TUI_FPS=30 nit .` and compare scrolling and idle CPU at the same dimensions. The default frame cap is 60 frames per second. [Configuration](ENVIRONMENT.md)
 
+## How quickly does the first file get syntax colors?
+
+Nit loads the highlighting rules for a language when you first open it. In a release-build comparison on Apple silicon, the first highlighted Rust snapshot took a median of **7.2 ms** for the whole file and **4.6 ms** for the visible region. Loading the language rules together at startup had taken **588.6 ms** and **580.4 ms** on the same file.
+
+The sample was `crates/nit-core/src/buffer/cursor_motion.rs` at `7715252` (584 lines, 19,149 bytes). The comparison used that revision with and without the change in `67b982e`. After one warm-up per build and mode, nine fresh processes per condition ran in alternating order. Timing started after the file was read, as the syntax manager was created, and ended when a snapshot contained a keyword on a visible line. Terminal startup, file reads and drawing the frame take additional time.
+
 ## How much text do NitSkills save?
 
 Nit puts required instructions in each request and lets agents fetch detailed references when needed. We counted four representative prompt bodies from the initial six-playbook rollout at `3b82579` against the earlier implementation at `69657d0`, using the `o200k_base` tokenizer. The NitSkills counts include the Codex hint pointing to the local skills directory. The catalog later expanded to 16 playbooks. These figures describe the original measurement.
