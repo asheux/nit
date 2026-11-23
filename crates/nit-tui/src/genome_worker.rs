@@ -14,6 +14,7 @@ pub struct GenomeEvalResult {
     /// turn-completion evaluations.
     pub shadow: bool,
     pub save_eval: bool,
+    pub editor_open: bool,
     /// Launch / file-watcher triggered background scan: populates
     /// `genome_reports` for every source file in the workspace without being
     /// tied to an agent or turn. Set by `evaluate_from_disk_workspace_scan`.
@@ -22,6 +23,13 @@ pub struct GenomeEvalResult {
     /// parallel swarm turns finalize independently. `None` for shadow/save/
     /// editor-opened evals.
     pub agent_id: Option<String>,
+}
+
+enum DiskEval {
+    Save,
+    Shadow,
+    Workspace,
+    Turn(String),
 }
 
 pub struct GenomeWorker {
@@ -46,12 +54,26 @@ impl GenomeWorker {
         Self { tx, rx }
     }
 
-    pub fn evaluate(&self, path: PathBuf, text: String, shadow: bool) {
-        self.evaluate_inner(path, text, shadow, false);
+    pub fn evaluate_editor(&self, path: PathBuf, text: String) -> bool {
+        let tx = self.tx.clone();
+        eval_thread()
+            .spawn(move || {
+                let report = nit_core::compute_genome_report(&text, &path);
+                let _ = tx.send(GenomeEvalResult {
+                    path,
+                    report: Some(report),
+                    shadow: false,
+                    save_eval: false,
+                    editor_open: true,
+                    workspace_scan: false,
+                    agent_id: None,
+                });
+            })
+            .is_ok()
     }
 
-    pub fn evaluate_save(&self, path: PathBuf, text: String) {
-        self.evaluate_inner(path, text, false, true);
+    pub fn evaluate_saved_file(&self, path: PathBuf) -> bool {
+        self.evaluate_from_disk_inner(path, DiskEval::Save)
     }
 
     /// Authoritative turn-completion eval: the worker reads the file itself so
@@ -59,11 +81,11 @@ impl GenomeWorker {
     /// the thread could not be spawned; the caller must then decrement
     /// pending counters manually.
     pub fn evaluate_from_disk(&self, path: PathBuf, agent_id: String) -> bool {
-        self.evaluate_from_disk_inner(path, false, false, Some(agent_id))
+        self.evaluate_from_disk_inner(path, DiskEval::Turn(agent_id))
     }
 
     pub fn evaluate_from_disk_shadow(&self, path: PathBuf) -> bool {
-        self.evaluate_from_disk_inner(path, true, false, None)
+        self.evaluate_from_disk_inner(path, DiskEval::Shadow)
     }
 
     /// Background workspace-scan eval: inserts into `state.genome_reports`
@@ -71,47 +93,30 @@ impl GenomeWorker {
     /// and the file-watcher invalidation path so every source file has a
     /// report ready the moment an agent needs the landscape.
     pub fn evaluate_from_disk_workspace_scan(&self, path: PathBuf) -> bool {
-        self.evaluate_from_disk_inner(path, false, true, None)
+        self.evaluate_from_disk_inner(path, DiskEval::Workspace)
     }
 
-    fn evaluate_from_disk_inner(
-        &self,
-        path: PathBuf,
-        shadow: bool,
-        workspace_scan: bool,
-        agent_id: Option<String>,
-    ) -> bool {
+    fn evaluate_from_disk_inner(&self, path: PathBuf, kind: DiskEval) -> bool {
         let tx = self.tx.clone();
         eval_thread()
             .spawn(move || {
-                let report = std::fs::read_to_string(&path)
+                let report = nit_core::io::load_to_string(&path)
                     .ok()
                     .map(|text| nit_core::compute_genome_report(&text, &path));
                 let _ = tx.send(GenomeEvalResult {
                     path,
                     report,
-                    shadow,
-                    save_eval: false,
-                    workspace_scan,
-                    agent_id,
+                    editor_open: false,
+                    shadow: matches!(kind, DiskEval::Shadow),
+                    save_eval: matches!(kind, DiskEval::Save),
+                    workspace_scan: matches!(kind, DiskEval::Workspace),
+                    agent_id: match kind {
+                        DiskEval::Turn(id) => Some(id),
+                        _ => None,
+                    },
                 });
             })
             .is_ok()
-    }
-
-    fn evaluate_inner(&self, path: PathBuf, text: String, shadow: bool, save_eval: bool) {
-        let tx = self.tx.clone();
-        let _ = eval_thread().spawn(move || {
-            let report = nit_core::compute_genome_report(&text, &path);
-            let _ = tx.send(GenomeEvalResult {
-                path,
-                report: Some(report),
-                shadow,
-                save_eval,
-                workspace_scan: false,
-                agent_id: None,
-            });
-        });
     }
 }
 

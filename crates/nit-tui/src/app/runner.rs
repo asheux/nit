@@ -637,6 +637,8 @@ pub(super) fn run_loop(
                     // Terminal pane owns input while live; the Ctrl+\ toggle and
                     // the global quit fall through so the operator can escape.
                     if state.terminal_pane_active
+                        && state.focus == PaneId::Notes
+                        && !super::popup_keys::is_terminal_popup_toggle_key(&key)
                         && !crate::pty::is_terminal_toggle_key(&key)
                         && !is_global_quit_key(&key)
                     {
@@ -723,7 +725,7 @@ pub(super) fn run_loop(
                             let _ = session.paste(&text);
                         }
                         needs_redraw = true;
-                    } else if state.terminal_pane_active {
+                    } else if state.terminal_pane_active && state.focus == PaneId::Notes {
                         if let Some(session) = terminal_pane.as_ref() {
                             let _ = session.paste(&text);
                         }
@@ -919,7 +921,6 @@ pub(super) fn run_loop(
                 state.agents.active_turns.len(),
             );
             last_job = Instant::now();
-            needs_redraw = true;
         }
 
         // metabolic tick — wall-clock substrate sweep, no gen advance.
@@ -1222,7 +1223,21 @@ pub(super) fn run_loop(
         // bus bursts can't repaint faster than the terminal compositor.
         // `needs_redraw` is left true on a deferred redraw so the next
         // iteration wakes at the frame boundary (see input-poll timeout).
-        if (needs_redraw || last_tick.elapsed() >= TICK_RATE)
+        // In review mode an idle editor only needs periodic telemetry and
+        // watcher updates. Input and bus events still request the next frame.
+        let idle_review = state.change_review_active()
+            && state.focus != PaneId::Notes
+            && !state.terminal_popup.visible
+            && !state.terminal_pane_active
+            && !state.visualizer.running
+            && state.agents.active_turns.is_empty()
+            && !workspace_scan.is_scanning();
+        let repaint_interval = if idle_review {
+            Duration::from_millis(250)
+        } else {
+            TICK_RATE
+        };
+        if (needs_redraw || last_tick.elapsed() >= repaint_interval)
             && last_render.elapsed() >= frame_interval
         {
             if let Ok(screen) = terminal.size() {
@@ -1331,8 +1346,7 @@ pub(super) fn run_loop(
             // a README just to throw the report away is waste.
             if let Some(path) = state.genome_save_eval_pending.take() {
                 if crate::workspace_scan::is_code_file(&path) {
-                    let text = state.editor_buffer().content_as_string();
-                    genome_worker.evaluate_save(path, text);
+                    genome_worker.evaluate_saved_file(path);
                 }
             }
 

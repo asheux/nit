@@ -706,9 +706,8 @@ pub(super) fn maybe_compute_genome_report(
     if state.genome_computing {
         return; // Already dispatched, waiting for result.
     }
-    state.genome_computing = true;
     let text = state.editor_buffer().content_as_string();
-    genome.evaluate(file_path, text, true);
+    state.genome_computing = genome.evaluate_editor(file_path, text);
 }
 
 // Append the genome landscape to shadow-agent dispatches (single-agent mode)
@@ -1018,10 +1017,14 @@ pub(super) fn drain_genome_results(
             continue;
         }
 
-        // Clear genome_computing flag when result arrives for the current editor buffer.
-        if state.genome_computing && state.editor_buffer().path() == Some(&path) {
+        // An editor evaluation may finish after the user has changed files.
+        if result.editor_open {
             state.genome_computing = false;
-            state.gate_monitor_scroll = 0;
+            if state.editor_buffer().path() == Some(&path) {
+                state.gate_monitor_scroll = 0;
+            }
+            state.genome_reports.entry(path).or_insert(report);
+            continue;
         }
 
         if result.save_eval {
