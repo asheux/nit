@@ -36,11 +36,11 @@ pub use action_apply::apply_action;
 pub use agent_types::{
     AgentAlert, AgentAlertSeverity, AgentChannel, AgentConsoleRow, AgentConsoleRowKind,
     AgentConsoleRowsCache, AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent,
-    AgentLane, AgentLaneKind, AgentMessage, AgentOpsTab, AgentStatus, AgentTurnState, EvidenceItem,
-    GenomeEvalBatch, GenomeShadowEval, GlobalArchiveEntry, GlobalArchiveSourceKind,
-    McpConnectionState, McpStatus, MissionPhase, MissionRecord, PatchProposal, PatchStatus,
-    PendingIntake, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection,
-    SavedRunHistoryFilter, SavedRunHistoryPendingAction,
+    AgentLane, AgentLaneKind, AgentMessage, AgentOpsTab, AgentStatus, AgentTurnReceipt,
+    AgentTurnState, EvidenceItem, GenomeEvalBatch, GenomeShadowEval, GlobalArchiveEntry,
+    GlobalArchiveSourceKind, McpConnectionState, McpStatus, MissionPhase, MissionRecord,
+    PatchProposal, PatchStatus, PendingIntake, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch,
+    RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction, TurnOutcome,
 };
 pub use agents_state::{AgentsState, SwarmDraftTarget};
 pub use family_run::{

@@ -288,6 +288,7 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
         mission_id: Some(mission_id.to_string()),
         text,
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 }
@@ -307,6 +308,7 @@ pub fn push_system_alert_to_mission(state: &mut AppState, mission_id: &str, text
         mission_id: Some(mission_id.to_string()),
         text,
         prompt_msg_idx: None,
+        turn: None,
         kind: Some(SYSTEM_ALERT_KIND.into()),
     });
 }

@@ -278,6 +278,7 @@ fn push_console_message(
         mission_id: None,
         text: lines.join("\n"),
         prompt_msg_idx: None,
+        turn: None,
         kind: Some("compile-retry".into()),
     });
     state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;

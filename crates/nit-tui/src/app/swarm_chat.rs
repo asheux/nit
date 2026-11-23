@@ -288,6 +288,7 @@ pub(crate) fn submit_active_followup(
                 agent_id: None,
                 mission_id: Some(mission.clone()),
                 text: body.to_owned(),
+                turn: None,
                 kind: None,
                 prompt_msg_idx: None,
             });

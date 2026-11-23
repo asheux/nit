@@ -68,6 +68,7 @@ pub(super) fn handle(state: &mut AppState, raw: &str) -> Option<bool> {
         mission_id: mission,
         text,
         prompt_msg_idx: None,
+        turn: None,
         kind: Some("followup-history".into()),
     });
     state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;

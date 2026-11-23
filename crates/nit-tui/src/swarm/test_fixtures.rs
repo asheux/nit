@@ -231,6 +231,7 @@ pub(crate) fn push_mission_message(
         mission_id: Some(mission_id.to_string()),
         text: text.to_string(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 }

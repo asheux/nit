@@ -852,6 +852,7 @@ fn scrolled_chat_selection_maps_to_visible_line_not_top() {
             mission_id: None,
             text: format!("payload-{i:03}"),
             prompt_msg_idx: None,
+            turn: None,
             kind: None,
         });
     }
@@ -969,6 +970,7 @@ fn scrolled_user_bubble_selection_can_span_multiple_messages() {
             mission_id: None,
             text: format!("user-prompt-{i:02}"),
             prompt_msg_idx: None,
+            turn: None,
             kind: None,
         });
     }
@@ -1089,6 +1091,7 @@ fn vertical_drag_across_user_bubbles_includes_end_message_text() {
         mission_id: None,
         text: "first message has a wider bubble".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -1098,6 +1101,7 @@ fn vertical_drag_across_user_bubbles_includes_end_message_text() {
         mission_id: None,
         text: "short".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -1187,6 +1191,7 @@ fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
         mission_id: None,
         text: "first message has a wider bubble".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     state.agents.messages.push(AgentMessage {
@@ -1196,6 +1201,7 @@ fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
         mission_id: None,
         text: "short".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -1290,6 +1296,7 @@ fn scrolled_reverse_drag_across_user_bubbles_keeps_visible_messages() {
             mission_id: None,
             text: format!("user-prompt-{i:02}"),
             prompt_msg_idx: None,
+            turn: None,
             kind: None,
         });
     }
@@ -1404,6 +1411,7 @@ fn agent_console_selection_strips_user_bubble_edges_from_clipboard() {
         mission_id: None,
         text: "hello".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
     let screen = ratatui::layout::Rect {
@@ -1459,6 +1467,7 @@ fn agent_console_selection_does_not_strip_markdown_table_pipes_in_user_prompt() 
         mission_id: None,
         text: "intro\n| table row |".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -1995,6 +2004,7 @@ fn artifact_popup_context_overrides_agent_and_mission() {
         mission_id: Some("mis-002".into()),
         text: "Clone result".into(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 

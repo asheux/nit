@@ -334,6 +334,32 @@ pub struct AgentAlert {
     pub at: String,
 }
 
+/// Facts captured when the provider finished a single turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentTurnReceipt {
+    pub outcome: TurnOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    Completed,
+    Failed,
+    Aborted,
+}
+
+impl TurnOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Aborted => "Aborted",
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentMessage {
     pub at: String,
@@ -345,6 +371,8 @@ pub struct AgentMessage {
     /// user prompts themselves and for replies where the prompt is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_msg_idx: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<AgentTurnReceipt>,
     /// Optional kind tag, e.g. `"synth"` for synthesis reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -385,6 +413,7 @@ pub enum AgentConsoleRowKind {
     Reply,
     Agent,
     ArtifactLink,
+    FinishedBand { artifact: Option<usize> },
     Breather,
     StatusHeader,
     StatusRow,
@@ -419,6 +448,47 @@ pub struct AgentConsoleRowsCache {
     /// Positions `(row_index, prompt_msg_idx)` where a breather row should
     /// be inserted before render.
     pub breather_slots: Vec<(usize, usize)>,
+    visible_buttons: Vec<ArtifactButton>,
+}
+
+#[derive(Clone, Debug)]
+struct ArtifactButton {
+    columns: std::ops::Range<u16>,
+    y: u16,
+    line: usize,
+    message: usize,
+}
+
+impl AgentConsoleRowsCache {
+    pub fn clear_buttons(&mut self) {
+        self.visible_buttons.clear();
+    }
+    pub fn remember_button(
+        &mut self,
+        columns: std::ops::Range<u16>,
+        y: u16,
+        line: usize,
+        message: usize,
+    ) {
+        self.visible_buttons.push(ArtifactButton {
+            columns,
+            y,
+            line,
+            message,
+        });
+    }
+    pub fn button_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.visible_buttons
+            .iter()
+            .find(|b| b.y == y && b.columns.contains(&x))
+            .map(|b| b.message)
+    }
+    pub fn button_on_line(&self, line: usize) -> Option<usize> {
+        self.visible_buttons
+            .iter()
+            .find(|b| b.line == line)
+            .map(|b| b.message)
+    }
 }
 
 #[derive(Clone, Debug)]

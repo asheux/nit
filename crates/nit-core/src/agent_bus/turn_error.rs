@@ -19,7 +19,11 @@ pub(super) fn handle_turn_failed(
     message: &str,
 ) {
     let source = backend_source_for_agent(state, agent_id);
-    state.agents.active_turns.remove(agent_id);
+    let elapsed = state
+        .agents
+        .active_turns
+        .remove(agent_id)
+        .map(|turn| turn.started_at.elapsed());
     if let Some(token_count) = token_count.as_ref() {
         apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
     }
@@ -32,6 +36,19 @@ pub(super) fn handle_turn_failed(
     // substrate warning, no "Codex failed: …" status banner.
     let is_operator_cancel = message == OPERATOR_CANCEL_TURN_MESSAGE;
     let is_soft_cancel = is_operator_cancel || is_runner_internal_cancel(message);
+    super::turn_completion::push_terminal_message(
+        state,
+        agent_id,
+        mission_id,
+        message,
+        &at,
+        if is_soft_cancel {
+            crate::state::TurnOutcome::Aborted
+        } else {
+            crate::state::TurnOutcome::Failed
+        },
+        elapsed,
+    );
     let new_status = if is_soft_cancel {
         AgentStatus::Idle
     } else {

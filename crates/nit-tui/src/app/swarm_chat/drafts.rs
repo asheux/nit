@@ -190,6 +190,7 @@ pub(super) fn command(state: &mut AppState, raw: &str) -> Option<bool> {
                     agent_id: agent,
                     mission_id: mid,
                     text,
+                    turn: None,
                     kind: Some("followup-history".into()),
                     prompt_msg_idx: None,
                 });

@@ -18,6 +18,7 @@ use crate::theme::Theme;
 use crate::widgets::{agent_ops_view, text_selection::apply_ui_selection};
 
 mod breather;
+mod finished;
 mod rendering;
 
 pub use breather::{
@@ -333,6 +334,7 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    state.agents.console_rows_cache.clear_buttons();
     let layout = compute_console_layout(area, state)?;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -564,6 +566,17 @@ pub fn render(
     };
     let scroll_usize = state.agents.console_scroll;
     let visible_rows = combined_rows.iter().skip(scroll_usize).take(thread_height);
+    if state.station_chat_center() {
+        for (offset, row) in visible_rows.clone().enumerate() {
+            finished::remember(
+                state,
+                row,
+                scroll_usize + offset,
+                layout.thread_area,
+                layout.thread_area.y + offset as u16,
+            );
+        }
+    }
     let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
     let visible = apply_ui_selection(
         visible,
@@ -1033,6 +1046,19 @@ pub fn thread_lines_for_selection_with_swarm(
         .collect()
 }
 
+pub(crate) fn completed_artifact_message_at(
+    state: &AppState,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    if !state.station_chat_center()
+        || state.station_center_tab() != nit_core::StationCenterTab::Chat
+    {
+        return None;
+    }
+    state.agents.console_rows_cache.button_at(column, row)
+}
+
 pub fn artifact_message_index_for_line(
     state: &AppState,
     width: usize,
@@ -1066,6 +1092,10 @@ pub fn artifact_message_index_for_line_with_pane(
     width: usize,
     line_idx: usize,
 ) -> Option<usize> {
+    if state.station_chat_center() && pane_idx.is_none() {
+        return state.agents.console_rows_cache.button_on_line(line_idx);
+    }
+
     let width = width.max(1);
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
@@ -1557,6 +1587,9 @@ pub(super) fn thread_lines<'a>(
             }
             ThreadRowKind::User => user_line_with_prompt_bg(&row.text, theme),
             ThreadRowKind::Agent => agent_line_with_accent_ecg(&row.text, theme),
+            ThreadRowKind::FinishedBand { artifact } => {
+                finished::line(&row.text, artifact.is_some(), theme)
+            }
             ThreadRowKind::ArtifactLink => artifact_link_line(&row.text, theme),
             ThreadRowKind::Breather => breather_line(&row.text, theme),
             ThreadRowKind::StatusHeader => status_header_line(&row.text, theme),
@@ -2592,23 +2625,42 @@ pub(super) fn format_message_rows(
     let indent_str = "";
 
     let mut out = Vec::new();
-    let artifact_target = state
+    let message_idx = state
         .agents
         .messages
         .iter()
-        .enumerate()
-        .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
-        .and_then(|message_idx| {
-            agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
+        .position(|candidate| std::ptr::eq(candidate, msg));
+    let artifact_target = message_idx
+        .and_then(|idx| agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, idx));
+    let legacy_status = match msg.turn.map(|turn| turn.outcome) {
+        Some(nit_core::state::TurnOutcome::Failed) => "failed",
+        Some(nit_core::state::TurnOutcome::Aborted) => "aborted",
+        _ => "done",
+    };
+    if state.station_chat_center() {
+        let status = msg.turn.map_or("Reply", |turn| turn.outcome.label());
+        let elapsed = msg.turn.and_then(|turn| turn.elapsed_ms).map(|ms| {
+            if ms < 1000 {
+                "<1s".into()
+            } else {
+                format_duration_compact(Duration::from_millis(ms))
+            }
         });
-    if artifact_target.is_some() {
-        let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
+        out.extend(finished::rows(
+            status,
+            &agent_badge,
+            elapsed.as_deref(),
+            width,
+            message_idx.filter(|_| artifact_target.is_some()),
+        ));
+    } else if artifact_target.is_some() {
+        let callout = format!("{indent_str}\u{21b3} {header} {legacy_status} (see ARTIFACTS)");
         out.push(ThreadRow {
             text: pad_line_right(&callout, width),
             kind: ThreadRowKind::ArtifactLink,
         });
     } else {
-        let callout = format!("{indent_str}\u{21b3} {header} done");
+        let callout = format!("{indent_str}\u{21b3} {header} {legacy_status}");
         out.push(ThreadRow {
             text: callout,
             kind: ThreadRowKind::Agent,

@@ -321,6 +321,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
         mission_id: None,
         text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
@@ -394,6 +395,7 @@ fn artifacts_popup_wheel_clamps_forward_at_max_and_allows_reverse() {
         mission_id: None,
         text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
         prompt_msg_idx: None,
+        turn: None,
         kind: None,
     });
 
