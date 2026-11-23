@@ -2117,6 +2117,7 @@ fn central_chat_renders_the_reply_in_order_and_bounds_long_output() {
 #[test]
 fn composer_recipient_action_uses_the_visible_border_label_for_clicks() {
     let mut state = test_state();
+    state.agents.codex_cli_available = true;
     state.center_tab = Some(nit_core::StationCenterTab::Chat);
     state.agents.agents.clear();
     state.agents.selected_agent = None;

@@ -324,7 +324,7 @@ fn recipient_action(
         .agents
         .agents
         .iter()
-        .any(|a| a.is_codex() || a.is_claude());
+        .any(|lane| crate::app::chat_lane_runnable(state, lane));
     let action = if model_available {
         "[Select agent]"
     } else {
@@ -820,7 +820,7 @@ pub fn render(
                 .agents
                 .agents
                 .iter()
-                .any(|a| a.is_codex() || a.is_claude())
+                .any(|lane| crate::app::chat_lane_runnable(state, lane))
         {
             let setup = if layout.input_chunk.width >= 51 {
                 " Set up Codex or Claude CLI · nit --agents all ."
