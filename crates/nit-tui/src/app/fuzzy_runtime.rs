@@ -148,6 +148,7 @@ impl FuzzySearchRuntime {
     }
 
     pub(super) fn run_file_query(&mut self, state: &mut AppState) {
+        self.invalidate_preview();
         self.file_gen = self.file_gen.wrapping_add(1);
         state.fuzzy_search.searching = false;
         state.fuzzy_search.file_results.clear();
@@ -160,6 +161,7 @@ impl FuzzySearchRuntime {
     }
 
     pub(super) fn run_content_query(&mut self, state: &mut AppState) {
+        self.invalidate_preview();
         self.content_gen = self.content_gen.wrapping_add(1);
         state.fuzzy_search.match_results.clear();
         state.fuzzy_search.selected = 0;
@@ -186,6 +188,13 @@ impl FuzzySearchRuntime {
             state.fuzzy_search.show_hidden,
             state.fuzzy_search.show_ignored,
         );
+    }
+
+    fn invalidate_preview(&mut self) {
+        self.preview_gen = self.preview_gen.wrapping_add(1);
+        self.preview_model = None;
+        self.last_preview_key = None;
+        self.preview_scroll_delta = 0;
     }
 
     pub(super) fn request_preview_for_selection(&mut self, state: &AppState) {
@@ -232,9 +241,8 @@ impl FuzzySearchRuntime {
             return;
         }
         let override_content = dirty_buffer_override(&state.buffers, &path);
-        self.preview_scroll_delta = 0;
+        self.invalidate_preview();
         self.last_preview_key = Some(key);
-        self.preview_gen = self.preview_gen.wrapping_add(1);
         self.preview.request(
             self.preview_gen,
             state.fuzzy_search.mode,

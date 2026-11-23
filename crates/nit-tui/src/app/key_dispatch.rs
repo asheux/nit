@@ -408,8 +408,6 @@ pub(super) fn handle_paste_event(
 
     if state.fuzzy_search.open {
         state.fuzzy_search.query.push_str(text);
-        fuzzy_runtime.preview_model = None;
-        fuzzy_runtime.last_preview_key = None;
         fuzzy_runtime.run_search_for_mode(state);
         return true;
     }

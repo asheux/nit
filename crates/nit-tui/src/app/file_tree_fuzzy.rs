@@ -123,7 +123,7 @@ pub(super) fn handle_fuzzy_file_event(
     runtime: &mut FuzzySearchRuntime,
     event: FuzzyEvent,
 ) {
-    if !state.fuzzy_search.open {
+    if !state.fuzzy_search.open || state.fuzzy_search.mode != SearchMode::Files {
         return;
     }
     match event {
@@ -141,20 +141,17 @@ pub(super) fn handle_fuzzy_file_event(
             let len = state.fuzzy_search.file_results.len();
             state.fuzzy_search.selected = state.fuzzy_search.selected.min(len.saturating_sub(1));
             state.fuzzy_search.scroll_offset = state.fuzzy_search.scroll_offset.min(len);
-            if state.fuzzy_search.mode == SearchMode::Files {
-                if state.fuzzy_search.query.is_empty() {
-                    if state.fuzzy_search.indexing {
-                        state.fuzzy_search.status_msg =
-                            format!("Indexing… ({total_indexed} files)");
-                    } else {
-                        state.fuzzy_search.status_msg = format!("{total_indexed} files");
-                    }
+            if state.fuzzy_search.query.is_empty() {
+                if state.fuzzy_search.indexing {
+                    state.fuzzy_search.status_msg = format!("Indexing… ({total_indexed} files)");
                 } else {
-                    state.fuzzy_search.status_msg =
-                        format!("{total_matches} matches (showing {len}) · {duration_ms}ms");
+                    state.fuzzy_search.status_msg = format!("{total_indexed} files");
                 }
-                runtime.request_preview_for_selection(state);
+            } else {
+                state.fuzzy_search.status_msg =
+                    format!("{total_matches} matches (showing {len}) · {duration_ms}ms");
             }
+            runtime.request_preview_for_selection(state);
         }
         FuzzyEvent::ResultsAppend {
             generation,
@@ -165,14 +162,12 @@ pub(super) fn handle_fuzzy_file_event(
                 return;
             }
             state.fuzzy_search.file_results.extend(results);
-            if state.fuzzy_search.mode == SearchMode::Files {
-                if state.fuzzy_search.indexing {
-                    state.fuzzy_search.status_msg = format!("Indexing… ({total_indexed} files)");
-                } else if state.fuzzy_search.query.is_empty() {
-                    state.fuzzy_search.status_msg = format!("{total_indexed} files");
-                }
-                runtime.request_preview_for_selection(state);
+            if state.fuzzy_search.indexing {
+                state.fuzzy_search.status_msg = format!("Indexing… ({total_indexed} files)");
+            } else if state.fuzzy_search.query.is_empty() {
+                state.fuzzy_search.status_msg = format!("{total_indexed} files");
             }
+            runtime.request_preview_for_selection(state);
         }
     }
 }
@@ -182,7 +177,7 @@ pub(super) fn handle_fuzzy_content_event(
     runtime: &mut FuzzySearchRuntime,
     event: ContentEvent,
 ) {
-    if !state.fuzzy_search.open {
+    if !state.fuzzy_search.open || state.fuzzy_search.mode != SearchMode::Content {
         return;
     }
     match event {
@@ -201,13 +196,11 @@ pub(super) fn handle_fuzzy_content_event(
                 return;
             }
             state.fuzzy_search.match_results.extend(results);
-            if state.fuzzy_search.mode == SearchMode::Content {
-                state.fuzzy_search.status_msg = format!(
-                    "Searching… ({} matches)",
-                    state.fuzzy_search.match_results.len()
-                );
-                runtime.request_preview_for_selection(state);
-            }
+            state.fuzzy_search.status_msg = format!(
+                "Searching… ({} matches)",
+                state.fuzzy_search.match_results.len()
+            );
+            runtime.request_preview_for_selection(state);
         }
         ContentEvent::Done {
             generation,
@@ -218,11 +211,8 @@ pub(super) fn handle_fuzzy_content_event(
                 return;
             }
             state.fuzzy_search.searching = false;
-            if state.fuzzy_search.mode == SearchMode::Content {
-                state.fuzzy_search.status_msg =
-                    format!("{total_matches} matches · {duration_ms}ms");
-                runtime.request_preview_for_selection(state);
-            }
+            state.fuzzy_search.status_msg = format!("{total_matches} matches · {duration_ms}ms");
+            runtime.request_preview_for_selection(state);
         }
         ContentEvent::Error {
             generation,
@@ -647,8 +637,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.selected = 0;
             state.fuzzy_search.scroll_offset = 0;
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -658,8 +646,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -670,8 +656,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -682,8 +666,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -693,8 +675,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -705,8 +685,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -717,8 +695,6 @@ pub(super) fn handle_fuzzy_search_key(
             state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
             runtime.rebuild_index(state);
             runtime.run_search_for_mode(state);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -734,8 +710,6 @@ pub(super) fn handle_fuzzy_search_key(
                     runtime.run_content_query(state);
                 }
             }
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -752,8 +726,6 @@ pub(super) fn handle_fuzzy_search_key(
                     runtime.run_content_query(state);
                 }
             }
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -770,8 +742,6 @@ pub(super) fn handle_fuzzy_search_key(
                     runtime.run_content_query(state);
                 }
             }
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             true
         }
         KeyEvent {
@@ -784,8 +754,6 @@ pub(super) fn handle_fuzzy_search_key(
             } else {
                 state.fuzzy_search.query.pop();
             }
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             runtime.run_search_for_mode(state);
             true
         }
@@ -996,8 +964,6 @@ pub(super) fn handle_fuzzy_search_key(
             ..
         } if (modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT) && !c.is_control() => {
             state.fuzzy_search.query.push(*c);
-            runtime.preview_model = None;
-            runtime.last_preview_key = None;
             runtime.run_search_for_mode(state);
             true
         }

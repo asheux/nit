@@ -752,3 +752,72 @@ fn swarm_artifacts_popup_follows_final_report() {
     ));
     assert_eq!(state.agents.artifacts_popup_scroll, 0);
 }
+
+#[test]
+fn fuzzy_mode_switch_rejects_pending_results_and_preview() {
+    use crate::fuzzy_preview_runner::{PreviewEvent, PreviewModel};
+    use crate::fuzzy_search_runner::{ContentEvent, FuzzyEvent};
+
+    let mut state = state_for_test();
+    let mut runtime = FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    state.fuzzy_search.open = true;
+    state.fuzzy_search.mode = SearchMode::Files;
+    let preview_generation = runtime.preview_gen;
+    let file_generation = runtime.file_gen;
+    let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+    let screen = ratatui::layout::Rect::new(0, 0, 100, 40);
+    assert!(file_tree_fuzzy::handle_fuzzy_search_key(
+        &tab,
+        &mut state,
+        &mut syntax,
+        &mut runtime,
+        screen
+    ));
+    state.fuzzy_search.selected = 3;
+    file_tree_fuzzy::handle_fuzzy_file_event(
+        &mut state,
+        &mut runtime,
+        FuzzyEvent::ResultsReplace {
+            generation: file_generation,
+            results: vec![],
+            total_indexed: 0,
+            total_matches: 0,
+            duration_ms: 1,
+        },
+    );
+    assert_eq!(state.fuzzy_search.selected, 3);
+    file_tree_fuzzy::handle_fuzzy_preview_event(
+        &mut state,
+        &mut runtime,
+        PreviewEvent::Ready {
+            generation: preview_generation,
+            model: PreviewModel {
+                path: "old.rs".into(),
+                start_line: 0,
+                anchor_line: 0,
+                truncated: false,
+                lines: vec![],
+            },
+        },
+    );
+    assert!(runtime.preview_model.is_none());
+
+    let content_generation = runtime.content_gen;
+    assert!(file_tree_fuzzy::handle_fuzzy_search_key(
+        &tab,
+        &mut state,
+        &mut syntax,
+        &mut runtime,
+        screen
+    ));
+    file_tree_fuzzy::handle_fuzzy_content_event(
+        &mut state,
+        &mut runtime,
+        ContentEvent::Started {
+            generation: content_generation,
+        },
+    );
+    assert!(!state.fuzzy_search.searching);
+    runtime.shutdown();
+}
