@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
@@ -17,23 +16,6 @@ impl RecordedMtime {
     fn probe(path: &Path) -> Self {
         Self(std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
     }
-
-    const fn is_known(&self) -> bool {
-        self.0.is_some()
-    }
-
-    fn has_changed_from(&self, baseline: &Self) -> bool {
-        self.is_known() && *self != *baseline
-    }
-}
-
-impl fmt::Display for RecordedMtime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            Some(_) => write!(f, "known"),
-            None => write!(f, "unknown"),
-        }
-    }
 }
 
 type MtimeMap = HashMap<PathBuf, RecordedMtime>;
@@ -41,7 +23,8 @@ type MtimeMap = HashMap<PathBuf, RecordedMtime>;
 /// Each tick: drain queued commands → optionally re-scan workspace →
 /// compare tracked mtimes → emit change events → sleep until next tick.
 pub(super) struct PollLoop {
-    tracked_files: MtimeMap,
+    watched_files: MtimeMap,
+    workspace_files: MtimeMap,
     workspace_root: Option<PathBuf>,
     gitignored_dirs: Vec<String>,
     last_scan_timestamp: Instant,
@@ -55,7 +38,8 @@ impl PollLoop {
         event_tx: Sender<PathBuf>,
     ) -> Self {
         Self {
-            tracked_files: HashMap::with_capacity(INITIAL_TRACKING_CAPACITY),
+            watched_files: HashMap::new(),
+            workspace_files: HashMap::with_capacity(INITIAL_TRACKING_CAPACITY),
             workspace_root: None,
             gitignored_dirs: Vec::new(),
             last_scan_timestamp: Instant::now(),
@@ -82,16 +66,16 @@ impl PollLoop {
         match command {
             FileWatchCommand::Watch(filepath) => {
                 let baseline = RecordedMtime::probe(&filepath);
-                self.tracked_files.insert(filepath, baseline);
+                self.watched_files.insert(filepath, baseline);
                 false
             }
             FileWatchCommand::Unwatch(filepath) => {
-                self.tracked_files.remove(&filepath);
+                self.watched_files.remove(&filepath);
                 false
             }
             FileWatchCommand::WatchWorkspace(root) => {
                 self.gitignored_dirs = parse_gitignore_dirs(&root);
-                self.emit_workspace_discoveries(&root);
+                self.scan_workspace(&root, false);
                 self.workspace_root = Some(root);
                 self.last_scan_timestamp = Instant::now();
                 false
@@ -124,21 +108,35 @@ impl PollLoop {
         // Emit change events for newly discovered files so the genome system
         // picks them up immediately rather than waiting for a future mtime
         // change.
-        self.emit_workspace_discoveries(&workspace);
+        self.scan_workspace(&workspace, true);
         self.last_scan_timestamp = Instant::now();
     }
 
-    fn emit_workspace_discoveries(&mut self, root: &Path) {
-        let new_files = discover_source_files(root, &mut self.tracked_files, &self.gitignored_dirs);
-        for path in new_files {
-            let _ = self.change_emitter.send(path);
+    fn scan_workspace(&mut self, root: &Path, notify: bool) {
+        let mut previous = std::mem::take(&mut self.workspace_files);
+        let mut next = HashMap::with_capacity(previous.len());
+        for path in SourceTreeWalker::rooted_at(root, self.gitignored_dirs.clone()) {
+            let current = RecordedMtime::probe(&path);
+            let old = previous.remove(&path);
+            if notify && old.as_ref() != Some(&current) && !self.watched_files.contains_key(&path) {
+                let _ = self.change_emitter.send(path.clone());
+            }
+            next.insert(path, current);
         }
+        if notify {
+            for path in previous.into_keys() {
+                if !self.watched_files.contains_key(&path) && !path.exists() {
+                    let _ = self.change_emitter.send(path);
+                }
+            }
+        }
+        self.workspace_files = next;
     }
 
     fn emit_detected_changes(&mut self) {
-        for (filepath, recorded) in self.tracked_files.iter_mut() {
+        for (filepath, recorded) in self.watched_files.iter_mut() {
             let current = RecordedMtime::probe(filepath);
-            if !current.has_changed_from(recorded) {
+            if current == *recorded {
                 continue;
             }
             *recorded = current;
@@ -155,21 +153,32 @@ impl PollLoop {
     }
 }
 
-/// Walk `root` recursively, inserting newly discovered source files into
-/// `destination`. Existing entries keep their baseline mtime. Returns the
-/// list of paths added on this call.
-fn discover_source_files(
-    root: &Path,
-    destination: &mut MtimeMap,
-    gitignored: &[String],
-) -> Vec<PathBuf> {
-    use std::collections::hash_map::Entry;
-    let mut new_paths = Vec::new();
-    SourceTreeWalker::rooted_at(root, gitignored.to_vec()).for_each(|discovered_path| {
-        if let Entry::Vacant(slot) = destination.entry(discovered_path.clone()) {
-            slot.insert(RecordedMtime::probe(&discovered_path));
-            new_paths.push(discovered_path);
-        }
-    });
-    new_paths
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_workspace_creation_and_removal_without_startup_events() {
+        let dir = std::env::temp_dir().join(format!("nit-watch-changes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.py");
+        let added = dir.join("added.rs");
+        std::fs::write(&original, "").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dir, dir.join("recursive")).unwrap();
+
+        let (_, commands) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
+        let mut watch = PollLoop::initialize(commands, tx);
+        watch.execute(FileWatchCommand::WatchWorkspace(dir.clone()));
+        assert_eq!(watch.workspace_files.len(), 1);
+        assert!(events.try_recv().is_err());
+        std::fs::remove_file(&original).unwrap();
+        std::fs::write(&added, "").unwrap();
+        watch.scan_workspace(&dir, true);
+        assert_eq!(events.try_iter().collect::<Vec<_>>(), [added, original]);
+        watch.scan_workspace(&dir, true);
+        assert!(events.try_recv().is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
