@@ -4,6 +4,29 @@
 
 use super::*;
 
+fn select_test_recipient(
+    state: &mut AppState,
+) -> (
+    crate::codex_runner::CodexRunner,
+    std::sync::mpsc::Receiver<crate::codex_runner::CodexCommand>,
+) {
+    state.agents.agents.push(nit_core::AgentLane {
+        id: "codex-test".into(),
+        role: "chat".into(),
+        lane: "Codex".into(),
+        kind: nit_core::AgentLaneKind::Codex,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        shadow: false,
+        last_message: String::new(),
+    });
+    state.agents.codex_cli_available = true;
+    state.agents.selected_agent = Some("codex-test".into());
+    crate::codex_runner::CodexRunner::test_channel()
+}
+
 #[test]
 fn agent_chat_parses_all_prefix_as_broadcast() {
     let mut state = state_for_test();
@@ -35,6 +58,7 @@ fn agent_chat_does_not_treat_allies_as_broadcast() {
 #[test]
 fn agent_chat_accepts_input_and_sends_on_enter() {
     let mut state = state_for_test();
+    let (runner, _commands) = select_test_recipient(&mut state);
     state.focus = PaneId::Notes;
     state.agents.console_scroll = 9;
     let mut vitals = VitalsState::default();
@@ -44,7 +68,7 @@ fn agent_chat_accepts_input_and_sends_on_enter() {
         KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -52,7 +76,7 @@ fn agent_chat_accepts_input_and_sends_on_enter() {
         KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -63,7 +87,7 @@ fn agent_chat_accepts_input_and_sends_on_enter() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -188,6 +212,7 @@ fn agent_chat_arrow_keys_move_cursor_not_thread_scroll() {
 #[test]
 fn agent_chat_prompt_history_cycles_with_up_down() {
     let mut state = state_for_test();
+    let (runner, _commands) = select_test_recipient(&mut state);
     state.focus = PaneId::Notes;
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
@@ -198,7 +223,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -209,7 +234,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -218,7 +243,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -229,7 +254,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -240,7 +265,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -250,7 +275,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -261,6 +286,7 @@ fn agent_chat_prompt_history_cycles_with_up_down() {
 #[test]
 fn agent_chat_prompt_history_restores_draft() {
     let mut state = state_for_test();
+    let (runner, _commands) = select_test_recipient(&mut state);
     state.focus = PaneId::Notes;
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
@@ -271,7 +297,7 @@ fn agent_chat_prompt_history_restores_draft() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -281,7 +307,7 @@ fn agent_chat_prompt_history_restores_draft() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -292,7 +318,7 @@ fn agent_chat_prompt_history_restores_draft() {
         KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -302,7 +328,7 @@ fn agent_chat_prompt_history_restores_draft() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -382,6 +408,7 @@ fn insert_newline_preserves_indent_in_editor() {
 #[test]
 fn agent_chat_send_preserves_pasted_formatting() {
     let mut state = state_for_test();
+    let (runner, _commands) = select_test_recipient(&mut state);
     state.focus = PaneId::Notes;
     state.agents.chat_input = "  code block:\n    let x = 1;\n".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
@@ -392,7 +419,7 @@ fn agent_chat_send_preserves_pasted_formatting() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -406,6 +433,7 @@ fn agent_chat_send_preserves_pasted_formatting() {
 #[test]
 fn agent_chat_send_preserves_markdown_text() {
     let mut state = state_for_test();
+    let (runner, _commands) = select_test_recipient(&mut state);
     state.focus = PaneId::Notes;
     let markdown = "# Plan\n- item 1\n- item 2\n```rust\nlet x = 1;\n```\n";
     state.agents.chat_input = markdown.into();
@@ -417,7 +445,7 @@ fn agent_chat_send_preserves_markdown_text() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -698,4 +726,99 @@ fn rejected_swarm_draft_recovers_without_dispatching_to_a_reused_mission() {
         1
     );
     fs::remove_dir_all(after.workspace_root).unwrap();
+}
+
+#[test]
+fn missing_chat_targets_keep_the_exact_draft_and_never_emit_a_prompt() {
+    for raw in [
+        "  first\nsecond λ",
+        "@q  first\nsecond λ",
+        "@new first",
+        "@shadow first",
+        "@all first",
+        "@swarm 2 first",
+        "SWARM PLANNER: sample pasted from a file",
+        "@agent missing first",
+    ] {
+        let mut state = state_for_test();
+        state.agents.chat_input = raw.into();
+        state.agents.chat_input_cursor = 3;
+        state.agents.chat_input_selection_anchor = Some(1);
+        let (runner, commands) = crate::codex_runner::CodexRunner::test_channel();
+        let sent = submit_chat_input_and_dispatch(
+            &mut state,
+            &mut VitalsState::default(),
+            Some(&runner),
+            None,
+            &mut SwarmRuntime::default(),
+            &mut crate::shadow::ShadowRuntime::default(),
+        );
+        assert!(!sent, "{raw}");
+        assert_eq!(state.agents.chat_input, raw);
+        assert_eq!(state.agents.chat_input_cursor, 3);
+        assert_eq!(state.agents.chat_input_selection_anchor, Some(1));
+        assert!(state.agents.messages.is_empty());
+        assert!(state.agents.chat_needs_recipient);
+        assert!(commands.try_recv().is_err());
+    }
+}
+
+#[test]
+fn direct_address_queues_only_the_named_model_and_keeps_failed_submits_unsent() {
+    let mut state = state_for_test();
+    let (runner, commands) = select_test_recipient(&mut state);
+    state.agents.selected_agent = None;
+    state.agents.chat_input = "Review this file".into();
+    let mut vitals = VitalsState::default();
+    let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
+    assert!(!submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&runner),
+        None,
+        &mut swarm,
+        &mut shadow
+    ));
+    assert!(commands.try_recv().is_err());
+    state.agents.chat_input = "@agent codex-test @all remains literal".into();
+    assert!(submit_chat_input_and_dispatch(
+        &mut state,
+        &mut vitals,
+        Some(&runner),
+        None,
+        &mut swarm,
+        &mut shadow
+    ));
+    assert_eq!(state.agents.messages.len(), 1);
+    assert_eq!(state.agents.messages[0].channel, AgentChannel::Agent);
+    assert_eq!(state.agents.messages[0].text, "@all remains literal");
+    assert!(
+        matches!(commands.try_recv(), Ok(crate::codex_runner::CodexCommand::RunTurn { model, .. }) if model == "codex-test")
+    );
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn offline_or_disconnected_runner_leaves_first_send_editable() {
+    let mut state = state_for_test();
+    let (runner, commands) = select_test_recipient(&mut state);
+    drop(commands);
+    for installed in [false, true] {
+        state.agents.chat_needs_recipient = false;
+        state.agents.codex_cli_available = installed;
+        state.agents.chat_input = "Please review the change".into();
+        state.agents.chat_input_cursor = 6;
+        assert!(!submit_chat_input_and_dispatch(
+            &mut state,
+            &mut VitalsState::default(),
+            Some(&runner),
+            None,
+            &mut SwarmRuntime::default(),
+            &mut crate::shadow::ShadowRuntime::default()
+        ));
+        assert!(state.agents.messages.is_empty());
+        assert_eq!(state.agents.chat_input, "Please review the change");
+        assert_eq!(state.agents.chat_input_cursor, 6);
+    }
 }

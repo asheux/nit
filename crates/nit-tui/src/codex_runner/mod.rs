@@ -106,6 +106,21 @@ pub struct CodexRunner {
 }
 
 impl CodexRunner {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, Receiver<CodexCommand>) {
+        let (cmd_tx, commands) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        (
+            Self {
+                cmd_tx,
+                events,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                handle: None,
+            },
+            commands,
+        )
+    }
+
     pub fn spawn(
         mode: CodexRuntimeMode,
         config: CodexRunnerConfig,

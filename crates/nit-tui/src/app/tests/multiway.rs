@@ -35,6 +35,7 @@ fn agent_lane(id: &str) -> nit_core::AgentLane {
 /// submit never panics), and `input` staged on the chat line.
 fn chat_state(multiway_enabled: bool, input: &str) -> AppState {
     let mut state = state_for_test();
+    state.agents.codex_cli_available = true;
     state.agents.multiway_enabled = multiway_enabled;
     state.agents.agents.push(agent_lane("a1"));
     state.agents.agents.push(agent_lane("a2"));
@@ -48,10 +49,11 @@ fn submit(state: &mut AppState) -> bool {
     let mut vitals = crate::vitals::VitalsState::default();
     let mut swarm = crate::swarm::SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     crate::app::submit_chat_input_and_dispatch(
         state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm,
         &mut shadow,

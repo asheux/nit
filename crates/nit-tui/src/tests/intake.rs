@@ -378,6 +378,7 @@ fn intake_disabled_skips_intake_turn() {
     let claude = ClaudeRunner::spawn(ClaudeRunnerConfig::default());
 
     let mut state = make_state(cwd.clone(), false);
+    state.agents.claude_cli_available = true;
     state.agents.chat_input = RAW_REAL_WORK.into();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();

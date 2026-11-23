@@ -39,6 +39,9 @@ fn swarm_bulk_preserves_operator_selected_ops_tab() {
     });
     state.agents.chat_input = "@swarm 2 template=bulk do thing".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -46,7 +49,7 @@ fn swarm_bulk_preserves_operator_selected_ops_tab() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -85,6 +88,9 @@ fn swarm_auto_detects_template_line_without_prefix() {
     state.agents.chat_input =
         "You are the SWARM PLANNER inside nit.\nTemplate: `parallel`\nDo thing.".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -92,7 +98,7 @@ fn swarm_auto_detects_template_line_without_prefix() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -136,6 +142,9 @@ fn swarm_auto_detects_swarm_role_and_uses_default_template() {
     });
     state.agents.chat_input = "You are the SWARM SYNTHESIZER.\nCombine agent outputs.".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -143,7 +152,7 @@ fn swarm_auto_detects_swarm_role_and_uses_default_template() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -187,6 +196,9 @@ fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
     });
     state.agents.chat_input = "do a quick repo health check and suggest next steps".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -194,7 +206,7 @@ fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -233,6 +245,9 @@ fn swarm_autostart_uses_codex_max_parallel_turns_as_size_hint() {
     }
     state.agents.chat_input = "do a quick repo health check and suggest next steps".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -240,7 +255,7 @@ fn swarm_autostart_uses_codex_max_parallel_turns_as_size_hint() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -284,6 +299,9 @@ fn swarm_uses_roster_default_template_when_argument_missing() {
     });
     state.agents.chat_input = "@swarm 2 do thing".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -291,7 +309,7 @@ fn swarm_uses_roster_default_template_when_argument_missing() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -334,6 +352,9 @@ fn swarm_uses_roster_default_mission_when_argument_missing() {
     });
     state.agents.chat_input = "@swarm 2 read papers and compare ideas".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -341,7 +362,7 @@ fn swarm_uses_roster_default_mission_when_argument_missing() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));
@@ -384,6 +405,9 @@ fn explicit_prompt_mission_overrides_roster_default_mission() {
     });
     state.agents.chat_input = "@swarm 2 Mission: research\nread papers and compare ideas".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    state.agents.selected_agent = state.agents.agents.first().map(|lane| lane.id.clone());
+    state.agents.codex_cli_available = true;
+    let (runner, _commands) = crate::codex_runner::CodexRunner::test_channel();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
 
@@ -391,7 +415,7 @@ fn explicit_prompt_mission_overrides_roster_default_mission() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         &mut vitals,
-        None,
+        Some(&runner),
         None,
         &mut swarm
     ));

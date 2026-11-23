@@ -1,11 +1,13 @@
 use arboard::Clipboard;
 mod receipts;
+mod recipient;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
     AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentStatus, AppState,
     MissionPhase, CONSOLE_SCROLL_BOTTOM,
 };
 use nit_multiway::policy::Mood;
+pub(crate) use recipient::{chat_lane_runnable, chat_recipient};
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig};
@@ -53,27 +55,20 @@ fn try_dispatch_swarm_command(
     cmd: &mut SwarmCommand,
     raw: &str,
 ) -> bool {
-    chat_history_remember(state, raw);
     let planner = state
         .agents
-        .selected_context_agent()
-        .and_then(|id| {
-            state
-                .agents
-                .agents
-                .iter()
-                .find(|lane| lane.id == id)
-                .is_some_and(|lane| lane.is_codex() || lane.is_claude())
-                .then_some(id.to_string())
-        })
+        .selected_agent
+        .as_deref()
+        .filter(|id| recipient::runner_available(state, id, codex, claude))
         .or_else(|| {
             state
                 .agents
                 .agents
                 .iter()
-                .find(|lane| lane.is_codex() || lane.is_claude())
-                .map(|lane| lane.id.clone())
-        });
+                .map(|lane| lane.id.as_str())
+                .find(|id| recipient::runner_available(state, id, codex, claude))
+        })
+        .map(str::to_owned);
 
     if let Some(planner) = planner {
         let original_size = cmd.size;
@@ -101,6 +96,7 @@ fn try_dispatch_swarm_command(
             cmd.mission_kind,
             cmd.prompt.clone(),
         ) {
+            chat_history_remember(state, raw);
             state.agents.chat_input = cmd.prompt.clone();
             sync_cursor_to_input_end(state);
             let _ = push_chat_message(state);
@@ -194,13 +190,11 @@ fn try_dispatch_swarm_command(
             // A failed team launch leaves the original command available for retry.
             true
         } else {
-            state.agents.chat_input = cmd.prompt.clone();
-            sync_cursor_to_input_end(state);
             false
         }
     } else {
-        state.status = Some("@swarm requires at least one Codex or Claude agent".into());
-        true
+        super::choose_chat_recipient(state);
+        false
     }
 }
 
@@ -325,21 +319,18 @@ fn dispatch_to_selected_targets(
     force_new: bool,
 ) {
     for model in targets {
-        let base_model = crate::swarm::resolve_base_agent_id(&model).to_string();
-        let lane_kind = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == base_model)
-            .map(|lane| lane.kind);
-        let is_dispatchable = matches!(
-            lane_kind,
-            Some(nit_core::AgentLaneKind::Codex) | Some(nit_core::AgentLaneKind::Claude)
-        );
-        if !is_dispatchable {
+        let base_model = if force_new {
+            crate::swarm::resolve_base_agent_id(&model).to_owned()
+        } else {
+            model
+        };
+        let Some(lane) = state.agents.agents_get(&base_model) else {
+            continue;
+        };
+        let is_claude = lane.is_claude();
+        if !is_claude && !lane.is_codex() {
             continue;
         }
-        let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
 
         // The intake agent (when `state.settings.intake_enabled`) owns
         // the FILE CHECKLIST decision now; chat dispatch hands the
@@ -1422,6 +1413,9 @@ pub(crate) fn submit_chat_input_and_dispatch(
 ) -> bool {
     let raw = state.agents.chat_input.clone();
     if raw.trim().is_empty() {
+        if chat_recipient(state).is_none() && super::followup_mission(state, swarm).is_none() {
+            super::choose_chat_recipient(state);
+        }
         return false;
     }
     if let Some(handled) = receipts::handle(state, &raw) {
@@ -1465,8 +1459,13 @@ pub(crate) fn submit_chat_input_and_dispatch(
         reset_chat_input_and_history_nav(state);
         return aborted;
     }
-    if let Some(result) = super::swarm_chat::submit_active_followup(state, swarm, &raw) {
-        return result;
+    let direct_address = raw.split_whitespace().next() == Some("@agent")
+        && super::followup_mission(state, swarm).is_none()
+        && state.agents.selected_context_mission().is_none();
+    if !direct_address {
+        if let Some(result) = super::swarm_chat::submit_active_followup(state, swarm, &raw) {
+            return result;
+        }
     }
     // Multiway routing (Phase 6/7), gated behind `NIT_MULTIWAY` (snapshotted into
     // `multiway_enabled` at run start). With the flag off this whole block is
@@ -1536,11 +1535,6 @@ pub(crate) fn submit_chat_input_and_dispatch(
     // `@shadow <prompt>` — explicit opt-in to the single-agent shadow pipeline.
     // Strip the prefix so `push_chat_message` sees just the user's text.
     let shadow_explicit = parse_shadow_command(&raw).is_some();
-    if shadow_explicit {
-        let stripped = raw.trim_start().strip_prefix("@shadow").unwrap_or(&raw);
-        state.agents.chat_input = stripped.trim_start().to_string();
-        sync_cursor_to_input_end(state);
-    }
     let mut swarm_handled = false;
     // When `@shadow` was given explicitly, do NOT also try to interpret the
     // prompt as `@swarm` — the user picked shadows on purpose.
@@ -1556,10 +1550,18 @@ pub(crate) fn submit_chat_input_and_dispatch(
                     effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
                 cmd
             })
-            .or_else(|| detect_implicit_swarm_command(state, &raw))
+            .or_else(|| {
+                chat_recipient(state).and_then(|_| detect_implicit_swarm_command(state, &raw))
+            })
     };
     if let Some(cmd) = cmd.as_mut() {
         swarm_handled = try_dispatch_swarm_command(state, vitals, codex, claude, swarm, cmd, &raw);
+        if !swarm_handled
+            && (raw.split_whitespace().next() == Some("@swarm")
+                || state.agents.chat_needs_recipient)
+        {
+            return false;
+        }
     }
 
     if !swarm_handled {
@@ -1573,113 +1575,160 @@ pub(crate) fn submit_chat_input_and_dispatch(
         // @q / @queue: legacy alias — now the same as the default (queue to base).
         let legacy_queue = prefix_isolated("@queue") || prefix_isolated("@q");
 
-        if force_new {
-            state.agents.chat_input = raw["@new".len()..].trim_start().to_string();
-            sync_cursor_to_input_end(state);
-        } else if legacy_queue {
-            let stripped = raw
-                .strip_prefix("@queue")
-                .or_else(|| raw.strip_prefix("@q"))
-                .unwrap_or(&raw);
-            state.agents.chat_input = stripped.trim_start().to_string();
-            sync_cursor_to_input_end(state);
-        }
-        let mission_id = state
-            .agents
-            .selected_context_mission()
-            .map(ToString::to_string);
-        let selected_agent = state
-            .agents
-            .selected_context_agent()
-            .map(ToString::to_string);
-        let sent = push_chat_message(state);
-        if let Some((channel, raw_prompt)) = sent {
-            let prompt = raw_prompt.clone();
-            let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
-            chat_history_remember(state, &raw);
-            // For swarm missions, re-activate the run and dispatch only to
-            // the planner so the swarm pipeline assigns roles to clones.
-            let is_swarm_mission = dispatch_swarm_followup(
-                state,
-                vitals,
-                codex,
-                claude,
-                swarm,
-                &mission_id,
-                &prompt,
-                prompt_msg_idx,
-            );
-            // Shadow pipeline: enabled explicitly (@shadow) or auto for heavy
-            // single-agent prompts. Skipped for swarm followups, broadcasts,
-            // @new clone dispatches, @queue prompts, and when no single agent
-            // is selected. The auto-enable heuristic runs on the *raw*
-            // prompt — see `raw_prompt` above for why.
-            let shadow_eligible = !is_swarm_mission
-                && !force_new
-                && !legacy_queue
-                && matches!(channel, AgentChannel::Agent);
-            let shadow_requested =
-                shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&raw_prompt));
-            let shadow_handled = shadow_requested
-                && try_dispatch_shadow_pipeline(
-                    state,
-                    vitals,
-                    codex,
-                    claude,
-                    shadow,
-                    &selected_agent,
-                    &prompt,
-                    &mission_id,
-                    prompt_msg_idx,
-                );
-
-            // Intake gate: when enabled, an LLM-based classifier runs
-            // before the real dispatch and may append a FILE CHECKLIST.
-            // Skipped for swarm, shadow, broadcast, @new, @queue, and
-            // when no single agent is selected — same eligibility rules
-            // as the shadow pipeline. The deferred dispatch resumes via
-            // `event_drain::drain_intake_outcome` on the intake turn's
-            // `TurnCompleted` / `TurnFailed`.
-            let intake_handled = !is_swarm_mission
-                && !shadow_handled
-                && !force_new
-                && !legacy_queue
-                && matches!(channel, AgentChannel::Agent)
-                && selected_agent.is_some()
-                && try_dispatch_intake(
-                    state,
-                    vitals,
-                    codex,
-                    claude,
-                    selected_agent.as_deref(),
-                    &prompt,
-                    &mission_id,
-                    prompt_msg_idx,
-                    channel,
-                    force_new,
-                );
-
-            let targets = if is_swarm_mission || shadow_handled || intake_handled {
-                Vec::new()
-            } else if matches!(channel, AgentChannel::Broadcast) {
-                broadcast_target_agents(state, mission_id.as_deref())
-            } else {
-                selected_agent.clone().into_iter().collect::<Vec<_>>()
-            };
-            dispatch_to_selected_targets(
-                state,
-                vitals,
-                codex,
-                claude,
-                targets,
-                &prompt,
-                &mission_id,
-                prompt_msg_idx,
-                force_new,
-            );
-        } else {
+        let mission_id = state.agents.selected_context_mission().map(str::to_owned);
+        let team = mission_id
+            .as_deref()
+            .filter(|mid| swarm.mission_is_complete(mid))
+            .and_then(|mid| swarm.session_config(mid));
+        if team.as_ref().is_some_and(|team| {
+            !recipient::runner_available(state, &team.planner_agent_id, codex, claude)
+        }) {
+            state.status = Some("Draft kept. The mission planner is unavailable.".into());
             return false;
         }
+        let completed_team = team.is_some();
+        let mut selected_agent = chat_recipient(state).map(str::to_owned);
+        let mut body = raw.as_str();
+        if direct_address {
+            let tail = raw.trim_start()["@agent".len()..].trim_start();
+            let Some((id, message)) = tail
+                .split_once(char::is_whitespace)
+                .filter(|(_, body)| !body.trim().is_empty())
+            else {
+                state.status = Some("Use @agent MODEL MESSAGE.".into());
+                return false;
+            };
+            selected_agent = Some(id.to_owned());
+            body = message.trim_start();
+        } else if force_new || legacy_queue || shadow_explicit {
+            body = raw
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .map_or("", |(_, tail)| tail.trim_start());
+        }
+        let (channel, text) = if direct_address {
+            (AgentChannel::Agent, body.to_owned())
+        } else {
+            parse_chat_input_channel(body)
+        };
+        if text.trim().is_empty() {
+            return false;
+        }
+        let targets = if channel == AgentChannel::Broadcast {
+            broadcast_target_agents(state, mission_id.as_deref())
+        } else {
+            selected_agent.iter().cloned().collect()
+        };
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|id| recipient::runner_available(state, id, codex, claude))
+            .collect();
+        if !completed_team && targets.is_empty() {
+            super::choose_chat_recipient(state);
+            if direct_address {
+                state.status = Some(format!(
+                    "Draft kept. Choose an available Codex or Claude model or edit @agent {}.",
+                    selected_agent.as_deref().unwrap_or_default()
+                ));
+            }
+            return false;
+        }
+        if direct_address {
+            state.agents.selected_agent = selected_agent.clone();
+        }
+        let prompt = text;
+        let prompt_msg_idx = state.agents.messages.len();
+        if completed_team {
+            record_chat_message(state, channel, &prompt, &raw);
+        }
+        // For swarm missions, re-activate the run and dispatch only to
+        // the planner so the swarm pipeline assigns roles to clones.
+        let is_swarm_mission = dispatch_swarm_followup(
+            state,
+            vitals,
+            codex,
+            claude,
+            swarm,
+            &mission_id,
+            &prompt,
+            prompt_msg_idx,
+        );
+        // Shadow pipeline: enabled explicitly (@shadow) or auto for heavy
+        // single-agent prompts. Skipped for swarm followups, broadcasts,
+        // @new clone dispatches, @queue prompts, and when no single agent
+        // is selected. The auto-enable heuristic runs on the *raw*
+        // prompt before any provider-specific instructions are attached.
+        let shadow_eligible = !is_swarm_mission
+            && !force_new
+            && !legacy_queue
+            && matches!(channel, AgentChannel::Agent);
+        let shadow_requested =
+            shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&prompt));
+        let shadow_handled = shadow_requested
+            && try_dispatch_shadow_pipeline(
+                state,
+                vitals,
+                codex,
+                claude,
+                shadow,
+                &selected_agent,
+                &prompt,
+                &mission_id,
+                prompt_msg_idx,
+            );
+
+        // Intake gate: when enabled, an LLM-based classifier runs
+        // before the real dispatch and may append a FILE CHECKLIST.
+        // Skipped for swarm, shadow, broadcast, @new, @queue, and
+        // when no single agent is selected — same eligibility rules
+        // as the shadow pipeline. The deferred dispatch resumes via
+        // `event_drain::drain_intake_outcome` on the intake turn's
+        // `TurnCompleted` / `TurnFailed`.
+        let intake_handled = !is_swarm_mission
+            && !shadow_handled
+            && !force_new
+            && !legacy_queue
+            && matches!(channel, AgentChannel::Agent)
+            && selected_agent.is_some()
+            && try_dispatch_intake(
+                state,
+                vitals,
+                codex,
+                claude,
+                selected_agent.as_deref(),
+                &prompt,
+                &mission_id,
+                prompt_msg_idx,
+                channel,
+                force_new,
+            );
+
+        let targets = if is_swarm_mission || shadow_handled || intake_handled {
+            Vec::new()
+        } else {
+            targets
+        };
+        dispatch_to_selected_targets(
+            state,
+            vitals,
+            codex,
+            claude,
+            targets,
+            &prompt,
+            &mission_id,
+            prompt_msg_idx,
+            force_new,
+        );
+        if !completed_team {
+            if !shadow_handled && !intake_handled && !recipient::accepted(state, prompt_msg_idx) {
+                state.status =
+                    Some("Draft kept. The selected agent did not accept this turn.".into());
+                return false;
+            }
+            record_chat_message(state, channel, &prompt, &raw);
+        }
+        chat_history_remember(state, &raw);
+        state.agents.chat_needs_recipient = false;
     }
     state.agents.chat_input_scroll = usize::MAX;
     true
@@ -1820,6 +1869,11 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
         return None;
     }
 
+    record_chat_message(state, channel, &text, &raw);
+    Some((channel, text))
+}
+
+fn record_chat_message(state: &mut AppState, channel: AgentChannel, text: &str, raw: &str) {
     let message = AgentMessage {
         at: timestamp_label(state),
         channel,
@@ -1828,14 +1882,14 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
             .agents
             .selected_context_mission()
             .map(ToString::to_string),
-        text: text.clone(),
+        text: text.to_owned(),
         prompt_msg_idx: None,
         turn: None,
         kind: None,
     };
     if let Some(mission_id) = message.mission_id.as_deref() {
         mark_mission_provenance_dirty(state, mission_id);
-        let delta = estimate_codex_context_tokens(&text);
+        let delta = estimate_codex_context_tokens(text);
         let entry = state
             .agents
             .codex_estimated_tokens_used_by_mission
@@ -1858,7 +1912,6 @@ pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
     state.agents.chat_input_cursor = 0;
     state.agents.chat_input_scroll = usize::MAX;
     state.agents.chat_input_selection_anchor = None;
-    Some((channel, text))
 }
 
 pub(super) fn slice_by_char(input: &str, start: usize, end: usize) -> String {
