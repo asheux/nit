@@ -2076,42 +2076,36 @@ fn central_chat_composer_grows_upward_until_capped_then_scrolls_at_the_cursor() 
 }
 
 #[test]
-fn central_chat_renders_the_reply_in_order_and_bounds_long_output() {
+fn central_chat_keeps_the_working_panel_and_opens_reply_body_only_in_artifacts() {
     let mut state = test_state();
-    let mut msg = AgentMessage {
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    state.agents.messages.push(AgentMessage {
         at: "10:00:00".into(),
-        channel: AgentChannel::Broadcast,
+        channel: AgentChannel::Agent,
         agent_id: Some("codex".into()),
         mission_id: None,
-        text: "The first line.\nThe second line.".into(),
+        text: "private response body".repeat(10000),
         prompt_msg_idx: None,
-        turn: None,
+        turn: Some(nit_core::state::AgentTurnReceipt {
+            outcome: nit_core::state::TurnOutcome::Completed,
+            elapsed_ms: Some(3200),
+        }),
         kind: None,
-    };
-    let legacy = format_message_rows(&state, None, &msg, 50);
-    assert!(!legacy
+    });
+    let rows = format_message_rows(&state, None, state.agents.messages.last().unwrap(), 50);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].text.trim(), "[Artifacts]");
+    assert!(
+        rows[1].text.contains("AGENT")
+            && rows[1].text.contains("ELAP")
+            && rows[1].text.contains("OUT")
+    );
+    assert!(rows[2].text.contains("codex") && rows[2].text.contains("3s"));
+    assert_eq!(rows[2].text.matches('—').count(), 2);
+    assert_eq!(rows[3].text.trim(), "↳ Completed");
+    assert!(!rows
         .iter()
-        .any(|row| matches!(row.kind, ThreadRowKind::Reply)));
-    state.center_tab = Some(nit_core::StationCenterTab::Chat);
-    let station = format_message_rows(&state, None, &msg, 50);
-    assert_eq!(
-        station
-            .iter()
-            .filter(|r| matches!(r.kind, ThreadRowKind::Reply))
-            .map(|r| r.text.as_str())
-            .collect::<Vec<_>>(),
-        ["The first line.", "The second line."]
-    );
-    msg.text = "0123456789 data output\n".repeat(10000);
-    let oversized = format_message_rows(&state, None, &msg, 50);
-    assert_eq!(
-        oversized
-            .iter()
-            .filter(|row| matches!(row.kind, ThreadRowKind::Reply))
-            .count(),
-        96
-    );
-    assert!(oversized.len() < 101);
+        .any(|r| r.text.contains("private response body")));
 }
 
 #[test]
