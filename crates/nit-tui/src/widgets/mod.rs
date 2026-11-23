@@ -6,6 +6,7 @@ pub mod artifacts_history_popup;
 pub mod artifacts_popup;
 pub mod assumptions_view;
 pub mod bottom_bar;
+pub mod change_review_view;
 pub mod claims_view;
 pub mod definition_popup;
 pub mod editor_view;

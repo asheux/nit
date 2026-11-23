@@ -11,6 +11,34 @@ use crate::{syntax::SyntaxRuntime, vitals::VitalsState};
 
 use super::*;
 
+pub(super) fn handle_change_review_key(
+    key: KeyEvent,
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    area: ratatui::layout::Rect,
+) -> bool {
+    use crate::widgets::change_review_view::{move_file, scroll_patch};
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    let review = &mut state.change_review;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => move_file(review, -1),
+        KeyCode::Down | KeyCode::Char('j') => move_file(review, 1),
+        KeyCode::PageUp => scroll_patch(review, area, -1, true),
+        KeyCode::PageDown => scroll_patch(review, area, 1, true),
+        KeyCode::Char('r') => review.refresh = true,
+        KeyCode::Enter => {
+            if let Some(file) = review.files.get(review.selected) {
+                let path = review.root.join(&file.path);
+                apply_action_with_syntax(state, syntax, Action::OpenFile(path));
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 pub(super) fn handle_editor_buffer_shortcuts(
     key: KeyEvent,
     state: &mut AppState,
@@ -591,21 +619,21 @@ pub(super) fn map_key_to_action(
         return Some(Action::ToggleJobPause);
     }
 
-    if is_petri_show_key(&key, state) {
+    if !state.change_review_active() && is_petri_show_key(&key, state) {
         return Some(match state.app_kind {
             AppKind::Gol => Action::PetriShow,
             AppKind::Games => Action::GamesShow,
         });
     }
 
-    if is_global_run_key(&key) {
+    if !state.change_review_active() && is_global_run_key(&key) {
         return Some(match state.app_kind {
             AppKind::Gol => Action::VisualizerRun,
             AppKind::Games => Action::GamesRun,
         });
     }
 
-    if state.app_kind == AppKind::Gol {
+    if state.app_kind == AppKind::Gol && !state.change_review_active() {
         if let Some(action) = visualizer_ctrl_action(&key, state) {
             return Some(action);
         }
@@ -809,7 +837,7 @@ pub(super) fn map_key_to_action(
             code: KeyCode::Char('g'),
             modifiers: KeyModifiers::CONTROL,
             ..
-        } => Some(Action::VisualizerToggleSearch),
+        } if !state.change_review_active() => Some(Action::VisualizerToggleSearch),
         KeyEvent {
             code: KeyCode::Char('y'),
             modifiers: KeyModifiers::CONTROL,
@@ -819,12 +847,12 @@ pub(super) fn map_key_to_action(
             code: KeyCode::Char('\u{19}'),
             modifiers: KeyModifiers::NONE,
             ..
-        } => Some(Action::VisualizerToggleSeedSource),
+        } if !state.change_review_active() => Some(Action::VisualizerToggleSeedSource),
         KeyEvent {
             code: KeyCode::Char('n'),
             modifiers: KeyModifiers::CONTROL,
             ..
-        } => Some(Action::VisualizerSnapshot),
+        } if !state.change_review_active() => Some(Action::VisualizerSnapshot),
         KeyEvent {
             code: KeyCode::Char('b') | KeyCode::Char('B'),
             modifiers: KeyModifiers::CONTROL,

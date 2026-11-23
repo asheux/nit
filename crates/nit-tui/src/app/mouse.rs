@@ -203,6 +203,16 @@ fn scroll_main_layout_panes(
     theme: &Theme,
 ) -> bool {
     let layout = layout::split(screen);
+    let point = (mouse.column, mouse.row).into();
+    if state.change_review_active() && layout.visualizer.contains(point) {
+        crate::widgets::change_review_view::mouse_scroll(
+            &mut state.change_review,
+            layout.visualizer,
+            point,
+            delta,
+        );
+        return true;
+    }
     if point_in_rect(mouse.column, mouse.row, layout.editor) {
         scroll_buffer(state.editor_buffer_mut(), delta);
         return true;
@@ -1347,7 +1357,23 @@ pub(super) fn handle_mouse_down_with_swarm(
     }
     {
         let layout = layout::split(screen);
-        if mouse.row == layout.visualizer.y {
+        let point = (mouse.column, mouse.row).into();
+        if state.change_review_active() && layout.visualizer.contains(point) {
+            state.focus = PaneId::Visualizer;
+            state.mode = Mode::Normal;
+            state.ui_selection = None;
+            input_state.mouse_select_anchor = None;
+            crate::widgets::change_review_view::mouse_select(
+                &mut state.change_review,
+                layout.visualizer,
+                point,
+            );
+            return true;
+        }
+        if !state.change_review_active()
+            && mouse.row == layout.visualizer.y
+            && layout.visualizer.contains(point)
+        {
             let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
             if let Some(action) = visualizer_view::title_button_hit(col_in_rect) {
                 state.focus = PaneId::Visualizer;
