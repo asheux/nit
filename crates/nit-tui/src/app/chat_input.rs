@@ -1424,7 +1424,7 @@ pub(crate) fn submit_chat_input_and_dispatch(
     if raw.trim().is_empty() {
         return false;
     }
-    if let Some(handled) = receipts::handle(state, swarm, &raw) {
+    if let Some(handled) = receipts::handle(state, &raw) {
         return handled;
     }
     if let Some(reply) = nit_core::skills::chat_reply(&raw) {

@@ -6,9 +6,8 @@ use super::{
     chat_history_remember, reset_chat_input_and_history_nav, sync_cursor_to_input_end,
     timestamp_label,
 };
-use crate::swarm::SwarmRuntime;
 
-pub(super) fn handle(state: &mut AppState, swarm: &SwarmRuntime, raw: &str) -> Option<bool> {
+pub(super) fn handle(state: &mut AppState, raw: &str) -> Option<bool> {
     let mut words = raw.split_whitespace();
     if words.next()? != "/followups" {
         return None;
@@ -30,30 +29,15 @@ pub(super) fn handle(state: &mut AppState, swarm: &SwarmRuntime, raw: &str) -> O
                 // Restoring a receipt reconstructs a draft only. A new receiver
                 // still passes through normal mission ownership checks on send.
                 state.agents.chat_input = note.text;
-                if let Some(mid) = mission.filter(|mid| swarm.is_active_mission(mid)) {
-                    let original_task = (mid == note.mission_id).then_some(note.task_id.clone());
-                    state.agents.swarm_draft_target = Some(SwarmDraftTarget {
-                        mission_id: mid,
-                        task_id: original_task,
-                        agent_id: None,
-                        saved_draft: None,
-                        needs_choice: false,
-                        suggested_task: None,
-                        source: note.source,
-                    });
-                } else if let Some(source) = note.source {
-                    state
-                        .agents
-                        .chat_input
-                        .push_str(&format!("\n\nFile: {}", source.path));
-                    for detail in [source.revision, source.hunk].into_iter().flatten() {
-                        state.agents.chat_input.push('\n');
-                        state.agents.chat_input.push_str(&detail);
-                    }
-                }
+                state.agents.swarm_draft_target = Some(SwarmDraftTarget {
+                    mission_id: note.mission_id.clone(),
+                    needs_choice: true,
+                    source: note.source,
+                    ..Default::default()
+                });
                 sync_cursor_to_input_end(state);
                 state.status = Some(format!(
-                    "Restored unsent draft from {} / {}. Check the destination before sending.",
+                    "Restored unsent draft from {} / {}. Choose a live mission and use Alt+→ to select its task.",
                     note.mission_id, note.task_id
                 ));
                 return Some(true);
