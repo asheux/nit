@@ -44,6 +44,18 @@ pub(super) fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<Highlig
 
             for job in &jobs {
                 fills.remove(&job.buffer_id);
+                // Publish only to the UI. Incremental edits and progressive fills
+                // must always start from the full document tree and snapshot.
+                if let Ok(Some(snapshot)) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        super::first_paint::top_snapshot(job, &mut state.highlighter)
+                    }))
+                {
+                    let _ = res_tx.send(HighlightResult {
+                        buffer_id: job.buffer_id,
+                        snapshot,
+                    });
+                }
                 let snapshot = run_highlight_job(job, &mut state, &mut fills);
 
                 if let Some(fill) = make_progressive_fill(job, &snapshot) {

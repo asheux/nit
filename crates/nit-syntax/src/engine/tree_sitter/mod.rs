@@ -11,6 +11,7 @@ use crate::language::LanguageId;
 
 use super::{HighlightRequest, SyntaxEngine};
 
+mod first_paint;
 mod incremental;
 mod job;
 mod modes;
