@@ -335,7 +335,7 @@ pub fn roster_multiway_button_hit(col: usize) -> Option<RosterMultiwayButton> {
 }
 
 pub fn roster_role_cell_hit(col: usize, width: usize) -> bool {
-    let widths = roster_column_widths(width.max(32));
+    let widths = roster_column_widths(width);
     let start = 1usize; // selection marker prefix
     let end = start.saturating_add(widths.first().copied().unwrap_or(0));
     col >= start && col < end
@@ -1183,7 +1183,7 @@ pub fn tab_at_column(col: usize, width: usize, active: AgentOpsTab) -> Option<Ag
 }
 
 pub fn current_lines(state: &AppState) -> Vec<String> {
-    current_lines_for_width_with_swarm(state, None, usize::MAX)
+    current_lines_for_width_with_swarm(state, None, 240)
 }
 
 pub fn current_lines_for_width(state: &AppState, width: usize) -> Vec<String> {
@@ -1491,7 +1491,8 @@ fn roster_backend_is_expanded(state: &AppState, backend: AgentLaneKind) -> bool 
 }
 
 fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
-    let widths = roster_column_widths(width.max(32));
+    let widths = roster_column_widths(width);
+    let compact = widths[2] == 0;
     let selected_row = roster_selected_row(state);
     let mut out = vec![" Backends".into()];
     for row in roster_backend_inventory_rows(state) {
@@ -1510,8 +1511,8 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
     out.push(String::new());
     out.push(format!(
         " {} {} {} {} {}",
-        fit_left("PRI+ROLE", widths[0]),
-        fit_left("STATUS", widths[1]),
+        fit_left(if compact { "MODEL" } else { "PRI+ROLE" }, widths[0]),
+        fit_left(if compact { "STAT" } else { "STATUS" }, widths[1]),
         fit_right("HB", widths[2]),
         fit_right("Q", widths[3]),
         fit_left("MISSION", widths[4]),
@@ -1651,10 +1652,16 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
             } else {
                 format!("{priority_prefix}{}", table_role_label(agent.role.as_str()))
             };
+            let status = match (compact, agent.status) {
+                (true, AgentStatus::Running) => "RUN",
+                (true, AgentStatus::Waiting) => "WAIT",
+                (true, AgentStatus::Error) => "ERR",
+                _ => agent.status.label(),
+            };
             out.push(format!(
                 "{marker}{} {} {} {} {}",
                 fit_left(&role_label, widths[0]),
-                fit_left(agent.status.label(), widths[1]),
+                fit_left(status, widths[1]),
                 fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
                 fit_right(&agent.queue_len.to_string(), widths[3]),
                 fit_left(agent.current_mission.as_deref().unwrap_or("--"), widths[4]),
@@ -8004,6 +8011,13 @@ fn fit(text: &str, width: usize, right_align: bool) -> String {
 }
 
 fn roster_column_widths(width: usize) -> Vec<usize> {
+    // Preserve model names at compact widths. Heartbeat, queue and mission
+    // columns reappear when the pane has room to distinguish the models.
+    if width < 36 {
+        let status = if width >= 20 { 4 } else { 0 };
+        let name = width.saturating_sub(1 + usize::from(status > 0) + status);
+        return vec![name, status, 0, 0, 0];
+    }
     // For the roster, the ROLE column is the primary piece of information (especially when
     // listing model slugs). Keep MISSION readable, but bias extra width to ROLE instead of letting
     // it all pool in the last column.

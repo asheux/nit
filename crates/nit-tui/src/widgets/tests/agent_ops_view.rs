@@ -1777,6 +1777,7 @@ fn tab_strip_keeps_selection_and_mouse_targets_inside_the_pane() {
 #[test]
 fn compact_roster_opens_on_models_and_keeps_setup_scrollable() {
     let mut state = make_state_with_codex_lanes(4);
+    state.agents.agents[0].role = "GPT-6.2-Astra".into();
     state.agents.dock_tab = AgentOpsTab::Roster;
     state.agents.roster_selected_backend = Some(AgentLaneKind::Codex);
     state
@@ -1785,12 +1786,25 @@ fn compact_roster_opens_on_models_and_keeps_setup_scrollable() {
         .insert(AgentLaneKind::Codex);
     let pane = crate::layout::split(ratatui::layout::Rect::new(0, 0, 100, 32)).job;
     let height = usize::from(pane.height - 5);
-    let rows = current_lines_for_width(&state, usize::from(pane.width - 2));
+    let width = usize::from(pane.width - 2);
+    let rows = current_lines_for_width(&state, width);
     super::position_compact_roster(&mut state, &rows, height);
     let group = roster_body_offset(&state);
     let scroll = state.agents.ops_scroll;
     assert!(scroll <= group && group + 1 < scroll + height);
     assert!(rows[group].starts_with(cursor_glyph()));
+    for (index, text) in [(group, "Codex (4)"), (group + 1, "GPT-6.2-Astra")] {
+        let styled =
+            super::roster_styled_line(&state, index, &rows[index], width, &Theme::default());
+        let visible: String = styled.to_string().chars().take(width).collect();
+        assert!(visible.contains(text), "{visible:?}");
+        if index > group {
+            assert!(visible.contains("IDLE"), "{visible:?}");
+        }
+    }
+    assert!(super::current_lines(&state)
+        .iter()
+        .any(|line| line.contains("GPT-6.2-Astra")));
     assert_eq!(
         super::roster_meta_for_body_line(&state, 1)
             .unwrap()
