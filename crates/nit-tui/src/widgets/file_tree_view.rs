@@ -9,13 +9,16 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use unicode_width::UnicodeWidthStr;
+
+const TREE_TITLE: &str = "NITTREE";
 
 const INDENT_STEP: usize = 2;
 const ARROW_CHARS: usize = 2;
 
 pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let focused = state.focus == PaneId::Editor;
-    let commands = header_commands(state);
+    let commands = header_commands(state, area.width);
     let block = build_block(theme, focused, &commands);
 
     let inner = block.inner(area);
@@ -80,12 +83,30 @@ fn render_prompt_bar(f: &mut Frame, area: Rect, prompt: &FileTreePrompt, theme: 
     f.render_widget(Paragraph::new(Line::from(text)).style(style), bar);
 }
 
-fn header_commands(state: &AppState) -> String {
-    let hidden = on_off(state.file_tree.show_hidden);
-    let ignored = on_off(state.file_tree.show_ignored);
-    format!(
-        "[Enter open] [r rename] [n new] [N dir] [R refresh] [. hidden:{hidden}] [i ignored:{ignored}] [Esc close]"
-    )
+fn header_commands(state: &AppState, pane_width: u16) -> String {
+    let hidden = format!("[. hidden:{}]", on_off(state.file_tree.show_hidden));
+    let ignored = format!("[i ignored:{}]", on_off(state.file_tree.show_ignored));
+    // Two corner cells, the title, and the space after it are already occupied.
+    let mut remaining = usize::from(pane_width).saturating_sub(TREE_TITLE.width() + 3);
+    let mut commands = Vec::new();
+    for hint in [
+        "[Enter open]",
+        "[Esc close]",
+        "[F1 help]",
+        "[n new]",
+        "[r rename]",
+        "[N dir]",
+        "[R refresh]",
+        &hidden,
+        &ignored,
+    ] {
+        let cells = hint.width() + usize::from(!commands.is_empty());
+        if cells <= remaining {
+            commands.push(hint);
+            remaining -= cells;
+        }
+    }
+    commands.join(" ")
 }
 
 fn on_off(flag: bool) -> &'static str {
@@ -104,7 +125,7 @@ fn build_block<'a>(theme: &Theme, focused: bool, commands: &'a str) -> Block<'a>
     };
     let title = Line::from(vec![
         Span::styled(
-            "NITTREE",
+            TREE_TITLE,
             Style::default()
                 .fg(title_color)
                 .bg(theme.background)

@@ -51,3 +51,36 @@ fn selected_row_spans_the_tree_interior_and_retains_nested_alignment() {
         }
     }
 }
+
+#[test]
+fn shortcuts_fit_as_complete_labels_across_terminal_widths() {
+    let state = AppState::new(
+        ".".into(),
+        Buffer::empty("e", None),
+        Buffer::empty("n", None),
+    );
+    let theme = Theme::default();
+    for width in [10, 20, 25, 40, 67, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.size(), &state, &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row = (1..width - 1)
+            .map(|x| buf.get(x, 0).symbol())
+            .collect::<String>();
+        assert!(row.starts_with(TREE_TITLE));
+        let hints = header_commands(&state, width);
+        assert!(row.contains(&hints), "width {width}: {row}");
+        assert_eq!(row.matches('[').count(), row.matches(']').count());
+        if width >= 25 {
+            assert!(hints.contains("[Enter open]"));
+        }
+        if width >= 67 {
+            assert!(hints.contains("[F1 help]") && hints.contains("[Esc close]"));
+        }
+        if width >= 120 {
+            assert!(hints.contains("[i ignored:"));
+        }
+    }
+}
