@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 struct ThemeFile {
     background: Option<String>,
+    list_background: Option<String>,
     panel_background: Option<String>,
     editor_background: Option<String>,
     popup_background: Option<String>,
@@ -97,6 +98,7 @@ struct SeedThemeFile {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub background: Color,
+    pub list_background: Color,
     pub panel_background: Color,
     pub editor_background: Color,
     pub editor_background_unfocused: Color,
@@ -188,7 +190,7 @@ pub struct HighlightTheme {
 
 impl Theme {
     pub fn list_background(&self) -> Color {
-        dim_bg_towards(self.border, self.background, 85)
+        self.list_background
     }
 
     pub(crate) fn input_background(&self, focused: bool) -> Color {
@@ -245,6 +247,11 @@ impl Theme {
         );
         overlay(&mut theme.foreground, cfg.foreground.as_deref());
         overlay(&mut theme.border, cfg.border.as_deref());
+        // Preserve the derived list fill for older custom palettes.
+        if cfg.background.is_some() || cfg.border.is_some() {
+            theme.list_background = dim_bg_towards(theme.border, theme.background, 85);
+        }
+        overlay(&mut theme.list_background, cfg.list_background.as_deref());
         overlay(
             &mut theme.muted,
             cfg.muted.as_deref().or(cfg.border.as_deref()),
@@ -356,6 +363,7 @@ impl Default for Theme {
         let base = Color::Rgb(10, 21, 30);
         let mut theme = Theme {
             background: base,
+            list_background: Color::Rgb(23, 36, 46),
             panel_background: base,
             editor_background: base,
             editor_background_unfocused: base,

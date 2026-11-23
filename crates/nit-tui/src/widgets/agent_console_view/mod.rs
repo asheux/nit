@@ -2178,7 +2178,7 @@ fn user_prompt_bg(theme: &Theme) -> Color {
 fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim();
     let is_rule = !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─');
-    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    let bg = theme.list_background();
     if is_rule {
         return Line::from(Span::styled(
             text.to_string(),
@@ -2193,10 +2193,10 @@ fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
 
 fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
     if text.trim().is_empty() {
-        let bg = dim_bg_towards(theme.border, theme.background, 85);
+        let bg = theme.list_background();
         return Line::from(Span::styled(text.to_string(), Style::default().bg(bg)));
     }
-    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    let bg = theme.list_background();
     Line::from(Span::styled(
         text.to_string(),
         Style::default().fg(theme.foreground).bg(bg),
@@ -2205,7 +2205,7 @@ fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
 
 fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim_start();
-    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    let bg = theme.list_background();
     let is_swarm_meta =
         trimmed.starts_with("Swarm") || trimmed.starts_with("Verify") || trimmed.starts_with("• ");
     if is_swarm_meta {

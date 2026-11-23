@@ -6438,7 +6438,7 @@ fn artifacts_styled_line(
             let bg = if selected {
                 theme.selection_bg
             } else {
-                dim_bg_towards(theme.border, theme.background, 85)
+                theme.list_background()
             };
             Style::default()
                 .fg(theme.accent)
@@ -6448,7 +6448,7 @@ fn artifacts_styled_line(
             let bg = if selected {
                 theme.selection_bg
             } else {
-                dim_bg_towards(theme.border, theme.background, 85)
+                theme.list_background()
             };
             Style::default()
                 .fg(verify_fg)
