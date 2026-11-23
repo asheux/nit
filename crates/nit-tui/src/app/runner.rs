@@ -400,7 +400,11 @@ pub(super) fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
-                    if is_job_pause_key(&key) {
+                    let station_tab_switch = state.station_chat_center()
+                        && state.change_review_active()
+                        && key.code == crossterm::event::KeyCode::F(6)
+                        && key.modifiers.is_empty();
+                    if is_job_pause_key(&key) && !station_tab_switch {
                         if state.app_kind == AppKind::Games
                             && state.command_line.is_none()
                             && state.prompt.is_none()
@@ -645,9 +649,7 @@ pub(super) fn run_loop(
                         }
                     }
                     // Switch the central surface before the shell or chat consumes F6.
-                    if state.station_chat_center()
-                        && key.code == crossterm::event::KeyCode::F(6)
-                        && key.modifiers.is_empty()
+                    if station_tab_switch
                         && state.command_line.is_none()
                         && state.prompt.is_none()
                         && state.search_prompt.is_none()
