@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -360,11 +360,6 @@ struct ActiveTurn {
     handle: JoinHandle<()>,
 }
 
-struct StdoutCapture {
-    stdout: Vec<u8>,
-    json_errors: Vec<String>,
-}
-
 /// See `codex_runner::STDOUT_TAIL_CAP_BYTES` — same rationale. 100 MB tail
 /// window, drop from front at newline boundary on overflow.
 const STDOUT_TAIL_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -572,26 +567,56 @@ fn run_turn(
     config: ClaudeRunnerConfig,
     cancel: Arc<AtomicBool>,
 ) {
-    let started_at = Instant::now();
-    let out_file = std::env::temp_dir().join(format!("nit-claude-last-message-{seq}.txt"));
-
-    let mut cmd = prepare_claude_command(
+    let cmd = prepare_claude_command(
         model.as_str(),
         cwd.as_path(),
         persist_session,
         effort.as_deref(),
-        out_file.as_path(),
         resume_session_id.as_deref(),
         read_only,
         max_turns,
         &config,
     );
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    run_cold_process(
+        cmd,
+        event_tx,
+        seq,
+        model,
+        cwd,
+        mission_id,
+        resume_session_id,
+        prompt,
+        cancel,
+    );
+}
 
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
+#[allow(clippy::too_many_arguments)]
+fn run_cold_process(
+    mut cmd: Command,
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    prompt: String,
+    cancel: Arc<AtomicBool>,
+) {
+    let started_at = Instant::now();
+    // Independent file positions make input EOF a property of this process's
+    // current output, even when a descendant inherited its standard streams.
+    let spawned = (|| -> std::io::Result<_> {
+        let (stdout, out_writer) = crate::runner_output::private_output_stream()?;
+        let (stderr, err_writer) = crate::runner_output::private_output_stream()?;
+        let child = cmd
+            .stdin(Stdio::piped())
+            .stdout(out_writer)
+            .stderr(err_writer)
+            .spawn()?;
+        Ok((child, stdout, stderr))
+    })();
+    let (mut child, mut output, stderr_file) = match spawned {
+        Ok(pair) => pair,
         Err(err) => {
             let _ = event_tx.send(AgentBusEvent::McpStatus {
                 status: McpStatus {
@@ -628,151 +653,125 @@ fn run_turn(
         let _ = stdin.write_all(b"\n");
     }
 
-    // Shared liveness signals between the stdout reader and the wait loop.
-    // `last_stdout_at` advances on every successful line read so the wait
-    // loop can fire an idle reaper independent of the heartbeat clock.
-    // `result_seen` flips true when a stream-json `{"type":"result", ...}`
-    // event is observed, which lets the wait loop exit early once the
-    // model is done — even if the Claude CLI lingers waiting on its own
-    // backgrounded subshells.
-    // `turn_did_writes` flips true the first time the model invokes a
-    // write-capable tool (Write/Edit/MultiEdit/NotebookEdit). The idle
-    // reaper skips any turn that has done writes — a writer turn is
-    // presumed productive even during long stream silences (e.g.
-    // building a large file or running a verify gate after editing).
-    // Operators retain `/abort` for the rare case where a writer wedges.
-    let last_stdout_at = Arc::new(Mutex::new(Instant::now()));
-    let result_seen = Arc::new(AtomicBool::new(false));
-    let turn_did_writes = Arc::new(AtomicBool::new(false));
+    let mut stream = TurnStream::new();
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 32 * 1024];
+    let mut position = 0u64;
+    let mut last_stdout_at = Instant::now();
+    let mut last_heartbeat_at = Instant::now();
+    let idle_timeout = claude_turn_idle_timeout();
+    let mut kill_reason = None;
+    let mut exited = None;
+    let status = loop {
+        if cancel.load(Ordering::Acquire) {
+            kill_reason = Some(TurnKillReason::OperatorCancel);
+        } else if stream.result_seen {
+            kill_reason = Some(TurnKillReason::ResultSeen);
+        } else if !stream.turn_did_writes
+            && idle_timeout.is_some_and(|t| last_stdout_at.elapsed() >= t)
+        {
+            kill_reason = Some(TurnKillReason::IdleTimeout);
+        }
 
-    let stdout_handle = child.stdout.take().map(|stdout| {
-        let event_tx = event_tx.clone();
-        let model = model.clone();
-        let mission_id = mission_id.clone();
-        let cwd = cwd.clone();
-        let last_stdout_at = Arc::clone(&last_stdout_at);
-        let result_seen = Arc::clone(&result_seen);
-        let turn_did_writes = Arc::clone(&turn_did_writes);
-        thread::Builder::new()
-            .name(format!("nit-claude-stdout-{seq}"))
-            .spawn(move || {
-                let mut buf = Vec::new();
-                let mut json_errors = Vec::new();
-                let mut last_stage: Option<String> = None;
-                let mut last_stage_sent_at = Instant::now();
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    // Bump on every successful read so the wait loop's idle
-                    // reaper measures stream silence, not heartbeat cadence.
-                    if let Ok(mut guard) = last_stdout_at.lock() {
-                        *guard = Instant::now();
-                    }
-                    let obs = process_stream_json_line(
-                        &line,
-                        &mut buf,
-                        &mut json_errors,
-                        &mut last_stage,
-                        &mut last_stage_sent_at,
-                        &event_tx,
+        if exited.is_none() {
+            if kill_reason.is_some() {
+                let _ = child.kill();
+            }
+            let status = if kill_reason.is_some() {
+                child.wait().map(Some)
+            } else {
+                child.try_wait()
+            };
+            match status {
+                Ok(Some(status)) => {
+                    // Ignore further writes from descendants of a finished CLI.
+                    exited = Some((status, output.metadata().map_or(position, |m| m.len())));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                        agent_id: model,
+                        mission_id,
+                        thread_id: resume_session_id,
+                        token_count: None,
+                        message: format!("Claude wait failed: {err}"),
+                    });
+                    return;
+                }
+            }
+        }
+        if let Some((status, end)) = exited {
+            if kill_reason.is_some() || position >= end {
+                if !pending.is_empty() && kill_reason.is_none() {
+                    stream.observe(
+                        &String::from_utf8_lossy(&pending),
+                        event_tx,
                         &model,
                         &mission_id,
                         &cwd,
                     );
-                    if obs.result_seen {
-                        result_seen.store(true, Ordering::Release);
-                    }
-                    if obs.turn_did_writes {
-                        turn_did_writes.store(true, Ordering::Release);
-                    }
                 }
-                StdoutCapture {
-                    stdout: buf,
-                    json_errors,
-                }
-            })
-            .expect("spawn claude stdout reader")
-    });
-    let stderr_handle = child.stderr.take().map(|mut stderr| {
-        thread::Builder::new()
-            .name(format!("nit-claude-stderr-{seq}"))
-            .spawn(move || {
-                let mut buf = Vec::new();
-                let _ = stderr.read_to_end(&mut buf);
-                buf
-            })
-            .expect("spawn claude stderr reader")
-    });
-
-    let mut kill_reason: Option<TurnKillReason> = None;
-    let mut last_heartbeat_at = Instant::now();
-    let idle_timeout = claude_turn_idle_timeout();
-    let status = loop {
-        if kill_reason.is_none() && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+                break status;
+            }
+        }
+        if last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
             let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
                 agent_id: model.clone(),
                 mission_id: mission_id.clone(),
             });
             last_heartbeat_at = Instant::now();
         }
-        if kill_reason.is_none() {
-            if cancel.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                kill_reason = Some(TurnKillReason::OperatorCancel);
-            } else if result_seen.load(Ordering::Acquire) {
-                // Model emitted its `result` event; the CLI may still
-                // be holding the session open on backgrounded subshells.
-                // Kill it so the gate report reaches nit immediately.
-                let _ = child.kill();
-                kill_reason = Some(TurnKillReason::ResultSeen);
-            } else if let Some(timeout) = idle_timeout {
-                // Skip writer turns: any turn that has invoked a
-                // write-capable tool is presumed productive even
-                // during long stream silences.
-                if !turn_did_writes.load(Ordering::Acquire) {
-                    let elapsed = last_stdout_at
-                        .lock()
-                        .map(|guard| guard.elapsed())
-                        .unwrap_or_else(|_| Duration::from_secs(0));
-                    if elapsed >= timeout {
-                        let _ = child.kill();
-                        kill_reason = Some(TurnKillReason::IdleTimeout);
-                    }
-                }
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
+        let limit = exited.map_or(buf.len(), |(_, end)| {
+            (end - position).min(buf.len() as u64) as usize
+        });
+        let n = match output.read(&mut buf[..limit]) {
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
                 let _ = event_tx.send(AgentBusEvent::TurnFailed {
                     agent_id: model,
                     mission_id,
-                    thread_id: resume_session_id.clone(),
+                    thread_id: resume_session_id,
                     token_count: None,
-                    message: format!("Claude wait failed: {err}"),
+                    message: format!("Claude output read failed: {err}"),
                 });
-                let _ = std::fs::remove_file(&out_file);
                 return;
+            }
+        };
+        if n == 0 {
+            thread::sleep(Duration::from_millis(15));
+            continue;
+        }
+        last_stdout_at = Instant::now();
+        position += n as u64;
+        for part in buf[..n].split_inclusive(|b| *b == b'\n') {
+            pending.extend_from_slice(part);
+            if part.ends_with(b"\n") {
+                stream.observe(
+                    &String::from_utf8_lossy(&pending),
+                    event_tx,
+                    &model,
+                    &mission_id,
+                    &cwd,
+                );
+                pending.clear();
+                if stream.result_seen {
+                    break;
+                }
             }
         }
     };
-
-    let (stdout, json_errors) = match stdout_handle.and_then(|handle| handle.join().ok()) {
-        Some(capture) => (capture.stdout, capture.json_errors),
-        None => (Vec::new(), Vec::new()),
-    };
-    let stderr = stderr_handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    let stdout = stream.stdout_buf;
+    let json_errors = stream.json_errors;
+    let mut stderr = Vec::new();
+    let len = stderr_file.metadata().map_or(0, |meta| meta.len());
+    let _ = stderr_file
+        .take(len.min(1024 * 1024))
+        .read_to_end(&mut stderr);
 
     if kill_reason == Some(TurnKillReason::OperatorCancel) {
-        let _ = std::fs::remove_file(&out_file);
         // Emit a TurnFailed so AppState releases this active turn. The
         // bus handler detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel
         // and routes this down a "soft" path (Idle status, Info diag)
@@ -826,7 +825,6 @@ fn run_turn(
         resume_session_id.as_deref(),
         started_at,
     ) {
-        let _ = std::fs::remove_file(&out_file);
         return;
     }
 
@@ -834,7 +832,7 @@ fn run_turn(
     // non-zero status is from our `child.kill()`, not from Claude
     // genuinely crashing.  The buffered stream-json still holds the
     // model's final assistant message and can be extracted below.
-    if kill_reason.is_none() && !status.success() {
+    if !stream.result_seen && kill_reason.is_none() && !status.success() {
         // Persist raw stdout + stderr to a debug log so the failure can be
         // inspected even when the subprocess dies without emitting any JSON
         // error events or stderr text (e.g. fast-exit rate limit / resource
@@ -886,20 +884,10 @@ fn run_turn(
             token_count,
             message,
         });
-        let _ = std::fs::remove_file(&out_file);
         return;
     }
 
-    // Claude -p writes the final result to stdout as part of stream-json. We also attempt to
-    // read the out_file (from the -o flag fallback, if applicable), and fall back to extracting
-    // the result text from the JSONL stream.
-    let message = std::fs::read_to_string(&out_file)
-        .ok()
-        .map(|s| s.trim_end().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| extract_result_text_from_jsonl(&stdout))
-        .unwrap_or_default();
-    let _ = std::fs::remove_file(&out_file);
+    let message = extract_result_text_from_jsonl(&stdout).unwrap_or_default();
 
     if message.is_empty() {
         let session_id = extract_session_id_from_jsonl(&stdout);
@@ -1012,7 +1000,6 @@ fn prepare_claude_command(
     cwd: &Path,
     persist_session: bool,
     effort: Option<&str>,
-    out_file: &Path,
     resume_session_id: Option<&str>,
     read_only: bool,
     max_turns: Option<u32>,
@@ -1024,7 +1011,6 @@ fn prepare_claude_command(
         cwd,
         persist_session,
         effort,
-        out_file,
         resume_session_id,
         read_only,
         max_turns,
@@ -1072,7 +1058,6 @@ fn build_claude_args(
     cwd: &Path,
     persist_session: bool,
     effort: Option<&str>,
-    _out_file: &Path,
     resume_session_id: Option<&str>,
     read_only: bool,
     max_turns: Option<u32>,
@@ -1360,7 +1345,7 @@ fn claude_turn_idle_timeout() -> Option<Duration> {
 /// `true` when `value` is a Claude stream-json `{"type":"result", ...}`
 /// envelope — the canonical end-of-turn marker.
 fn is_stream_result_event(value: &serde_json::Value) -> bool {
-    value.get("type").and_then(|v| v.as_str()) == Some("result")
+    value["type"] == "result"
 }
 
 /// Production [`WorkerSpawn`] that boots a real `claude` CLI process with the
@@ -1477,7 +1462,7 @@ fn run_turn_pooled(
         },
     });
 
-    let mut state = PooledTurnState::new();
+    let mut state = TurnStream::new();
     let idle_timeout = claude_turn_idle_timeout();
     let mut kill_reason: Option<TurnKillReason> = None;
     let mut last_heartbeat_at = Instant::now();
@@ -1517,19 +1502,7 @@ fn run_turn_pooled(
             continue;
         };
         last_stdout_at = Instant::now();
-        let obs = process_stream_json_line(
-            &line.raw,
-            &mut state.stdout_buf,
-            &mut state.json_errors,
-            &mut state.last_stage,
-            &mut state.last_stage_sent_at,
-            event_tx,
-            &model,
-            &mission_id,
-            &cwd,
-        );
-        state.result_seen |= obs.result_seen;
-        state.turn_did_writes |= obs.turn_did_writes;
+        state.observe(&line.raw, event_tx, &model, &mission_id, &cwd);
     }
 
     let stdout = std::mem::take(&mut state.stdout_buf);
@@ -1690,7 +1663,14 @@ fn terminal_result_error(stdout: &[u8]) -> Option<String> {
         .find(is_stream_result_event)?;
     let subtype = result["subtype"].as_str().unwrap_or_default();
     if result["is_error"].as_bool() != Some(true) && !subtype.starts_with("error_") {
-        return None;
+        return if result["result"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            None
+        } else {
+            Some("Claude emitted an incomplete result.".into())
+        };
     }
     if let Some(message) = result["result"]
         .as_str()
@@ -1744,7 +1724,7 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
-struct PooledTurnState {
+struct TurnStream {
     result_seen: bool,
     turn_did_writes: bool,
     stdout_buf: Vec<u8>,
@@ -1753,7 +1733,30 @@ struct PooledTurnState {
     last_stage_sent_at: Instant,
 }
 
-impl PooledTurnState {
+impl TurnStream {
+    fn observe(
+        &mut self,
+        line: &str,
+        event_tx: &Sender<AgentBusEvent>,
+        model: &str,
+        mission_id: &Option<String>,
+        cwd: &Path,
+    ) {
+        let obs = process_stream_json_line(
+            line,
+            &mut self.stdout_buf,
+            &mut self.json_errors,
+            &mut self.last_stage,
+            &mut self.last_stage_sent_at,
+            event_tx,
+            model,
+            mission_id,
+            cwd,
+        );
+        self.result_seen |= obs.result_seen;
+        self.turn_did_writes |= obs.turn_did_writes;
+    }
+
     fn new() -> Self {
         Self {
             result_seen: false,
@@ -1772,11 +1775,7 @@ struct StreamObservations {
     turn_did_writes: bool,
 }
 
-// Shared per-line stream-json processor used by both the cold-spawn reader
-// thread and the pool-path main loop. Callers thread their own
-// `result_seen`/`turn_did_writes` storage (AtomicBool for the cold path,
-// plain bool on `PooledTurnState` for the pool path) and merge from the
-// returned `StreamObservations`.
+// Shared stream-json event parser for cold and pooled turns.
 #[allow(clippy::too_many_arguments)]
 fn process_stream_json_line(
     raw_line: &str,

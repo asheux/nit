@@ -204,7 +204,6 @@ fn prepare_claude_command_binds_cwd_to_subprocess_working_directory() {
         cwd,
         true,
         None,
-        Path::new("/tmp/out.txt"),
         None,
         false,
         None,
@@ -224,7 +223,6 @@ fn prepare_claude_command_binds_cwd_for_resume_turns() {
         cwd,
         true,
         None,
-        Path::new("/tmp/out.txt"),
         Some("session-abc-123"),
         false,
         None,
@@ -241,7 +239,6 @@ fn test_build_claude_args_basic() {
         Path::new("/tmp/project"),
         true,
         Some("high"),
-        Path::new("/tmp/out.txt"),
         None,
         false,
         None,
@@ -273,7 +270,6 @@ fn test_build_claude_args_resume() {
         Path::new("/tmp/project"),
         false,
         None,
-        Path::new("/tmp/out.txt"),
         Some("session-abc-123"),
         false,
         None,
@@ -292,7 +288,6 @@ fn test_build_claude_args_read_only_for_shadow_turns() {
         Path::new("/tmp/project"),
         false,
         Some("medium"),
-        Path::new("/tmp/out.txt"),
         None,
         true,
         None,
@@ -434,7 +429,6 @@ fn cold_spawn_args_unchanged_by_pool_addition() {
         Path::new("/tmp/project"),
         true,
         None,
-        Path::new("/tmp/out.txt"),
         None,
         false,
         None,
@@ -581,4 +575,107 @@ fn provider_error_result_never_completes_the_turn() {
         br#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#
     )
     .is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn cold_result_and_same_lane_successor_finish_while_descendants_hold_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let worker = tx.clone();
+    let work = dir.path().to_owned();
+    let join = thread::spawn(move || {
+        for seq in [1, 2] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg("-c").arg(r#"sleep 5 & printf '%s\n' '{"type":"result","subtype":"success","result":"answer","session_id":"session-fixture","usage":{"input_tokens":9,"output_tokens":2}}'"#);
+            run_cold_process(
+                cmd,
+                &worker,
+                seq,
+                "model".into(),
+                work.clone(),
+                None,
+                None,
+                "hello".into(),
+                Arc::new(AtomicBool::new(false)),
+            );
+        }
+    });
+    drop(tx);
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut replies = 0;
+    while replies < 2 {
+        let event = rx
+            .recv_timeout(end.saturating_duration_since(Instant::now()))
+            .expect("successor waited on inherited output streams");
+        match event {
+            AgentBusEvent::TurnCompleted {
+                message,
+                thread_id,
+                token_count,
+                ..
+            } => {
+                assert_eq!(message, "answer");
+                assert_eq!(thread_id.as_deref(), Some("session-fixture"));
+                assert!(token_count.is_some());
+                replies += 1;
+            }
+            AgentBusEvent::TurnFailed { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    join.join().unwrap();
+    assert!(!rx.try_iter().any(|e| matches!(
+        e,
+        AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
+    )));
+}
+
+#[cfg(unix)]
+#[test]
+fn cold_error_malformed_and_cancel_emit_one_failure_while_streams_are_inherited() {
+    let dir = tempfile::tempdir().unwrap();
+    for (result, cancelled, expected) in [
+        (
+            r#"{"type":"result","subtype":"error_during_execution","errors":["provider error"]}"#,
+            false,
+            "provider error",
+        ),
+        (r#"{"type":"result"}"#, false, "incomplete result"),
+        (
+            r#"{"type":"result","result":"late answer"}"#,
+            true,
+            nit_core::OPERATOR_CANCEL_TURN_MESSAGE,
+        ),
+    ] {
+        let (tx, rx) = mpsc::channel();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("sleep 5 & printf '%s\\n' \"$1\"")
+            .arg("fixture")
+            .arg(result);
+        let before = Instant::now();
+        run_cold_process(
+            cmd,
+            &tx,
+            17,
+            "model".into(),
+            dir.path().into(),
+            None,
+            None,
+            "hi".into(),
+            Arc::new(AtomicBool::new(cancelled)),
+        );
+        assert!(before.elapsed() < Duration::from_secs(3));
+        let results: Vec<_> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                AgentBusEvent::TurnCompleted { .. } => panic!("unexpected success for {result}"),
+                AgentBusEvent::TurnFailed { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains(expected), "{results:?}");
+    }
 }
