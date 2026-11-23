@@ -210,7 +210,20 @@ pub fn render_pane(
             .unwrap_or(0);
         let mut title_spans = Vec::new();
         title_spans.push(Span::styled(
-            "CHAT BOX".to_string(),
+            super::composer_title(
+                swarm,
+                pane.swarm_draft_target.as_ref(),
+                pane.swarm_draft_target
+                    .as_ref()
+                    .map(|target| target.mission_id.as_str())
+                    .or_else(|| {
+                        pane.mission_id
+                            .as_deref()
+                            .filter(|id| swarm.is_some_and(|swarm| swarm.is_active_mission(id)))
+                    }),
+                Some(&pane.agent_id),
+                &pane.chat_input,
+            ),
             Style::default()
                 .fg(if focused {
                     theme.border_focused

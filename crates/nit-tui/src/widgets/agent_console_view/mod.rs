@@ -250,6 +250,47 @@ pub(super) fn resolve_context_used(
     )
 }
 
+fn composer_title(
+    swarm: Option<&SwarmRuntime>,
+    target: Option<&nit_core::SwarmDraftTarget>,
+    mission: Option<&str>,
+    agent: Option<&str>,
+    draft: &str,
+) -> String {
+    let mut words = draft.split_whitespace();
+    let typed = match words.next() {
+        Some("@task" | "@agent") => words.next(),
+        Some("@all") => return "CHAT BOX → all".into(),
+        Some("@swarm" | "@shadow" | "@multiway" | "@new") => return "CHAT BOX".into(),
+        _ => None,
+    };
+    if let Some(mid) = mission {
+        let task = typed
+            .or_else(|| {
+                target.and_then(|target| {
+                    target
+                        .task_id
+                        .as_deref()
+                        .or(target.suggested_task.as_deref())
+                })
+            })
+            .or_else(|| {
+                if target.is_some_and(|target| target.source.is_some()) {
+                    return None;
+                }
+                swarm.and_then(|swarm| swarm.only_operator_followup_task(mid))
+            });
+        return match task {
+            Some(task) => format!("To {task} · {mid}"),
+            None => format!("To swarm {mid}"),
+        };
+    }
+    if draft.is_empty() {
+        return "CHAT BOX".into();
+    }
+    agent.map_or_else(|| "CHAT BOX".into(), |id| format!("To {id}"))
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -351,7 +392,9 @@ pub fn render(
                 .missions
                 .iter()
                 .any(|m| !matches!(m.status.as_str(), "DONE" | "ABORTED" | "FAILED" | ""));
-        let hint_text = if any_mission_active {
+        let hint_text = if crate::app::followup_mission(state, swarm).is_some() {
+            "Alt+←/→ task · @task ID message · /followups"
+        } else if any_mission_active {
             "/abort  ·  Ctrl+C  ·  Esc Esc  ·  x in Missions tab"
         } else {
             "@swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel"
@@ -595,7 +638,13 @@ pub fn render(
             .unwrap_or(0);
         let mut title_spans = Vec::new();
         title_spans.push(Span::styled(
-            "CHAT BOX".to_string(),
+            composer_title(
+                Some(swarm),
+                state.agents.swarm_draft_target.as_ref(),
+                crate::app::followup_mission(state, swarm),
+                state.agents.selected_context_agent(),
+                &state.agents.chat_input,
+            ),
             Style::default()
                 .fg(if focused {
                     theme.border_focused

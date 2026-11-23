@@ -15,6 +15,16 @@ fn default_offline_mcp_status() -> McpStatus {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SwarmDraftTarget {
+    pub mission_id: String,
+    pub task_id: Option<String>,
+    /// File owner displayed while composing. Revalidated on submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_task: Option<String>,
+    pub source: Option<crate::followups::Source>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentsState {
     pub selected_agent: Option<String>,
@@ -22,6 +32,8 @@ pub struct AgentsState {
     pub dock_tab: AgentOpsTab,
     pub console_tab: AgentConsoleTab,
     pub chat_input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_draft_target: Option<SwarmDraftTarget>,
     #[serde(default)]
     pub chat_input_cursor: usize,
     /// Char index in `chat_input` where a selection started.
@@ -260,6 +272,9 @@ pub struct AgentsState {
     /// Per-model Codex thread ids for ad-hoc (non-mission) chat resumption.
     #[serde(skip)]
     pub codex_thread_ids: HashMap<String, String>,
+    /// The live DAG pins its follow-up turns to the workspace that owns the task.
+    #[serde(skip)]
+    pub followup_workspaces: HashMap<String, std::path::PathBuf>,
     /// Per-mission Codex thread ids for live-mission resumption.
     #[serde(skip)]
     pub codex_mission_thread_ids: HashMap<String, HashMap<String, String>>,
@@ -448,6 +463,7 @@ impl Default for AgentsState {
             dock_tab: AgentOpsTab::Roster,
             console_tab: AgentConsoleTab::Thread,
             chat_input: String::new(),
+            swarm_draft_target: None,
             chat_input_cursor: 0,
             chat_input_selection_anchor: None,
             chat_input_scroll: chat_input_scroll_default(),
@@ -534,6 +550,7 @@ impl Default for AgentsState {
             codex_mission_used_tokens: HashMap::new(),
             codex_turn_prompt_idx: HashMap::new(),
             codex_thread_ids: HashMap::new(),
+            followup_workspaces: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),

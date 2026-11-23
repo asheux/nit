@@ -499,11 +499,11 @@ fn drain_input_burst(
                         let _ = session.paste(&text);
                     }
                 } else if state.agents.artifacts_popup_open {
-                    handle_paste(state, &text);
+                    handle_paste(state, swarm, &text);
                 } else if let Some(session) = focused_terminal(state, terminals) {
                     let _ = session.paste(&text);
                 } else {
-                    handle_paste(state, &text);
+                    handle_paste(state, swarm, &text);
                 }
             }
             Event::Mouse(mouse) => {
@@ -567,7 +567,7 @@ fn drain_input_burst(
 /// Routes a bracketed-paste blob to whichever input is currently
 /// receiving keystrokes: the artifacts popup chat input when it's
 /// open, otherwise the focused pane's chat input.
-fn handle_paste(state: &mut AppState, text: &str) {
+fn handle_paste(state: &mut AppState, swarm: &SwarmRuntime, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -577,7 +577,9 @@ fn handle_paste(state: &mut AppState, text: &str) {
     }
     let pane_idx = super::keys::focused_pane_idx(state);
     with_pane_aliased(state, pane_idx, |state| {
-        let _ = crate::app::insert_chat_input_text(state, text);
+        if crate::app::insert_chat_input_text(state, text) {
+            crate::app::pin_composing_mission(state, swarm);
+        }
     });
 }
 

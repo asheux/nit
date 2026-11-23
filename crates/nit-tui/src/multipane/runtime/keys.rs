@@ -255,6 +255,15 @@ fn handle_chat_key(
     let is_ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let is_super = modifiers.contains(KeyModifiers::SUPER);
 
+    if key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Left | KeyCode::Right)
+        && with_focused_pane_aliased(state, |state| {
+            crate::app::cycle_followup_target(state, swarm, &key)
+        })
+    {
+        return false;
+    }
+
     match key.code {
         KeyCode::Char('/') if is_ctrl => {
             toggle_focused_pane_dir_search(state, dir_runner);
@@ -279,7 +288,9 @@ fn handle_chat_key(
             // selections still copy.
             if !super::mouse::try_copy_focused_pane_selection(state, clipboard, area) {
                 with_focused_pane_aliased(state, |state| {
-                    let _ = handle_chat_input_editing_key(&key, state, clipboard);
+                    if handle_chat_input_editing_key(&key, state, clipboard).changed {
+                        crate::app::pin_composing_mission(state, swarm);
+                    }
                 });
             }
             false
@@ -296,7 +307,9 @@ fn handle_chat_key(
                 abort_focused_pane(state, codex, claude, swarm, shadow);
             } else {
                 with_focused_pane_aliased(state, |state| {
-                    let _ = handle_chat_input_editing_key(&key, state, clipboard);
+                    if handle_chat_input_editing_key(&key, state, clipboard).changed {
+                        crate::app::pin_composing_mission(state, swarm);
+                    }
                 });
             }
             false
@@ -334,7 +347,9 @@ fn handle_chat_key(
         }
         _ => {
             with_focused_pane_aliased(state, |state| {
-                let _ = handle_chat_input_editing_key(&key, state, clipboard);
+                if handle_chat_input_editing_key(&key, state, clipboard).changed {
+                    crate::app::pin_composing_mission(state, swarm);
+                }
             });
             false
         }
@@ -502,6 +517,7 @@ pub(super) fn revert_focused_pane_to_roster(state: &mut AppState) {
         pane.selected_agent_id = None;
         pane.agent_id.clear();
         pane.chat_input.clear();
+        pane.swarm_draft_target = None;
         pane.chat_input_cursor = 0;
         pane.chat_input_selection_anchor = None;
         pane.chat_input_scroll = 0;
@@ -553,6 +569,7 @@ fn focused_chat_input_is_empty(state: &AppState) -> bool {
 pub(in crate::multipane) fn clear_focused_pane_input(state: &mut AppState) {
     if let Some(pane) = focused_pane_mut(state) {
         pane.chat_input.clear();
+        pane.swarm_draft_target = None;
         pane.chat_input_cursor = 0;
         pane.chat_input_selection_anchor = None;
         pane.chat_input_scroll = 0;

@@ -549,3 +549,96 @@ fn esc_in_agent_chat_does_not_clear_chat_input_when_no_selection() {
     assert!(state.ui_selection.is_none());
     assert_eq!(state.agents.chat_input, "draft message");
 }
+
+#[test]
+fn active_swarm_draft_survives_ambiguity_and_queues_once_to_chosen_task() {
+    let mut state = state_for_test_in_workspace("followup-ui");
+    let mid = "mission-ui";
+    let mut swarm = crate::swarm::test_runtime_with_running_tasks(
+        mid,
+        &[("writer", "integrate"), ("reader", "review")],
+    );
+    swarm.set_test_workspace(mid, &state.workspace_root);
+    state.agents.selected_mission = Some(mid.into());
+    state.focus = PaneId::Notes;
+    state.agents.chat_input = "Preserve the public option.".into();
+    state.agents.chat_input_cursor = 4;
+    let mut vitals = VitalsState::default();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(handle_agent_station_key(
+        enter,
+        &mut state,
+        &mut vitals,
+        None,
+        None,
+        &mut swarm
+    ));
+    assert_eq!(state.agents.chat_input, "Preserve the public option.");
+    assert_eq!(state.agents.chat_input_cursor, 4);
+    assert!(state.status.as_deref().unwrap().contains("task-01"));
+    assert!(handle_agent_station_key(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+        &mut state,
+        &mut vitals,
+        None,
+        None,
+        &mut swarm
+    ));
+    assert_eq!(
+        state
+            .agents
+            .swarm_draft_target
+            .as_ref()
+            .unwrap()
+            .task_id
+            .as_deref(),
+        Some("task-00")
+    );
+    // Browsing another mission must never retarget an existing draft.
+    state.agents.selected_mission = Some("unrelated".into());
+    for _ in 0..2 {
+        assert!(handle_agent_station_key(
+            enter,
+            &mut state,
+            &mut vitals,
+            None,
+            None,
+            &mut swarm
+        ));
+    }
+    assert!(state.agents.chat_input.is_empty());
+    assert!(state.agents.swarm_draft_target.is_none());
+    assert!(swarm.is_active_mission(mid));
+    assert_eq!(
+        swarm.operator_followup_tasks(mid),
+        vec!["task-00", "task-01"]
+    );
+    let receipts = nit_core::followups::directory(&state.workspace_root, mid);
+    let files: Vec<_> = fs::read_dir(receipts).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1);
+    let receipt: nit_core::followups::Receipt =
+        serde_json::from_slice(&fs::read(files[0].path()).unwrap()).unwrap();
+    assert_eq!(receipt.text, "Preserve the public option.");
+    assert_eq!(receipt.task_id, "task-00");
+    assert_eq!(receipt.agent_id, "writer");
+    fs::remove_dir_all(&state.workspace_root).unwrap();
+}
+
+#[test]
+fn changes_followup_keeps_an_existing_draft_and_rejects_a_conflicting_handoff() {
+    let mut state = state_for_test();
+    state.agents.chat_input = "My draft".into();
+    state.agents.chat_input_cursor = 2;
+    let source = nit_core::followups::Source {
+        path: "src/lib.rs".into(),
+        revision: None,
+        hunk: Some("@@ -3 +3 @@".into()),
+    };
+    prepare_swarm_followup_draft(&mut state, "one", Some("edit"), Some(source.clone())).unwrap();
+    assert!(prepare_swarm_followup_draft(&mut state, "two", Some("test"), None).is_err());
+    assert_eq!(state.agents.chat_input, "My draft");
+    assert_eq!(state.agents.chat_input_cursor, 2);
+    let target = state.agents.swarm_draft_target.as_ref().unwrap();
+    assert_eq!(target.mission_id, "one");
+    assert_eq!(target.source.as_ref(), Some(&source));
+}

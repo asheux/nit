@@ -17,6 +17,8 @@ pub struct PaneSession {
     pub agent_id: String,
     pub cwd: PathBuf,
     pub chat_input: String,
+    #[serde(default)]
+    pub swarm_draft_target: Option<super::SwarmDraftTarget>,
     pub chat_input_cursor: usize,
     pub chat_input_selection_anchor: Option<usize>,
     pub chat_input_scroll: usize,
@@ -136,6 +138,7 @@ impl Default for PaneSession {
             agent_id: String::new(),
             cwd: PathBuf::new(),
             chat_input: String::new(),
+            swarm_draft_target: None,
             chat_input_cursor: 0,
             chat_input_selection_anchor: None,
             chat_input_scroll: 0,

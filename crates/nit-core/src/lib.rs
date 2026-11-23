@@ -105,6 +105,7 @@ pub use state::{
     TerminalPopupState, TerminalSelectRegion, UiSelection, UiSelectionPane, VisualizerMode,
     VisualizerRuleEntry, VisualizerState, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
+pub use state::{SwarmDraftTarget, YankRegister};
 pub use substrate::{
     claims_conflict, targets_overlap, Assumption, AssumptionId, AssumptionTarget, Claim,
     ClaimConflict, ClaimId, ClaimKind, ClaimTarget, Signal, SignalId, SignalKind, SignalTarget,

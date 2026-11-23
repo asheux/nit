@@ -821,6 +821,31 @@ pub(crate) fn handle_artifacts_popup_key(
             return true;
         }
 
+        if let Some(mid) = artifact_mission
+            .as_ref()
+            .filter(|mid| swarm.is_active_mission(mid))
+        {
+            let previous = state
+                .agents
+                .swarm_draft_target
+                .replace(nit_core::SwarmDraftTarget {
+                    mission_id: mid.clone(),
+                    suggested_task: None,
+                    task_id: artifact_agent.clone(),
+                    source: None,
+                });
+            swap_in_artifacts_popup_chat(state);
+            let submitted = super::swarm_chat::submit_active_followup(state, swarm, &prompt);
+            swap_out_artifacts_popup_chat(state);
+            state.agents.swarm_draft_target = previous;
+            if submitted == Some(true) {
+                close_artifacts_popup(state);
+            } else if submitted.is_none() {
+                state.status =
+                    Some("Use Agent Chat to start a separate command. Reply draft kept.".into());
+            }
+            return true;
+        }
         if let Some(agent_id) = artifact_agent {
             // If the resolved agent was a clone that has been cleaned up,
             // re-create its lane from the base so the dispatch uses the
@@ -857,7 +882,9 @@ pub(crate) fn handle_artifacts_popup_key(
                 state.agents.selected_mission = artifact_mission.clone();
             }
             swap_in_artifacts_popup_chat(state);
+            let main_target = state.agents.swarm_draft_target.take();
             let sent = push_chat_message(state);
+            state.agents.swarm_draft_target = main_target;
             swap_out_artifacts_popup_chat(state);
             state.agents.selected_agent = prev_agent;
             state.agents.selected_mission = prev_mission;
@@ -934,7 +961,10 @@ pub(crate) fn handle_artifacts_popup_key(
         } else {
             // No artifact agent resolved — fall back to normal submit path.
             swap_in_artifacts_popup_chat(state);
-            if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm, shadow) {
+            let main_target = state.agents.swarm_draft_target.take();
+            let sent = submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm, shadow);
+            state.agents.swarm_draft_target = main_target;
+            if sent {
                 swap_out_artifacts_popup_chat(state);
                 close_artifacts_popup(state);
                 state.agents.note_event();

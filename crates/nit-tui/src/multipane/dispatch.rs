@@ -83,6 +83,7 @@ pub(crate) fn with_pane_aliased<R>(
     };
 
     let saved_chat_input = std::mem::take(&mut state.agents.chat_input);
+    let saved_target = state.agents.swarm_draft_target.take();
     let saved_chat_input_cursor = state.agents.chat_input_cursor;
     let saved_chat_input_anchor = state.agents.chat_input_selection_anchor;
     let saved_chat_input_scroll = state.agents.chat_input_scroll;
@@ -95,6 +96,7 @@ pub(crate) fn with_pane_aliased<R>(
     let saved_swarm_mission = state.agents.swarm_default_mission.clone();
 
     state.agents.chat_input = pane.chat_input.clone();
+    state.agents.swarm_draft_target = pane.swarm_draft_target.clone();
     state.agents.chat_input_cursor = pane.chat_input_cursor;
     state.agents.chat_input_selection_anchor = pane.chat_input_selection_anchor;
     state.agents.chat_input_scroll = pane.chat_input_scroll;
@@ -123,6 +125,7 @@ pub(crate) fn with_pane_aliased<R>(
     mirror_back_pane(state, pane_idx);
 
     state.agents.chat_input = saved_chat_input;
+    state.agents.swarm_draft_target = saved_target;
     state.agents.chat_input_cursor = saved_chat_input_cursor;
     state.agents.chat_input_selection_anchor = saved_chat_input_anchor;
     state.agents.chat_input_scroll = saved_chat_input_scroll;
@@ -153,6 +156,7 @@ fn mirror_back_pane(state: &mut AppState, pane_idx: usize) {
     else {
         return;
     };
+    pane.swarm_draft_target = state.agents.swarm_draft_target.take();
     pane.chat_input = std::mem::take(&mut state.agents.chat_input);
     pane.chat_input_cursor = state.agents.chat_input_cursor;
     pane.chat_input_selection_anchor = state.agents.chat_input_selection_anchor;

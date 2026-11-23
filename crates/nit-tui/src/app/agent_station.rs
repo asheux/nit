@@ -473,6 +473,28 @@ pub(super) fn handle_agent_ops_key(
                 select_roster_backend(state, backend);
                 changed = toggle_roster_backend_expanded(state, backend);
             } else {
+                // An explicit roster selection addresses that lane. Preserve the
+                // destination of an existing draft when visiting other agents.
+                if state.agents.chat_input.is_empty() {
+                    let lane = state
+                        .agents
+                        .selected_context_agent()
+                        .and_then(|id| state.agents.agents_get(id));
+                    let mid = lane.and_then(|lane| lane.current_mission.clone());
+                    state.agents.swarm_draft_target = lane.and_then(|lane| {
+                        let mid = mid.as_ref().filter(|mid| swarm.is_active_mission(mid))?;
+                        Some(nit_core::SwarmDraftTarget {
+                            mission_id: mid.clone(),
+                            suggested_task: None,
+                            task_id: Some(lane.id.clone()),
+                            source: None,
+                        })
+                    });
+                    if mid.is_none() {
+                        state.agents.selected_mission = None;
+                        state.agents.mission_selected = usize::MAX;
+                    }
+                }
                 state.focus = PaneId::Notes;
                 state.mode = Mode::Normal;
                 state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
@@ -1320,6 +1342,9 @@ pub(super) fn handle_agent_console_key(
 ) -> bool {
     let mut changed = false;
     let mut handled = false;
+    if cycle_followup_target(state, swarm, &key) {
+        return true;
+    }
     let mut follow_chat_cursor = false;
 
     // Try reusable text-editing handler first.
@@ -1328,6 +1353,9 @@ pub(super) fn handle_agent_console_key(
         handled = true;
         changed = edit.changed;
         follow_chat_cursor = edit.follow_cursor;
+        if edit.changed {
+            pin_composing_mission(state, swarm);
+        }
     }
 
     // Keys specific to the Agent Console context (not handled by the shared editor).

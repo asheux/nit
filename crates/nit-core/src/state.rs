@@ -42,7 +42,7 @@ pub use agent_types::{
     PendingIntake, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection,
     SavedRunHistoryFilter, SavedRunHistoryPendingAction,
 };
-pub use agents_state::AgentsState;
+pub use agents_state::{AgentsState, SwarmDraftTarget};
 pub use family_run::{
     apply_family_run_runtime_overrides, build_family_run_override_for_request,
     build_family_run_override_for_request_with_timings, build_family_run_override_from_base_config,
