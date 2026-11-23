@@ -41,7 +41,7 @@ impl SystemStats {
             cpu_percent: 0.0,
             mem_used_gb: 0.0,
             mem_total_gb: 0.0,
-            gpu: None,
+            gpu: query_gpu_info(),
         };
         stats.update_cached();
         stats
@@ -109,11 +109,14 @@ impl SystemStats {
         } else {
             cpus.iter().map(|c| c.cpu_usage()).sum::<f32>() / cpus.len() as f32
         };
-        let total_kib = self.system.total_memory() as f32;
-        let used_kib = self.system.used_memory() as f32;
-        self.mem_total_gb = total_kib / 1024.0 / 1024.0;
-        self.mem_used_gb = used_kib / 1024.0 / 1024.0;
-        self.gpu = query_gpu_info();
+        const BYTES_PER_GIB: f32 = (1u64 << 30) as f32;
+        self.mem_total_gb = self.system.total_memory() as f32 / BYTES_PER_GIB;
+        self.mem_used_gb = self.system.used_memory() as f32 / BYTES_PER_GIB;
+        // Only Linux reports dynamic GPU load. The Metal values describe hardware.
+        #[cfg(target_os = "linux")]
+        {
+            self.gpu = query_gpu_info();
+        }
     }
 }
 
