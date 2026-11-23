@@ -63,7 +63,7 @@ pub use multiway_view::{
 pub use pickers::{ProtocolPickerState, RulePickerState};
 pub use text_input::{smart_case_insensitive, CommandLine, EditorSearch, SearchPrompt};
 mod change_review;
-pub use change_review::{ChangeReview, ChangedFile};
+pub use change_review::{ChangeReview, ChangedFile, ReviewCommit};
 
 pub use visualizer::{GolRenderMode, VisualizerMode, VisualizerRuleEntry, VisualizerState};
 

@@ -16,10 +16,27 @@ impl ChangedFile {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewCommit {
+    pub id: String,
+    pub subject: String,
+    pub author: String,
+    pub date: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChangeReview {
     pub root: PathBuf,
     pub branch: String,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub upstream_gone: bool,
+    pub detached: bool,
+    pub unborn: bool,
+    pub commits: Vec<ReviewCommit>,
+    pub preview_commit: Option<String>,
+    pub history_patch_open: bool,
     pub files: Vec<ChangedFile>,
     pub selected: usize,
     pub scroll: usize,
