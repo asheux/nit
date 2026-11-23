@@ -33,7 +33,7 @@ pub(crate) struct Cli {
     #[arg(long, value_enum)]
     pub agents: Option<AgentsArg>,
 
-    /// Codex automation runtime (auto uses mcp when supported and otherwise uses exec)
+    /// Codex runtime. Auto uses MCP when supported, otherwise exec. App-server enables live steering.
     #[arg(long, value_enum, default_value_t = CodexRuntimeArg::Auto)]
     pub codex_runtime: CodexRuntimeArg,
 

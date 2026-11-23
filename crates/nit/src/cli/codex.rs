@@ -5,6 +5,7 @@ pub(crate) enum CodexRuntimeArg {
     Auto,
     Exec,
     Mcp,
+    AppServer,
 }
 
 impl From<CodexRuntimeArg> for nit_tui::codex_runner::CodexRuntimeMode {
@@ -13,6 +14,7 @@ impl From<CodexRuntimeArg> for nit_tui::codex_runner::CodexRuntimeMode {
             CodexRuntimeArg::Auto => Self::Auto,
             CodexRuntimeArg::Exec => Self::Exec,
             CodexRuntimeArg::Mcp => Self::Mcp,
+            CodexRuntimeArg::AppServer => Self::AppServer,
         }
     }
 }
