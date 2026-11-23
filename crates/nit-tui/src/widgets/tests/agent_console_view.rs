@@ -2113,3 +2113,56 @@ fn central_chat_renders_the_reply_in_order_and_bounds_long_output() {
     );
     assert!(oversized.len() < 101);
 }
+
+#[test]
+fn composer_recipient_action_uses_the_visible_border_label_for_clicks() {
+    let mut state = test_state();
+    state.center_tab = Some(nit_core::StationCenterTab::Chat);
+    state.agents.agents.clear();
+    state.agents.selected_agent = None;
+    let swarm = SwarmRuntime::default();
+    assert_eq!(
+        super::recipient_action(&state, &swarm, 60),
+        Some(("[Agent Ops]", " · No chat models"))
+    );
+    state.agents.agents.push(make_lane(
+        "codex",
+        "model",
+        "Codex",
+        AgentLaneKind::Codex,
+        AgentStatus::Idle,
+    ));
+    for width in [14, 23, 90] {
+        let area = Rect::new(7, 3, width, 16);
+        let layout = super::compute_console_layout(area, &state).unwrap();
+        let (label, _) =
+            super::recipient_action(&state, &swarm, layout.input_chunk.width - 2).unwrap();
+        let x = layout.input_chunk.x + 1;
+        let y = layout.input_chunk.y;
+        for column in x..x + label.len() as u16 {
+            assert!(super::select_agent_button_at(
+                &state, &swarm, area, column, y
+            ));
+        }
+        assert!(!super::select_agent_button_at(
+            &state,
+            &swarm,
+            area,
+            x + label.len() as u16,
+            y
+        ));
+        assert!(!super::select_agent_button_at(
+            &state,
+            &swarm,
+            area,
+            x,
+            y + 1
+        ));
+    }
+    state.agents.selected_agent = Some("codex".into());
+    assert!(super::recipient_action(&state, &swarm, 60).is_none());
+    assert_eq!(
+        super::composer_title(None, None, None, Some("codex"), ""),
+        "To codex"
+    );
+}
