@@ -13,8 +13,8 @@ use crate::highlight::{
 use crate::language::LanguageId;
 
 use super::job::BufferState;
-use super::window::WindowHighlighter;
 use super::worker::{HighlightResult, WorkerState};
+use tree_sitter_highlight::Highlighter;
 
 // Chunk size for progressive fill beyond the initial viewport window.
 pub(super) const FILL_CHUNK_LINES: usize = 500;
@@ -75,12 +75,7 @@ pub(super) fn step_progressive_fills(
         let Some(fill) = fills.get_mut(&id) else {
             continue;
         };
-        let mut window = WindowHighlighter {
-            configs: &state.hl_configs,
-            queries: &state.query_configs,
-            highlighter: &mut state.highlighter,
-        };
-        if process_fill_chunk(fill, &mut state.buffers, &mut window, res_tx) {
+        if process_fill_chunk(fill, &mut state.buffers, &mut state.highlighter, res_tx) {
             fills.remove(&id);
         }
     }
@@ -89,7 +84,7 @@ pub(super) fn step_progressive_fills(
 fn process_fill_chunk(
     fill: &mut ProgressiveFill,
     buffers: &mut HashMap<usize, BufferState>,
-    window: &mut WindowHighlighter,
+    highlighter: &mut Highlighter,
     res_tx: &Sender<HighlightResult>,
 ) -> bool {
     let Some((start_line, end_line)) = next_fill_chunk(fill) else {
@@ -123,7 +118,8 @@ fn process_fill_chunk(
         "start_line {start_line} out of fill line_start_bytes len {}",
         fill.line_start_bytes.len()
     );
-    let Ok((mut spans, start_line, end_line)) = window.spans(
+    let Ok((mut spans, start_line, end_line)) = super::window::window_spans(
+        highlighter,
         fill.language,
         tree,
         &fill.text,

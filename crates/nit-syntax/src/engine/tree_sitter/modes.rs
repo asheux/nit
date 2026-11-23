@@ -2,7 +2,6 @@
 //! tree-sitter query executor that backs them.
 
 use std::cmp;
-use std::collections::HashMap;
 
 use tree_sitter::{QueryCursor, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
@@ -13,19 +12,19 @@ use crate::highlight::{
     compute_line_starts, distribute_spans_to_lines, recompute_line_hashes, sort_spans, EngineKind,
     HighlightGroup, HighlightSnapshot, HighlightSpan, SyntaxStatus,
 };
-use crate::language::{LanguageId, LanguageRegistry};
+use crate::language::LanguageRegistry;
 
 // Amount by which viewport-scoped highlights extend beyond the visible range,
 // so small scroll jitter doesn't immediately require a re-request.
 pub(super) const VIEWPORT_MARGIN_LINES: usize = 100;
 
 pub(super) fn full_highlight(
-    configs: &HashMap<LanguageId, HighlightConfiguration>,
-    config: &HighlightConfiguration,
     highlighter: &mut Highlighter,
     job: &HighlightRequest,
 ) -> anyhow::Result<HighlightSnapshot> {
-    let spans = highlight_source(configs, config, highlighter, job.text.as_bytes())?;
+    let config = crate::captures::highlight_config(job.language)
+        .ok_or_else(|| anyhow::anyhow!("no highlight config"))?;
+    let spans = highlight_source(config, highlighter, job.text.as_bytes())?;
     Ok(HighlightSnapshot::from_spans(
         job.buffer_id,
         job.version,
@@ -39,7 +38,6 @@ pub(super) fn full_highlight(
 }
 
 pub(super) fn highlight_source(
-    configs: &HashMap<LanguageId, HighlightConfiguration>,
     config: &HighlightConfiguration,
     highlighter: &mut Highlighter,
     source: &[u8],
@@ -51,7 +49,7 @@ pub(super) fn highlight_source(
         if name == "markdown_inline" {
             crate::captures::markdown_inline_config()
         } else {
-            LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id))
+            LanguageRegistry::from_injection_name(name).and_then(crate::captures::highlight_config)
         }
     })?;
 
@@ -80,7 +78,7 @@ pub(super) fn highlight_source(
 }
 
 pub(super) fn viewport_highlight(
-    window: &mut super::window::WindowHighlighter,
+    highlighter: &mut Highlighter,
     tree: &Tree,
     job: &HighlightRequest,
     cursor: &mut QueryCursor,
@@ -109,7 +107,8 @@ pub(super) fn viewport_highlight(
         "start_line {start_line} out of offsets len {}",
         offsets.len()
     );
-    let (mut spans, start_line, end_line) = window.spans(
+    let (mut spans, start_line, end_line) = super::window::window_spans(
+        highlighter,
         job.language,
         tree,
         &job.text,

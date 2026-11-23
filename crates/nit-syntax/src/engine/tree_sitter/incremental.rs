@@ -2,18 +2,16 @@
 //! snapshot, mark edit-touched lines dirty, and rebuild only those lines.
 
 use std::cmp;
-use std::collections::HashMap;
 
 use nit_core::BufferEdit;
 use tree_sitter::{QueryCursor, Tree};
 
-use crate::captures::QueryConfig;
+use crate::captures::query_config;
 use crate::engine::HighlightRequest;
 use crate::highlight::{
     compute_line_starts, distribute_spans_to_lines, find_line, recompute_line_hashes, sort_spans,
     EngineKind, HighlightSnapshot, LineSegment, SyntaxStatus,
 };
-use crate::language::LanguageId;
 
 use super::modes::collect_spans;
 
@@ -25,7 +23,6 @@ pub(super) fn incremental_highlight(
     prev: &HighlightSnapshot,
     edited_old: Option<&Tree>,
     tree: &Tree,
-    query_configs: &HashMap<LanguageId, QueryConfig>,
     cursor: &mut QueryCursor,
     job: &HighlightRequest,
 ) -> HighlightSnapshot {
@@ -42,7 +39,6 @@ pub(super) fn incremental_highlight(
             offsets: &offsets,
             per_line: &mut per_line,
             line_hashes: &mut line_hashes,
-            query_configs,
             tree,
             cursor,
             job,
@@ -145,7 +141,6 @@ struct IncrementalCtx<'a> {
     offsets: &'a [usize],
     per_line: &'a mut [Vec<LineSegment>],
     line_hashes: &'a mut [u64],
-    query_configs: &'a HashMap<LanguageId, QueryConfig>,
     tree: &'a Tree,
     cursor: &'a mut QueryCursor,
     job: &'a HighlightRequest,
@@ -157,7 +152,6 @@ fn rehighlight_dirty(ctx: IncrementalCtx<'_>) {
         offsets,
         per_line,
         line_hashes,
-        query_configs,
         tree,
         cursor,
         job,
@@ -169,7 +163,7 @@ fn rehighlight_dirty(ctx: IncrementalCtx<'_>) {
         }
     }
 
-    if let Some(cfg) = query_configs.get(&job.language) {
+    if let Some(cfg) = query_config(job.language) {
         let mut spans = Vec::new();
         let ranges = dirty_byte_ranges(dirty, offsets);
         collect_spans(cfg, tree, job.text.as_bytes(), &ranges, &mut spans, cursor);

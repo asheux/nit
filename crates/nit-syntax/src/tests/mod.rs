@@ -14,13 +14,7 @@ mod source_roles;
 mod span_distribution;
 mod viewport;
 
-// Bumped from 2s → 15s after the tree-sitter 0.20 → 0.25 + 28-grammar
-// expansion: the first highlight request on a cold engine has to
-// initialise the grammar registry for every LanguageId, build each
-// query, and compile the highlight configuration. On a hot dev box
-// that's ~300 ms; on the slowest CI runner (ubuntu-24.04 cold cache)
-// we measured ~6 s. 15 s leaves headroom without making real timeouts
-// invisible.
+// Allow headroom for first-use query compilation on slow CI runners.
 pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(super) const DEFAULT_POLL: Duration = Duration::from_millis(10);
 pub(super) const LONG_TIMEOUT: Duration = Duration::from_secs(30);

@@ -5,12 +5,10 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use tree_sitter_highlight::{HighlightConfiguration, Highlighter};
+use tree_sitter_highlight::Highlighter;
 
-use crate::captures::{build_highlight_configs, build_query_configs, QueryConfig};
 use crate::engine::HighlightRequest;
 use crate::highlight::HighlightSnapshot;
-use crate::language::LanguageId;
 
 use super::job::{run_highlight_job, BufferState};
 use super::progressive::{
@@ -24,16 +22,12 @@ pub(super) struct HighlightResult {
 
 pub(super) struct WorkerState {
     pub buffers: HashMap<usize, BufferState>,
-    pub hl_configs: HashMap<LanguageId, HighlightConfiguration>,
-    pub query_configs: HashMap<LanguageId, QueryConfig>,
     pub highlighter: Highlighter,
 }
 
 pub(super) fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) {
     let mut state = WorkerState {
         buffers: HashMap::new(),
-        hl_configs: build_highlight_configs(),
-        query_configs: build_query_configs(),
         highlighter: Highlighter::new(),
     };
     let mut fills: HashMap<usize, ProgressiveFill> = HashMap::new();

@@ -10,9 +10,8 @@ use std::time::{Duration, Instant};
 use nit_core::BufferPoint;
 use tracing::{debug, error};
 use tree_sitter::{InputEdit, Parser, Point, QueryCursor, Tree};
-use tree_sitter_highlight::{HighlightConfiguration, Highlighter};
+use tree_sitter_highlight::Highlighter;
 
-use crate::captures::QueryConfig;
 use crate::engine::HighlightRequest;
 use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
 use crate::language::{LanguageId, LanguageRegistry};
@@ -98,13 +97,11 @@ pub(super) fn run_highlight_job(
     let start = Instant::now();
     let WorkerState {
         buffers,
-        hl_configs,
-        query_configs,
         highlighter,
     } = state;
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        highlight_job(buffers, hl_configs, query_configs, highlighter, job)
+        highlight_job(buffers, highlighter, job)
     }));
 
     let mut snapshot = match outcome {
@@ -166,27 +163,23 @@ fn extract_panic_message(payload: &(dyn Any + Send)) -> String {
 
 fn highlight_job(
     buffers: &mut HashMap<usize, BufferState>,
-    hl_configs: &HashMap<LanguageId, HighlightConfiguration>,
-    query_configs: &HashMap<LanguageId, QueryConfig>,
     highlighter: &mut Highlighter,
     job: &HighlightRequest,
 ) -> anyhow::Result<HighlightSnapshot> {
     let lang = job.language;
 
-    let Some(config) = hl_configs.get(&lang) else {
-        debug!("no highlight config for {lang:?}");
+    if lang == LanguageId::PlainText {
         return Ok(fallback_snapshot(
             job,
             SyntaxStatus::Error("no highlight config".into()),
         ));
-    };
-
+    }
     let has_injections = !LanguageRegistry::injections_query(lang).is_empty();
     if has_injections && job.viewport.is_none() {
         // The full highlighter owns its parser and evaluates nested languages.
         // An edit may change the meaning of a later fence or script terminator.
         buffers.remove(&job.buffer_id);
-        return full_highlight(hl_configs, config, highlighter, job);
+        return full_highlight(highlighter, job);
     }
 
     let state = buffers
@@ -204,26 +197,14 @@ fn highlight_job(
 
     let snapshot = if !has_injections && should_incremental_update(state, job) {
         if let Some(prev) = state.snapshot.as_ref() {
-            incremental_highlight(
-                prev,
-                edited_old.as_ref(),
-                &tree,
-                query_configs,
-                &mut state.cursor,
-                job,
-            )
+            incremental_highlight(prev, edited_old.as_ref(), &tree, &mut state.cursor, job)
         } else {
-            full_highlight(hl_configs, config, highlighter, job)?
+            full_highlight(highlighter, job)?
         }
     } else if job.viewport.is_some() {
-        let mut window = super::window::WindowHighlighter {
-            configs: hl_configs,
-            queries: query_configs,
-            highlighter,
-        };
-        viewport_highlight(&mut window, &tree, job, &mut state.cursor)?
+        viewport_highlight(highlighter, &tree, job, &mut state.cursor)?
     } else {
-        full_highlight(hl_configs, config, highlighter, job)?
+        full_highlight(highlighter, job)?
     };
 
     state.tree = Some(tree);

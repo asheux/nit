@@ -1,7 +1,7 @@
 //! Grammar-time configuration: compiled queries and highlight-group
 //! resolutions for every [`LanguageId`] that ships a grammar.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use tracing::{debug, warn};
 use tree_sitter::Query;
@@ -27,29 +27,26 @@ impl QueryConfig {
     }
 }
 
-fn grammar_entries() -> impl Iterator<Item = (LanguageId, tree_sitter::Language, &'static str)> {
-    LanguageId::ALL.into_iter().filter_map(|lang| {
-        let grammar = LanguageRegistry::tree_sitter_language(lang)?;
-        let highlights = LanguageRegistry::highlights_query(lang)?;
-        Some((lang, grammar, highlights))
-    })
-}
+// Only immutable compiled queries are shared. Parsers, highlighters and query
+// cursors stay with the worker that executes them. PlainText has its own empty slot.
+const SLOTS: usize = LanguageId::ALL.len() + 1;
 
-pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfiguration> {
-    let names = capture_names();
-    let mut configs = HashMap::with_capacity(LanguageId::ALL.len());
-
-    for (lang, grammar, highlights) in grammar_entries() {
-        let injections = LanguageRegistry::injections_query(lang);
-        let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
-            warn!("highlight config for {lang:?} failed (with and without injections)");
-            continue;
-        };
-        cfg.configure(&names);
-        configs.insert(lang, cfg);
-    }
-
-    configs
+pub(crate) fn highlight_config(lang: LanguageId) -> Option<&'static HighlightConfiguration> {
+    static CONFIGS: [OnceLock<Option<HighlightConfiguration>>; SLOTS] =
+        [const { OnceLock::new() }; SLOTS];
+    CONFIGS[lang as usize]
+        .get_or_init(|| {
+            let grammar = LanguageRegistry::tree_sitter_language(lang)?;
+            let highlights = LanguageRegistry::highlights_query(lang)?;
+            let injections = LanguageRegistry::injections_query(lang);
+            let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
+                warn!("highlight config for {lang:?} failed (with and without injections)");
+                return None;
+            };
+            cfg.configure(&capture_names());
+            Some(cfg)
+        })
+        .as_ref()
 }
 
 /// The inline grammar is an internal child of Markdown, never a standalone file language.
@@ -87,25 +84,21 @@ fn try_build_config(
     }
 }
 
-pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
-    let groups: HashMap<&str, HighlightGroup> = CAPTURES.iter().copied().collect();
-    let mut configs = HashMap::with_capacity(LanguageId::ALL.len());
-
-    for (lang, grammar, highlights) in grammar_entries() {
-        let Ok(query) = Query::new(&grammar, highlights) else {
-            continue;
-        };
-        let highlight_groups = resolve_highlight_groups(&query, &groups);
-        configs.insert(
-            lang,
-            QueryConfig {
+pub(crate) fn query_config(lang: LanguageId) -> Option<&'static QueryConfig> {
+    static CONFIGS: [OnceLock<Option<QueryConfig>>; SLOTS] = [const { OnceLock::new() }; SLOTS];
+    CONFIGS[lang as usize]
+        .get_or_init(|| {
+            let grammar = LanguageRegistry::tree_sitter_language(lang)?;
+            let highlights = LanguageRegistry::highlights_query(lang)?;
+            let query = Query::new(&grammar, highlights).ok()?;
+            let groups = CAPTURES.iter().copied().collect();
+            let highlight_groups = resolve_highlight_groups(&query, &groups);
+            Some(QueryConfig {
                 query,
                 highlight_groups,
-            },
-        );
-    }
-
-    configs
+            })
+        })
+        .as_ref()
 }
 
 fn resolve_highlight_groups(

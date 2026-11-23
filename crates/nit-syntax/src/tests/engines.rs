@@ -412,3 +412,18 @@ fn jsx_and_tsx_highlight_tag_names_and_attributes_without_changing_ts_assertions
         assert!(has_group(&snap, 0, HighlightGroup::Attribute));
     }
 }
+
+#[test]
+fn workers_share_immutable_configs_on_first_use() {
+    let configs = || {
+        (
+            crate::captures::highlight_config(LanguageId::Kotlin).unwrap(),
+            crate::captures::query_config(LanguageId::Kotlin).unwrap(),
+        )
+    };
+    let worker = std::thread::spawn(configs);
+    let (local_full, local_query) = configs();
+    let (other_full, other_query) = worker.join().unwrap();
+    assert!(std::ptr::eq(local_full, other_full));
+    assert!(std::ptr::eq(local_query, other_query));
+}

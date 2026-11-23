@@ -7,7 +7,5 @@ mod table;
 pub use category::{CaptureCategory, Categorizable, CATEGORY_COUNT};
 pub use table::capture_entry_count;
 
-pub(crate) use config::{
-    build_highlight_configs, build_query_configs, markdown_inline_config, QueryConfig,
-};
+pub(crate) use config::{highlight_config, markdown_inline_config, query_config, QueryConfig};
 pub(crate) use table::capture_group;
