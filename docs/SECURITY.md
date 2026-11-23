@@ -27,6 +27,7 @@ Codex uses its own sandbox configuration when you omit the flag. Nit defaults th
 | --- | --- |
 | `.nit/agents/runs/` | Mission records, messages and patch evidence |
 | `.nit/swarm/` | Task outputs, verification results, final reports and follow-up receipts containing the operator’s note and selected source |
+| `.nit/chat/followups/` | Direct chat corrections, their recipient and delivery status |
 | `.nit/followup-drafts/` | Unsent follow-ups saved after a routing error, with their original text and source context |
 | nit’s application state or data directory | Workspace logs and saved sessions. `NIT_LOG_PATH` selects a path for the workspace log. |
 | `gol-snapshots/` and `runs/games/` | Simulation snapshots and tournament output when you use those labs |
