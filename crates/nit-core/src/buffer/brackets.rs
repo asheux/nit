@@ -109,7 +109,7 @@ fn scan(
 }
 
 impl Buffer {
-    pub(super) fn rope_ref(&self) -> &ropey::Rope {
+    pub(crate) fn rope_ref(&self) -> &ropey::Rope {
         &self.rope
     }
 

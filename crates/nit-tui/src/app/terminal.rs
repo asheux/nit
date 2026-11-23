@@ -173,30 +173,17 @@ pub(super) fn install_terminal_panic_hook(state: Weak<Mutex<TerminalState>>) {
 // callers just fall back to "no diff".
 pub(super) fn git_head_content(path: &Path) -> Option<String> {
     use std::process::Command;
-    let dir = path.parent()?;
-    let root_out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !root_out.status.success() {
-        return None;
-    }
-    let root = PathBuf::from(String::from_utf8(root_out.stdout).ok()?.trim());
-    let rel = path
-        .canonicalize()
-        .ok()?
-        .strip_prefix(&root)
-        .ok()?
-        .to_path_buf();
+    let mut revision = std::ffi::OsString::from("HEAD:./");
+    revision.push(path.file_name()?);
     let output = Command::new("git")
-        .args(["show", &format!("HEAD:{}", rel.display())])
-        .current_dir(&root)
+        .arg("show")
+        .arg(revision)
+        .current_dir(path.parent()?)
         .output()
         .ok()?;
-    if output.status.success() {
-        String::from_utf8(output.stdout).ok()
-    } else {
-        None
-    }
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
 }

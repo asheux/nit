@@ -29,11 +29,16 @@ where
 {
     match path {
         Some(p) if p.is_file() => {
-            let buffer = load_file_buffer(p, default_name)?;
-            let root = files::parent_or_cwd(p)?;
+            let absolute = std::path::absolute(p)?;
+            let root = absolute
+                .parent()
+                .expect("file has a parent")
+                .canonicalize()?;
+            let file = root.join(absolute.file_name().expect("file has a name"));
+            let buffer = load_file_buffer(&file, default_name)?;
             Ok((root, buffer))
         }
-        Some(p) if p.is_dir() => dir_handler(p),
+        Some(p) if p.is_dir() => dir_handler(&p.canonicalize()?),
         None => dir_handler(&std::env::current_dir()?),
         Some(missing) => anyhow::bail!("path does not exist: {}", missing.display()),
     }
