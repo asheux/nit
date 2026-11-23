@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
 
+mod app_server;
 mod args;
+pub use app_server::CodexLiveTurn;
 mod evaluate_genome;
 mod jsonl;
 
@@ -62,6 +64,8 @@ pub enum CodexRuntimeMode {
     Exec,
     /// Keep a persistent `codex mcp-server` process and multiplex turns as `tools/call` requests.
     Mcp,
+    /// Use a local stdio app-server with turn-scoped live steering.
+    AppServer,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +103,7 @@ pub enum CodexCommand {
 }
 
 pub struct CodexRunner {
+    live: app_server::LiveRoutes,
     cmd_tx: Sender<CodexCommand>,
     pub events: Receiver<AgentBusEvent>,
     shutdown: Arc<AtomicBool>,
@@ -112,6 +117,7 @@ impl CodexRunner {
         let (_, events) = mpsc::channel();
         (
             Self {
+                live: Default::default(),
                 cmd_tx,
                 events,
                 shutdown: Arc::new(AtomicBool::new(false)),
@@ -134,16 +140,42 @@ impl CodexRunner {
             mcp_backchannel_socket,
             ..config
         };
+        let live = app_server::LiveRoutes::default();
+        let routes = live.clone();
         let handle = thread::Builder::new()
             .name("nit-codex".into())
-            .spawn(move || runner_loop(mode, config, shutdown_worker, cmd_rx, event_tx))
+            .spawn(move || {
+                if mode == CodexRuntimeMode::AppServer {
+                    runner_loop_process(cmd_rx, event_tx, config, Some(routes))
+                } else {
+                    runner_loop(mode, config, shutdown_worker, cmd_rx, event_tx)
+                }
+            })
             .expect("spawn codex runner");
         Self {
+            live,
             cmd_tx,
             events: event_rx,
             shutdown,
             handle: Some(handle),
         }
+    }
+
+    pub fn live_turn(
+        &self,
+        agent_id: &str,
+        mission_id: Option<&str>,
+        cwd: &std::path::Path,
+    ) -> Option<CodexLiveTurn> {
+        self.live.get(agent_id, mission_id, cwd)
+    }
+    pub fn steer(
+        &self,
+        target: CodexLiveTurn,
+        client_message_id: String,
+        text: String,
+    ) -> Receiver<crate::steering::SteerOutcome> {
+        self.live.steer(target, client_message_id, text)
     }
 
     /// Returns `true` if the command was accepted, `false` if the runner's
@@ -308,6 +340,14 @@ fn runner_loop_exec(
     event_tx: Sender<AgentBusEvent>,
     config: CodexRunnerConfig,
 ) {
+    runner_loop_process(cmd_rx, event_tx, config, None);
+}
+fn runner_loop_process(
+    cmd_rx: Receiver<CodexCommand>,
+    event_tx: Sender<AgentBusEvent>,
+    config: CodexRunnerConfig,
+    live: Option<app_server::LiveRoutes>,
+) {
     let mut seq = 0u64;
     let mut queue: VecDeque<CodexCommand> = VecDeque::new();
     let mut active: Vec<ActiveTurn> = Vec::new();
@@ -425,7 +465,11 @@ fn runner_loop_exec(
                 let _ = event_tx.send(AgentBusEvent::McpStatus {
                     status: McpStatus {
                         state: McpConnectionState::Connecting,
-                        endpoint: codex_exec_endpoint_label(&model, resume_thread_id.as_deref()),
+                        endpoint: if live.is_some() {
+                            "codex app-server (stdio)".into()
+                        } else {
+                            codex_exec_endpoint_label(&model, resume_thread_id.as_deref())
+                        },
                         latency_ms: None,
                         last_error: None,
                     },
@@ -435,12 +479,14 @@ fn runner_loop_exec(
                     mission_id: mission_id.clone(),
                     resume_thread_id: resume_thread_id.clone(),
                 });
-                crate::swarm::report_provider_followup_input(
-                    &event_tx,
-                    &model,
-                    mission_id.as_deref(),
-                    &prompt,
-                );
+                if live.is_none() {
+                    crate::swarm::report_provider_followup_input(
+                        &event_tx,
+                        &model,
+                        mission_id.as_deref(),
+                        &prompt,
+                    );
+                }
                 seq = seq.wrapping_add(1);
                 active.push(spawn_turn_worker(
                     &event_tx,
@@ -454,6 +500,7 @@ fn runner_loop_exec(
                     prompt,
                     read_only,
                     config.clone(),
+                    live.clone(),
                 ));
             }
         }
@@ -1790,6 +1837,7 @@ fn spawn_turn_worker(
     prompt: String,
     read_only: bool,
     config: CodexRunnerConfig,
+    live: Option<app_server::LiveRoutes>,
 ) -> ActiveTurn {
     let agent_id = model.clone();
     let session = resume_thread_id.clone();
@@ -1800,20 +1848,37 @@ fn spawn_turn_worker(
     let handle = thread::Builder::new()
         .name(format!("nit-codex-turn-{seq}"))
         .spawn(move || {
-            run_turn(
-                &event_tx,
-                seq,
-                model,
-                cwd,
-                mission_id,
-                resume_thread_id,
-                persist_session,
-                reasoning_effort,
-                prompt,
-                read_only,
-                config,
-                cancel_worker,
-            );
+            if let Some(live) = live {
+                app_server::run(
+                    &event_tx,
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_thread_id,
+                    persist_session,
+                    reasoning_effort,
+                    prompt,
+                    read_only,
+                    config,
+                    cancel_worker,
+                    live,
+                );
+            } else {
+                run_turn(
+                    &event_tx,
+                    seq,
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_thread_id,
+                    persist_session,
+                    reasoning_effort,
+                    prompt,
+                    read_only,
+                    config,
+                    cancel_worker,
+                );
+            }
             let _ = done_tx.send(());
         })
         .expect("spawn codex turn worker");

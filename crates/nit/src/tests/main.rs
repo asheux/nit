@@ -367,6 +367,11 @@ fn runtime_defaults_to_auto_and_preserves_explicit_mcp() {
     assert!(matches!(defaults.codex_runtime, CodexRuntimeArg::Auto));
     let explicit = Cli::try_parse_from(["nit", "--codex-runtime", "mcp"]).unwrap();
     assert!(matches!(explicit.codex_runtime, CodexRuntimeArg::Mcp));
+    let app_server = Cli::try_parse_from(["nit", "--codex-runtime", "app-server"]).unwrap();
+    assert!(matches!(
+        app_server.codex_runtime,
+        CodexRuntimeArg::AppServer
+    ));
 }
 
 #[test]
