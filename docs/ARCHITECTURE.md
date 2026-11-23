@@ -18,7 +18,7 @@ Use the station when you want an agent to read or change a specific checkout and
 | Did the requested check actually run? | **DAG** for the verification result and **Artifacts** for the gate report or command output |
 | What changed on disk? | **Changes** for the Git patch, then Enter to read the file |
 | Why did the provider turn fail? | **Diag** and **Alerts** for the provider error. With Codex MCP, the **MCP** tab also shows the connection state. |
-| What guidance can the agent read? | **Code Structural Quality → Skills**. From a shell, run `nit skills` for names or `nit skills NAME` for a playbook. |
+| What guidance can the agent read? | **NitSkills** opens by default. Focus it with `:skills`, filter with `/` and attach a reference to the unsent chat draft with `a`. In a shell, use `nit skills NAME` to read a playbook. |
 
 A swarm can finish with no verification commands configured. Check which commands ran, their exit status and their coverage of your acceptance criterion before treating a mission as verified. [Swarm verification](SWARM.md)
 
