@@ -31,6 +31,19 @@ fn fixture_state() -> MultipaneState {
 }
 
 #[test]
+fn saved_draft_ends_on_a_whole_character() {
+    let prefix = "a".repeat(CHAT_INPUT_CAP_BYTES - 1);
+    let mut pane = PaneSession {
+        chat_input: format!("{prefix}🦀"),
+        chat_input_cursor: prefix.len() + 1,
+        ..PaneSession::default()
+    };
+    cap_chat_input(&mut pane);
+    assert_eq!(pane.chat_input, prefix);
+    assert_eq!(pane.chat_input_cursor, prefix.len());
+}
+
+#[test]
 fn save_then_load_roundtrips_per_pane_cwd_and_chat_input() {
     // Roundtrip through serde_json without touching the shared state
     // dir (ProjectDirs is unmocked in this crate's tests).

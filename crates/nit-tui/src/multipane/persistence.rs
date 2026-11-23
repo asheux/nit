@@ -44,7 +44,11 @@ fn cap_chat_input(pane: &mut PaneSession) {
     if pane.chat_input.len() <= CHAT_INPUT_CAP_BYTES {
         return;
     }
-    pane.chat_input.truncate(CHAT_INPUT_CAP_BYTES);
+    let mut end = CHAT_INPUT_CAP_BYTES;
+    while !pane.chat_input.is_char_boundary(end) {
+        end -= 1;
+    }
+    pane.chat_input.truncate(end);
     pane.chat_input_cursor = pane.chat_input_cursor.min(pane.chat_input.chars().count());
 }
 
@@ -62,15 +66,9 @@ pub fn save_session(state: &MultipaneState, workspace: &Path) -> io::Result<()> 
     for pane in &mut snapshot.panes {
         cap_chat_input(pane);
     }
-    let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    // Write-then-rename so a crash mid-write can't corrupt the live
-    // session file. A leftover `.tmp` is harmless; load_session only
-    // reads the canonical path.
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    nit_utils::write_atomic(&path, |writer| {
+        serde_json::to_writer_pretty(writer, &snapshot).map_err(io::Error::from)
+    })
 }
 
 /// Load a previously persisted session. Returns `None` when the file is
