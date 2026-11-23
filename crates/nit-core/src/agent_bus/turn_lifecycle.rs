@@ -88,6 +88,11 @@ pub(super) fn handle_turn_stage(
     mission_id: &Option<String>,
     stage: &str,
 ) {
+    // Completion is applied by the typed terminal event. An informational
+    // protocol marker can arrive while another turn on the same lane is active.
+    if matches!(stage, "turn.completed" | "turn_completed") {
+        return;
+    }
     if let Some(turn) = state.agents.active_turns.get_mut(agent_id) {
         turn.last_output_at = Instant::now();
         turn.stage = Some(stage.to_string());
@@ -114,4 +119,26 @@ pub(super) fn handle_turn_log(state: &mut AppState, agent_id: &str, message: &st
         message: format!("[{agent_id}] {message}"),
         at: timestamp_label(state),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn previous_completion_marker_does_not_replace_the_new_turn_activity() {
+        let mut state = crate::test_helpers::test_state();
+        let lane = "codex-test";
+        handle_turn_started(&mut state, lane, &None);
+        handle_turn_stage(&mut state, lane, &None, "item.started(command)");
+        handle_turn_started(&mut state, lane, &None);
+        handle_turn_stage(&mut state, lane, &None, "turn.completed");
+        assert_eq!(state.agents.active_turns[lane].stage, None);
+        handle_turn_stage(&mut state, lane, &None, "item_completed(command)");
+        handle_turn_stage(&mut state, lane, &None, "turn_completed");
+        assert_eq!(
+            state.agents.active_turns[lane].stage.as_deref(),
+            Some("item_completed(command)")
+        );
+    }
 }
