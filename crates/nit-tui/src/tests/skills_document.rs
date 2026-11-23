@@ -52,3 +52,36 @@ fn headings_lists_and_roles_use_styles_without_markup() {
         .any(|s| s.content == "Check" && s.style.add_modifier.contains(Modifier::BOLD)));
     assert!(rendered.iter().any(|r| r.to_string() == "ROLE DISCIPLINE"));
 }
+
+#[test]
+fn tables_keep_separators_aligned_through_styled_wide_and_wrapped_cells() {
+    use unicode_width::UnicodeWidthStr;
+    let theme = Theme::default();
+    let body = "| Key | Explanation |\n|---|---|\n| `表` | A long description with several wrapped words retained |\n| **AB** | closing value |";
+    let rows = lines(body, 28, &theme, theme.accent);
+    let header = rows[0].to_string();
+    let sep = header[..header.find('│').unwrap()].width();
+    assert_eq!(
+        rows[1]
+            .to_string()
+            .find('┼')
+            .map(|i| rows[1].to_string()[..i].width()),
+        Some(sep)
+    );
+    let mut words = Vec::new();
+    for row in rows.iter().skip(2) {
+        let text = row.to_string();
+        assert!(row.width() <= 28);
+        let (key, value) = text.split_once('│').unwrap();
+        assert_eq!(key.width(), sep);
+        words.extend(value.split_whitespace().map(str::to_owned));
+    }
+    assert_eq!(
+        words.join(" "),
+        "A long description with several wrapped words retained closing value"
+    );
+    assert!(rows
+        .iter()
+        .flat_map(|line| &line.spans)
+        .any(|s| s.content == "表" && s.style.fg == Some(theme.hl.string)));
+}

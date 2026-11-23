@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 pub(super) fn lines(body: &str, width: usize, theme: &Theme, heading: Color) -> Vec<Line<'static>> {
     if width == 0 {
@@ -73,7 +73,7 @@ pub(super) fn lines(body: &str, width: usize, theme: &Theme, heading: Color) -> 
 }
 
 fn table(rows: &[&str], width: usize, theme: &Theme, key: Style, out: &mut Vec<Line<'static>>) {
-    let cells: Vec<Vec<_>> = rows
+    let mut cells: Vec<Vec<_>> = rows
         .iter()
         .map(|row| {
             row.trim_matches('|')
@@ -81,49 +81,93 @@ fn table(rows: &[&str], width: usize, theme: &Theme, key: Style, out: &mut Vec<L
                 .map(str::trim)
                 .collect::<Vec<_>>()
         })
-        .filter(|r| !r.iter().all(|s| s.chars().all(|c| matches!(c, '-' | ':'))))
         .collect();
+    let alignment = if cells.get(1).is_some_and(|row| {
+        row.iter()
+            .all(|s| s.contains('-') && s.chars().all(|c| matches!(c, '-' | ':')))
+    }) {
+        cells.remove(1)
+    } else {
+        Vec::new()
+    };
     let Some(headers) = cells.first() else { return };
     let normal = Style::default().fg(theme.foreground);
-    let widths: Vec<_> = (0..headers.len())
+    let natural: Vec<usize> = (0..headers.len())
         .map(|i| {
             cells
                 .iter()
-                .filter_map(|r| r.get(i))
-                .map(|s| s.trim_matches('`').width())
+                .filter_map(|row| row.get(i))
+                .flat_map(|cell| wrap(cell, usize::MAX, normal, theme))
+                .map(|line| line.width())
                 .max()
-                .unwrap_or(0)
+                .unwrap_or(1)
+                .max(1)
         })
         .collect();
-    if widths.iter().sum::<usize>() + 2 * headers.len().saturating_sub(1) <= width {
-        for (i, row) in cells.iter().enumerate() {
-            let mut spans = Vec::new();
-            for (j, cell) in row.iter().enumerate() {
-                let style = if i == 0 { key } else { normal };
-                if let Some(line) = wrap(cell, width, style, theme).pop() {
-                    let used = line.width();
-                    spans.extend(line.spans);
-                    if j + 1 < row.len() {
-                        spans.push(Span::raw(" ".repeat(widths[j].saturating_sub(used) + 2)));
-                    }
-                }
-            }
-            out.push(Line::from(spans));
-        }
-    } else {
+    let mut widths: Vec<_> = natural.iter().map(|w| (*w).min(12)).collect();
+    // Each separator has a space on either side. Leave one cell at the left
+    // edge so a table reads as a distinct block within the document.
+    let overhead = 1 + 3 * widths.len().saturating_sub(1);
+    if width < overhead + widths.iter().sum::<usize>() {
         for (i, row) in cells.iter().skip(1).enumerate() {
             if i > 0 {
                 out.push(Line::default());
             }
-            for (j, (label, cell)) in headers.iter().zip(row).enumerate() {
-                let value = format!("{label} · {cell}");
-                out.extend(wrap(
-                    &value,
-                    width,
-                    if j == 0 { key } else { normal },
-                    theme,
-                ));
+            for (label, cell) in headers.iter().zip(row) {
+                out.extend(wrap(&format!("**{label}** · {cell}"), width, normal, theme));
             }
+        }
+        return;
+    }
+    let mut remaining = width - overhead - widths.iter().sum::<usize>();
+    while remaining > 0 {
+        let Some((column, _)) = natural
+            .iter()
+            .zip(&widths)
+            .enumerate()
+            .filter(|(_, (want, have))| want > have)
+            .max_by_key(|(_, (want, have))| **want - **have)
+        else {
+            break;
+        };
+        widths[column] += 1;
+        remaining -= 1;
+    }
+    let rule = Style::default().fg(theme.muted);
+    for (row_idx, row) in cells.iter().enumerate() {
+        let style = if row_idx == 0 { key } else { normal };
+        let columns: Vec<_> = widths
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| wrap(row.get(i).copied().unwrap_or(""), w, style, theme))
+            .collect();
+        let height = columns.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        for line_idx in 0..height {
+            let mut spans = vec![Span::raw(" ")];
+            for (col, lines) in columns.iter().enumerate() {
+                let line = lines.get(line_idx);
+                let padding = widths[col].saturating_sub(line.map_or(0, Line::width));
+                let before = match alignment.get(col) {
+                    Some(s) if s.starts_with(':') && s.ends_with(':') => padding / 2,
+                    Some(s) if s.ends_with(':') => padding,
+                    _ => 0,
+                };
+                if before > 0 {
+                    spans.push(Span::raw(" ".repeat(before)));
+                }
+                if let Some(line) = line {
+                    spans.extend(line.spans.iter().cloned());
+                }
+                if col + 1 < widths.len() {
+                    spans.push(Span::raw(" ".repeat(padding - before)));
+                    spans.push(Span::styled(" │ ", rule));
+                }
+            }
+            out.push(Line::from(spans));
+        }
+        if row_idx == 0 {
+            let segments: Vec<_> = widths.iter().map(|&w| "─".repeat(w)).collect();
+            out.push(Line::styled(format!(" {}", segments.join("─┼─")), rule));
         }
     }
 }

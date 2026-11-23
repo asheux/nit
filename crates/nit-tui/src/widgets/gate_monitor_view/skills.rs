@@ -95,6 +95,14 @@ fn regions(inner: Rect, state: &AppState) -> Regions {
             Rect::default(),
         )
     };
+    // Keep the catalog divider and preview text visually separate.
+    let gutter = u16::from(preview.width >= 18);
+    let preview = Rect::new(
+        preview.x + gutter,
+        preview.y,
+        preview.width.saturating_sub(2 * gutter),
+        preview.height,
+    );
     let header = Rect::new(preview.x, preview.y, preview.width, preview.height.min(1));
     let body = Rect::new(
         preview.x,
@@ -138,7 +146,7 @@ fn group_color(group: &str, theme: &Theme) -> Color {
 struct DocumentCache {
     id: &'static str,
     width: usize,
-    colors: [Color; 3],
+    colors: [Color; 4],
     rows: Rc<[Line<'static>]>,
 }
 
@@ -150,7 +158,7 @@ fn document_rows(state: &AppState, theme: &Theme, width: usize) -> Rc<[Line<'sta
     let skill = entry(state);
     let width = width.max(1);
     let heading = group_color(skill.group, theme);
-    let colors = [heading, theme.foreground, theme.hl.string];
+    let colors = [heading, theme.foreground, theme.hl.string, theme.muted];
     DOCUMENT.with_borrow_mut(|cache| {
         if let Some(hit) = cache
             .as_ref()
@@ -281,7 +289,12 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
                 ),
             ]));
         } else {
-            rows.push(Line::styled(name, accent));
+            let cells = usize::from(r.catalog.width);
+            let rule_width = cells.saturating_sub(Span::raw(name).width() + 3);
+            rows.push(Line::from(vec![
+                Span::styled(format!(" {name} "), accent),
+                Span::styled("─".repeat(rule_width), muted),
+            ]));
         }
     }
     frame.render_widget(
@@ -326,9 +339,10 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
         }
         Line::from(spans)
     } else {
+        let gap = available.saturating_sub(Span::raw(&name).width() + 6);
         Line::from(vec![
             Span::styled(name, heading),
-            Span::raw("  "),
+            Span::raw(" ".repeat(gap)),
             Span::styled("↗ Open", link),
         ])
     };
