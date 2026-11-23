@@ -1,5 +1,71 @@
 use nit_core::AgentTokenCount;
 
+/// Recognize a successful single-turn exec stream. Unknown formats continue to
+/// use the CLI's last-message file and process exit status.
+#[derive(Default)]
+pub(super) struct ExecReply {
+    thread: Option<String>,
+    text: Option<String>,
+    unusable: bool,
+    tokens: Option<AgentTokenCount>,
+}
+
+impl ExecReply {
+    pub(super) fn observe(
+        &mut self,
+        value: &serde_json::Value,
+        resume: Option<&str>,
+    ) -> Option<(String, String, Option<AgentTokenCount>)> {
+        if self.unusable {
+            return None;
+        }
+        if let Some(tokens) = token_count_from_value(value) {
+            self.tokens = Some(tokens);
+        }
+        match value.get("type")?.as_str()? {
+            "thread.started" => {
+                let id = value
+                    .get("thread_id")
+                    .and_then(|id| id.as_str())
+                    .filter(|s| !s.trim().is_empty())?;
+                if self.thread.is_some() || resume.is_some_and(|prior| prior != id) {
+                    self.unusable = true;
+                } else {
+                    self.thread = Some(id.to_owned());
+                }
+            }
+            "turn.started" | "item.started" => self.text = None,
+            "item.completed" => {
+                self.text = None;
+                let item = value.get("item")?;
+                if item.get("type")?.as_str()? == "agent_message"
+                    && item
+                        .get("phase")
+                        .and_then(|v| v.as_str())
+                        .is_none_or(|p| p == "final_answer")
+                {
+                    self.text = item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim_end)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                }
+            }
+            "error" | "turn.failed" | "turn.aborted" | "turn.cancelled" => self.unusable = true,
+            "turn.completed" => {
+                self.unusable = true;
+                if value.get("error").is_some_and(|v| !v.is_null()) {
+                    return None;
+                }
+                return Some((self.thread.take()?, self.text.take()?, self.tokens.take()));
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 pub(super) fn extract_thread_id_from_jsonl(stdout: &[u8]) -> Option<String> {
     // `codex exec --json` emits a "thread.started" event with a `thread_id` field.
     let text = String::from_utf8_lossy(stdout);

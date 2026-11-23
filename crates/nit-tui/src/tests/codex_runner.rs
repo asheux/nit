@@ -611,3 +611,380 @@ fn mcp_tool_error_is_distinct_from_a_model_reply() {
         Some("No credentials")
     );
 }
+
+#[test]
+fn only_a_matching_completed_final_item_can_publish_an_exec_reply() {
+    use super::jsonl::ExecReply;
+    let started = json!({"type":"thread.started","thread_id":"thread-a"});
+    let final_item =
+        json!({"type":"item.completed","item":{"type":"agent_message","text":"Answer."}});
+    let complete = json!({"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}});
+    for (id, items, valid) in [
+        (
+            Some("thread-a"),
+            vec![started.clone(), final_item.clone()],
+            true,
+        ),
+        (
+            Some("other-thread"),
+            vec![started.clone(), final_item.clone()],
+            false,
+        ),
+        (None, vec![final_item.clone()], false),
+        (
+            None,
+            vec![
+                started.clone(),
+                json!({"type":"item.completed","item":{"type":"agent_message","phase":"commentary","text":"Checking..."}}),
+            ],
+            false,
+        ),
+        (
+            None,
+            vec![
+                started.clone(),
+                final_item.clone(),
+                json!({"type":"item.started","item":{"type":"command_execution"}}),
+            ],
+            false,
+        ),
+        (
+            None,
+            vec![started, final_item, json!({"type":"turn.failed"})],
+            false,
+        ),
+    ] {
+        let mut capture = ExecReply::default();
+        for item in items {
+            assert!(capture.observe(&item, id).is_none());
+        }
+        let actual = capture.observe(&complete, id);
+        assert_eq!(actual.is_some(), valid);
+        if let Some((id, text, Some(tokens))) = actual {
+            assert_eq!(
+                (id.as_str(), text.as_str(), tokens.total_tokens),
+                ("thread-a", "Answer.", 10)
+            );
+        }
+        assert!(capture.observe(&complete, id).is_none());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_publishes_before_exit_and_reaps_without_a_second_terminal_event() {
+    use std::{process::Command, sync::Arc, thread, time::Duration};
+    for exit in [0, 9] {
+        let dir =
+            std::env::temp_dir().join(format!("nit-protocol-exit-{}-{exit}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gate = dir.join("exit-gate");
+        let _ = std::fs::remove_file(&gate);
+        let output = dir.join("last-message");
+        let mut cmd = Command::new("sh");
+        cmd.current_dir(&dir).args([
+            "-c",
+            r#"
+cat >/dev/null
+echo '{"type":"thread.started","thread_id":"session"}'
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"Provider answer"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}'
+i=0
+while [ ! -e exit-gate ] && [ "$i" -lt 120 ]; do sleep 0.05; i=$((i+1)); done
+exit "$1"
+"#,
+            "shim",
+            &exit.to_string(),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            super::run_exec_command(
+                cmd,
+                &tx,
+                1,
+                "codex".into(),
+                None,
+                Some("session".into()),
+                "question".into(),
+                output,
+                Arc::new(super::ExecStop::default()),
+                Instant::now(),
+            )
+        });
+        loop {
+            match rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("provider reply must be available before exit gate opens")
+            {
+                AgentBusEvent::TurnCompleted {
+                    message,
+                    thread_id,
+                    token_count,
+                    ..
+                } => {
+                    assert_eq!(message, "Provider answer");
+                    assert_eq!(thread_id.as_deref(), Some("session"));
+                    assert_eq!(token_count.unwrap().total_tokens, 8);
+                    break;
+                }
+                AgentBusEvent::TurnFailed { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        assert!(!worker.is_finished());
+        std::fs::write(&gate, []).unwrap();
+        worker.join().unwrap();
+        let after = rx.try_iter().collect::<Vec<_>>();
+        assert!(!after.iter().any(|e| matches!(
+            e,
+            AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
+        )));
+        if exit != 0 {
+            assert!(after.iter().any(|e|matches!(e,AgentBusEvent::DiagnosticAppend {event} if event.severity==nit_core::AgentAlertSeverity::Warn)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_falls_back_to_last_message_and_honors_failures_and_cancellation() {
+    use std::{process::Command, sync::Arc};
+    for (case, script, expected_success) in [
+        (
+            "legacy",
+            "cat >/dev/null; echo 'Legacy document' > last-message",
+            true,
+        ),
+        (
+            "protocol-failure",
+            r#"cat >/dev/null; echo 'Partial' > last-message; echo '{"type":"turn.failed","error":{"message":"provider failed"}}'"#,
+            false,
+        ),
+        (
+            "exit-failure",
+            "cat >/dev/null; echo 'provider unavailable' >&2; exit 1",
+            false,
+        ),
+        ("cancel", "cat >/dev/null; sleep 0.3", false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new("sh");
+        command.current_dir(root.path()).args(["-c", script]);
+        let stop = Arc::new(super::ExecStop::default());
+        stop.cancelled
+            .store(case == "cancel", std::sync::atomic::Ordering::Release);
+        let (tx, rx) = mpsc::channel();
+        super::run_exec_command(
+            command,
+            &tx,
+            1,
+            "codex".into(),
+            None,
+            None,
+            "prompt".into(),
+            root.path().join("last-message"),
+            stop,
+            Instant::now(),
+        );
+        drop(tx);
+        let terminal: Vec<_> = rx
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
+                )
+            })
+            .collect();
+        assert_eq!(terminal.len(), 1, "{case}");
+        match &terminal[0] {
+            AgentBusEvent::TurnCompleted { message, .. } => {
+                assert!(expected_success);
+                assert_eq!(message, "Legacy document");
+            }
+            AgentBusEvent::TurnFailed { message, .. } => {
+                assert!(!expected_success);
+                if case == "cancel" {
+                    assert_eq!(message, nit_core::OPERATOR_CANCEL_TURN_MESSAGE);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_resumes_same_lane_while_previous_cli_is_still_draining() {
+    use std::{os::unix::fs::PermissionsExt, process::Command, thread, time::Duration};
+    const KEY: &str = "NIT_TEST_RESUME_DRAIN_TMP";
+    if let Some(dir) = std::env::var_os(KEY) {
+        let dir = std::path::PathBuf::from(dir);
+        let (request, cmds) = mpsc::channel();
+        let (events, rx) = mpsc::channel();
+        let runner = thread::spawn(move || {
+            super::runner_loop_exec(
+                cmds,
+                events,
+                CodexRunnerConfig {
+                    max_parallel_turns: 1,
+                    ..custom_config()
+                },
+            )
+        });
+        for (prompt, resume) in [("first", None), ("second", Some("saved-session"))] {
+            request
+                .send(super::CodexCommand::RunTurn {
+                    model: "codex".into(),
+                    cwd: dir.clone(),
+                    mission_id: None,
+                    resume_thread_id: resume.map(str::to_owned),
+                    persist_session: true,
+                    reasoning_effort: None,
+                    prompt: prompt.into(),
+                    read_only: true,
+                })
+                .unwrap();
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("next turn must run before the old exit gate opens")
+                {
+                    AgentBusEvent::TurnCompleted {
+                        message, thread_id, ..
+                    } => {
+                        assert_eq!(message, prompt);
+                        assert_eq!(thread_id.as_deref(), Some("saved-session"));
+                        break;
+                    }
+                    AgentBusEvent::TurnFailed { message, .. } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+        }
+        std::fs::write(dir.join("exit-gate"), []).unwrap();
+        let mut stale = false;
+        while let Ok(event) = rx.recv_timeout(Duration::from_millis(400)) {
+            if matches!(
+                event,
+                AgentBusEvent::TokenCount { .. }
+                    | AgentBusEvent::TurnStage { .. }
+                    | AgentBusEvent::TurnLog { .. }
+                    | AgentBusEvent::TurnFailed { .. }
+                    | AgentBusEvent::TurnCompleted { .. }
+                    | AgentBusEvent::McpStatus { .. }
+            ) {
+                stale = true;
+            }
+        }
+        request.send(super::CodexCommand::Shutdown).unwrap();
+        runner.join().unwrap();
+        assert!(
+            !stale,
+            "finished worker changed the lane after the next reply"
+        );
+        return;
+    }
+    // Isolate the fake CLI on this test process's PATH without changing the
+    // environment observed by parallel tests.
+    let dir = tempfile::tempdir().unwrap();
+    let cli = dir.path().join("codex");
+    std::fs::write(
+        &cli,
+        r#"#!/bin/sh
+prompt=$(cat)
+if [ "$prompt" = second ]; then
+    case " $* " in *" resume "*" saved-session "*) ;; *) echo 'missing resume ID' >&2; exit 1;; esac
+fi
+echo '{"type":"thread.started","thread_id":"saved-session"}'
+printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' "$prompt"
+echo '{"type":"turn.completed","usage":{"input_tokens":2}}'
+if [ "$prompt" = first ]; then
+    i=0
+    while [ ! -e exit-gate ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
+    echo '{"type":"tool.started"}'
+    echo '{"type":"token_count","info":{"context_window":500,"total_tokens":450}}'
+    echo 'old CLI cleanup' >&2
+fi
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(std::iter::once(dir.path().to_owned()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "codex_runner::tests::exec_resumes_same_lane_while_previous_cli_is_still_draining",
+            "--nocapture",
+        ])
+        .env(KEY, dir.path())
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn finished_or_failed_cli_releases_worker_while_descendant_holds_streams() {
+    use std::{process::Command, sync::Arc, thread, time::Duration};
+    for status in [0, 1] {
+        let root = tempfile::tempdir().unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.current_dir(root.path()).args([
+            "-c",
+            r#"
+cat >/dev/null
+sleep 20 &
+echo "$!" > descendant
+echo '{"type":"thread.started","thread_id":"session"}'
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"Done"}}'
+if [ "$1" = 0 ]; then echo '{"type":"turn.completed"}'; fi
+exit "$1"
+"#,
+            "shim",
+            &status.to_string(),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let file = root.path().join("last");
+        let worker = thread::spawn(move || {
+            super::run_exec_command(
+                cmd,
+                &tx,
+                1,
+                "codex".into(),
+                None,
+                None,
+                String::new(),
+                file,
+                Arc::new(super::ExecStop::default()),
+                Instant::now(),
+            );
+            done.send(()).unwrap();
+        });
+        let released = finished.recv_timeout(Duration::from_secs(2)).is_ok();
+        let pid = std::fs::read_to_string(root.path().join("descendant")).unwrap();
+        let _ = Command::new("kill").arg(pid.trim()).status();
+        worker.join().unwrap();
+        assert!(released, "inherited streams retained an execution worker");
+        assert_eq!(
+            rx.try_iter()
+                .filter(|event| match event {
+                    AgentBusEvent::TurnCompleted { .. } => status == 0,
+                    AgentBusEvent::TurnFailed { .. } => status != 0,
+                    _ => false,
+                })
+                .count(),
+            1
+        );
+    }
+}

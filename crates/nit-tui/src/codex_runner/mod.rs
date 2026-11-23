@@ -33,7 +33,7 @@ pub struct CodexRunnerConfig {
     pub approval_policy: Option<String>,
     /// Maximum number of Codex turns to run concurrently.
     ///
-    /// - Exec runtime: caps concurrent `codex exec` child processes.
+    /// - Exec runtime: caps executing turns, with the same extra budget for CLI cleanup.
     /// - MCP runtime: caps in-flight `tools/call` requests multiplexed over the persistent server.
     pub max_parallel_turns: usize,
     /// When set, Codex is launched with `-c mcp_servers.nit=...` so the model
@@ -341,7 +341,7 @@ fn runner_loop_exec(
                     shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
                     queue.clear();
                     for turn in active.iter() {
-                        turn.cancel.store(true, Ordering::Relaxed);
+                        turn.cancel.cancelled.store(true, Ordering::Relaxed);
                     }
                 }
                 CodexCommand::CancelTurn { agent_id } => {
@@ -350,7 +350,7 @@ fn runner_loop_exec(
                     // within ~50ms.
                     for turn in active.iter() {
                         if turn.agent_id == agent_id {
-                            turn.cancel.store(true, Ordering::Relaxed);
+                            turn.cancel.cancelled.store(true, Ordering::Relaxed);
                         }
                     }
                     // Drop pending RunTurn commands for the same agent so a
@@ -360,7 +360,7 @@ fn runner_loop_exec(
                 CodexCommand::CancelAll => {
                     cancel_queued_turns(&mut queue, &event_tx, None);
                     for turn in active.iter() {
-                        turn.cancel.store(true, Ordering::Relaxed);
+                        turn.cancel.cancelled.store(true, Ordering::Relaxed);
                     }
                 }
             }
@@ -381,11 +381,26 @@ fn runner_loop_exec(
         }
 
         if !shutting_down {
-            while active.len() < max_parallel {
+            // A completed CLI can still be flushing its log. Reserve a bounded pool
+            // of cleanup slots so an immediately resumed turn can execute.
+            while active.len() < max_parallel.saturating_mul(2)
+                && active
+                    .iter()
+                    .filter(|turn| !turn.cancel.draining.load(Ordering::Acquire))
+                    .count()
+                    < max_parallel
+            {
                 let idx = queue.iter().position(|cmd| match cmd {
-                    CodexCommand::RunTurn { model, .. } => !active
-                        .iter()
-                        .any(|turn| turn.agent_id.as_str() == model.as_str()),
+                    CodexCommand::RunTurn {
+                        model,
+                        resume_thread_id,
+                        ..
+                    } => !active.iter().any(|turn| {
+                        let same_session = resume_thread_id.is_some()
+                            && *resume_thread_id == turn.resume_thread_id;
+                        (turn.agent_id == *model || same_session)
+                            && !turn.cancel.draining.load(Ordering::Acquire)
+                    }),
                     _ => false,
                 });
                 let Some(idx) = idx else {
@@ -445,7 +460,8 @@ fn runner_loop_exec(
 
         if shutting_down {
             for turn in active.iter() {
-                turn.cancel.store(true, Ordering::Relaxed);
+                turn.cancel.shutdown.store(true, Ordering::Release);
+                turn.cancel.cancelled.store(true, Ordering::Release);
             }
             if active.is_empty() {
                 break;
@@ -1673,16 +1689,55 @@ fn extract_codex_mcp_output(result: &serde_json::Value) -> Option<(String, Strin
     Some((thread_id.to_string(), text))
 }
 
+#[derive(Default)]
+struct ExecStop {
+    cancelled: AtomicBool,
+    shutdown: AtomicBool,
+    draining: AtomicBool,
+}
+
 struct ActiveTurn {
     agent_id: String,
-    cancel: Arc<AtomicBool>,
+    resume_thread_id: Option<String>,
+    cancel: Arc<ExecStop>,
     done_rx: Receiver<()>,
     handle: JoinHandle<()>,
+}
+
+/// Follow complete JSONL records while the CLI runs, then drain just its final
+/// file length. An inherited writer cannot keep a turn or reader thread alive.
+struct ExecOutput {
+    file: std::fs::File,
+    exited: Arc<AtomicBool>,
+    position: u64,
+    end: Option<u64>,
+}
+impl Read for ExecOutput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.end.is_none() && self.exited.load(Ordering::Acquire) {
+                self.end = Some(self.file.metadata()?.len());
+            }
+            let limit = self.end.map_or(buf.len(), |end| {
+                end.saturating_sub(self.position).min(buf.len() as u64) as usize
+            });
+            if limit == 0 {
+                return Ok(0);
+            }
+            let n = self.file.read(&mut buf[..limit])?;
+            if n > 0 || self.end.is_some() {
+                self.position += n as u64;
+                return Ok(n);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 struct StdoutCapture {
     stdout: Vec<u8>,
     json_errors: Vec<String>,
+    failed: bool,
 }
 
 /// Hard ceiling on the per-turn stdout buffer. The captured `Vec<u8>` feeds
@@ -1737,7 +1792,8 @@ fn spawn_turn_worker(
     config: CodexRunnerConfig,
 ) -> ActiveTurn {
     let agent_id = model.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
+    let session = resume_thread_id.clone();
+    let cancel = Arc::new(ExecStop::default());
     let (done_tx, done_rx) = mpsc::channel();
     let event_tx = event_tx.clone();
     let cancel_worker = Arc::clone(&cancel);
@@ -1763,6 +1819,7 @@ fn spawn_turn_worker(
         .expect("spawn codex turn worker");
     ActiveTurn {
         agent_id,
+        resume_thread_id: session,
         cancel,
         done_rx,
         handle,
@@ -1782,10 +1839,25 @@ fn run_turn(
     prompt: String,
     read_only: bool,
     config: CodexRunnerConfig,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<ExecStop>,
 ) {
     let started_at = Instant::now();
-    let out_file = std::env::temp_dir().join(format!("nit-codex-last-message-{seq}.txt"));
+    // Sequence numbers are local to a runner. Separate stations can both start
+    // at turn 1, so give the legacy final-message fallback a private path.
+    let last_message = match tempfile::NamedTempFile::new() {
+        Ok(file) => file.into_temp_path(),
+        Err(err) => {
+            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                agent_id: model,
+                mission_id,
+                thread_id: resume_thread_id,
+                token_count: None,
+                message: format!("Cannot create Codex reply file: {err}"),
+            });
+            return;
+        }
+    };
+    let out_file = last_message.to_path_buf();
 
     let args = build_codex_exec_args(
         model.as_str(),
@@ -1797,14 +1869,46 @@ fn run_turn(
         read_only,
         &config,
     );
-    let mut cmd = prepare_codex_command(cwd.as_path(), args);
-    // Read prompt from stdin so multi-line input works without shell escaping.
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let cmd = prepare_codex_command(cwd.as_path(), args);
+    run_exec_command(
+        cmd,
+        event_tx,
+        seq,
+        model,
+        mission_id,
+        resume_thread_id,
+        prompt,
+        out_file,
+        cancel,
+        started_at,
+    );
+}
 
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
+#[allow(clippy::too_many_arguments)]
+fn run_exec_command(
+    mut cmd: std::process::Command,
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    mission_id: Option<String>,
+    resume_thread_id: Option<String>,
+    prompt: String,
+    out_file: PathBuf,
+    cancel: Arc<ExecStop>,
+    started_at: Instant,
+) {
+    let spawned = (|| -> std::io::Result<_> {
+        let (stdout, out_writer) = crate::runner_output::private_output_stream()?;
+        let (stderr, err_writer) = crate::runner_output::private_output_stream()?;
+        let child = cmd
+            .stdin(Stdio::piped())
+            .stdout(out_writer)
+            .stderr(err_writer)
+            .spawn()?;
+        Ok((child, stdout, stderr))
+    })();
+    let (mut child, stdout, stderr) = match spawned {
+        Ok(streams) => streams,
         Err(err) => {
             let _ = event_tx.send(AgentBusEvent::McpStatus {
                 status: McpStatus {
@@ -1830,15 +1934,27 @@ fn run_turn(
         let _ = stdin.write_all(b"\n");
     }
 
-    let stdout_handle = child.stdout.take().map(|stdout| {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let exited = Arc::new(AtomicBool::new(false));
+    let stdout_handle = {
+        let stdout = ExecOutput {
+            file: stdout,
+            exited: exited.clone(),
+            position: 0,
+            end: None,
+        };
         let event_tx = event_tx.clone();
         let model = model.clone();
         let mission_id = mission_id.clone();
+        let resume = resume_thread_id.clone();
         thread::Builder::new()
             .name(format!("nit-codex-stdout-{seq}"))
             .spawn(move || {
+                let mut terminal = false;
+                let mut reply = jsonl::ExecReply::default();
                 let mut buf = Vec::new();
                 let mut json_errors = Vec::new();
+                let mut failed = false;
                 let mut last_stage: Option<String> = None;
                 let mut last_stage_sent_at = Instant::now();
                 let mut reader = BufReader::new(stdout);
@@ -1848,6 +1964,27 @@ fn run_turn(
                     match reader.read_line(&mut line) {
                         Ok(0) => break,
                         Ok(_) => {
+                            if terminal {
+                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
+                                {
+                                    if matches!(
+                                        value.get("type").and_then(|s| s.as_str()),
+                                        Some(
+                                            "error"
+                                                | "turn.failed"
+                                                | "turn.cancelled"
+                                                | "turn.aborted"
+                                        )
+                                    ) {
+                                        failed = true;
+                                        push_json_error_capped(
+                                            &mut json_errors,
+                                            line.trim().to_owned(),
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                             append_stdout_line_capped(&mut buf, line.as_bytes());
                             let raw = line.trim();
                             if raw.is_empty() {
@@ -1861,6 +1998,11 @@ fn run_turn(
                                 continue;
                             };
 
+                            if let Some(completed) = reply.observe(&value, resume.as_deref()) {
+                                let _ = reply_tx.send(completed);
+                                terminal = true;
+                                continue;
+                            }
                             if let Some(token_count) = token_count_from_value(&value) {
                                 let _ = event_tx.send(AgentBusEvent::TokenCount {
                                     agent_id: model.clone(),
@@ -1904,7 +2046,16 @@ fn run_turn(
                                     });
                                 }
                             }
-                            if kind == Some("error") {
+                            if matches!(
+                                kind,
+                                Some("turn.failed" | "turn.cancelled" | "turn.aborted")
+                            ) {
+                                failed = true;
+                            }
+                            if matches!(
+                                kind,
+                                Some("error" | "turn.failed" | "turn.cancelled" | "turn.aborted")
+                            ) {
                                 let msg =
                                     payload.get("message").and_then(|v| v.as_str()).or_else(|| {
                                         payload
@@ -1927,62 +2078,127 @@ fn run_turn(
                 StdoutCapture {
                     stdout: buf,
                     json_errors,
+                    failed,
                 }
             })
             .expect("spawn codex stdout reader")
-    });
-    let stderr_handle = child.stderr.take().map(|mut stderr| {
-        thread::Builder::new()
-            .name(format!("nit-codex-stderr-{seq}"))
-            .spawn(move || {
-                let mut buf = Vec::new();
-                let _ = stderr.read_to_end(&mut buf);
-                buf
-            })
-            .expect("spawn codex stderr reader")
-    });
+    };
 
+    let publish = |thread_id, message, token_count| {
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Connected,
+                endpoint: codex_exec_endpoint_label(&model, resume_thread_id.as_deref()),
+                latency_ms: Some(started_at.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                last_error: None,
+            },
+        });
+        let _ = event_tx.send(AgentBusEvent::TurnCompleted {
+            agent_id: model.clone(),
+            mission_id: mission_id.clone(),
+            thread_id,
+            token_count,
+            message,
+        });
+    };
+    // The provider turn may finish while exec is still flushing its session.
+    // Release its execution slot after publication, retaining the child in the cleanup budget.
+    let publish_protocol = |(id, message, usage)| {
+        publish(Some(id), message, usage);
+        cancel.draining.store(true, Ordering::Release);
+    };
+    let mut published = false;
+    let mut cleanup_started = None;
     let mut killed = false;
     let mut last_heartbeat_at = Instant::now();
     let status = loop {
-        if !killed && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+        if !killed && !published && !cancel.cancelled.load(Ordering::Acquire) {
+            if let Ok(reply) = reply_rx.try_recv() {
+                publish_protocol(reply);
+                published = true;
+                cleanup_started = Some(Instant::now());
+            }
+        }
+        if !killed && !published && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
             let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
                 agent_id: model.clone(),
                 mission_id: mission_id.clone(),
             });
             last_heartbeat_at = Instant::now();
         }
-        if cancel.load(Ordering::Relaxed) && !killed {
+        if !killed
+            && cancel.cancelled.load(Ordering::Acquire)
+            && (!published || cancel.shutdown.load(Ordering::Acquire))
+        {
             let _ = child.kill();
             killed = true;
+        }
+        // Preserve normal session flushing but eventually reclaim the bounded
+        // cleanup slot if the CLI itself hangs after delivering its result.
+        if !killed
+            && cleanup_started.is_some_and(|start| start.elapsed() >= Duration::from_secs(30))
+        {
+            let _ = child.kill();
+            killed = true;
+            let _=event_tx.send(AgentBusEvent::DiagnosticAppend{event:nit_core::AgentDiagnosticEvent{
+                severity:nit_core::AgentAlertSeverity::Warn,source:"codex".into(),at:format!("+{}s",started_at.elapsed().as_secs()),
+                message:format!("[{model} exec #{seq}] CLI cleanup exceeded 30s after reply; stopped the process")
+            }});
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(50)),
             Err(err) => {
-                let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                    agent_id: model,
-                    mission_id,
-                    thread_id: resume_thread_id.clone(),
-                    token_count: None,
-                    message: format!("Codex wait failed: {err}"),
-                });
+                let message = format!("Codex wait failed: {err}");
+                if published {
+                    let _ = event_tx.send(AgentBusEvent::DiagnosticAppend {
+                        event: nit_core::AgentDiagnosticEvent {
+                            source: "codex".into(),
+                            at: format!("+{}s", started_at.elapsed().as_secs()),
+                            severity: nit_core::AgentAlertSeverity::Warn,
+                            message: format!("[{model} exec #{seq}] {message}"),
+                        },
+                    });
+                } else {
+                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                        agent_id: model,
+                        mission_id,
+                        thread_id: resume_thread_id,
+                        token_count: None,
+                        message,
+                    });
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                exited.store(true, Ordering::Release);
+                let _ = stdout_handle.join();
                 let _ = std::fs::remove_file(&out_file);
                 return;
             }
         }
     };
 
-    let (stdout, json_errors) = match stdout_handle.and_then(|handle| handle.join().ok()) {
-        Some(capture) => (capture.stdout, capture.json_errors),
-        None => (Vec::new(), Vec::new()),
+    // Stop tailing at the parent exit even when a descendant still has both streams.
+    exited.store(true, Ordering::Release);
+    if !published && !killed && !cancel.cancelled.load(Ordering::Acquire) {
+        if let Ok(reply) = reply_rx.recv() {
+            publish_protocol(reply);
+            published = true;
+        }
+    }
+    let (stdout, json_errors, failed) = match stdout_handle.join().ok() {
+        Some(capture) => (capture.stdout, capture.json_errors, capture.failed),
+        None => (Vec::new(), Vec::new(), false),
     };
-    let stderr = stderr_handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    let mut stderr_bytes = Vec::new();
+    let n = stderr.metadata().map_or(0, |m| m.len());
+    let _ = stderr.take(n).read_to_end(&mut stderr_bytes);
 
     if killed {
         let _ = std::fs::remove_file(&out_file);
+        if published {
+            return;
+        }
         // Emit a TurnFailed so AppState releases this active turn and the
         // breather/UI stop showing the agent as Running. The bus handler
         // detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel and routes this
@@ -1999,7 +2215,30 @@ fn run_turn(
     }
 
     // Stderr can contain plain-text warnings even when `--json` is used.
-    let stderr_text = String::from_utf8_lossy(&stderr);
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes);
+    if published {
+        if !status.success() || failed || !stderr_text.trim().is_empty() {
+            let severity = if !status.success() || failed {
+                nit_core::AgentAlertSeverity::Warn
+            } else {
+                nit_core::AgentAlertSeverity::Info
+            };
+            let _ = event_tx.send(AgentBusEvent::DiagnosticAppend {
+                event: nit_core::AgentDiagnosticEvent {
+                    at: format!("+{}s", started_at.elapsed().as_secs()),
+                    source: "codex".into(),
+                    severity,
+                    message: format!(
+                        "[{model} exec #{seq}] cleanup {status}: {} {}",
+                        json_errors.join(" | "),
+                        stderr_text.trim()
+                    ),
+                },
+            });
+        }
+        let _ = std::fs::remove_file(&out_file);
+        return;
+    }
     for line in stderr_text.lines() {
         let line = line.trim();
         if !line.is_empty() {
@@ -2010,11 +2249,13 @@ fn run_turn(
         }
     }
 
-    if !status.success() {
+    if !status.success() || failed {
         let message = if !json_errors.is_empty() {
             json_errors.join(" | ")
         } else if !stderr_text.trim().is_empty() {
             stderr_text.trim().to_string()
+        } else if failed {
+            "Codex reported an unsuccessful turn".into()
         } else {
             format!("Codex exited with {status}")
         };
@@ -2058,23 +2299,7 @@ fn run_turn(
 
     let thread_id = extract_thread_id_from_jsonl(&stdout);
     let token_count = extract_token_count_from_jsonl(&stdout);
-    let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let endpoint = codex_exec_endpoint_label(&model, resume_thread_id.as_deref());
-    let _ = event_tx.send(AgentBusEvent::McpStatus {
-        status: McpStatus {
-            state: McpConnectionState::Connected,
-            endpoint,
-            latency_ms: Some(latency_ms),
-            last_error: None,
-        },
-    });
-    let _ = event_tx.send(AgentBusEvent::TurnCompleted {
-        agent_id: model,
-        mission_id,
-        thread_id,
-        token_count,
-        message,
-    });
+    publish(thread_id, message, token_count);
 }
 
 #[cfg(test)]
