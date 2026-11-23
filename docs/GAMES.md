@@ -89,4 +89,6 @@ nit games run --config games.toml --strategies generated.ndjson --out .
 
 With the example’s output settings, each run gets a directory under `runs/games/`. Open `run_summary.json` for the seed, ranking, effective configuration and output paths. `history.ndjson` contains the round outcomes by match. In `score_idx`, the digits 0, 1, 2 and 3 represent CC, CD, DC and DD respectively, with player A’s action first. Use `match_id` to identify records when parallel runs write them out of order.
 
+The summary’s `runtime` section records how many matches used the CPU or Metal. On macOS, set `accelerator = "cpu"` under `[engine]` to run a CPU comparison. [Runtime settings](ENVIRONMENT.md)
+
 In the TUI, `:games runs` opens the run browser. Use `:games replay` to select a matchup from the loaded run and `:games history` to inspect its rounds. With a history log available, `:games analyze` writes per-match and per-strategy summaries, including cooperation rates. Set `save_data = false` for a normal tournament when you only need the result on screen. [Games controls](KEYBINDINGS.md)
