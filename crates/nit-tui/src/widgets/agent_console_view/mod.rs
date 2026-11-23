@@ -1213,11 +1213,13 @@ fn compute_console_layout(area: Rect, state: &AppState) -> Option<ConsoleLayout>
         cursor_char_idx,
         input_wrap_width,
     );
-    let input_inner_height = if state.station_chat_center() {
-        input_inner_height_for(inner, input_boxed, if inner.height >= 16 { 4 } else { 2 })
+    let desired_rows = if state.station_chat_center() {
+        let cap = usize::from(inner.height / 3).clamp(1, 8);
+        input_lines_all.len().min(cap)
     } else {
-        input_inner_height_for(inner, input_boxed, input_lines_all.len())
+        input_lines_all.len()
     };
+    let input_inner_height = input_inner_height_for(inner, input_boxed, desired_rows);
     let input_height = if input_boxed {
         input_inner_height + 2
     } else {
