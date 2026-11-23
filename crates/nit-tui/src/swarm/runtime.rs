@@ -616,19 +616,40 @@ impl SwarmRuntime {
         agent_ids
     }
 
-    /// Aborts every active swarm. Returns the union of agent ids across
-    /// runs so the caller can dispatch a single `CancelAll` per runner
-    /// instead of N CancelTurn calls.
+    /// Abort all missions and discard queued standalone turns before a runner
+    /// completion can dispatch them. Return all affected agent IDs.
     pub fn abort_all(&mut self, state: &mut AppState) -> Vec<String> {
         let mission_ids: Vec<String> = self.runs.keys().cloned().collect();
         let mut all_agents: Vec<String> = Vec::new();
         for mid in mission_ids {
-            for agent in self.abort_mission(state, &mid) {
-                if !all_agents.contains(&agent) {
-                    all_agents.push(agent);
-                }
-            }
+            all_agents.extend(self.abort_mission(state, &mid));
         }
+        all_agents.extend(state.agents.active_turns.keys().cloned());
+        all_agents.extend(
+            state
+                .agents
+                .agents
+                .iter()
+                .filter(|lane| lane.status == nit_core::AgentStatus::Running)
+                .map(|lane| lane.id.clone()),
+        );
+        all_agents.extend(
+            state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .map(|turn| turn.agent_id.clone()),
+        );
+        all_agents.extend(
+            state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .map(|turn| turn.agent_id.clone()),
+        );
+        all_agents.sort_unstable();
+        all_agents.dedup();
+        super::clones::drain_queued_turns_for_mission_agents(state, &all_agents);
         all_agents
     }
 }

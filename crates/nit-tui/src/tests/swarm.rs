@@ -5067,6 +5067,47 @@ fn abort_mission_unknown_id_is_idempotent() {
 }
 
 #[test]
+fn abort_all_clears_ad_hoc_turns_before_the_runner_responds() {
+    let mut state = new_state();
+    let mut runtime = SwarmRuntime::default();
+    for id in ["standalone-codex", "standalone-claude"] {
+        let mut lane = lane_for_abort(id);
+        lane.queue_len = 1;
+        state.agents.agents.push(lane);
+    }
+    state
+        .agents
+        .queued_codex_turns
+        .push_back(nit_core::QueuedCodexTurn {
+            agent_id: "standalone-codex".into(),
+            mission_id: None,
+            prompt: "discard".into(),
+            prompt_msg_idx: None,
+        });
+    state
+        .agents
+        .queued_claude_turns
+        .push_back(nit_core::QueuedClaudeTurn {
+            agent_id: "standalone-claude".into(),
+            mission_id: None,
+            prompt: "discard".into(),
+            prompt_msg_idx: None,
+        });
+    assert!(crate::app::handle_abort(
+        &mut state,
+        None,
+        None,
+        &mut runtime,
+        crate::app::AbortScope::All
+    ));
+    assert!(state.agents.queued_codex_turns.is_empty());
+    assert!(state.agents.queued_claude_turns.is_empty());
+    for id in ["standalone-codex", "standalone-claude"] {
+        assert_eq!(state.agents.agents_get(id).unwrap().queue_len, 0);
+    }
+}
+
+#[test]
 fn abort_all_aborts_every_active_run() {
     let mut state = new_state();
     // Build two missions in two separate runtimes, then merge runs into
