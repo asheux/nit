@@ -283,3 +283,53 @@ fn compact_empty_filter_and_catalog_share_list_surface() {
     }
     assert_ne!(buf.get(r.help.x, r.help.y).bg, theme.list_background());
 }
+
+#[test]
+fn use_skill_targets_only_the_drawn_label_in_catalog_and_reader() {
+    for width in [13, 20, 36, 100] {
+        for reader in [false, true] {
+            let mut state = browser();
+            state.skill_reader_open = reader;
+            state.agents.chat_input = "My question".into();
+            let area = Rect::new(0, 0, width, 12);
+            let r = regions(inner(area), &state);
+            let screen = draw(&mut state, area);
+            let line = screen.lines().nth(r.help.y as usize).unwrap();
+            let start = line.find("Use skill").unwrap() as u16;
+            let last = start + "Use skill".len() as u16 - 1;
+            assert!(!click(&mut state, area, Position::new(last + 1, r.help.y)));
+            assert_eq!(state.agents.chat_input, "My question");
+            assert!(click(&mut state, area, Position::new(last, r.help.y)));
+            assert_eq!(state.focus, PaneId::Notes);
+            assert!(state
+                .agents
+                .chat_input
+                .starts_with("My question\nRead NitSkill "));
+            assert!(state.agents.active_turns.is_empty());
+        }
+    }
+}
+
+#[test]
+fn filter_allows_mouse_use_while_a_is_text_and_hides_use_for_no_results() {
+    let area = Rect::new(0, 0, 55, 16);
+    let mut state = browser();
+    state.skill_filter_editing = true;
+    assert!(handle_key(&mut state, KeyCode::Char('a').into(), area));
+    assert_eq!(state.skill_filter, "a");
+    assert!(state.agents.chat_input.is_empty());
+    let help = regions(inner(area), &state).help;
+    let text = draw(&mut state, area);
+    let line = text.lines().nth(help.y as usize).unwrap();
+    assert!(line.contains("Use skill") && !line.contains("[a]"));
+    assert!(click(&mut state, area, Position::new(help.x, help.y)));
+    assert_eq!(state.focus, PaneId::Notes);
+
+    let mut state = browser();
+    state.skill_filter = "no-matching-playbook".into();
+    state.skill_filter_editing = true;
+    let help = regions(inner(area), &state).help;
+    assert!(!draw(&mut state, area).contains("Use skill"));
+    assert!(click(&mut state, area, Position::new(help.x, help.y)));
+    assert!(state.skill_filter.is_empty() && state.agents.chat_input.is_empty());
+}

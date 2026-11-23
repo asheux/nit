@@ -212,6 +212,14 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
         })
         .add_modifier(Modifier::BOLD);
     let indices = catalog::matches(state);
+    for (area, label, action) in footer_actions(state, r.help, !indices.is_empty()) {
+        let style = if action == FooterAction::Use {
+            accent.bg(theme.selection_bg)
+        } else {
+            muted
+        };
+        frame.render_widget(Paragraph::new(label).style(style), area);
+    }
     if r.filter.height > 0 {
         let mark = if state.skill_filter_editing {
             "▏"
@@ -238,7 +246,6 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
             Paragraph::new("No matching skills").style(regular.bg(theme.list_background())),
             r.catalog,
         );
-        frame.render_widget(Paragraph::new("Esc clear filter").style(muted), r.help);
         state.gate_monitor_last_max_scroll = 0;
         return;
     }
@@ -343,22 +350,59 @@ pub(super) fn render(frame: &mut Frame, inner: Rect, state: &mut AppState, theme
     } else {
         state.gate_monitor_last_max_scroll = 0;
     }
-    let help = footer(state, r.help.width);
-    frame.render_widget(Paragraph::new(help).style(muted), r.help);
 }
 
-fn footer(state: &AppState, width: u16) -> &'static str {
-    if state.skill_reader_open {
-        "Esc back · ↑↓ scroll · a attach"
-    } else if state.skill_filter_editing {
-        "Type to filter · Enter done · Esc clear"
-    } else if width >= 49 {
-        "↑↓ choose · / filter · Enter read · a attach"
-    } else if width >= 32 {
-        "/ filter · Enter read · a attach"
-    } else {
-        "/ find  ↵ read  a attach"
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FooterAction {
+    Use,
+    Read,
+    Back,
+    Filter,
+    Done,
+    Clear,
+    Hint,
+}
+
+fn footer_actions(
+    state: &AppState,
+    area: Rect,
+    has_matches: bool,
+) -> Vec<(Rect, &'static str, FooterAction)> {
+    use FooterAction::*;
+    let mut actions = Vec::new();
+    let mut x = area.x;
+    let mut add = |label: &'static str, action| {
+        let width = unicode_width::UnicodeWidthStr::width(label) as u16;
+        if area.height > 0 && area.right().saturating_sub(x) >= width {
+            actions.push((Rect::new(x, area.y, width, 1), label, action));
+            x = x.saturating_add(width + 2);
+        }
+    };
+    if has_matches {
+        // In the filter field, 'a' is input. The pointer action remains available.
+        add(
+            if state.skill_filter_editing || area.width < 13 {
+                "Use skill"
+            } else {
+                "[a] Use skill"
+            },
+            Use,
+        );
     }
+    if !has_matches {
+        add("Esc clear filter", Clear);
+    } else if state.skill_filter_editing {
+        add("Enter done", Done);
+        add("Esc clear", Clear);
+    } else if state.skill_reader_open {
+        add("Esc back", Back);
+        add("↑↓ scroll", Hint);
+    } else {
+        add("↵ read", Read);
+        add("/ filter", Filter);
+        add("↑↓ choose", Hint);
+    }
+    actions
 }
 
 fn switch_reader(state: &mut AppState, open: bool) {
@@ -480,24 +524,29 @@ pub(crate) fn click(state: &mut AppState, area: Rect, point: Position) -> bool {
     }
     let r = regions(inner(area), state);
     let indices = catalog::matches(state);
-    if r.help.contains(point) && !indices.is_empty() && !state.skill_filter_editing {
-        let help = footer(state, r.help.width);
-        let col = usize::from(point.x - r.help.x);
-        let hit = |text: &str| {
-            help.find(text).is_some_and(|byte| {
-                let start = help[..byte].chars().count();
-                (start..start + text.chars().count()).contains(&col)
-            })
+    if r.help.contains(point) {
+        let hit = footer_actions(state, r.help, !indices.is_empty())
+            .into_iter()
+            .find(|(area, _, _)| area.contains(point));
+        let Some((_, _, action)) = hit else {
+            return false;
         };
         state.focus = PaneId::GateMonitor;
-        if hit("a attach") {
-            attach::attach(state, entry(state).name);
-        } else if hit("/ filter") || hit("/ find") {
-            state.skill_filter_editing = true;
-        } else if hit("Enter read") || hit("↵ read") {
-            switch_reader(state, true);
-        } else if hit("Esc back") {
-            switch_reader(state, false);
+        match action {
+            FooterAction::Use if indices.contains(&state.selected_skill) => {
+                state.skill_filter_editing = false;
+                attach::attach(state, entry(state).name);
+            }
+            FooterAction::Read => switch_reader(state, true),
+            FooterAction::Back => switch_reader(state, false),
+            FooterAction::Filter => state.skill_filter_editing = true,
+            FooterAction::Done => state.skill_filter_editing = false,
+            FooterAction::Clear => {
+                state.skill_filter.clear();
+                state.skill_filter_editing = false;
+                catalog::reconcile(state);
+            }
+            _ => {}
         }
         return true;
     }
