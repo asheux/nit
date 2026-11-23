@@ -234,10 +234,16 @@ mod tests {
     #[test]
     fn paths_crossing_the_workspace_boundary_retain_their_actual_location() {
         let mut state = state();
-        state.workspace_root = "/project/module".into();
-        state.change_review.root = "/project".into();
+        let project = std::env::temp_dir().join("nit-draft-project");
+        state.workspace_root = project.join("module");
+        state.change_review.root = project.clone();
         draft(&mut state, &SwarmRuntime::default(), None);
-        assert!(state.agents.chat_input.contains("/project/src/lib.rs"));
+        let outside = project.join("src/lib.rs");
+        let rendered = outside.to_string_lossy().escape_debug().to_string();
+        assert!(state
+            .agents
+            .chat_input
+            .contains(&format!("Working tree · {rendered}")));
         state.agents.chat_input.clear();
         state.change_review.files[0].path = "module/nested.rs".into();
         draft(&mut state, &SwarmRuntime::default(), None);
