@@ -2574,6 +2574,8 @@ pub struct PersistedPatchRecord {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 struct PersistedArtifactsRun {
     #[serde(default)]
+    prompt_indices_local: bool,
+    #[serde(default)]
     updated_at: Option<String>,
     #[serde(default)]
     messages: Vec<AgentMessage>,
@@ -3057,6 +3059,14 @@ fn build_search_fields(
     (hay, tokens)
 }
 
+fn legacy_planner_reply(msg: &AgentMessage) -> bool {
+    msg.channel != nit_core::AgentChannel::Broadcast
+        && msg.kind.is_none()
+        && msg
+            .turn
+            .is_none_or(|r| r.outcome == nit_core::state::TurnOutcome::Completed)
+}
+
 fn extract_run_entries(
     run: &PersistedArtifactsRun,
     run_path: &Path,
@@ -3077,7 +3087,7 @@ fn extract_run_entries(
             run.messages
                 .iter()
                 .enumerate()
-                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid) && legacy_planner_reply(m))
                 .map(|(i, _)| i)
         });
         let synth = planner.and_then(|pid| {
@@ -3085,7 +3095,7 @@ fn extract_run_entries(
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid) && legacy_planner_reply(m))
                 .map(|(i, _)| i)
         });
         // If plan and synth point to the same message, it's just a synth (single planner reply).
@@ -3099,7 +3109,9 @@ fn extract_run_entries(
     };
 
     for (idx, msg) in run.messages.iter().enumerate() {
-        if msg.agent_id.as_deref() == Some("swarm") {
+        if msg.agent_id.as_deref() == Some("swarm")
+            || msg.kind.as_deref() == Some("followup-history")
+        {
             continue;
         }
         let kind: &'static str = if msg.agent_id.is_none() {
@@ -3622,12 +3634,30 @@ fn artifact_card_row(
     }
 }
 
-// Without explicit `prompt_msg_idx`, fall back to nearest-preceding-prompt by index.
-fn group_replies_under_prompts(
-    prompt_indices: &[usize],
-    reply_indices: &[usize],
+fn persisted_message_groups(
+    run: &PersistedArtifactsRun,
+    keep: impl Fn(&AgentMessage) -> bool,
 ) -> Vec<(Option<usize>, Vec<usize>)> {
-    group_replies_under_prompts_with_hints(prompt_indices, reply_indices, &[])
+    let mut prompts = Vec::new();
+    let mut replies = Vec::new();
+    let mut hints = Vec::new();
+    for (idx, msg) in run.messages.iter().enumerate() {
+        if !keep(msg) || msg.kind.as_deref() == Some("followup-history") {
+            continue;
+        }
+        if msg.agent_id.is_none() {
+            prompts.push(idx);
+        } else {
+            replies.push(idx);
+            // Older snapshots stored station-wide indices even after filtering.
+            hints.push(if run.prompt_indices_local {
+                msg.prompt_msg_idx
+            } else {
+                None
+            });
+        }
+    }
+    group_replies_under_prompts_with_hints(&prompts, &replies, &hints)
 }
 
 // `parent_hints` is parallel to `reply_indices`; `None` entries fall back to positional grouping.
@@ -3659,7 +3689,7 @@ fn group_replies_under_prompts_with_hints(
     for (i, &reply_idx) in reply_indices.iter().enumerate() {
         // 1) Try explicit parent hint first.
         let hint = parent_hints.get(i).copied().flatten();
-        if let Some(parent_idx) = hint {
+        if let Some(parent_idx) = hint.filter(|parent| *parent < reply_idx) {
             if let Some(&slot) = prompt_pos.get(&parent_idx) {
                 let offset = if groups.first().is_some_and(|g| g.0.is_none()) {
                     1
@@ -3719,7 +3749,9 @@ fn build_mission_cards(
         }
         // Skip swarm meta messages — they're internal bookkeeping,
         // not real agent replies.
-        if message.agent_id.as_deref() == Some("swarm") {
+        if message.agent_id.as_deref() == Some("swarm")
+            || message.kind.as_deref() == Some("followup-history")
+        {
             continue;
         }
         if matches!(message.channel, nit_core::AgentChannel::Broadcast)
@@ -3832,7 +3864,7 @@ fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) ->
     let mut reply_indices_vec: Vec<usize> = Vec::new();
     let mut parent_hints: Vec<Option<usize>> = Vec::new();
     for (idx, message) in state.agents.messages.iter().enumerate() {
-        if message.mission_id.is_some() {
+        if message.mission_id.is_some() || message.kind.as_deref() == Some("followup-history") {
             continue;
         }
         if message.agent_id.is_none() {
@@ -3915,24 +3947,11 @@ fn build_persisted_mission_cards(
     mission_id: &str,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
-    // Two-pass grouping: assign each reply to its nearest preceding prompt.
-    let filtered: Vec<&AgentMessage> = run
-        .messages
-        .iter()
-        .filter(|m| m.mission_id.as_deref() == Some(mission_id))
-        .collect();
-    let prompt_positions: Vec<usize> = filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.agent_id.is_none().then_some(i))
-        .collect();
-    let reply_positions: Vec<usize> = filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.agent_id.is_some().then_some(i))
-        .collect();
-    let groups = group_replies_under_prompts(&prompt_positions, &reply_positions);
-
+    let groups = persisted_message_groups(run, |m| {
+        m.mission_id.as_deref() == Some(mission_id)
+            && m.agent_id.as_deref() != Some("swarm")
+            && (m.agent_id.is_none() || m.channel != nit_core::AgentChannel::Broadcast)
+    });
     let mut patches = run
         .patches
         .iter()
@@ -3957,18 +3976,26 @@ fn build_persisted_mission_cards(
     let (plan_pos, synth_pos) = if run.swarm {
         let planner = run.assigned_agents.first().map(String::as_str);
         let plan = planner.and_then(|pid| {
-            filtered
+            run.messages
                 .iter()
                 .enumerate()
-                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .find(|(_, m)| {
+                    m.mission_id.as_deref() == Some(mission_id)
+                        && m.agent_id.as_deref() == Some(pid)
+                        && legacy_planner_reply(m)
+                })
                 .map(|(i, _)| i)
         });
         let synth = planner.and_then(|pid| {
-            filtered
+            run.messages
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .find(|(_, m)| {
+                    m.mission_id.as_deref() == Some(mission_id)
+                        && m.agent_id.as_deref() == Some(pid)
+                        && legacy_planner_reply(m)
+                })
                 .map(|(i, _)| i)
         });
         if plan == synth {
@@ -3983,14 +4010,14 @@ fn build_persisted_mission_cards(
     let mut cards = Vec::new();
     for (prompt_pos, mut child_positions) in groups {
         if let Some(pos) = prompt_pos {
-            if let Some(message) = filtered.get(pos) {
+            if let Some(message) = run.messages.get(pos) {
                 cards.push(ArtifactCard {
                     kind: "PROMPT",
                     at: message.at.clone(),
                     owner: "You".into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
                     reference: ArtifactRef::PersistedMessage {
-                        message: (*message).clone(),
+                        message: message.clone(),
                     },
                 });
             }
@@ -4000,7 +4027,7 @@ fn build_persisted_mission_cards(
                 child_positions.split_off(child_positions.len() - ARTIFACT_CARD_LIMIT_REPLIES);
         }
         for pos in child_positions {
-            if let Some(message) = filtered.get(pos) {
+            if let Some(message) = run.messages.get(pos) {
                 let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
                 let kind = if message.kind.as_deref() == Some("synth") || synth_pos == Some(pos) {
                     "SYNTH"
@@ -4015,7 +4042,7 @@ fn build_persisted_mission_cards(
                     owner,
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
                     reference: ArtifactRef::PersistedMessage {
-                        message: (*message).clone(),
+                        message: message.clone(),
                     },
                 });
             }
@@ -4058,28 +4085,12 @@ fn build_persisted_ad_hoc_cards(
     agent_id: &str,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
-    // Group messages by prompt.
-    // Two-pass grouping: assign each reply to its nearest preceding prompt.
-    let filtered: Vec<&AgentMessage> = run
-        .messages
-        .iter()
-        .filter(|m| {
-            m.mission_id.is_none()
-                && (m.agent_id.is_none() || m.agent_id.as_deref() == Some(agent_id))
-        })
-        .collect();
-    let prompt_positions: Vec<usize> = filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.agent_id.is_none().then_some(i))
-        .collect();
-    let reply_positions: Vec<usize> = filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.agent_id.is_some().then_some(i))
-        .collect();
-    let groups = group_replies_under_prompts(&prompt_positions, &reply_positions);
-
+    let groups = persisted_message_groups(run, |m| {
+        m.mission_id.is_none()
+            && m.agent_id
+                .as_deref()
+                .is_none_or(|id| id == agent_id || chat_clone_base_id(id) == Some(agent_id))
+    });
     let mut patches = run
         .patches
         .iter()
@@ -4103,14 +4114,14 @@ fn build_persisted_ad_hoc_cards(
     let mut cards = Vec::new();
     for (prompt_pos, mut child_positions) in groups {
         if let Some(pos) = prompt_pos {
-            if let Some(message) = filtered.get(pos) {
+            if let Some(message) = run.messages.get(pos) {
                 cards.push(ArtifactCard {
                     kind: "PROMPT",
                     at: message.at.clone(),
                     owner: "You".into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
                     reference: ArtifactRef::PersistedMessage {
-                        message: (*message).clone(),
+                        message: message.clone(),
                     },
                 });
             }
@@ -4120,7 +4131,7 @@ fn build_persisted_ad_hoc_cards(
                 child_positions.split_off(child_positions.len() - ARTIFACT_CARD_LIMIT_REPLIES);
         }
         for pos in child_positions {
-            if let Some(message) = filtered.get(pos) {
+            if let Some(message) = run.messages.get(pos) {
                 let kind = if message.kind.as_deref() == Some("synth") {
                     "SYNTH"
                 } else {
@@ -4132,7 +4143,7 @@ fn build_persisted_ad_hoc_cards(
                     owner: agent_id.into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
                     reference: ArtifactRef::PersistedMessage {
-                        message: (*message).clone(),
+                        message: message.clone(),
                     },
                 });
             }
@@ -5685,6 +5696,9 @@ pub fn artifacts_popup_ref_for_message(
     message_idx: usize,
 ) -> Option<ArtifactsPopupRef> {
     let message = state.agents.messages.get(message_idx)?;
+    if message.kind.as_deref() == Some("followup-history") {
+        return None;
+    }
     if let Some(swarm) = swarm {
         if let Some((mission_id, agent_id)) = message
             .mission_id

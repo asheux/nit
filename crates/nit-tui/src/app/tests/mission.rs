@@ -337,6 +337,16 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
     state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
     state.agents.roster_selected = state.agents.agents.len().saturating_sub(1);
     state.agents.messages.push(AgentMessage {
+        at: "t+0".into(),
+        channel: AgentChannel::Agent,
+        agent_id: Some("another-agent".into()),
+        mission_id: None,
+        text: "outside this archive".into(),
+        prompt_msg_idx: None,
+        turn: None,
+        kind: None,
+    });
+    state.agents.messages.push(AgentMessage {
         at: "t+1".into(),
         channel: AgentChannel::Agent,
         agent_id: None,
@@ -352,7 +362,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         agent_id: Some("gpt-5.1-codex-mini".into()),
         mission_id: None,
         text: "keep this reply".into(),
-        prompt_msg_idx: None,
+        prompt_msg_idx: Some(1),
         turn: None,
         kind: None,
     });
@@ -370,6 +380,8 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         serde_json::from_slice(&fs::read(&run_path).expect("read run")).expect("parse run");
     assert_eq!(run["messages"][0]["text"], "keep this prompt");
     assert_eq!(run["messages"][1]["text"], "keep this reply");
+    assert_eq!(run["prompt_indices_local"], true);
+    assert_eq!(run["messages"][1]["prompt_msg_idx"], 0);
     assert_eq!(run["codex_thread_id"], "thread-adhoc");
 }
 

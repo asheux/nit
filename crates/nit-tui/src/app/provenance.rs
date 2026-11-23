@@ -47,6 +47,32 @@ pub(super) fn flush_agent_run_provenance(
     Ok(())
 }
 
+/// Parent indices on live messages refer to the entire station transcript.
+fn archived_messages(
+    state: &AppState,
+    keep: impl Fn(&nit_core::AgentMessage) -> bool,
+) -> Vec<nit_core::AgentMessage> {
+    let mut prompts = std::collections::HashMap::new();
+    let mut messages = Vec::new();
+    for (global, msg) in state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| keep(msg))
+    {
+        if msg.agent_id.is_none() {
+            prompts.insert(global, messages.len());
+        }
+        let mut copy = msg.clone();
+        copy.prompt_msg_idx = msg
+            .prompt_msg_idx
+            .and_then(|parent| prompts.get(&parent).copied());
+        messages.push(copy);
+    }
+    messages
+}
+
 pub(super) fn write_agent_run_provenance(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -69,13 +95,7 @@ pub(super) fn write_agent_run_provenance(
     let patches_dir = run_dir.join("patches");
     fs::create_dir_all(&patches_dir)?;
 
-    let messages = state
-        .agents
-        .messages
-        .iter()
-        .filter(|msg| msg.mission_id.as_deref() == Some(mission_id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let messages = archived_messages(state, |msg| msg.mission_id.as_deref() == Some(mission_id));
     let patches = state
         .agents
         .patches
@@ -110,7 +130,8 @@ pub(super) fn write_agent_run_provenance(
                 "latency_ms": state.agents.mcp.latency_ms,
             "last_error": state.agents.mcp.last_error,
         },
-        "messages": messages.clone(),
+        "prompt_indices_local":true,
+        "messages": messages,
         "patches": patches.clone(),
         "evidence": evidence,
     });
@@ -156,16 +177,10 @@ pub(super) fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> i
     let is_own_or_clone = |id: Option<&str>| -> bool {
         id == Some(agent_id) || id.is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
     };
-    let messages = state
-        .agents
-        .messages
-        .iter()
-        .filter(|message| {
-            message.mission_id.is_none()
-                && (message.agent_id.is_none() || is_own_or_clone(message.agent_id.as_deref()))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let messages = archived_messages(state, |message| {
+        message.mission_id.is_none()
+            && (message.agent_id.is_none() || is_own_or_clone(message.agent_id.as_deref()))
+    });
     let patches = state
         .agents
         .patches
@@ -190,7 +205,8 @@ pub(super) fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> i
         "context": "ad-hoc",
         "updated_at": timestamp_label(state),
         "codex_thread_id": state.agents.codex_thread_ids.get(agent_id),
-        "messages": messages.clone(),
+        "prompt_indices_local":true,
+        "messages": messages,
         "patches": patches.clone(),
         "evidence": evidence,
     });
