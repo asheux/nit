@@ -91,8 +91,11 @@ pub(super) fn task_state_dashboard_label(state: SwarmTaskState) -> &'static str 
     }
 }
 
-pub(super) fn stage_label(stage: SwarmStage) -> &'static str {
-    match stage {
+pub(super) fn stage_label(run: &SwarmRun) -> &'static str {
+    if run.report_status.is_some() {
+        return "REPORT";
+    }
+    match run.stage {
         SwarmStage::Planning => "PLAN",
         SwarmStage::Executing => "EXEC",
         SwarmStage::Verifying => "VERIFY",

@@ -148,8 +148,7 @@ impl SwarmRuntime {
     }
 
     pub fn swarm_stage_label(&self, mission_id: &str) -> Option<&'static str> {
-        self.run_for_mission(mission_id)
-            .map(|run| stage_label(run.stage))
+        self.run_for_mission(mission_id).map(stage_label)
     }
 
     /// Hint describing background work blocking the current stage (e.g.
@@ -314,7 +313,7 @@ impl SwarmRuntime {
         Some(SwarmDashboardView {
             mission_id: run.mission_id.clone(),
             template: run.template.label().into(),
-            phase: stage_label(run.stage).into(),
+            phase: stage_label(run).into(),
             done: counts.done,
             failed: counts.failed,
             skipped: counts.skipped,
@@ -352,7 +351,7 @@ impl SwarmRuntime {
         Some(SwarmPersistenceView {
             mission_id: run.mission_id.clone(),
             template: run.template.label().into(),
-            phase: stage_label(run.stage).into(),
+            phase: stage_label(run).into(),
             gate_bundle: run_gates_label(run),
             gate_selection: run.gate_selection.clone(),
             gate_report: run.gate_report.clone(),

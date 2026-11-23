@@ -39,8 +39,7 @@ pub(super) fn evaluate_repair_round(prior: &[Violation], current: &[Violation]) 
 
 /// Builds the repair prompt fed back to the planner. The shape is:
 ///   1. A short framing line explaining the situation and round counter.
-///   2. The verbatim original planner prompt (so the planner sees the same
-///      operator request, constraints, and output format).
+///   2. The original operator request.
 ///   3. The previous plan JSON (so the planner can edit, not rewrite).
 ///   4. A numbered list of MustFix violations with their `hint` strings.
 ///   5. A reminder that the response must be the same v2 JSON schema.
@@ -50,14 +49,13 @@ pub(super) fn evaluate_repair_round(prior: &[Violation], current: &[Violation]) 
 /// look like prompt fragments. The validator's own `Violation.hint` is
 /// itself constructed from typed fields and sanitized ids.
 pub(super) fn build_repair_prompt(
-    original_planner_prompt: &str,
+    operator_request: &str,
     prior_plan_json: &str,
     violations: &[Violation],
     round: u8,
     max_rounds: u8,
 ) -> String {
-    let mut out =
-        String::with_capacity(original_planner_prompt.len() + prior_plan_json.len() + 512);
+    let mut out = String::with_capacity(operator_request.len() + prior_plan_json.len() + 512);
     out.push_str(&format!(
         "Your previous plan did not pass the deterministic validator. Repair round {round}/{max_rounds}. \
          Re-emit a corrected plan IN THE SAME v2 JSON SCHEMA. Keep what was correct; fix only the violations listed below.\n\n"
@@ -81,8 +79,8 @@ pub(super) fn build_repair_prompt(
     out.push_str("\nPREVIOUS PLAN (correct in place):\n```json\n");
     out.push_str(prior_plan_json);
     out.push_str("\n```\n\n");
-    out.push_str("ORIGINAL PLANNER PROMPT (re-stated; constraints unchanged):\n");
-    out.push_str(original_planner_prompt);
+    out.push_str("ORIGINAL OPERATOR REQUEST:\n");
+    out.push_str(operator_request);
     out.push_str(
         "\n\nReturn the corrected plan as: 3-6 summary bullets followed by a single ```json code block matching the v2 schema. Do not include any other code blocks.\n",
     );

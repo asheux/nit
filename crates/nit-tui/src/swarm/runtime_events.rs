@@ -372,7 +372,7 @@ fn announce_repair_round(state: &mut AppState, run: &SwarmRun, blockers: &[Viola
         &run.mission_id,
         format!(
             "PLAN repair {round}/{max}: {count} violation(s); re-dispatching planner. {preview}{more}",
-            round = run.repair_round + 1,
+            round = run.repair_round,
             max = REPAIR_RETRY_LIMIT,
             count = blockers.len(),
             preview = preview.join("; "),
