@@ -4,7 +4,7 @@ nit is a terminal editor for working on a codebase with coding agents. Read the 
 
 ## Start with a change
 
-From a Git checkout, run `nit .`. The file tree opens beside a **Changes** pane. You can try this workflow with an edit of your own or one an agent has just made.
+From a Git checkout, run `nit .`. The file tree opens beside **Changes**. With a clean working tree, select a recent commit to see its patch. You can try this workflow with an edit of your own or one an agent has just made.
 
 1. **Find the decision.** Press `Ctrl+F`, search for a function name or error message, select a match and press Enter. Use `Ctrl+P` when you know the filename.
 2. **Edit the source.** Press `i` to type, Esc to return to Normal mode, then `:w` and Enter to save.

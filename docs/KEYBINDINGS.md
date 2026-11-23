@@ -55,7 +55,9 @@ Use the arrows or `h j k l` to move left, down, up, and right in Normal or Visua
 
 ## Review changes, switch panes, or quit
 
-Use **:changes** to focus Git change review. Each row shows two Git status characters. The first describes the staged copy, the second the working copy. `MM` means a file has both staged and unstaged edits, `??` marks an untracked file, and `UU` marks a conflict where both sides modified the file. Select with `j`/`k`, Up/Down, or a click. Use `PageUp`/`PageDown` to read the patch and `Enter` to open the selected path. The pane refreshes automatically. Press `r` to refresh immediately.
+Run `:changes` to focus Git review. With a clean working tree, the pane shows up to 24 recent commits. The ahead and behind counts compare your branch with its locally recorded upstream. Use ↑/↓, `j`/`k` or a click to select a recent commit and preview its patch. Press Enter or → to expand the patch, PageUp/PageDown to scroll and Esc or ← to return to the list.
+
+When the working tree has changes, each file row shows two Git status characters. The first describes the staged copy, the second the working copy. `MM` means a file has both staged and unstaged edits, `??` marks an untracked file, and `UU` marks a conflict where both sides modified the file. Select with `j`/`k`, Up/Down, or a click. Use `PageUp`/`PageDown` to read the patch and `Enter` to open the selected path. The pane refreshes automatically. Press `r` to refresh immediately.
 
 | Task | Control |
 |---|---|
